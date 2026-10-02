@@ -1600,6 +1600,31 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
         )
         return transport, resolver, allocator
 
+    def test_nonce_allocator_rejects_credential_handle_subclass(self):
+        base = kraken_trade_handle()
+
+        class HostileHandle(PersistentCredentialHandle):
+            pass
+
+        forged = HostileHandle(
+            base.handle_id,
+            base.account_id,
+            base.provider,
+            base.environment,
+            base.purpose,
+            base.generation,
+            base.provider_environment,
+        )
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "credential_handle"):
+                KrakenSpotDurableNonceAllocator(
+                    journal=JournalStore(f"{directory}/journal.sqlite3"),
+                    account_id="acct-kraken",
+                    environment="LIVE",
+                    credential_handle=forged,
+                    clock_millis=lambda: 100,
+                )
+
     def test_signer_matches_independent_synthetic_auth_vector(self):
         request = KrakenSpotSigner.sign(
             policy=KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"],
@@ -2634,6 +2659,37 @@ class ProviderTransportTests(unittest.TestCase):
             wire_client=wire or RecordingWire(events),
         )
         return transport, resolver
+
+    def test_binance_transport_rejects_credential_handle_subclass(self):
+        base = trade_handle()
+
+        class HostileHandle(PersistentCredentialHandle):
+            pass
+
+        forged = HostileHandle(
+            base.handle_id,
+            base.account_id,
+            base.provider,
+            base.environment,
+            base.purpose,
+            base.generation,
+            base.provider_environment,
+        )
+        events = []
+        with self.assertRaisesRegex(TypeError, "credential_handle"):
+            BinanceSpotHttpTransport(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-1",
+                capability_snapshot_id="cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=forged,
+                session_token="session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                wire_client=RecordingWire(events),
+            )
+        self.assertEqual(events, [])
 
     def test_quota_gate_secret_sign_guard_wire_order_is_exact(self):
         events = []

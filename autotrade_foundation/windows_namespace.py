@@ -41,6 +41,7 @@ _NT_FILE_OPEN = 0x00000001
 _NT_FILE_CREATE = 0x00000002
 _NT_FILE_OPEN_IF = 0x00000003
 _NT_FILE_DIRECTORY_FILE = 0x00000001
+_NT_FILE_WRITE_THROUGH = 0x00000002
 _NT_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 _NT_FILE_NON_DIRECTORY_FILE = 0x00000040
 _NT_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
@@ -658,6 +659,21 @@ def _raise_ntstatus(status: int) -> None:
     raise ctypes.WinError(rtl_error(status))
 
 
+def _regular_file_create_options(*, write_through: bool) -> int:
+    """Return exact NT regular-file create options for retained publication."""
+
+    if type(write_through) is not bool:
+        raise TypeError("write_through must be boolean")
+    options = (
+        _NT_FILE_NON_DIRECTORY_FILE
+        | _NT_FILE_SYNCHRONOUS_IO_NONALERT
+        | _NT_FILE_OPEN_REPARSE_POINT
+    )
+    if write_through:
+        options |= _NT_FILE_WRITE_THROUGH
+    return options
+
+
 def _nt_create_relative_file(
     parent_handle: int,
     name: str,
@@ -666,10 +682,13 @@ def _nt_create_relative_file(
     desired_access: int,
     share_access: int,
     subject: str,
+    write_through: bool = False,
 ) -> int:
     """Open/create one no-reparse regular file relative to a retained directory."""
 
     _require_windows()
+    if type(write_through) is not bool:
+        raise TypeError("write_through must be boolean")
     name = _validate_component(name)
     ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
     nt_create_file = ntdll.NtCreateFile
@@ -714,9 +733,7 @@ def _nt_create_relative_file(
         0,
         share_access,
         disposition,
-        _NT_FILE_NON_DIRECTORY_FILE
-        | _NT_FILE_SYNCHRONOUS_IO_NONALERT
-        | _NT_FILE_OPEN_REPARSE_POINT,
+        _regular_file_create_options(write_through=write_through),
         None,
         0,
     )
@@ -976,10 +993,12 @@ def publish_windows_regular_bytes_retained(
 ) -> Iterator[int]:
     """Publish exact bytes and retain that exact leaf generation until exit.
 
-    The temporary file is opened with no sharing, fsynced and verified through
-    the same descriptor, then renamed relative to the retained parent. Keeping
-    the descriptor open after rename prevents replacement, deletion, or a
-    second write-capable open until the caller commits manifest authority.
+    The temporary file is opened with no sharing and NT FILE_WRITE_THROUGH,
+    fsynced and verified through the same descriptor, then renamed relative to
+    the retained parent. The write-through handle makes the rename metadata part
+    of the same durable file publication boundary on the qualified Windows
+    filesystem. Keeping the descriptor open after rename prevents replacement,
+    deletion, or a second write-capable open until the caller releases it.
     """
 
     if type(data) is not bytes:
@@ -1005,6 +1024,7 @@ def publish_windows_regular_bytes_retained(
                 ),
                 share_access=0,
                 subject="Windows publication temporary file",
+                write_through=True,
             )
         except FileExistsError:
             continue

@@ -31,7 +31,7 @@ CredentialHandle = PersistentCredentialHandle
 
 
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value.strip()
 
@@ -451,7 +451,7 @@ class SecurityBoundary:
         provider_environment: str | None = None,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
-        if not isinstance(handle, CredentialHandle):
+        if type(handle) is not CredentialHandle:
             raise PermissionError("Credential handle is invalid")
         return self._credential_vault.resolve(
             handle,
@@ -486,7 +486,7 @@ class SecurityBoundary:
     ):
         """Authorize and hold one exact credential generation for terminal use."""
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
-        if not isinstance(handle, CredentialHandle):
+        if type(handle) is not CredentialHandle:
             raise PermissionError("Credential handle is invalid")
         with self._credential_vault.lease(
             handle,

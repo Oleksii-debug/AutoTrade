@@ -419,6 +419,62 @@ class SecurityBoundaryTests(unittest.TestCase):
             "rotated-read-secret",
         )
 
+    def test_credential_handle_subclass_is_rejected_before_vault_resolution(self):
+        handle = self._credential()
+
+        class HostileHandle(type(handle)):
+            pass
+
+        forged = HostileHandle(
+            handle.handle_id,
+            handle.account_id,
+            handle.provider,
+            handle.environment,
+            handle.purpose,
+            handle.generation,
+            handle.provider_environment,
+        )
+        with self.assertRaisesRegex(PermissionError, "Credential handle is invalid"):
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+        with self.assertRaisesRegex(PermissionError, "Credential handle is invalid"):
+            with self.boundary.lease_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ):
+                self.fail("handle subclass must not reach vault lease")
+
+    def test_string_subclass_is_rejected_before_security_scope_normalization(self):
+        class HostileText(str):
+            def strip(self):
+                return "paper-1"
+
+        with self.assertRaises(ValueError):
+            self.boundary.register_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                owner_identity="windows-user-1",
+                account_id=HostileText("attacker"),
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value="read-secret",
+            )
+
     def test_withdrawal_credentials_are_not_supported(self):
         with self.assertRaises(PermissionError):
             self.boundary.register_secret(

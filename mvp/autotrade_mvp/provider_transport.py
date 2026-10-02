@@ -1729,7 +1729,7 @@ class KrakenSpotDurableNonceAllocator:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -1959,7 +1959,7 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "WhiteBIT order transport requires WHITEBIT LIVE policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -2634,7 +2634,7 @@ class KrakenSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "Kraken Spot order transport requires KRAKEN LIVE policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -2829,7 +2829,7 @@ class KrakenSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Kraken Spot authenticated-read transport requires KRAKEN LIVE policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -3105,7 +3105,7 @@ class AlpacaTradingHttpTransport:
             raise ProviderTransportScopeError(
                 "Alpaca Trading transport requires ALPACA policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -3462,7 +3462,7 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "Bybit policy does not match exact provider environment"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -3901,7 +3901,7 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Bybit read policy does not match exact provider environment"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -4225,7 +4225,7 @@ class BinanceSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "Binance Spot transport requires BINANCE policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -4496,7 +4496,7 @@ class BinanceSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Binance authenticated-read transport requires BINANCE policy"
             )
-        if not isinstance(credential_handle, PersistentCredentialHandle):
+        if type(credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )

@@ -38,7 +38,7 @@ class SecretProtector(Protocol):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise SecretVaultError(f"{name} is required")
     return value.strip()
 
@@ -331,11 +331,7 @@ class PersistentCredentialHandle:
         if purpose not in _ALLOWED_PURPOSES:
             raise SecretVaultError("credential purpose is not allowed")
         object.__setattr__(self, "purpose", purpose)
-        if (
-            not isinstance(self.generation, int)
-            or isinstance(self.generation, bool)
-            or self.generation < 1
-        ):
+        if type(self.generation) is not int or self.generation < 1:
             raise SecretVaultError("credential generation is invalid")
 
 
@@ -347,7 +343,7 @@ class CredentialReattachmentRequirement:
     was_active: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.handle, PersistentCredentialHandle):
+        if type(self.handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be PersistentCredentialHandle")
         if type(self.was_active) is not bool:
             raise SecretVaultError("was_active must be boolean")
@@ -446,6 +442,22 @@ class ProtectedCredentialVault:
             ensure_ascii=False,
             allow_nan=False,
         )
+        if sys.platform == "win32":
+            from autotrade_foundation.windows_namespace import (
+                publish_windows_regular_bytes,
+                retain_windows_parent_namespace,
+            )
+
+            with retain_windows_parent_namespace(self.path, create=True) as authority:
+                publish_windows_regular_bytes(
+                    authority,
+                    target_name=self.path.name,
+                    data=encoded.encode("utf-8"),
+                    replace=True,
+                )
+            _require_vault_leaf(self.path)
+            return
+
         fd, temp_name = tempfile.mkstemp(
             prefix=self.path.name + ".",
             suffix=".tmp",
@@ -537,7 +549,7 @@ class ProtectedCredentialVault:
             purpose=purpose,
             provider_environment=provider_environment,
         )
-        if not isinstance(secret_value, str) or not secret_value:
+        if type(secret_value) is not str or not secret_value:
             raise SecretVaultError("secret_value must not be empty")
         hid = (
             _text(handle_id, name="handle_id")
@@ -765,7 +777,7 @@ class ProtectedCredentialVault:
         purpose: str,
         provider_environment: str | None = None,
     ) -> str:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         (
             owner,
@@ -847,7 +859,7 @@ class ProtectedCredentialVault:
         and revoke() use the same inter-process lock, so neither can commit after
         the generation/scope check and before the caller exits the lease.
         """
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         (
             owner,
@@ -918,9 +930,9 @@ class ProtectedCredentialVault:
         execution_identity: str,
         new_secret_value: str,
     ) -> PersistentCredentialHandle:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
-        if not isinstance(new_secret_value, str) or not new_secret_value:
+        if type(new_secret_value) is not str or not new_secret_value:
             raise SecretVaultError("new_secret_value must not be empty")
         owner = _text(execution_identity, name="execution_identity")
         with _exclusive_file_lock(self.lock_path, vault_path=self.path):
@@ -977,7 +989,7 @@ class ProtectedCredentialVault:
         *,
         execution_identity: str,
     ) -> None:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         owner = _text(execution_identity, name="execution_identity")
         with _exclusive_file_lock(self.lock_path, vault_path=self.path):

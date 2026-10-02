@@ -8,6 +8,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 CONSUMERS = (
+    "mvp.autotrade_mvp.model_pricing_evidence",
+    "mvp.autotrade_mvp.model_billing_evidence",
+    "mvp.autotrade_mvp.model_observation_evidence",
+    "mvp.autotrade_mvp.model_production_composition",
     "mvp.autotrade_mvp.durable_reservations",
     "mvp.autotrade_mvp.authority",
     "mvp.autotrade_mvp.qualification_attestation",

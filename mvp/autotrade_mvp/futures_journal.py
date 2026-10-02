@@ -11,14 +11,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
-from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
-    ArtifactStore,
-    trusted_authenticated_reader,
+    require_trusted_authenticated_reader,
 )
 from autotrade_runtime.strict_json import strict_json_loads
 from autotrade_runtime.resource_lock import ResourceLockError
@@ -304,27 +302,13 @@ def _verify_provider_settlement_evidence(
     return canonical_ref
 
 
-def _settlement_evidence_reader(
-    evidence_artifact_root: str | Path,
-    evidence_artifact_store: ArtifactStore,
-) -> _EvidenceReader:
-    if type(evidence_artifact_store) is not ArtifactStore:
-        raise FuturesError(
-            "durable provider settlement requires canonical ArtifactStore publication input"
-        )
+def _settlement_evidence_reader(evidence_reader: object) -> _EvidenceReader:
     try:
-        return trusted_authenticated_reader(
-            evidence_artifact_root,
-            publication_store=evidence_artifact_store,
-        )
-    except (
-        ArtifactIntegrityError,
-        ResourceLockError,
-        OSError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise FuturesError("settlement evidence root authority is invalid") from error
+        return require_trusted_authenticated_reader(evidence_reader)
+    except (ArtifactIntegrityError, TypeError) as error:
+        raise FuturesError(
+            "durable provider settlement requires issued trusted artifact reader"
+        ) from error
 
 
 def _durable_scope(
@@ -391,16 +375,12 @@ def rebuild_variation_margin_book(
     store: JournalStore,
     opening_state: VariationMarginState | InverseVariationMarginState,
     *,
-    evidence_artifact_store: ArtifactStore,
-    evidence_artifact_root: str | Path,
+    evidence_reader: object,
 ) -> EconomicBook:
     """Rebuild the canonical double-entry projection from one durable journal cut."""
 
     store = _journal_authority(store)
-    evidence_reader = _settlement_evidence_reader(
-        evidence_artifact_root,
-        evidence_artifact_store,
-    )
+    evidence_reader = _settlement_evidence_reader(evidence_reader)
     rebuild_cut = JournalStore.current_journal_sequence(store)
     aggregate_id, _ = _durable_scope(opening_state)
     events = tuple(JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id))
@@ -561,16 +541,12 @@ def restore_linear_variation_margin(
     store: JournalStore,
     opening_state: VariationMarginState,
     *,
-    evidence_artifact_store: ArtifactStore,
-    evidence_artifact_root: str | Path,
+    evidence_reader: object,
 ) -> VariationMarginState:
     """Rebuild and independently verify durable linear VM economics."""
 
     store = _journal_authority(store)
-    evidence_reader = _settlement_evidence_reader(
-        evidence_artifact_root,
-        evidence_artifact_store,
-    )
+    evidence_reader = _settlement_evidence_reader(evidence_reader)
     aggregate_id, _ = _durable_scope(opening_state)
     replay_cut = JournalStore.current_journal_sequence(store)
     events = tuple(JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id))
@@ -589,16 +565,12 @@ def commit_linear_variation_margin(
     opening_state: VariationMarginState,
     settlement: FuturesSettlementEvidence,
     *,
-    evidence_artifact_store: ArtifactStore,
-    evidence_artifact_root: str | Path,
+    evidence_reader: object,
 ) -> tuple[VariationMarginState, Decimal, JournalTransaction | None, bool]:
     """Atomically accept one linear settlement and its double-entry economics."""
 
     store = _journal_authority(store)
-    evidence_reader = _settlement_evidence_reader(
-        evidence_artifact_root,
-        evidence_artifact_store,
-    )
+    evidence_reader = _settlement_evidence_reader(evidence_reader)
     journal_cut = JournalStore.current_journal_sequence(store)
     aggregate_id, environment = _durable_scope(opening_state)
     events = tuple(JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id))
@@ -730,16 +702,12 @@ def restore_inverse_variation_margin(
     store: JournalStore,
     opening_state: InverseVariationMarginState,
     *,
-    evidence_artifact_store: ArtifactStore,
-    evidence_artifact_root: str | Path,
+    evidence_reader: object,
 ) -> InverseVariationMarginState:
     """Rebuild and independently verify durable inverse VM economics."""
 
     store = _journal_authority(store)
-    evidence_reader = _settlement_evidence_reader(
-        evidence_artifact_root,
-        evidence_artifact_store,
-    )
+    evidence_reader = _settlement_evidence_reader(evidence_reader)
     aggregate_id, _ = _durable_scope(opening_state)
     replay_cut = JournalStore.current_journal_sequence(store)
     events = tuple(JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id))
@@ -758,8 +726,7 @@ def commit_inverse_variation_margin(
     opening_state: InverseVariationMarginState,
     settlement: FuturesSettlementEvidence,
     *,
-    evidence_artifact_store: ArtifactStore,
-    evidence_artifact_root: str | Path,
+    evidence_reader: object,
     settlement_quantum: Decimal | str,
     rounding: str = "HALF_EVEN",
 ) -> tuple[
@@ -782,10 +749,7 @@ def commit_inverse_variation_margin(
         raise FuturesError("unsupported rounding policy")
 
     store = _journal_authority(store)
-    evidence_reader = _settlement_evidence_reader(
-        evidence_artifact_root,
-        evidence_artifact_store,
-    )
+    evidence_reader = _settlement_evidence_reader(evidence_reader)
     journal_cut = JournalStore.current_journal_sequence(store)
     aggregate_id, environment = _durable_scope(opening_state)
     events = tuple(JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id))

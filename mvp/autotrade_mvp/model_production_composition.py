@@ -21,7 +21,24 @@ from .model_pricing_evidence import ModelPricingEvidenceAuthority
 
 
 class ProductionModelCompositionError(TypeError):
-    """Raised when production composition is given a non-canonical authority."""
+    """Raised when production composition lacks canonical independent authority."""
+
+
+def _require_independent_model_evidence_trust() -> None:
+    """Keep production model evidence fail-closed until receipt trust is anchored.
+
+    The three evidence authorities intentionally remain usable below the
+    production-composition seam for deterministic/diagnostic qualification.
+    Their current Trusted*ArtifactReceipt values are public data classes and
+    therefore cannot, by themselves, establish an independently authenticated
+    issuer root.  Do not replace this interlock with exact-type or private-token
+    checks; production enablement requires a separately authenticated signed or
+    durable issuer policy.
+    """
+
+    raise ProductionModelCompositionError(
+        "independent model-evidence receipt trust is unavailable"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +79,7 @@ class ProductionModelEvidenceAuthorities:
             )
         if not callable(clock):
             raise ProductionModelCompositionError("clock must be callable")
+        _require_independent_model_evidence_trust()
         orchestrator = DurableModelCallOrchestrator(
             budget=budget,
             clock=clock,

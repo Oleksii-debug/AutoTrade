@@ -122,23 +122,30 @@ def budget(directory):
 
 
 class ProductionModelCompositionTests(unittest.TestCase):
-    def test_builder_wires_exact_concrete_authorities_without_callback_surface(self):
+    def test_self_authored_exact_receipts_cannot_enter_production_composition(self):
         with TemporaryDirectory() as directory:
             evidence = authorities(directory)
             durable_budget = budget(directory)
-            orchestrator = build_production_model_orchestrator(
-                budget=durable_budget,
-                clock=lambda: NOW,
-                authorities=evidence,
-                owner_token="production-model-owner",
-            )
-            self.assertIs(orchestrator.pricing_evidence_resolver, evidence.pricing)
-            self.assertIs(
-                orchestrator.observation_evidence_resolver,
-                evidence.observation,
-            )
-            self.assertIs(orchestrator.billing_evidence_resolver, evidence.billing)
-            self.assertIs(orchestrator.budget, durable_budget)
+            with self.assertRaisesRegex(
+                ProductionModelCompositionError,
+                "independent model-evidence receipt trust is unavailable",
+            ):
+                build_production_model_orchestrator(
+                    budget=durable_budget,
+                    clock=lambda: NOW,
+                    authorities=evidence,
+                    owner_token="production-model-owner",
+                )
+
+            with self.assertRaisesRegex(
+                ProductionModelCompositionError,
+                "independent model-evidence receipt trust is unavailable",
+            ):
+                evidence.build_orchestrator(
+                    budget=durable_budget,
+                    clock=lambda: NOW,
+                    owner_token="production-model-owner",
+                )
 
     def test_arbitrary_callback_cannot_enter_production_authority_bundle(self):
         with TemporaryDirectory() as directory:

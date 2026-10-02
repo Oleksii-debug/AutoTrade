@@ -27,7 +27,6 @@ from mvp.autotrade_mvp.alpaca import (
 from mvp.autotrade_mvp.binance_spot import parse_account_trades
 from mvp.autotrade_mvp.kraken_spot import parse_trade_history
 from mvp.autotrade_mvp.dispatch import (
-    _issue_financial_authority_check,
     GuardedDispatcher,
     load_submission_response_binding,
     stable_client_order_id,
@@ -1254,7 +1253,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             )
             dispatcher = GuardedDispatcher(
                 store,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-wb",
                 owner_token="owner-wb",
             )
@@ -1262,7 +1261,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             client_id = stable_client_order_id(
                 "WHITEBIT",
                 intent_id,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-wb",
                 max_length=32,
                 client_id_format="TOKEN",
@@ -1292,11 +1291,8 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T12:00:01Z",
                 submission_scope={
                     "capability_snapshot_id": "wb-cap-1",
@@ -1316,11 +1312,8 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:02Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "capability_snapshot_id": "wb-cap-1",
                     "provider": "WHITEBIT",
@@ -2520,14 +2513,14 @@ with open(path, "a+b") as stream:
             )
             dispatcher = GuardedDispatcher(
                 store,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-kraken",
             )
             intent_id = "kraken-live-intent-1"
             client_id = stable_client_order_id(
                 "KRAKEN",
                 intent_id,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-kraken",
                 max_length=36,
                 client_id_format="UUID",
@@ -2539,11 +2532,8 @@ with open(path, "a+b") as stream:
                 provider="KRAKEN",
                 request=kraken_prepared_request(client_id),
                 now=now,
-                authority_check=_issue_financial_authority_check(
-                    lambda _provider, _environment: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 client_id_max_length=36,
                 client_id_format="UUID",
                 final_barrier_clock=lambda: now,
@@ -2965,7 +2955,7 @@ class ProviderTransportTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
                 owner_token="owner-1",
             )
@@ -2973,7 +2963,7 @@ class ProviderTransportTests(unittest.TestCase):
             client_id = stable_client_order_id(
                 "BINANCE",
                 intent_id,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
             )
             result = dispatcher.dispatch(
@@ -2983,11 +2973,8 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
                 submission_scope={
                     "capability_snapshot_id": "cap-1",
@@ -3002,7 +2989,7 @@ class ProviderTransportTests(unittest.TestCase):
 
             binding = load_submission_response_binding(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
                 attempt_id="attempt-http-reject-1",
             )
@@ -3012,7 +2999,7 @@ class ProviderTransportTests(unittest.TestCase):
             restarted = JournalStore(f"{directory}/journal.sqlite3")
             recovered = load_submission_response_binding(
                 restarted,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
                 attempt_id="attempt-http-reject-1",
             )
@@ -3033,7 +3020,7 @@ class ProviderTransportTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
                 owner_token="owner-1",
             )
@@ -3041,7 +3028,7 @@ class ProviderTransportTests(unittest.TestCase):
             client_id = stable_client_order_id(
                 "BINANCE",
                 intent_id,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
             )
             request = prepared_request(client_id)
@@ -3053,11 +3040,8 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
                 submission_scope={
                     "capability_snapshot_id": "cap-1",
@@ -3095,11 +3079,8 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:02Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "capability_snapshot_id": "cap-1",
                     "provider": "BINANCE",
@@ -3127,7 +3108,7 @@ class ProviderTransportTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
                 owner_token="owner-1",
             )
@@ -3135,7 +3116,7 @@ class ProviderTransportTests(unittest.TestCase):
             client_id = stable_client_order_id(
                 "BINANCE",
                 intent_id,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct-1",
             )
             result = dispatcher.dispatch(
@@ -3145,11 +3126,8 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "transport_failed_before_send")
@@ -3192,11 +3170,14 @@ class ProviderTransportTests(unittest.TestCase):
             transport, _resolver = self.make_transport(events=events, wire=wire)
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
-                store, environment="PAPER", account_id="acct-1", owner_token="owner-1"
+                store,
+                environment="SIMULATION",
+                account_id="acct-1",
+                owner_token="owner-1",
             )
             intent_id = "intent-http-byte-budget"
             client_id = stable_client_order_id(
-                "BINANCE", intent_id, environment="PAPER", account_id="acct-1"
+                "BINANCE", intent_id, environment="SIMULATION", account_id="acct-1"
             )
             arguments = dict(
                 attempt_id="attempt-http-byte-budget",
@@ -3205,11 +3186,8 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
                 submission_scope={
                     "capability_snapshot_id": "cap-1",

@@ -5092,25 +5092,22 @@ class AuthorityService:
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
 
-        def check(intent_hash: str, now: str) -> tuple[bool, str]:
-            return self.dispatch_allowed(
-                aid,
-                intent_hash=intent_hash,
-                account_id=account,
-                environment=env,
-                instrument_id=identity.instrument_id,
-                instrument_version=identity.version,
-                action=normalized_action,
-                now=now,
-                capability_snapshot_id=capability,
-            )
-
         # PAPER/LIVE dispatch accepts only a product-issued opaque capability.
-        # Mint it here, at the AuthorityService boundary, and bind it to the
-        # exact durable JournalStore selected by this authority instance.
+        # Bind the exact AuthorityService plus immutable admission/scope data;
+        # no caller-selected callback becomes part of the capability.
         from .dispatch import _issue_financial_authority_check
 
-        return _issue_financial_authority_check(check, store=self.store)
+        return _issue_financial_authority_check(
+            self,
+            store=self.store,
+            admission_id=aid,
+            account_id=account,
+            environment=env,
+            instrument_id=identity.instrument_id,
+            instrument_version=identity.version,
+            action=normalized_action,
+            capability_snapshot_id=capability,
+        )
 
 
     def export_state(self) -> dict:

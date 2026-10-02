@@ -281,8 +281,23 @@ def _validated_authority_result(result: Any) -> tuple[bool, str]:
     return allowed, reason.strip()
 
 
+@dataclass(frozen=True)
+class _FinancialAuthorityBinding:
+    """Immutable AuthorityService-owned scope behind one opaque dispatch capability."""
+
+    authority_service: object
+    store: JournalStore | None
+    admission_id: str
+    account_id: str
+    environment: str
+    instrument_id: str
+    instrument_version: int
+    action: str
+    capability_snapshot_id: str | None
+
+
 class _IssuedFinancialAuthorityCheck:
-    """Opaque trusted-process capability issued by AuthorityService only."""
+    """Opaque capability bound to canonical AuthorityService evaluation."""
 
     __slots__ = ("__weakref__",)
 
@@ -300,27 +315,103 @@ class _IssuedFinancialAuthorityCheck:
         if type(self) is not _IssuedFinancialAuthorityCheck:
             raise PermissionError("financial dispatch authority type changed")
         binding = _FINANCIAL_AUTHORITY_BINDINGS.get(self)
-        if binding is None:
+        if type(binding) is not _FinancialAuthorityBinding:
             raise PermissionError("financial dispatch authority is not issued")
-        callback, _store = binding
-        return callback(intent_hash, now)
+
+        # Deliberately invoke the exact class-owned method rather than storing or
+        # calling a caller-supplied callback.  This keeps PAPER/LIVE authority on
+        # the canonical AuthorityService path even if a caller imports this
+        # module's private helpers.
+        from .authority import AuthorityService
+
+        if type(binding.authority_service) is not AuthorityService:
+            raise PermissionError("financial dispatch authority issuer changed")
+        return AuthorityService.dispatch_allowed(
+            binding.authority_service,
+            binding.admission_id,
+            intent_hash=intent_hash,
+            account_id=binding.account_id,
+            environment=binding.environment,
+            instrument_id=binding.instrument_id,
+            instrument_version=binding.instrument_version,
+            action=binding.action,
+            now=now,
+            capability_snapshot_id=binding.capability_snapshot_id,
+        )
 
 
 def _issue_financial_authority_check(
-    callback: AuthorityCheck,
+    authority_service: object,
     *,
     store: JournalStore | None,
+    admission_id: str,
+    account_id: str,
+    environment: str,
+    instrument_id: str,
+    instrument_version: int,
+    action: str,
+    capability_snapshot_id: str | None = None,
 ) -> AuthorityCheck:
-    """Issue one opaque financial authority capability for an exact store."""
+    """Issue one opaque capability bound to exact AuthorityService scope.
 
-    if not callable(callback):
-        raise TypeError("financial authority callback must be callable")
+    This helper is intentionally not a generic callback wrapper.  Direct callers
+    may invoke it, but they cannot replace canonical authority evaluation with an
+    arbitrary allow callback.
+    """
+
+    from .authority import AuthorityService
+
+    if type(authority_service) is not AuthorityService:
+        raise TypeError("financial authority issuer must be exact AuthorityService")
+    if getattr(authority_service, "store", None) is not store:
+        raise PermissionError(
+            "financial authority store must be selected by AuthorityService"
+        )
     if store is not None:
         _canonical_journal_authority_snapshot(store)
+
+    scoped_text = []
+    for value, name in (
+        (admission_id, "admission_id"),
+        (account_id, "account_id"),
+        (environment, "environment"),
+        (instrument_id, "instrument_id"),
+        (action, "action"),
+    ):
+        if type(value) is not str or not value.strip():
+            raise ValueError(f"{name} is required")
+        scoped_text.append(value.strip())
+    aid, account, env, instrument, normalized_action = scoped_text
+    env = env.upper()
+    normalized_action = normalized_action.upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("invalid financial authority environment")
+    if type(instrument_version) is not int or instrument_version <= 0:
+        raise ValueError("instrument_version must be a positive integer")
+    if capability_snapshot_id is not None and (
+        type(capability_snapshot_id) is not str
+        or not capability_snapshot_id.strip()
+    ):
+        raise ValueError("capability_snapshot_id must be non-empty text")
+
     capability = _IssuedFinancialAuthorityCheck(
         _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
     )
-    _FINANCIAL_AUTHORITY_BINDINGS[capability] = (callback, store)
+    _FINANCIAL_AUTHORITY_BINDINGS[capability] = _FinancialAuthorityBinding(
+        authority_service=authority_service,
+        store=store,
+        admission_id=aid,
+        account_id=account,
+        environment=env,
+        instrument_id=instrument,
+        instrument_version=instrument_version,
+        action=normalized_action,
+        capability_snapshot_id=(
+            None
+            if capability_snapshot_id is None
+            else capability_snapshot_id.strip()
+        ),
+    )
     return capability
 
 
@@ -332,12 +423,9 @@ def _issued_financial_authority_binding(
             "PAPER/LIVE financial authority must be issued by AuthorityService"
         )
     binding = _FINANCIAL_AUTHORITY_BINDINGS.get(value)
-    if binding is None:
+    if type(binding) is not _FinancialAuthorityBinding:
         raise PermissionError("financial dispatch authority is not issued")
-    callback, store = binding
-    if not callable(callback):
-        raise PermissionError("financial dispatch authority binding is invalid")
-    return callback, store
+    return value, binding.store
 
 
 @dataclass(frozen=True)

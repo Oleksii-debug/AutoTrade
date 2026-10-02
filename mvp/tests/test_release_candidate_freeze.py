@@ -435,7 +435,12 @@ def _bind_supply_chain_proof(
         role=dependency_rights.role,
         artifact_id=dependency_rights.artifact_id,
         artifact_sha256="sha256:" + sha256(proof_bytes).hexdigest(),
-        source_sha=dependency_rights.source_sha,
+        # Bind the durable WP-64 proof artifact to the source actually reviewed.
+        # For the A/B regression this keeps the proof internally valid for A,
+        # allowing freeze_release_candidate() to exercise the outer accepted
+        # WP-64 source == candidate source bridge instead of failing earlier on
+        # a malformed proof/artifact source mismatch.
+        source_sha=supply_chain_evidence.release_commit_sha,
         signature_status=dependency_rights.signature_status,
         evidence_status=dependency_rights.evidence_status,
     )

@@ -1146,5 +1146,5 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Unmeasured universal throughput or HFT claims; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: PERFORMANCE / runtime-resource-budget; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Runtime resource-budget/performance qualification implementation and focused tests are integrated. Measured declared-load throughput/latency, target-host interference and overload qualification remain open.
+- **Status evidence / remaining work:** Runtime resource-budget/performance harness, explicit fail-closed runtime-overload admission/sender fencing, delivered Windows-package UUID+digest binding, and focused regressions are implemented on the current WP-65 lineage. Artifact integrity and PASS/VERIFIED metadata do not substitute for independent release trust. Measured declared-load throughput/latency, target-host interference and overload qualification remain open; no universal throughput/HFT or economic-edge claim is established.
 

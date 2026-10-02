@@ -328,7 +328,14 @@ def _read_retained_windows_regular_file(
     path: Path,
     expected_identity: tuple[int, int],
 ) -> bytes:
-    """Read one staged Windows file through the retained parent HANDLE."""
+    """Read one staged Windows file through the retained parent HANDLE.
+
+    DirEntry.stat/os.stat own the pathname-generation identity check. The
+    retained NT handle denies WRITE/DELETE while those path checks and the read
+    occur. Do not compare that identity to CRT fstat device/inode fields:
+    CPython path and CRT descriptor backends need not expose the same Windows
+    identity representation.
+    """
 
     try:
         with retain_windows_regular_file(
@@ -336,9 +343,16 @@ def _read_retained_windows_regular_file(
             target_name=target_name,
             subject="Windows bundle staged file",
         ) as descriptor:
-            before = os.fstat(descriptor)
-            if (before.st_dev, before.st_ino) != expected_identity:
+            current_before = os.stat(path, follow_symlinks=False)
+            _reject_windows_reparse(path, current_before)
+            if (
+                not stat.S_ISREG(current_before.st_mode)
+                or (current_before.st_dev, current_before.st_ino)
+                != expected_identity
+            ):
                 raise BundleError(f"staged file changed during collection: {path}")
+
+            before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode):
                 raise BundleError(f"staged entry must remain a regular file: {path}")
             chunks = bytearray()
@@ -348,6 +362,17 @@ def _read_retained_windows_regular_file(
                     break
                 chunks.extend(chunk)
             after = os.fstat(descriptor)
+
+            current_after = os.stat(path, follow_symlinks=False)
+            _reject_windows_reparse(path, current_after)
+            if (
+                not stat.S_ISREG(current_after.st_mode)
+                or (current_after.st_dev, current_after.st_ino)
+                != expected_identity
+                or (current_before.st_dev, current_before.st_ino)
+                != (current_after.st_dev, current_after.st_ino)
+            ):
+                raise BundleError(f"staged file changed during collection: {path}")
     except BundleError:
         raise
     except RuntimeError as error:
@@ -367,11 +392,14 @@ def _read_retained_windows_regular_file(
         before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or before.st_ctime_ns != after.st_ctime_ns
+        or current_before.st_size != current_after.st_size
+        or current_before.st_mtime_ns != current_after.st_mtime_ns
+        or current_before.st_ctime_ns != current_after.st_ctime_ns
         or len(chunks) != after.st_size
+        or len(chunks) != current_after.st_size
     ):
         raise BundleError(f"staged file changed while being read: {path}")
     return bytes(chunks)
-
 
 def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
     """Snapshot staging while retaining each traversed Windows namespace generation."""

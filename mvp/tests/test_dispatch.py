@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.dispatch import (
     SubmissionResponseBinding,
     _issue_financial_authority_check,
     load_submission_response_binding,
+    provider_domain_submission_attempt_key,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -1144,7 +1145,14 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(outbound, 0)
                 events = store.load_events(
                     "submission_attempt",
-                    dispatcher._aggregate_id("fence-required"),
+                    dispatcher._aggregate_id(
+                        provider_domain_submission_attempt_key(
+                            attempt_id="fence-required",
+                            provider_id="SIM",
+                            environment=environment,
+                            provider_environment=environment,
+                        )
+                    ),
                 )
                 self.assertEqual(
                     [event["event_type"] for event in events],
@@ -1253,7 +1261,14 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(outbound, 1)
             events = store.load_events(
                 "submission_attempt",
-                dispatcher._aggregate_id("paper-current-owner"),
+                dispatcher._aggregate_id(
+                    provider_domain_submission_attempt_key(
+                        attempt_id="paper-current-owner",
+                        provider_id="SIM",
+                        environment="PAPER",
+                        provider_environment="PAPER",
+                    )
+                ),
             )
             self.assertEqual(
                 [event["owner_epoch"] for event in events],

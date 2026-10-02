@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
+import sys
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -217,6 +218,8 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertEqual(victim.read_bytes(), b"external-runtime")
 
     def test_staged_path_swap_during_open_fails_closed(self):
+        if sys.platform != "win32":
+            self.skipTest("retained Windows namespace test")
         staged = self.staging / "AutoTrade.exe"
         replacement = self.root / "replacement.exe"
         replacement.write_bytes(b"replacement")

@@ -169,11 +169,11 @@ def _immutable_evidence_ref(value: object) -> tuple[str, str, str]:
 
 
 def _provider_evidence_kind(evidence: object) -> str:
-    if isinstance(evidence, BorrowAvailabilityEvidence):
+    if type(evidence) is BorrowAvailabilityEvidence:
         return "AVAILABILITY"
-    if isinstance(evidence, BorrowRecallEvidence):
+    if type(evidence) is BorrowRecallEvidence:
         return "RECALL"
-    if isinstance(evidence, BorrowRecallResolutionEvidence):
+    if type(evidence) is BorrowRecallResolutionEvidence:
         return "RECALL_RESOLUTION"
     raise TypeError("unsupported securities-borrow evidence type")
 
@@ -220,6 +220,7 @@ def verify_provider_borrow_evidence(
     evidence: object,
     artifact_store: ArtifactStore,
 ) -> str:
+    _provider_evidence_kind(evidence)
     if type(artifact_store) is not ArtifactStore:
         raise BorrowEvidenceError(
             "provider borrow evidence requires canonical ArtifactStore"
@@ -719,8 +720,8 @@ class DurableBorrowRecallProjection:
         self._reload()
 
     def record_recall(self, evidence: BorrowRecallEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallEvidence):
-            raise TypeError("evidence must be BorrowRecallEvidence")
+        if type(evidence) is not BorrowRecallEvidence:
+            raise TypeError("evidence must be exact BorrowRecallEvidence")
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,
@@ -741,8 +742,8 @@ class DurableBorrowRecallProjection:
         return self.remaining(evidence.recall_id)
 
     def resolve_recall(self, evidence: BorrowRecallResolutionEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallResolutionEvidence):
-            raise TypeError("evidence must be BorrowRecallResolutionEvidence")
+        if type(evidence) is not BorrowRecallResolutionEvidence:
+            raise TypeError("evidence must be exact BorrowRecallResolutionEvidence")
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,

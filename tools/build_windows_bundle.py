@@ -350,7 +350,15 @@ def _read_retained_windows_regular_file(
             after = os.fstat(descriptor)
     except BundleError:
         raise
-    except (OSError, RuntimeError, TypeError, ValueError) as error:
+    except RuntimeError as error:
+        if "must not have hard-link aliases" in str(error):
+            raise BundleError(
+                f"hardlinked staged files are forbidden: {path}"
+            ) from error
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+    except (OSError, TypeError, ValueError) as error:
         raise BundleError(
             f"staged Windows file authority cannot be retained: {path}"
         ) from error

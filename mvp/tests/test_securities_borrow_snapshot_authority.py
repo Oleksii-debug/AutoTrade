@@ -59,6 +59,33 @@ def bind(store: ArtifactStore, evidence: BorrowAvailabilityEvidence):
 
 
 class SecuritiesBorrowSnapshotAuthorityTests(unittest.TestCase):
+    def test_evidence_subclass_is_rejected_before_virtual_receipt_dispatch(self):
+        class ForgedAvailability(BorrowAvailabilityEvidence):
+            resource_detail_called = False
+
+            def resource_detail(self):
+                self.resource_detail_called = True
+                raise AssertionError("evidence subclass virtual method must not run")
+
+        base = availability()
+        forged = ForgedAvailability(**base.__dict__)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "unsupported securities-borrow evidence type",
+        ):
+            provider_borrow_evidence_receipt(forged)
+        self.assertFalse(forged.resource_detail_called)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            with self.assertRaisesRegex(
+                TypeError,
+                "unsupported securities-borrow evidence type",
+            ):
+                verify_provider_borrow_evidence(forged, store)
+        self.assertFalse(forged.resource_detail_called)
+
     def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
         class ForgedArtifactStore(ArtifactStore):
             snapshot_called = False

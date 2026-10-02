@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -30,6 +31,10 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.autotrade_mvp.risk_policy_authority import (
+    DurableRiskPolicyRegistry,
+    RiskPolicyScope,
+)
 from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskDecision,
@@ -263,6 +268,7 @@ def public_authoritative_risk_snapshot(
     *,
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
+    resolved_risk_policy=None,
     valid_until: str = PUBLIC_RISK_VALID_UNTIL,
     evidence_suffix: str = "canonical",
 ) -> AuthoritativeRiskSnapshot:
@@ -310,6 +316,7 @@ def public_authoritative_risk_snapshot(
         evaluated_at=request.evaluated_at,
         valid_until=valid_until,
         evidence_refs=refs,
+        resolved_risk_policy=resolved_risk_policy,
     )
 
 
@@ -319,18 +326,34 @@ def authority_service(
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
     resolver=None,
+    risk_policy_registry: DurableRiskPolicyRegistry | None = None,
+    risk_policy_scope: RiskPolicyScope | None = None,
 ) -> AuthorityService:
     selected_resolver = resolver
     if selected_resolver is None:
         def selected_resolver(request):
+            resolved = None
+            selected_policy = risk_policy
+            if risk_policy_registry is not None:
+                if risk_policy_scope is None:
+                    raise AssertionError(
+                        "test risk policy registry requires an exact scope"
+                    )
+                resolved = risk_policy_registry.resolve_current(
+                    risk_policy_scope,
+                    journal_sequence_cut=request.journal_sequence_cut,
+                )
+                selected_policy = resolved.policy
             return public_authoritative_risk_snapshot(
                 request,
                 risk_context=risk_context,
-                risk_policy=risk_policy,
+                risk_policy=selected_policy,
+                resolved_risk_policy=resolved,
             )
     return AuthorityService(
         store,
         risk_authority_resolver=selected_resolver,
+        risk_policy_registry=risk_policy_registry,
     )
 
 
@@ -3443,6 +3466,219 @@ class AuthorityTests(unittest.TestCase):
             ):
                 restarted.financial_admission_binding(
                     "caller-invented-admission"
+                )
+
+    def test_financial_admission_binds_registry_policy_at_exact_cut_and_retry_is_historical(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            risk_scope = RiskPolicyScope(
+                provider_id="TEST_PROVIDER",
+                account_id="paper-1",
+                environment="SIMULATION",
+                provider_environment="SIMULATION",
+                entity_policy_id="simulation-global-v1",
+                instrument_family="GENERIC",
+            )
+            first_policy = public_risk_policy()
+            registry.register(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=first_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, 1, tzinfo=timezone.utc
+                ),
+            )
+            authority = authority_service(
+                store,
+                risk_policy_registry=registry,
+                risk_policy_scope=risk_scope,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-durable-quant-policy",
+                idempotency_key="idem-durable-quant-policy",
+                admission_id="admission-durable-quant-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-durable-quant-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-durable-quant-policy",
+                **public_financial_kwargs(
+                    store,
+                    risk_policy=first_policy,
+                ),
+            )
+            first = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            snapshot = risk_event["payload"]["authoritative_risk_snapshot"]
+            proof = snapshot["quantitative_risk_policy_authority"]
+            self.assertEqual(
+                proof["identity"]["policy_id"],
+                "core-risk",
+            )
+            self.assertEqual(proof["identity"]["version"], 1)
+            self.assertEqual(
+                proof["identity"]["scope"]["provider_environment"],
+                "SIMULATION",
+            )
+            self.assertEqual(
+                proof["resolved_journal_sequence_cut"],
+                snapshot["journal_sequence_cut"],
+            )
+
+            second_policy = public_risk_policy(max_single_notional="50")
+            registry.register(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=2,
+                policy=second_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 18, 2, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=2,
+                committed_at=datetime(
+                    2026, 9, 24, 18, 2, 1, tzinfo=timezone.utc
+                ),
+                activation_request_id="activate-core-risk-v2",
+                expected_previous_activation_event_id=(
+                    proof["activation_event_id"]
+                ),
+            )
+
+            def forbidden_resolver(_request):
+                raise AssertionError(
+                    "historical retry must not resolve current RiskPolicy"
+                )
+
+            restarted = authority_service(
+                store,
+                resolver=forbidden_resolver,
+                risk_policy_registry=registry,
+                risk_policy_scope=risk_scope,
+            )
+            replayed = restarted.admit(
+                reservation_book=DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                ),
+                **{
+                    **kwargs,
+                    "now": "2026-09-25T18:01:00Z",
+                    "reservation_available": {"CASH:USD": "0"},
+                },
+            )
+            self.assertEqual(replayed, first)
+
+    def test_financial_admission_rejects_quantitative_policy_wrong_provider_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            wrong_scope = RiskPolicyScope(
+                provider_id="TEST_PROVIDER",
+                account_id="paper-1",
+                environment="SIMULATION",
+                provider_environment="OTHER_DOMAIN",
+                entity_policy_id="simulation-global-v1",
+                instrument_family="GENERIC",
+            )
+            quantitative_policy = public_risk_policy()
+            registry.register(
+                scope=wrong_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=quantitative_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=wrong_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, 1, tzinfo=timezone.utc
+                ),
+            )
+            authority = authority_service(
+                store,
+                risk_policy_registry=registry,
+                risk_policy_scope=wrong_scope,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider environment does not match admission",
+            ):
+                authority.admit(
+                    command_id="cmd-wrong-quant-domain",
+                    idempotency_key="idem-wrong-quant-domain",
+                    admission_id="admission-wrong-quant-domain",
+                    policy_id=item.policy_id,
+                    intent_id="intent-wrong-quant-domain",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-wrong-quant-domain",
+                    **public_financial_kwargs(
+                        store,
+                        risk_policy=quantitative_policy,
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_financial_authority_rejects_risk_registry_from_other_journal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            other = JournalStore(f"{directory}/other.sqlite3")
+            registry = DurableRiskPolicyRegistry(other)
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "must share the financial authority JournalStore",
+            ):
+                AuthorityService(
+                    store,
+                    risk_authority_resolver=lambda _request: None,
+                    risk_policy_registry=registry,
                 )
 
     def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):

@@ -441,8 +441,9 @@ def _verify_liquidation_headroom_evidence(
     if not (evidence.observed_at <= point < evidence.expires_at):
         return False
     try:
-        manifest = evidence_store.load_manifest(evidence.artifact_id)
-        raw = evidence_store.read_bytes(evidence.artifact_id)
+        manifest, raw = evidence_store.read_authenticated_snapshot(
+            evidence.artifact_id
+        )
     except Exception:
         return False
     if type(manifest) is not dict or not isinstance(raw, bytes):
@@ -467,7 +468,7 @@ def _verify_liquidation_headroom_evidence(
     metadata = manifest.get("metadata")
     if type(metadata) is not dict:
         return False
-    return all(metadata.get(key) == value for key, value in payload.items())
+    return metadata == payload
 
 
 @dataclass(frozen=True)

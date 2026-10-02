@@ -469,9 +469,12 @@ def build_unexpected_provider_fill_transaction(
         raise AccountingConflict(
             "unexpected provider fill direction is not independently evidenced"
         )
-    if provider_fill.position_side in {"LONG", "SHORT"}:
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "unexpected hedge-mode fill requires leg-aware economic accounting"
+            "unexpected derivative-position fill requires leg-aware economic accounting"
         )
 
     instrument = _text(expected_instrument, name="expected_instrument")
@@ -827,7 +830,9 @@ def build_provider_fill_correction_transactions(
     if corrected_provider_fill.position_side != original_provider_fill.position_side:
         raise AccountingConflict("correction provider position_side changed")
     if (
-        corrected_provider_fill.position_side is not None
+        original_provider_fill.position_side is not None
+        or original_provider_fill.position_effect is not None
+        or corrected_provider_fill.position_side is not None
         or corrected_provider_fill.position_effect is not None
     ):
         raise AccountingConflict(

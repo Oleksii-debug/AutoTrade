@@ -321,6 +321,42 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
+def _fresh_windows_entry_stat(
+    directory: Path,
+    *,
+    target_name: str,
+    path: Path,
+) -> os.stat_result:
+    """Re-read one exact staged leaf through the directory-enumeration domain."""
+
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as error:
+        raise BundleError(
+            f"staging directory cannot be enumerated: {directory}"
+        ) from error
+    matches = [entry for entry in entries if entry.name == target_name]
+    if len(matches) != 1:
+        raise BundleError(f"staged file changed during collection: {path}")
+    entry = matches[0]
+    try:
+        observed = entry.stat(follow_symlinks=False)
+    except OSError as error:
+        raise BundleError(
+            f"staged entry identity cannot be verified: {path}"
+        ) from error
+    if entry.is_symlink():
+        raise BundleError(f"symlinks are forbidden in bundles: {path}")
+    _reject_windows_reparse(path, observed)
+    if not stat.S_ISREG(observed.st_mode):
+        raise BundleError(f"staged file changed during collection: {path}")
+    if observed.st_nlink > 1:
+        raise BundleError(f"hardlinked staged files are forbidden: {path}")
+    if observed.st_nlink != 1:
+        raise BundleError(f"staged file changed during collection: {path}")
+    return observed
+
+
 def _read_retained_windows_regular_file(
     authority,
     *,
@@ -330,11 +366,12 @@ def _read_retained_windows_regular_file(
 ) -> bytes:
     """Read one staged Windows file through the retained parent HANDLE.
 
-    DirEntry.stat/os.stat own the pathname-generation identity check. The
-    retained NT handle denies WRITE/DELETE while those path checks and the read
-    occur. Do not compare that identity to CRT fstat device/inode fields:
-    CPython path and CRT descriptor backends need not expose the same Windows
-    identity representation.
+    The generation fence stays inside stable metadata domains.  The initial and
+    retained-open identities are both DirEntry.stat() observations, while byte
+    mutation checks compare CRT fstat() only with CRT fstat().  The retained NT
+    handle denies WRITE/DELETE before the second enumeration and through the
+    descriptor read, so a swap between enumeration and retained open is still
+    detected without comparing CPython's distinct Windows stat representations.
     """
 
     try:
@@ -343,13 +380,12 @@ def _read_retained_windows_regular_file(
             target_name=target_name,
             subject="Windows bundle staged file",
         ) as descriptor:
-            current_before = os.stat(path, follow_symlinks=False)
-            _reject_windows_reparse(path, current_before)
-            if (
-                not stat.S_ISREG(current_before.st_mode)
-                or (current_before.st_dev, current_before.st_ino)
-                != expected_identity
-            ):
+            current_before = _fresh_windows_entry_stat(
+                path.parent,
+                target_name=target_name,
+                path=path,
+            )
+            if (current_before.st_dev, current_before.st_ino) != expected_identity:
                 raise BundleError(f"staged file changed during collection: {path}")
 
             before = os.fstat(descriptor)
@@ -363,12 +399,13 @@ def _read_retained_windows_regular_file(
                 chunks.extend(chunk)
             after = os.fstat(descriptor)
 
-            current_after = os.stat(path, follow_symlinks=False)
-            _reject_windows_reparse(path, current_after)
+            current_after = _fresh_windows_entry_stat(
+                path.parent,
+                target_name=target_name,
+                path=path,
+            )
             if (
-                not stat.S_ISREG(current_after.st_mode)
-                or (current_after.st_dev, current_after.st_ino)
-                != expected_identity
+                (current_after.st_dev, current_after.st_ino) != expected_identity
                 or (current_before.st_dev, current_before.st_ino)
                 != (current_after.st_dev, current_after.st_ino)
             ):
@@ -400,6 +437,7 @@ def _read_retained_windows_regular_file(
     ):
         raise BundleError(f"staged file changed while being read: {path}")
     return bytes(chunks)
+
 
 def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
     """Snapshot staging while retaining each traversed Windows namespace generation."""
@@ -449,27 +487,11 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
             if observed.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
 
-            # DirEntry.stat() is enumeration evidence only.  On Windows it
-            # may expose inode and timestamp representations that differ from
-            # os.stat() for the same unchanged file, so never compare metadata
-            # across those API domains.  Establish the authoritative pathname
-            # generation with os.stat(); the retained relative open then denies
-            # WRITE/DELETE and rechecks that same os.stat identity before and
-            # after the descriptor read, while CRT fstat metadata is compared
-            # only against CRT fstat metadata.
-            try:
-                path_observed = os.stat(path, follow_symlinks=False)
-            except OSError as error:
-                raise BundleError(
-                    f"staged entry identity cannot be verified: {path}"
-                ) from error
-            _reject_windows_reparse(path, path_observed)
-            if not stat.S_ISREG(path_observed.st_mode):
-                raise BundleError(f"unsupported filesystem entry: {path}")
-            if path_observed.st_nlink > 1:
-                raise BundleError(f"hardlinked staged files are forbidden: {path}")
-            if path_observed.st_nlink != 1:
-                raise BundleError(f"staged file changed during collection: {path}")
+            # Keep the generation fence in the directory-enumeration metadata
+            # domain.  _read_retained_windows_regular_file() re-enumerates the
+            # exact leaf only after its retained no-WRITE/no-DELETE handle is
+            # open, so a concurrent replacement remains fail-closed without
+            # comparing DirEntry.stat() identity to os.stat()/CRT identity.
             snapshots.append(
                 (
                     path,
@@ -477,10 +499,7 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                         authority,
                         target_name=entry.name,
                         path=path,
-                        expected_identity=(
-                            path_observed.st_dev,
-                            path_observed.st_ino,
-                        ),
+                        expected_identity=(observed.st_dev, observed.st_ino),
                     ),
                 )
             )

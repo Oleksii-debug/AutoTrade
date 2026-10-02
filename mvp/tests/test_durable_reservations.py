@@ -367,6 +367,204 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
 
+
+    def test_terminal_release_rejects_superseded_current_reconciliation(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-superseded",
+            idempotency_key="idem-unknown-superseded",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        old_checkpoint = self.record_reconciliation_resolution(
+            outcome="PROVEN_ABSENT",
+            reconciliation_id="reconciliation-old-absent",
+        )
+        evidence = self.publish_resolution_evidence(
+            artifact_id="71717171-7171-4717-8717-717171717171",
+            reconciliation_event=old_checkpoint,
+        )
+        self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-newer-filled",
+        )
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "current reconciliation checkpoint",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-superseded",
+                idempotency_key="idem-terminal-superseded",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+    def test_terminal_release_journal_cut_fences_reconciliation_race(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-race",
+            idempotency_key="idem-unknown-race",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        checkpoint = self.record_reconciliation_resolution(
+            outcome="PROVEN_ABSENT",
+            reconciliation_id="reconciliation-race-absent",
+        )
+        evidence = self.publish_resolution_evidence(
+            artifact_id="72727272-7272-4727-8727-727272727272",
+            reconciliation_event=checkpoint,
+        )
+        original_commit = book.store.commit_command
+        injected = False
+
+        def race_then_commit(**kwargs):
+            nonlocal injected
+            if not injected:
+                injected = True
+                self.record_reconciliation_resolution(
+                    outcome="FILLED",
+                    reconciliation_id="reconciliation-race-filled",
+                )
+            return original_commit(**kwargs)
+
+        with patch.object(
+            book.store,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after financial evidence validation",
+            ):
+                book.mark_terminal(
+                    command_id="cmd-terminal-race",
+                    idempotency_key="idem-terminal-race",
+                    reservation_id="r1",
+                    outcome="PROVEN_ABSENT",
+                    provider="SIMULATED",
+                    attempt_id="attempt-r1",
+                    resolution_evidence=evidence,
+                )
+
+        self.assertTrue(injected)
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(book.version, 2)
+
+    def test_terminal_release_persists_current_checkpoint_and_journal_cut(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-audit-cut",
+            idempotency_key="idem-unknown-audit-cut",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        checkpoint = self.record_reconciliation_resolution(
+            outcome="PROVEN_ABSENT",
+            reconciliation_id="reconciliation-audit-cut",
+        )
+        evidence = self.publish_resolution_evidence(
+            artifact_id="73737373-7373-4737-8737-737373737373",
+            reconciliation_event=checkpoint,
+        )
+        validated_cut = self.store.current_journal_sequence()
+
+        snapshot = book.mark_terminal(
+            command_id="cmd-terminal-audit-cut",
+            idempotency_key="idem-terminal-audit-cut",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+
+        self.assertEqual(snapshot.state, "PROVEN_ABSENT")
+        terminal_event = self.store.load_events(
+            "reservation_book",
+            book.scope_id,
+        )[-1]
+        validation = terminal_event["payload"][
+            "current_reconciliation_validation"
+        ]
+        self.assertEqual(
+            validation,
+            {
+                "reconciliation_event_id": checkpoint["event_id"],
+                "reconciliation_payload_hash": checkpoint["payload_hash"],
+                "journal_sequence": validated_cut,
+            },
+        )
+        self.assertEqual(
+            terminal_event["journal_sequence"],
+            validated_cut + 1,
+        )
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_terminal_release_exact_retry_does_not_reinterpret_later_provider_truth(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-retry-cut",
+            idempotency_key="idem-unknown-retry-cut",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        checkpoint = self.record_reconciliation_resolution(
+            outcome="PROVEN_ABSENT",
+            reconciliation_id="reconciliation-retry-absent",
+        )
+        evidence = self.publish_resolution_evidence(
+            artifact_id="74747474-7474-4747-8747-747474747474",
+            reconciliation_event=checkpoint,
+        )
+        first = book.mark_terminal(
+            command_id="cmd-terminal-retry-cut",
+            idempotency_key="idem-terminal-retry-cut",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+        committed_version = book.version
+        committed_events = len(
+            self.store.load_events("reservation_book", book.scope_id)
+        )
+
+        self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-after-release-filled",
+        )
+        retried = book.mark_terminal(
+            command_id="cmd-terminal-retry-cut-different-command",
+            idempotency_key="idem-terminal-retry-cut",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+
+        self.assertEqual(retried, first)
+        self.assertEqual(book.version, committed_version)
+        self.assertEqual(
+            len(self.store.load_events("reservation_book", book.scope_id)),
+            committed_events,
+        )
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
     def test_terminal_release_rejects_cross_scope_reconciliation_after_restart(self):
         book = self.book()
         self.reserve(book)

@@ -58,6 +58,96 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_resolved_policy_cannot_be_forged_by_direct_construction(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "must be issued by DurableRiskPolicyRegistry",
+            ):
+                authority.ResolvedRiskPolicy(
+                    identity=issued.identity,
+                    policy=issued.policy,
+                    registration_event_id=issued.registration_event_id,
+                    registration_journal_sequence=issued.registration_journal_sequence,
+                    activation_event_id=issued.activation_event_id,
+                    activation_journal_sequence=issued.activation_journal_sequence,
+                    resolved_journal_sequence_cut=issued.resolved_journal_sequence_cut,
+                    journal_store_identity_digest=issued.journal_store_identity_digest,
+                )
+
+    def test_resolved_policy_use_time_seal_rejects_post_issuance_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            object.__setattr__(
+                issued.policy,
+                "max_data_age_seconds",
+                Decimal("999"),
+            )
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
+    def test_resolved_policy_use_time_seal_rejects_identity_raw_state_poisoning(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            vars(issued.identity)["policy_id"] = "forged-policy"
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
     def test_canonical_risk_policy_detaches_exact_caller_state(self):
         caller = policy(max_gross_leverage="2")
         canonical = canonical_risk_policy(caller)

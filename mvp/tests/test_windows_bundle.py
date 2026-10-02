@@ -269,6 +269,54 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
 
         self.assertTrue(output.is_file())
 
+    def test_windows_path_stat_file_identity_drift_does_not_cross_domains(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows metadata representation regression")
+
+        original_stat = os.stat
+        staged_prefix = str(self.staging) + os.sep
+        counter = 0
+
+        def drifting_file_stat(path, *args, **kwargs):
+            nonlocal counter
+            observed = original_stat(path, *args, **kwargs)
+            candidate = str(path)
+            if candidate.startswith(staged_prefix) and stat.S_ISREG(observed.st_mode):
+                counter += 1
+
+                class StatProxy:
+                    def __getattr__(self, name):
+                        return getattr(observed, name)
+
+                    st_dev = observed.st_dev
+                    st_ino = observed.st_ino + (counter * 17)
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns
+                    st_ctime_ns = observed.st_ctime_ns
+
+                return StatProxy()
+            return observed
+
+        output = self.root / "path-stat-domain.zip"
+        with patch.object(
+            windows_bundle_module.os,
+            "stat",
+            side_effect=drifting_file_stat,
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertTrue(output.is_file())
+        self.assertEqual(counter, 0)
+
     def test_staged_path_swap_during_open_fails_closed(self):
         if sys.platform != "win32":
             self.skipTest("retained Windows namespace test")

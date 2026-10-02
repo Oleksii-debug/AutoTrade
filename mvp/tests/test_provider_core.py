@@ -130,7 +130,7 @@ class ProviderCoreTests(unittest.TestCase):
             )
             observation = observe_submission_json_response(
                 response_binding=binding,
-                provider_id="BYBIT",
+                provider_id="KRAKEN",
                 endpoint="/v5/order/create",
                 prepared_request_sha256=request_sha,
                 capability_snapshot_ids=("cap-1",),
@@ -174,7 +174,7 @@ class ProviderCoreTests(unittest.TestCase):
                 ):
                     observe_submission_json_response(
                         response_binding=binding,
-                        provider_id="BYBIT",
+                        provider_id="KRAKEN",
                         endpoint="/v5/order/create",
                         prepared_request_sha256=request_sha,
                         capability_snapshot_ids=("cap-1",),
@@ -344,7 +344,7 @@ class ProviderCoreTests(unittest.TestCase):
             attempt_id="provider-evidence-a1",
             intent_id="intent-1",
             intent_hash="intent-hash",
-            provider="BYBIT",
+            provider="KRAKEN",
             request=request,
             now="2026-09-24T18:00:00Z",
             authority_check=lambda _hash, _now: (True, "allowed"),
@@ -367,7 +367,7 @@ class ProviderCoreTests(unittest.TestCase):
             binding, request_sha = self._durable_submission_binding(directory)
             observation = observe_submission_json_response(
                 response_binding=binding,
-                provider_id="BYBIT",
+                provider_id="KRAKEN",
                 endpoint="/v5/order/create",
                 prepared_request_sha256=request_sha,
                 capability_snapshot_ids=("cap-1",),
@@ -378,7 +378,7 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertEqual(observation.response_sha256, binding.response_sha256)
             self.assertEqual(observation.request_sha256, request_sha)
             observation.require_scope(
-                provider_id="BYBIT",
+                provider_id="KRAKEN",
                 endpoint="/v5/order/create",
                 prepared_request_sha256=request_sha,
                 capability_snapshot_ids=("cap-1",),
@@ -400,7 +400,7 @@ class ProviderCoreTests(unittest.TestCase):
             ):
                 values = {
                     "response_binding": binding,
-                    "provider_id": "BYBIT",
+                    "provider_id": "KRAKEN",
                     "endpoint": "/v5/order/create",
                     "prepared_request_sha256": request_sha,
                     "capability_snapshot_ids": ("cap-1",),

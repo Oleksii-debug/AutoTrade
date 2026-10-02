@@ -565,6 +565,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             intent_id,
             environment=runtime_environment,
             account_id=account_id,
+            provider_environment=provider_environment,
         )
         capability = submission_write_capability(
             account_id=account_id,
@@ -615,6 +616,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     "instrument_versions": list(prepared.instrument_versions),
                 },
                 now="2026-09-24T20:00:00Z",
+                provider_environment=provider_environment,
                 intent_hash="bybit-intent-hash",
             )
             observation = observe_submission_json_response(

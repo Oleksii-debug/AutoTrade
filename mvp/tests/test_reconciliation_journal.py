@@ -33,22 +33,36 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 )
 
 
-def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def snapshot(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return SnapshotConsistencyEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
     )
 
 
-def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def fill(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return ProviderFillEvidence.create(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -106,12 +120,17 @@ def reconciliation(**overrides):
     provider_id = values["provider_id"]
     account_id = values["account_id"]
     environment = values["environment"]
+    provider_environment = values.get("provider_environment")
+    resource_availability = values.get("resource_availability")
+    if provider_environment is None and resource_availability is not None:
+        provider_environment = resource_availability.provider_environment
     if "provider_fills" not in overrides:
         values["provider_fills"] = [
             fill(
                 provider_id=provider_id,
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
             )
         ]
     if "snapshot_consistency" not in overrides:
@@ -119,6 +138,7 @@ def reconciliation(**overrides):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     if "provider_activity_provider_id" not in overrides:
         values["provider_activity_provider_id"] = provider_id

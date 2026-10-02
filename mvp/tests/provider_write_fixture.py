@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
+    provider_domain_submission_attempt_key,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 
@@ -32,6 +33,7 @@ def journal_sent_response(
     response_bytes: bytes,
     submission_scope: Mapping[str, object],
     now: str,
+    provider_environment: str | None = None,
     intent_hash: str = "test-fixture-intent-hash",
 ) -> SubmissionResponseBinding:
     """Persist one exact response without manufacturing financial send authority."""
@@ -47,11 +49,15 @@ def journal_sent_response(
         owner_token="provider-response-fixture",
         owner_epoch=1,
     )
-    dispatcher._append(
-        attempt_id=attempt_id,
-        event_type="SubmissionPrepared",
-        version=1,
-        payload={
+    durable_attempt_id = attempt_id
+    if environment.strip().upper() in {"PAPER", "LIVE"}:
+        durable_attempt_id = provider_domain_submission_attempt_key(
+            attempt_id=attempt_id,
+            provider_id=provider,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    prepared_payload = {
             "attempt_id": attempt_id,
             "intent_id": intent_id,
             "intent_hash": intent_hash,
@@ -65,11 +71,18 @@ def journal_sent_response(
             "prepared_at": now,
             "submission_scope": scope,
             "submission_scope_hash": scope_hash,
-        },
+    }
+    if provider_environment is not None:
+        prepared_payload["provider_environment"] = provider_environment
+    dispatcher._append(
+        attempt_id=durable_attempt_id,
+        event_type="SubmissionPrepared",
+        version=1,
+        payload=prepared_payload,
         now=now,
     )
     dispatcher._append(
-        attempt_id=attempt_id,
+        attempt_id=durable_attempt_id,
         event_type="SubmissionSending",
         version=2,
         payload={
@@ -81,7 +94,7 @@ def journal_sent_response(
         now=now,
     )
     dispatcher._append(
-        attempt_id=attempt_id,
+        attempt_id=durable_attempt_id,
         event_type="SubmissionSent",
         version=3,
         payload={
@@ -97,6 +110,12 @@ def journal_sent_response(
         environment=environment,
         account_id=account_id,
         attempt_id=attempt_id,
+        provider_id=provider if environment.strip().upper() in {"PAPER", "LIVE"} else None,
+        provider_environment=(
+            provider_environment
+            if environment.strip().upper() in {"PAPER", "LIVE"}
+            else None
+        ),
     )
 
 
@@ -115,6 +134,7 @@ def journal_unknown_submission(
     reason: str,
     response_bytes: bytes | None = None,
     http_status: int | None = None,
+    provider_environment: str | None = None,
     intent_hash: str = "test-fixture-intent-hash",
 ) -> None:
     """Persist an irreversible-send ambiguity without issuing send authority."""
@@ -130,11 +150,15 @@ def journal_unknown_submission(
         owner_token="provider-response-fixture",
         owner_epoch=1,
     )
-    dispatcher._append(
-        attempt_id=attempt_id,
-        event_type="SubmissionPrepared",
-        version=1,
-        payload={
+    durable_attempt_id = attempt_id
+    if environment.strip().upper() in {"PAPER", "LIVE"}:
+        durable_attempt_id = provider_domain_submission_attempt_key(
+            attempt_id=attempt_id,
+            provider_id=provider,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    prepared_payload = {
             "attempt_id": attempt_id,
             "intent_id": intent_id,
             "intent_hash": intent_hash,
@@ -148,11 +172,18 @@ def journal_unknown_submission(
             "prepared_at": now,
             "submission_scope": scope,
             "submission_scope_hash": scope_hash,
-        },
+    }
+    if provider_environment is not None:
+        prepared_payload["provider_environment"] = provider_environment
+    dispatcher._append(
+        attempt_id=durable_attempt_id,
+        event_type="SubmissionPrepared",
+        version=1,
+        payload=prepared_payload,
         now=now,
     )
     dispatcher._append(
-        attempt_id=attempt_id,
+        attempt_id=durable_attempt_id,
         event_type="SubmissionSending",
         version=2,
         payload={
@@ -181,7 +212,7 @@ def journal_unknown_submission(
     if http_status is not None:
         payload["http_status"] = http_status
     dispatcher._append(
-        attempt_id=attempt_id,
+        attempt_id=durable_attempt_id,
         event_type="SubmissionUnknown",
         version=3,
         payload=payload,

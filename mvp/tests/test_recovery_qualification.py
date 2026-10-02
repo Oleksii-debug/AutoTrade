@@ -1,23 +1,30 @@
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.recovery_qualification as recovery_qualification_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationScope,
     SignedQualificationAttestation,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
     RecoveryQualificationDecision,
     RecoveryQualificationPolicy,
+    RecoveryRawEvidenceRef,
+    RecoveryRawEvidenceRole,
     RecoveryScenario,
     RecoveryScenarioEvidence,
     qualify_recovery_release,
+    recovery_evidence_receipt_bytes,
     recovery_evidence_receipt_metadata,
+    recovery_policy_subject_requirement,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -84,6 +91,7 @@ def evidence(
     test_run_id=None,
     tests_run=None,
     unresolved_limits=(),
+    raw_evidence_refs=(),
 ):
     receipt_id = evidence_artifact_id or str(
         uuid5(
@@ -91,21 +99,14 @@ def evidence(
             f"autotrade-recovery-evidence:{scenario.value}",
         )
     )
-    receipt_bytes = (
-        "autotrade-recovery-evidence:" + scenario.value
-    ).encode("utf-8")
-    receipt_hash = (
-        evidence_artifact_sha256
-        or "sha256:" + sha256(receipt_bytes).hexdigest()
-    )
-    return RecoveryScenarioEvidence(
+    values = dict(
         scenario=scenario,
         status=status,
         source_sha=source_sha,
         release_artifact_id=artifact_id,
         release_artifact_sha256=artifact,
         evidence_artifact_id=receipt_id,
-        evidence_artifact_sha256=receipt_hash,
+        evidence_artifact_sha256="sha256:" + "0" * 64,
         evidence_refs=(f"artifact://recovery/{scenario.value.lower()}",),
         evidence_schema_version=evidence_schema_version,
         protocol_id=protocol_id,
@@ -125,15 +126,118 @@ def evidence(
         rollback_completed=rollback_completed,
         open_risk_present=open_risk_present,
         protection_state=protection_state,
+        raw_evidence_refs=raw_evidence_refs,
+    )
+    provisional = RecoveryScenarioEvidence(**values)
+    receipt_hash = (
+        evidence_artifact_sha256
+        or "sha256:" + sha256(
+            recovery_evidence_receipt_bytes(provisional)
+        ).hexdigest()
+    )
+    return RecoveryScenarioEvidence(
+        **{**values, "evidence_artifact_sha256": receipt_hash}
     )
 
 
+def required_raw_roles(scenario, *, open_risk_present=False):
+    roles = {
+        RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+        RecoveryRawEvidenceRole.BACKUP_INTEGRITY,
+        RecoveryRawEvidenceRole.RECONCILIATION,
+        RecoveryRawEvidenceRole.SENDER_FENCE,
+        RecoveryRawEvidenceRole.AUTHORITY_REACQUISITION,
+        RecoveryRawEvidenceRole.DATA_LOSS_AUDIT,
+        RecoveryRawEvidenceRole.DUPLICATE_EXTERNAL_ACTION_AUDIT,
+        RecoveryRawEvidenceRole.UNKNOWN_SUBMISSION_AUDIT,
+    }
+    if scenario is RecoveryScenario.UPGRADE_FAILURE:
+        roles.add(RecoveryRawEvidenceRole.UPGRADE_ROLLBACK)
+    if open_risk_present:
+        roles.add(RecoveryRawEvidenceRole.PROTECTION_STATE)
+    return frozenset(roles)
+
+
 def complete_evidence():
-    return [evidence(scenario) for scenario in RecoveryScenario]
+    return [
+        evidence(
+            scenario,
+            raw_evidence_refs=tuple(
+                raw_ref(scenario, role)
+                for role in sorted(
+                    required_raw_roles(scenario),
+                    key=lambda current: current.value,
+                )
+            ),
+        )
+        for scenario in RecoveryScenario
+    ]
+
+
+def raw_ref(
+    scenario,
+    role,
+    *,
+    source_sha=SOURCE_SHA,
+    artifact_label=None,
+    artifact_hash=None,
+    evidence_kind=None,
+    media_type="application/vnd.autotrade.recovery-raw-evidence",
+    artifact_id_value=None,
+    release_artifact_id=RELEASE_ARTIFACT_ID,
+    release_artifact_sha256=ARTIFACT_SHA,
+    evidence_schema_version=EVIDENCE_SCHEMA,
+    protocol_id=PROTOCOL_ID,
+    test_run_id=None,
+):
+    label = artifact_label or f"{scenario.value.lower()}:{role.value.lower()}"
+    aid = artifact_id_value or str(
+        uuid5(NAMESPACE_URL, "autotrade-recovery-raw:" + label)
+    )
+    default_raw = (
+        f"raw:{scenario.value.lower()}:{role.value.lower()}".encode("utf-8")
+    )
+    digest = artifact_hash or "sha256:" + sha256(default_raw).hexdigest()
+    return RecoveryRawEvidenceRef(
+        scenario=scenario,
+        role=role,
+        artifact_ref=EvidenceArtifactRef(
+            artifact_id=aid,
+            sha256=digest,
+            media_type=media_type,
+            evidence_kind=evidence_kind or ("RECOVERY_" + role.value),
+            source_sha=source_sha,
+        ),
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
+        evidence_schema_version=evidence_schema_version,
+        protocol_id=protocol_id,
+        test_run_id=test_run_id or f"run-{scenario.value.lower()}-001",
+    )
+
+
+def raw_bytes(ref):
+    return f"raw:{ref.scenario.value.lower()}:{ref.role.value.lower()}".encode(
+        "utf-8"
+    )
+
+
+def raw_metadata(ref):
+    return {
+        "evidence_kind": ref.artifact_ref.evidence_kind,
+        "scenario": ref.scenario.value,
+        "role": ref.role.value,
+        "source_sha": ref.artifact_ref.source_sha,
+        "release_artifact_id": ref.release_artifact_id,
+        "release_artifact_sha256": ref.release_artifact_sha256,
+        "evidence_schema_version": ref.evidence_schema_version,
+        "protocol_id": ref.protocol_id,
+        "test_run_id": ref.test_run_id,
+    }
 
 
 def _receipt_bytes(item):
-    return ("autotrade-recovery-evidence:" + item.scenario.value).encode("utf-8")
+    return recovery_evidence_receipt_bytes(item)
 
 
 def qualify(
@@ -145,6 +249,10 @@ def qualify(
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    attested_policy=None,
+    mutate_during_verify=None,
+    raw_semantics_trusted=True,
+    omit_trust_root=False,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -171,26 +279,48 @@ def qualify(
                 source_refs=[f"git:{item.source_sha}"],
                 metadata=recovery_evidence_receipt_metadata(item),
             )
+            for ref in item.raw_evidence_refs:
+                store.publish_bytes(
+                    artifact_id=ref.artifact_ref.artifact_id,
+                    data=raw_bytes(ref),
+                    media_type=ref.artifact_ref.media_type,
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{ref.artifact_ref.source_sha}"],
+                    metadata=raw_metadata(ref),
+                )
         if corrupt_evidence_id is not None:
             manifest = store.load_manifest(corrupt_evidence_id)
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
         trust_kwargs = {}
+        canonical_policy = None
         if trusted:
             trust_root = attestation_root(
                 scopes=(QualificationScope("RECOVERY", "RELEASE"),)
             )
-            trust_policy = attestation_policy(trust_root)
-            attested_refs = tuple(
-                EvidenceArtifactRef(
-                    artifact_id=item.evidence_artifact_id,
-                    sha256=item.evidence_artifact_sha256,
-                    media_type="application/vnd.autotrade.recovery-evidence",
-                    evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
-                    source_sha=item.source_sha,
-                )
+            canonical_policy = attestation_policy(trust_root)
+            bound_policy = policy if attested_policy is None else attested_policy
+            included = tuple(
+                item
                 for item in evidence
                 if item.scenario not in set(omit_attestation_scenarios)
+            )
+            attested_refs = tuple(
+                [
+                    EvidenceArtifactRef(
+                        artifact_id=item.evidence_artifact_id,
+                        sha256=item.evidence_artifact_sha256,
+                        media_type="application/vnd.autotrade.recovery-evidence",
+                        evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
+                        source_sha=item.source_sha,
+                    )
+                    for item in included
+                ]
+                + [
+                    ref.artifact_ref
+                    for item in included
+                    for ref in item.raw_evidence_refs
+                ]
             )
             signed = attestation(
                 trust_root,
@@ -200,7 +330,10 @@ def qualify(
                 package_id="WP-59",
                 protocol_id=policy.protocol_id,
                 protocol_version=policy.evidence_schema_version,
-                requirement_ids=("recovery-release-qualification",),
+                requirement_ids=(
+                    "recovery-release-qualification",
+                    recovery_policy_subject_requirement(bound_policy),
+                ),
                 evidence_refs=attested_refs,
                 release_artifact_id=policy.release_artifact_id,
                 release_artifact_sha256=policy.release_artifact_sha256,
@@ -210,17 +343,43 @@ def qualify(
                 "qualification_receipt": SignedQualificationAttestation(
                     signed, sign(signed)
                 ),
-                "qualification_policy": trust_policy,
-                "expected_policy_id": trust_policy.policy_id,
-                "expected_policy_version": trust_policy.policy_version,
+                "qualification_policy": canonical_policy,
+                "expected_policy_id": canonical_policy.policy_id,
+                "expected_policy_version": canonical_policy.policy_version,
             }
-        return qualify_recovery_release(
-            policy=policy,
-            evidence=evidence,
-            evidence_store=store,
-            evidence_root=directory,
-            **trust_kwargs,
-        )
+
+        def canonical_verify(receipt_arg, **kwargs):
+            if canonical_policy is None:
+                raise AssertionError("canonical verifier used without trusted fixture")
+            if mutate_during_verify is not None:
+                mutate_during_verify()
+            return verify_qualification_attestation(
+                receipt_arg,
+                policy=canonical_policy,
+                expected_policy_id=canonical_policy.policy_id,
+                expected_policy_version=canonical_policy.policy_version,
+                **kwargs,
+            )
+
+        with (
+            patch.object(
+                recovery_qualification_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ),
+            patch.object(
+                recovery_qualification_module,
+                "_canonical_recovery_raw_semantics_verified",
+                return_value=raw_semantics_trusted,
+            ),
+        ):
+            return qualify_recovery_release(
+                policy=policy,
+                evidence=evidence,
+                evidence_store=store,
+                evidence_root=None if omit_trust_root else directory,
+                **trust_kwargs,
+            )
 
 
 class RecoveryReleaseQualificationTests(unittest.TestCase):
@@ -249,6 +408,242 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_store=lambda _item: True,
             )
 
+    def test_recovery_terminal_rejects_subclass_and_hostile_scalar_graphs(self):
+        base = evidence(RecoveryScenario.NETWORK_LOSS)
+
+        class DerivedRecoveryScenarioEvidence(RecoveryScenarioEvidence):
+            pass
+
+        derived = DerivedRecoveryScenarioEvidence(
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "canonical RecoveryScenarioEvidence"):
+            qualify_recovery_release(
+                policy=policy(),
+                evidence=[derived],
+            )
+
+        class HostileText(str):
+            pass
+
+        poisoned = evidence(RecoveryScenario.NETWORK_LOSS)
+        object.__setattr__(poisoned, "source_sha", HostileText(poisoned.source_sha))
+        with self.assertRaisesRegex(TypeError, "source_sha must use exact str"):
+            qualify_recovery_release(
+                policy=policy(),
+                evidence=[poisoned],
+            )
+
+    def test_verifier_side_mutation_cannot_change_detached_recovery_decision(self):
+        items = complete_evidence()
+        target = items[0]
+        original_downtime = target.downtime_ms
+
+        def mutate_original():
+            object.__setattr__(
+                target,
+                "downtime_ms",
+                policy().max_downtime_ms[target.scenario] + 1,
+            )
+
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            mutate_during_verify=mutate_original,
+        )
+
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertEqual(decision.blockers, ())
+        self.assertEqual(
+            decision.measured_downtime_ms[target.scenario],
+            original_downtime,
+        )
+        self.assertGreater(
+            target.downtime_ms,
+            policy().max_downtime_ms[target.scenario],
+        )
+
+    def test_verifier_side_policy_mutation_cannot_change_detached_recovery_policy(self):
+        current_policy = policy()
+        requirement_before = recovery_policy_subject_requirement(current_policy)
+        replacement_tests = dict(REQUIRED_TESTS)
+        replacement_tests[RecoveryScenario.NETWORK_LOSS] = (
+            "recovery::impossible-post-callback-test",
+        )
+        replacement = policy(
+            limits={RecoveryScenario.POWER_LOSS: 0},
+            required_tests=replacement_tests,
+        )
+
+        def mutate_original_policy():
+            object.__setattr__(
+                current_policy,
+                "max_downtime_ms",
+                replacement.max_downtime_ms,
+            )
+            object.__setattr__(
+                current_policy,
+                "required_tests",
+                replacement.required_tests,
+            )
+
+        decision = qualify(
+            policy=current_policy,
+            evidence=complete_evidence(),
+            trusted=True,
+            mutate_during_verify=mutate_original_policy,
+        )
+
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertEqual(decision.blockers, ())
+        self.assertEqual(
+            decision.recovery_policy_requirement,
+            requirement_before,
+        )
+        self.assertNotEqual(
+            recovery_policy_subject_requirement(current_policy),
+            requirement_before,
+        )
+        self.assertEqual(
+            current_policy.max_downtime_ms[RecoveryScenario.POWER_LOSS],
+            0,
+        )
+
+    def test_typed_raw_evidence_is_canonically_bound_into_receipt_bytes(self):
+        scenario = RecoveryScenario.NETWORK_LOSS
+        base = evidence(scenario)
+        typed = evidence(
+            scenario,
+            raw_evidence_refs=(
+                raw_ref(
+                    scenario,
+                    RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+                ),
+            ),
+        )
+
+        self.assertNotEqual(
+            recovery_evidence_receipt_bytes(base),
+            recovery_evidence_receipt_bytes(typed),
+        )
+        metadata = recovery_evidence_receipt_metadata(typed)
+        self.assertEqual(
+            metadata["raw_evidence_refs"][0]["role"],
+            "JOURNAL_INTEGRITY",
+        )
+        self.assertEqual(
+            metadata["raw_evidence_refs"][0]["artifact_ref"]["sha256"],
+            typed.raw_evidence_refs[0].artifact_ref.sha256,
+        )
+
+    def test_typed_raw_evidence_rejects_polymorphic_or_cross_scope_refs(self):
+        scenario = RecoveryScenario.NETWORK_LOSS
+        base_ref = raw_ref(
+            scenario,
+            RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+        )
+
+        class DerivedRawRef(RecoveryRawEvidenceRef):
+            pass
+
+        hostile = DerivedRawRef(
+            **{
+                name: getattr(base_ref, name)
+                for name in base_ref.__dataclass_fields__
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "exact RecoveryRawEvidenceRef"):
+            evidence(scenario, raw_evidence_refs=(hostile,))
+
+        wrong_scenario = raw_ref(
+            RecoveryScenario.POWER_LOSS,
+            RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+            test_run_id="run-network_loss-001",
+        )
+        with self.assertRaisesRegex(ValueError, "scenario does not match"):
+            evidence(scenario, raw_evidence_refs=(wrong_scenario,))
+
+    def test_missing_required_raw_roles_cannot_produce_terminal_pass(self):
+        items = complete_evidence()
+        target = items[0]
+        reduced = evidence(
+            target.scenario,
+            raw_evidence_refs=target.raw_evidence_refs[1:],
+        )
+        decision = qualify(
+            policy=policy(),
+            evidence=[reduced, *items[1:]],
+            trusted=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertTrue(
+            any("raw_evidence_missing" in blocker for blocker in decision.blockers)
+        )
+
+    def test_raw_artifact_must_be_signed_and_rooted_for_terminal_pass(self):
+        items = complete_evidence()
+        target = items[0]
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            omit_attestation_scenarios=(target.scenario,),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn("independent_evidence_set_mismatch", decision.blockers)
+
+        semantic_unavailable = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            raw_semantics_trusted=False,
+        )
+        self.assertEqual(
+            semantic_unavailable.status,
+            RecoveryEvidenceStatus.INCONCLUSIVE,
+        )
+        self.assertTrue(
+            any(
+                "raw_evidence_semantics_unverified" in blocker
+                for blocker in semantic_unavailable.blockers
+            )
+        )
+
+    def test_raw_artifact_reuse_across_roles_or_scenarios_is_nonterminal(self):
+        items = complete_evidence()
+        first = items[0]
+        second = items[1]
+        first_ref = first.raw_evidence_refs[0]
+        second_refs = list(second.raw_evidence_refs)
+        replacement = second_refs[0]
+        reused = raw_ref(
+            second.scenario,
+            replacement.role,
+            artifact_id_value=first_ref.artifact_ref.artifact_id,
+            artifact_hash=first_ref.artifact_ref.sha256,
+        )
+        second_refs[0] = reused
+        changed_second = evidence(
+            second.scenario,
+            raw_evidence_refs=tuple(second_refs),
+        )
+        decision = qualify_recovery_release(
+            policy=policy(),
+            evidence=[first, changed_second, *items[2:]],
+        )
+        self.assertNotEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertTrue(
+            any(
+                "raw_evidence_artifact_reused" in blocker
+                or "raw_evidence_digest_reused" in blocker
+                for blocker in decision.blockers
+            )
+        )
+
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()
         target = items[0]
@@ -274,6 +669,66 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             corrupt.blockers,
         )
 
+    def test_recovery_receipt_bytes_bind_decision_relevant_facts(self):
+        items = complete_evidence()
+        original = items[0]
+        original_bytes = recovery_evidence_receipt_bytes(original)
+        mutated = evidence(
+            original.scenario,
+            downtime_ms=original.downtime_ms + 1,
+            evidence_artifact_id=original.evidence_artifact_id,
+            evidence_artifact_sha256=original.evidence_artifact_sha256,
+        )
+        self.assertNotEqual(
+            recovery_evidence_receipt_bytes(mutated),
+            original_bytes,
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            current_policy = policy()
+            store.publish_bytes(
+                artifact_id=current_policy.release_artifact_id,
+                data=RELEASE_ARTIFACT_BYTES,
+                media_type="application/vnd.autotrade.release-artifact",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{current_policy.source_sha}"],
+                metadata={
+                    "evidence_kind": "RECOVERY_RELEASE_ARTIFACT",
+                    "source_sha": current_policy.source_sha,
+                },
+            )
+            store.publish_bytes(
+                artifact_id=mutated.evidence_artifact_id,
+                data=original_bytes,
+                media_type="application/vnd.autotrade.recovery-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{mutated.source_sha}"],
+                metadata=recovery_evidence_receipt_metadata(mutated),
+            )
+            for item in items[1:]:
+                store.publish_bytes(
+                    artifact_id=item.evidence_artifact_id,
+                    data=recovery_evidence_receipt_bytes(item),
+                    media_type="application/vnd.autotrade.recovery-evidence",
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{item.source_sha}"],
+                    metadata=recovery_evidence_receipt_metadata(item),
+                )
+            decision = qualify_recovery_release(
+                policy=current_policy,
+                evidence=[mutated, *items[1:]],
+                evidence_store=store,
+                evidence_root=directory,
+            )
+        self.assertEqual(
+            decision.status,
+            RecoveryEvidenceStatus.INCONCLUSIVE,
+        )
+        self.assertIn(
+            f"{mutated.scenario.value.lower()}:evidence_integrity_unverified",
+            decision.blockers,
+        )
+
     def test_missing_release_artifact_fails_closed(self):
         decision = qualify(
             policy=policy(),
@@ -296,7 +751,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         )
         self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
         self.assertIn(
-            "independent_evidence_trust_incomplete",
+            "independent_evidence_trust_unavailable",
             decision.blockers,
         )
         self.assertFalse(decision.authorizes_trading)
@@ -304,6 +759,20 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             set(decision.measured_downtime_ms),
             set(RecoveryScenario),
         )
+
+    def test_signed_receipt_without_trusted_evidence_root_is_incomplete(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            omit_trust_root=True,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "independent_evidence_trust_incomplete",
+            decision.blockers,
+        )
+        self.assertFalse(decision.authorizes_trading)
 
     def test_signed_attestation_allows_terminal_recovery_pass(self):
         decision = qualify(
@@ -322,6 +791,22 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             decision.qualification_trust_root_id.startswith("sha256:")
         )
         self.assertFalse(decision.authorizes_trading)
+
+    def test_signed_recovery_policy_cannot_be_loosened_after_outcome(self):
+        original_policy = policy()
+        loosened_policy = policy(
+            limits={scenario: 120_000 for scenario in RecoveryScenario},
+        )
+        decision = qualify(
+            policy=loosened_policy,
+            evidence=complete_evidence(),
+            trusted=True,
+            attested_policy=original_policy,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn("independent_recovery_policy_mismatch", decision.blockers)
+        self.assertFalse(decision.matches_policy(original_policy))
+        self.assertTrue(decision.matches_policy(loosened_policy))
 
     def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):
         decision = qualify(
@@ -587,6 +1072,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
                 measured_downtime_ms={RecoveryScenario.POWER_LOSS: 10},
             )
@@ -601,6 +1087,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=("forged:blocker",),
                 measured_downtime_ms={scenario: 10 for scenario in RecoveryScenario},
             )
@@ -615,6 +1102,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
                 measured_downtime_ms={},
             )
@@ -641,6 +1129,10 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.protocol_id, current_policy.protocol_id)
         self.assertRegex(decision.evidence_set_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(decision.matches_policy(current_policy))
+        changed_thresholds = policy(
+            limits={RecoveryScenario.POWER_LOSS: 120_000},
+        )
+        self.assertFalse(decision.matches_policy(changed_thresholds))
 
         other_release = policy(
             artifact_id=str(
@@ -662,17 +1154,38 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical sha256"):
             policy(artifact=ARTIFACT_SHA + " ")
 
+    def test_direct_pass_decision_requires_independently_verifiable_trust(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires accepted qualification trust",
+        ):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
+                blockers=(),
+                measured_downtime_ms={
+                    scenario: 10 for scenario in RecoveryScenario
+                },
+            )
+
     def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
         measured = {scenario: 10 for scenario in RecoveryScenario}
         decision = RecoveryQualificationDecision(
-            status=RecoveryEvidenceStatus.PASS,
+            status=RecoveryEvidenceStatus.INCONCLUSIVE,
             source_sha=SOURCE_SHA,
             release_artifact_id=RELEASE_ARTIFACT_ID,
             release_artifact_sha256=ARTIFACT_SHA,
             evidence_schema_version=EVIDENCE_SCHEMA,
             protocol_id=PROTOCOL_ID,
             evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-            blockers=(),
+            recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
+            blockers=("fixture:inconclusive",),
             measured_downtime_ms=measured,
         )
         measured[RecoveryScenario.POWER_LOSS] = 999
@@ -682,14 +1195,15 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "non-negative integer"):
             RecoveryQualificationDecision(
-                status=RecoveryEvidenceStatus.PASS,
+                status=RecoveryEvidenceStatus.INCONCLUSIVE,
                 source_sha=SOURCE_SHA,
                 release_artifact_id=RELEASE_ARTIFACT_ID,
                 release_artifact_sha256=ARTIFACT_SHA,
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-                blockers=(),
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
+                blockers=("fixture:inconclusive",),
                 measured_downtime_ms={
                     scenario: (True if scenario is RecoveryScenario.POWER_LOSS else 10)
                     for scenario in RecoveryScenario

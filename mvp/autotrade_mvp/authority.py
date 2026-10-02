@@ -36,6 +36,7 @@ from .risk import (
     RiskDecision,
     RiskIntent,
     RiskPolicy,
+    RiskRuleResult,
     RISK_ARITHMETIC_POLICY_ID,
     evaluate_bound_risk,
     normalize_reservation_requirements,
@@ -685,6 +686,137 @@ def _durable_risk_intent_payload(value: object) -> dict[str, object]:
             "durable financial retry risk_intent is non-canonical"
         )
     return payload
+
+
+def _validate_durable_risk_decision_fingerprint(
+    risk_payload: dict[str, object],
+) -> None:
+    """Re-derive the content-addressed risk decision identity from durable evidence."""
+
+    if type(risk_payload) is not dict:
+        raise AuthorityConflict("durable risk decision payload is malformed")
+
+    input_fingerprint = risk_payload.get("input_fingerprint")
+    if (
+        type(input_fingerprint) is not str
+        or len(input_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in input_fingerprint)
+    ):
+        raise AuthorityConflict(
+            "durable risk decision input fingerprint is missing or malformed"
+        )
+
+    verdict = risk_payload.get("verdict")
+    if verdict not in {"ALLOW", "REJECT"}:
+        raise AuthorityConflict("durable risk decision verdict is malformed")
+
+    raw_checks = risk_payload.get("checks")
+    if type(raw_checks) is not list:
+        raise AuthorityConflict("durable risk decision checks are malformed")
+    rules: list[RiskRuleResult] = []
+    expected_check_keys = {
+        "rule_id",
+        "passed",
+        "measured",
+        "limit",
+        "evidence",
+    }
+    for raw_check in raw_checks:
+        if type(raw_check) is not dict or set(raw_check) != expected_check_keys:
+            raise AuthorityConflict("durable risk decision check is malformed")
+        if type(raw_check["passed"]) is not bool:
+            raise AuthorityConflict("durable risk decision check verdict is malformed")
+        string_fields = (
+            raw_check["rule_id"],
+            raw_check["measured"],
+            raw_check["limit"],
+            raw_check["evidence"],
+        )
+        if any(type(value) is not str for value in string_fields):
+            raise AuthorityConflict("durable risk decision check text is malformed")
+        rules.append(
+            RiskRuleResult(
+                rule=raw_check["rule_id"],
+                passed=raw_check["passed"],
+                observed=raw_check["measured"],
+                limit=raw_check["limit"],
+                reason=raw_check["evidence"],
+            )
+        )
+
+    def durable_decimal(name: str) -> Decimal:
+        raw = risk_payload.get(name)
+        if type(raw) is not str:
+            raise AuthorityConflict(
+                f"durable risk decision {name} must use canonical decimal text"
+            )
+        try:
+            parsed = _decimal(raw, name=f"durable risk decision {name}")
+        except (TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                f"durable risk decision {name} is malformed"
+            ) from error
+        if _canonical_decimal_text(parsed) != raw:
+            raise AuthorityConflict(
+                f"durable risk decision {name} is non-canonical"
+            )
+        return parsed
+
+    snapshot = risk_payload.get("authoritative_risk_snapshot")
+    if type(snapshot) is not dict:
+        raise AuthorityConflict(
+            "durable risk decision authoritative snapshot is malformed"
+        )
+    snapshot_id = snapshot.get("snapshot_id")
+    if type(snapshot_id) is not str or not snapshot_id:
+        raise AuthorityConflict(
+            "durable risk decision authoritative snapshot identity is malformed"
+        )
+
+    for name in ("state_version", "policy_version", "reservation_version"):
+        value = risk_payload.get(name)
+        if type(value) is not int:
+            raise AuthorityConflict(
+                f"durable risk decision {name} is malformed"
+            )
+
+    try:
+        requirements = normalize_reservation_requirements(
+            risk_payload.get("reservation_requirements")
+        )
+        decision = RiskDecision(
+            admitted=verdict == "ALLOW",
+            resulting_position=durable_decimal("resulting_position"),
+            gross_leverage=durable_decimal("gross_leverage"),
+            net_leverage=durable_decimal("net_leverage"),
+            worst_stress_loss=durable_decimal("worst_stress_loss"),
+            input_fingerprint=input_fingerprint,
+            rules=tuple(rules),
+            arithmetic_policy_id=risk_payload.get("arithmetic_policy_id"),
+            intent_hash=risk_payload.get("intent_hash"),
+            state_version=risk_payload.get("state_version"),
+            policy_version=risk_payload.get("policy_version"),
+            reservation_version=risk_payload.get("reservation_version"),
+            reservation_requirements=requirements,
+            capability_snapshot_id=risk_payload.get("capability_snapshot_id"),
+            authoritative_risk_snapshot_id=snapshot_id,
+            evaluated_at=risk_payload.get("evaluated_at"),
+            valid_until=risk_payload.get("valid_until"),
+        )
+        expected_fingerprint = risk_decision_fingerprint(decision)
+    except (TypeError, ValueError) as error:
+        raise AuthorityConflict(
+            "durable risk decision fingerprint preimage is malformed"
+        ) from error
+
+    if (
+        risk_payload.get("fingerprint") != expected_fingerprint
+        or risk_payload.get("decision_id")
+        != "risk:sha256:" + expected_fingerprint
+    ):
+        raise AuthorityConflict(
+            "durable risk decision fingerprint does not match its semantic preimage"
+        )
 
 
 def _risk_snapshot_value(value):
@@ -1730,6 +1862,8 @@ class AuthorityService:
             raise AuthorityConflict(
                 "historical risk arithmetic policy is unsupported"
             )
+        if historical_arithmetic_policy_id is not None:
+            _validate_durable_risk_decision_fingerprint(risk_payload)
 
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
@@ -2068,6 +2202,7 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable risk arithmetic policy is missing or stale"
             )
+        _validate_durable_risk_decision_fingerprint(risk_payload)
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
             "financial_idempotency_key"
@@ -4290,6 +4425,7 @@ class AuthorityService:
         risk_payload = {
             "decision_id": risk_decision.decision_id,
             "fingerprint": risk_decision_fingerprint(risk_decision),
+            "input_fingerprint": risk_decision.input_fingerprint,
             "arithmetic_policy_id": risk_decision.arithmetic_policy_id,
             "intent_hash": risk_decision.intent_hash,
             "risk_intent": canonical_risk_intent_payload,

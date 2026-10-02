@@ -2687,6 +2687,10 @@ class AuthorityTests(unittest.TestCase):
                 legacy_risk_payload.pop("arithmetic_policy_id"),
                 RISK_ARITHMETIC_POLICY_ID,
             )
+            self.assertEqual(
+                legacy_risk_payload.pop("input_fingerprint"),
+                current_decision.input_fingerprint,
+            )
             legacy_risk_payload["decision_id"] = legacy_decision.decision_id
             legacy_risk_payload["fingerprint"] = legacy_digest
             reservation_book = DurableReservationBook(
@@ -2823,6 +2827,64 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertFalse(allowed)
             self.assertEqual(reason, "financial_evidence_invalid")
+
+
+    def test_rehashed_risk_result_semantic_tamper_fails_restart(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-risk-result-tamper",
+                idempotency_key="idem-risk-result-tamper",
+                admission_id="admission-risk-result-tamper",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-result-tamper",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-risk-result-tamper",
+                **public_financial_kwargs(source_store),
+            )
+            current_risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            self.assertIn(
+                "input_fingerprint",
+                current_risk_event["payload"],
+            )
+
+            invalid_store = JournalStore(f"{directory}/invalid.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    # Rehashing the event envelope must not let changed economic
+                    # decision semantics retain the old content-addressed risk id.
+                    payload["gross_leverage"] = "999"
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                invalid_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "fingerprint",
+            ):
+                authority_service(invalid_store)
 
 
     def test_explicit_unknown_arithmetic_policy_id_remains_fatal_on_restart(self):

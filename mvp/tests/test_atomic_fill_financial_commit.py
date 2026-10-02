@@ -1770,6 +1770,125 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             obligation_id=obligation_id,
         )
 
+    def test_generic_correction_cannot_bypass_provider_fill_reservation_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+
+            inserted, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+            self.assertTrue(inserted)
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_settlements = settlements.obligations
+            self.assertEqual(before_reservation.consumed["CASH:USD"], Decimal("100"))
+
+            corrected_projected = self.projected_fill(
+                quantity="1.1",
+                fill_id="fill-generic-correction-bypass",
+                provider_revision="provider-revision-generic-bypass",
+                correction_of=original_projected.fill_id,
+            )
+            corrected_provider = self.provider_fill(quantity="1.1")
+            reversal, replacement = build_provider_fill_correction_transactions(
+                book=economics,
+                provider_id=PROVIDER,
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                correction_observed_at="2026-09-25T10:30:01Z",
+            )
+            obligation = settlement_obligation(
+                store,
+                replacement,
+                obligation_id="settlement-generic-correction-bypass",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider-fill-owned correction requires reservation-aware correction authority",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    command_id="generic-correction-bypass-command",
+                    idempotency_key="generic-correction-bypass-idempotency",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(obligation,),
+                    committed_at="2026-09-25T10:30:02Z",
+                )
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_settlements)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                [],
+            )
+
+            kwargs = dict(
+                reservation_id="reservation-1",
+                command_id="reservation-aware-correction-command",
+                idempotency_key="reservation-aware-correction-idempotency",
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                correction_observed_at="2026-09-25T10:30:01Z",
+                settlement_obligations=(obligation,),
+                committed_at="2026-09-25T10:30:02Z",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("110"),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_reservation_correction_binding"
+                    )
+                ),
+                1,
+            )
+
+            self.assertFalse(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("110"),
+            )
+            self.assertEqual(len(economics.transactions), 3)
+
     def test_correction_decrease_then_increase_consumes_only_high_water_delta(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

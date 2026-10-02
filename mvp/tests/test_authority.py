@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.dispatch import (
     _issued_financial_authority_binding,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
@@ -1588,21 +1589,10 @@ class AuthorityTests(unittest.TestCase):
         )
 
     def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
-        class FailingFinancialJournalStore(JournalStore):
-            def __init__(self, path):
-                super().__init__(path)
-                self.prepared_event_types = ()
-
-            def commit_command(self, **kwargs):
-                self.prepared_event_types = tuple(
-                    envelope["event_type"]
-                    for envelope, _topic in kwargs["events"]
-                )
-                raise RuntimeError("injected financial commit failure")
-
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            store = FailingFinancialJournalStore(path)
+            store = JournalStore(path)
+            prepared_event_types = []
             authority = authority_service(store)
             item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
@@ -1641,17 +1631,29 @@ class AuthorityTests(unittest.TestCase):
                 **public_financial_kwargs(store),
             )
 
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "injected financial commit failure",
+            def fail_financial_commit(**commit_kwargs):
+                prepared_event_types[:] = [
+                    envelope["event_type"]
+                    for envelope, _topic in commit_kwargs["events"]
+                ]
+                raise RuntimeError("injected financial commit failure")
+
+            with patch_journal_store_method(
+                store,
+                "commit_command",
+                side_effect=fail_financial_commit,
             ):
-                authority.admit(
-                    reservation_book=reservations,
-                    **kwargs,
-                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected financial commit failure",
+                ):
+                    authority.admit(
+                        reservation_book=reservations,
+                        **kwargs,
+                    )
 
             self.assertEqual(
-                store.prepared_event_types,
+                tuple(prepared_event_types),
                 (
                     "RiskDecisionRecorded",
                     "ReservationMutationCommitted",

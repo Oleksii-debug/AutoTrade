@@ -68,6 +68,7 @@ def trade_history_observation(
         query={"ofs": "0"} if query is None else query,
         at=NOW,
         permission_scope="TRADE.READ",
+        provider_environment=provider_environment,
     )
     raw = json.dumps(
         response,
@@ -104,6 +105,7 @@ def authenticated_activity_observation(
         query={} if query is None else query,
         at=NOW,
         permission_scope=permission_scope,
+        provider_environment=provider_environment,
     )
     raw = json.dumps(
         response,

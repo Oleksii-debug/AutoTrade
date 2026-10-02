@@ -2196,12 +2196,12 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-stale-cut",
             )
 
-            original_prepare = economics.prepare_batch_mutation
+            original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
             mutated = False
 
-            def mutate_reservation_then_prepare(*args, **kwargs):
+            def mutate_reservation_then_prepare(instance, *args, **kwargs):
                 nonlocal mutated
-                if not mutated:
+                if instance is economics and not mutated:
                     mutated = True
                     reservations.consume(
                         command_id="intervening-reservation-command",
@@ -2209,10 +2209,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         reservation_id="reservation-1",
                         usage={"CASH:USD": "1"},
                     )
-                return original_prepare(*args, **kwargs)
+                return original_prepare(instance, *args, **kwargs)
 
-            economics.prepare_batch_mutation = mutate_reservation_then_prepare
-            try:
+            with patch.object(
+                DurableProviderEconomicBook,
+                "prepare_batch_mutation",
+                new=mutate_reservation_then_prepare,
+            ):
                 with self.assertRaisesRegex(
                     ReservationConflict,
                     "snapshot changed after provider fill plan derivation",
@@ -2234,8 +2237,6 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         settlement_obligations=(obligation,),
                         committed_at="2026-09-25T12:55:02Z",
                     )
-            finally:
-                economics.prepare_batch_mutation = original_prepare
 
             snapshot = reservations.get("reservation-1")
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("101"))

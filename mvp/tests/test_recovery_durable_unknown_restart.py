@@ -309,7 +309,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
                 store,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct",
                 owner_token="sender-a",
                 owner_epoch=1,
@@ -332,11 +332,8 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 provider="provider",
                 request={"side": "BUY"},
                 now="2026-09-25T20:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _intent_hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner_token, _owner_epoch: None,
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")
@@ -367,7 +364,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
 
             recovery = RecoveryController(
                 owner_store=store,
-                owner_scope="LIVE:acct",
+                owner_scope="SIMULATION:acct",
             )
             recovery.start("host-restarted")
             self.assertEqual(

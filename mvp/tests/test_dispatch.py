@@ -165,10 +165,16 @@ class DispatchTests(unittest.TestCase):
                 return {"ok": True}
 
             paper = GuardedDispatcher(
-                store, environment="PAPER", account_id="acct", owner_token="paper-owner"
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="simulation-owner",
             )
             live = GuardedDispatcher(
-                store, environment="LIVE", account_id="acct", owner_token="live-owner"
+                store,
+                environment="REPLAY",
+                account_id="acct",
+                owner_token="replay-owner",
             )
             for dispatcher in (paper, live):
                 outcome = dispatcher.dispatch(

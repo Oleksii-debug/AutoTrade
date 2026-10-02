@@ -20,6 +20,7 @@ from mvp.autotrade_mvp.kraken_futures import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.dispatch import (
+    _issue_financial_authority_check,
     ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
@@ -297,7 +298,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 provider="KRAKEN",
                 request=prepared.body,
                 now=NOW,
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),

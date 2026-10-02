@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher, _issue_financial_authority_check
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
@@ -132,7 +132,9 @@ class DurableReservationBookTests(unittest.TestCase):
             provider=provider,
             request={"instrument": "TEST", "quantity": "1"},
             now="2026-09-25T00:00:00Z",
-            authority_check=lambda intent_hash, now: (True, "allowed"),
+            authority_check=_issue_financial_authority_check(
+                lambda intent_hash, now: (True, "allowed"), store=self.store
+            ),
             transport_send=ambiguous_transport,
             sender_check=sender_check,
         )

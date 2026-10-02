@@ -29,6 +29,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
+    _issue_financial_authority_check,
     ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
@@ -532,7 +533,9 @@ class AlpacaAdapterTests(unittest.TestCase):
                 provider="ALPACA",
                 request=prepared.body,
                 now="2026-09-24T20:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),

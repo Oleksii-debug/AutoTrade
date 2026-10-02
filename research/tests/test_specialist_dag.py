@@ -700,6 +700,21 @@ class SpecialistDagTests(unittest.TestCase):
                 completed_at=NOW,
             )
 
+    def test_direct_aggregate_direction_matches_exact_score_sign(self):
+        for score, expected in (("-1", "SHORT"), ("-1e-256", "SHORT"),
+                                ("-0", "FLAT"), ("0", "FLAT"),
+                                ("1e-256", "LONG"), ("1", "LONG")):
+            for direction in ("LONG", "SHORT", "FLAT"):
+                with self.subTest(score=score, direction=direction):
+                    values = dict(direction=direction, score=Decimal(score),
+                                  accepted_roles=(), rejected_roles=(),
+                                  evidence_refs=(), total_cost=Decimal("0"))
+                    if direction == expected:
+                        self.assertEqual(AggregatedProposal(**values).direction, expected)
+                    else:
+                        with self.assertRaisesRegex(SpecialistDagError, "aggregate direction must match score sign"):
+                            AggregatedProposal(**values)
+
     def test_output_requires_evidence_and_rejects_binary_floats(self):
         with self.assertRaises(SpecialistDagError):
             SpecialistRun(

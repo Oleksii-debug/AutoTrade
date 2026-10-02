@@ -317,6 +317,9 @@ class AggregatedProposal:
             raise SpecialistDagError(
                 "aggregate score exceeds the exact numeric resource envelope"
             ) from error
+        expected_direction = "LONG" if score > 0 else "SHORT" if score < 0 else "FLAT"
+        if self.direction != expected_direction:
+            raise SpecialistDagError("aggregate direction must match score sign")
         if type(self.accepted_roles) is not tuple:
             raise SpecialistDagError("accepted_roles must be an exact tuple")
         if type(self.rejected_roles) is not tuple:

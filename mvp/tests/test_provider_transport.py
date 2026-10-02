@@ -1429,7 +1429,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 )
                 dispatcher = GuardedDispatcher(
                     store,
-                    environment="LIVE",
+                    environment="SIMULATION",
                     account_id="acct-wb",
                     owner_token="owner-wb",
                 )
@@ -1438,7 +1438,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 client_id = stable_client_order_id(
                     "WHITEBIT",
                     intent_id,
-                    environment="LIVE",
+                    environment="SIMULATION",
                     account_id="acct-wb",
                     max_length=32,
                     client_id_format="TOKEN",
@@ -1469,7 +1469,6 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     "now": "2026-09-25T12:00:00Z",
                     "authority_check": lambda _hash, _now: (True, "allowed"),
                     "transport_send": transport,
-                    "sender_check": lambda _owner, _epoch: None,
                     "final_barrier_clock": lambda: "2026-09-25T12:00:01Z",
                     "submission_scope": {
                         "capability_snapshot_id": "wb-cap-1",
@@ -1485,7 +1484,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
 
                 binding = load_submission_response_binding(
                     store,
-                    environment="LIVE",
+                    environment="SIMULATION",
                     account_id="acct-wb",
                     attempt_id=attempt_id,
                 )
@@ -2427,14 +2426,14 @@ with open(path, "a+b") as stream:
             )
             dispatcher = GuardedDispatcher(
                 store,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-kraken",
             )
             intent_id = "kraken-live-deadline-intent"
             client_id = stable_client_order_id(
                 "KRAKEN",
                 intent_id,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-kraken",
                 max_length=36,
                 client_id_format="UUID",
@@ -2451,7 +2450,6 @@ with open(path, "a+b") as stream:
                     "allowed",
                 ),
                 "transport_send": transport,
-                "sender_check": lambda _owner, _epoch: None,
                 "client_id_max_length": 36,
                 "client_id_format": "UUID",
                 "final_barrier_clock": lambda: now,
@@ -2464,7 +2462,7 @@ with open(path, "a+b") as stream:
 
             binding = load_submission_response_binding(
                 store,
-                environment="LIVE",
+                environment="SIMULATION",
                 account_id="acct-kraken",
                 attempt_id=kwargs["attempt_id"],
             )
@@ -2896,7 +2894,7 @@ class ProviderTransportTests(unittest.TestCase):
                 store = JournalStore(f"{directory}/journal.sqlite3")
                 dispatcher = GuardedDispatcher(
                     store,
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="acct-1",
                     owner_token="owner-1",
                 )
@@ -2904,7 +2902,7 @@ class ProviderTransportTests(unittest.TestCase):
                 attempt_id = f"attempt-binance-ambiguous-{status}"
                 client_id = stable_client_order_id(
                     "BINANCE", intent_id,
-                    environment="PAPER", account_id="acct-1",
+                    environment="SIMULATION", account_id="acct-1",
                 )
                 args = dict(
                     attempt_id=attempt_id,
@@ -2913,11 +2911,8 @@ class ProviderTransportTests(unittest.TestCase):
                     provider="BINANCE",
                     request=prepared_request(client_id),
                     now="2026-09-25T10:00:00Z",
-                    authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                    authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=transport,
-                    sender_check=lambda _owner, _epoch: None,
                     final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
                     submission_scope={
                         "capability_snapshot_id": "cap-1",

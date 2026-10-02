@@ -5578,28 +5578,29 @@ class AuthorityService:
                 # admission instant so restart/replay remains deterministic.
                 # Sending is a distinct authority boundary: the exact persisted
                 # checkpoint/resources must still be current *now*.
-                load_account_resource_availability_evidence(
-                    self.store,
-                    checkpoint_event_id=_text(
-                        availability_evidence.get("checkpoint_event_id"),
-                        name="checkpoint_event_id",
-                    ),
-                    provider_id=_text(
-                        availability_evidence.get("provider_id"),
-                        name="provider_id",
-                    ),
-                    account_id=record.account_id,
-                    environment=record.environment,
-                    provider_environment=availability_evidence.get(
-                        "provider_environment"
-                    ),
-                    resources=tuple(sorted(risk_requirements)),
-                    now=now,
-                    max_age_seconds=availability_evidence.get(
-                        "max_age_seconds"
-                    ),
-                    evidence_artifact_store=self.evidence_artifact_store,
-                    require_latest_scope=True,
+                current_availability_evidence = (
+                    load_account_resource_availability_evidence(
+                        self.store,
+                        checkpoint_event_id=_text(
+                            availability_evidence.get("checkpoint_event_id"),
+                            name="checkpoint_event_id",
+                        ),
+                        provider_id=_text(
+                            availability_evidence.get("provider_id"),
+                            name="provider_id",
+                        ),
+                        account_id=record.account_id,
+                        environment=record.environment,
+                        provider_environment=availability_evidence.get(
+                            "provider_environment"
+                        ),
+                        resources=tuple(sorted(risk_requirements)),
+                        now=now,
+                        max_age_seconds=availability_evidence.get(
+                            "max_age_seconds"
+                        ),
+                        evidence_artifact_store=self.evidence_artifact_store,
+                        require_latest_scope=True,
                     )
                 )
                 persisted_cash_adjustments = availability_evidence.get(

@@ -11,13 +11,10 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
-    _issue_financial_authority_check,
-    ExactJsonTransportResponse,
-    GuardedDispatcher,
-    load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.provider_write_fixture import journal_sent_response
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -359,31 +356,19 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
+        client_order_id = prepared.body["cl_ord_id"]
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            dispatcher = GuardedDispatcher(
+            binding = journal_sent_response(
                 store,
                 environment=prepared.environment,
                 account_id=prepared.account_id,
-                owner_token="owner",
-            )
-            outcome = dispatcher.dispatch(
                 attempt_id=attempt,
                 intent_id=intent_id,
-                intent_hash="kraken-spot-intent-hash",
                 provider="KRAKEN",
-                request=prepared.body,
-                now="2026-09-24T20:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
-                transport_send=lambda _cid, _request, guard: (
-                    guard(),
-                    ExactJsonTransportResponse(raw),
-                )[1],
-                client_id_max_length=36,
-                client_id_format="UUID",
-                sender_check=lambda _owner, _epoch: None,
+                request_hash=prepared.body_sha256,
+                client_order_id=client_order_id,
+                response_bytes=raw,
                 submission_scope={
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
@@ -394,13 +379,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                         prepared.instrument_version
                     ],
                 },
-            )
-            self.assertEqual(outcome.status, "SENT")
-            binding = load_submission_response_binding(
-                store,
-                environment=prepared.environment,
-                account_id=prepared.account_id,
-                attempt_id=attempt,
+                now="2026-09-24T20:00:00Z",
+                intent_hash="kraken-spot-intent-hash",
             )
             observation = observe_submission_json_response(
                 response_binding=binding,
@@ -415,7 +395,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 ),
             )
         return attempt, prepared, observation
-
     def _parse_submission(self, payload, **overrides):
         intent_id = overrides.pop(
             "intent_id",

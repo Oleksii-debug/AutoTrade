@@ -162,10 +162,13 @@ class EvaluationGateTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "regime_coverage"):
             EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
 
-    def test_complete_registered_evidence_can_pass(self):
-        self.assertEqual(
-            evaluate_with_verified_bundle(profile(), evidence()).status,
-            "PASS",
+    def test_self_published_complete_bundle_cannot_terminally_pass(self):
+        decision = evaluate_with_verified_bundle(profile(), evidence())
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(decision.checks["evidence_bundle"], "INCONCLUSIVE")
+        self.assertIn(
+            "evidence bundle has not been verified",
+            " ".join(decision.reasons),
         )
 
 
@@ -187,7 +190,8 @@ class EvaluationGateTests(unittest.TestCase):
                 valid_sequential_evaluation_passed=True,
             ),
         )
-        self.assertEqual(sequential.status, "PASS")
+        self.assertEqual(sequential.status, "INCONCLUSIVE")
+        self.assertEqual(sequential.checks["evidence_bundle"], "INCONCLUSIVE")
         self.assertEqual(sequential.checks["locked_evaluation"], "PASS")
 
         walk_forward = evaluate_with_verified_bundle(
@@ -471,7 +475,7 @@ class EvaluationGateTests(unittest.TestCase):
             " ".join(decision.reasons),
         )
 
-    def test_consistent_lower_bound_and_point_estimate_can_pass(self):
+    def test_consistent_lower_bound_and_point_estimate_remains_non_authoritative(self):
         decision = evaluate_with_verified_bundle(
             profile(),
             evidence(
@@ -480,7 +484,8 @@ class EvaluationGateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(decision.checks["uncertainty_consistency"], "PASS")
-        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.checks["evidence_bundle"], "INCONCLUSIVE")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
 
     def test_missing_uncertainty_is_inconclusive_not_pass(self):
         self.assertEqual(
@@ -630,7 +635,8 @@ class EvaluationGateTests(unittest.TestCase):
 
     def test_gate_decision_checks_are_immutable_after_evaluation(self):
         decision = evaluate_with_verified_bundle(profile(), evidence())
-        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(decision.checks["evidence_bundle"], "INCONCLUSIVE")
         with self.assertRaises(TypeError):
             decision.checks["net_advantage"] = "FAIL"
         self.assertEqual(decision.checks["net_advantage"], "PASS")

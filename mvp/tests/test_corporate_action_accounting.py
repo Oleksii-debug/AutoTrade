@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -716,6 +716,79 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(len(economics.transactions), 1)
+
+
+
+    def test_entitlement_position_and_dividend_postings_ignore_hostile_decimal_context(self):
+        huge = "1234567890123456789012345678"
+        total_quantity = "1234567890123456789012345688"
+        for rounding in (ROUND_FLOOR, ROUND_CEILING):
+            with self.subTest(rounding=rounding), TemporaryDirectory() as directory:
+                path = Path(directory) / "journal.sqlite3"
+                store = JournalStore(path)
+                economics = economic_book(store)
+                economics.append(
+                    book_equity_fill(
+                        transaction_id="huge-position-seed",
+                        cause_event_id="provider-fill:huge-position-seed",
+                        instrument="BTCUSDT",
+                        settlement_currency="USDT",
+                        side="BUY",
+                        quantity=huge,
+                        price="1",
+                        economic_effective_at=(
+                            READ_NOW - timedelta(minutes=2)
+                        ).isoformat().replace("+00:00", "Z"),
+                        economic_order_key="provider:BINANCE:execution:huge-position-seed",
+                        observed_at=(
+                            READ_NOW - timedelta(minutes=1)
+                        ).isoformat().replace("+00:00", "Z"),
+                    )
+                )
+                current = canonical_instrument()
+                corporate = CorporateActionBook(
+                    EquityState.create(
+                        symbol="BTCUSDT",
+                        quantity=total_quantity,
+                        total_basis="1000",
+                        settled_cash="1000",
+                        unsettled_cash="0",
+                        currency="USDT",
+                    ),
+                    instrument_version=current,
+                    registry=InstrumentRegistry(versions=(current,)),
+                )
+                accepted = resolve_action(
+                    sealed_action(
+                        per_share="1",
+                        external_event_id="exact-huge-dividend",
+                    )
+                )
+                with localcontext() as context:
+                    context.prec = 6
+                    context.rounding = rounding
+                    result = commit_authoritative_corporate_action(
+                        store=store,
+                        evidence_store=evidence_store(store),
+                        economic_book=economics,
+                        corporate_book=corporate,
+                        accepted=accepted,
+                    )
+
+                self.assertTrue(result.inserted)
+                self.assertEqual(
+                    result.next_state.unsettled_cash,
+                    Decimal(total_quantity),
+                )
+                dividend = economics.transactions[-1]
+                self.assertEqual(
+                    dividend.postings[0].signed_amount,
+                    Decimal(total_quantity),
+                )
+                self.assertEqual(
+                    dividend.postings[1].signed_amount,
+                    Decimal("-" + total_quantity),
+                )
 
 
 

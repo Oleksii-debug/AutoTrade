@@ -105,6 +105,60 @@ def load_paper_book(store, **kwargs):
 
 
 class ProviderActivityAccountingTests(unittest.TestCase):
+    def test_provider_cash_rejects_polymorphic_and_shadowed_authorities_before_dispatch(self):
+        class ForgedStore(JournalStore):
+            pass
+
+        class ForgedActivity(ProviderActivityEvidence):
+            def __getattribute__(self, name):
+                if name == "provider_id":
+                    raise AssertionError("activity subclass virtual dispatch must not run")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            forged_store = ForgedStore(Path(directory) / "forged.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                book_external_provider_cash_activity(
+                    forged_store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=activity(signed_amount="1"),
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            base = activity(signed_amount="1")
+            forged_activity = ForgedActivity(**base.__dict__)
+            with self.assertRaisesRegex(TypeError, "canonical ProviderActivityEvidence"):
+                book_external_provider_cash_activity(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=forged_activity,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+
+            called = False
+
+            def hostile_batch(*_args, **_kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("shadowed JournalStore method must not run")
+
+            store.load_command_event_batch = hostile_batch
+            with self.assertRaisesRegex(TypeError, "shadowed"):
+                book_external_provider_cash_activity(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=base,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+            self.assertFalse(called)
+
     def test_environment_is_part_of_durable_provider_activity_identity(self):
         paper = paper_activity_identity(
             provider_id="ALPACA",

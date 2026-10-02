@@ -20,7 +20,13 @@ from autotrade_runtime.artifacts.store import (
 )
 from autotrade_runtime.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
@@ -576,11 +582,14 @@ class DurableBorrowRecallProjection:
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
     ):
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact JournalStore")
+        store_identity = require_exact_journal_store_authority(
+            store,
+            subject="securities-borrow JournalStore",
+        )
         if type(evidence_artifact_store) is not ArtifactStore:
             raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.store = store
+        self._store_identity = store_identity
         self.evidence_artifact_store = evidence_artifact_store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -602,6 +611,18 @@ class DurableBorrowRecallProjection:
         self._resolutions: dict[str, BorrowRecallResolutionEvidence] = {}
         self._reload()
 
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        store = self.store
+        expected = self._store_identity
+        current = require_exact_journal_store_authority(
+            store,
+            subject="securities-borrow JournalStore",
+        )
+        if current != expected:
+            raise BorrowRecallConflict("securities-borrow JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
+
     def _scope_matches(self, evidence) -> bool:
         return (
             evidence.provider_id == self.provider_id
@@ -613,7 +634,11 @@ class DurableBorrowRecallProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        return self._journal_operation(
+            JournalStore.load_events,
+            _AGGREGATE_TYPE,
+            self.aggregate_id,
+        )
 
     def _reload(self) -> None:
         recalls: dict[str, BorrowRecallEvidence] = {}
@@ -699,7 +724,7 @@ class DurableBorrowRecallProjection:
                 + self.aggregate_id + "/" + event_type + "/" + identity,
             )
         )
-        existing = self.store.get_event(event_id)
+        existing = self._journal_operation(JournalStore.get_event, event_id)
         if existing is not None:
             if existing.get("event_type") == event_type and existing.get("payload") == payload:
                 self._reload()
@@ -716,7 +741,7 @@ class DurableBorrowRecallProjection:
             "committed_at": committed_at,
         }
         try:
-            self.store.append_event(envelope)
+            self._journal_operation(JournalStore.append_event, envelope)
         except Exception as error:
             self._reload()
             raise BorrowRecallConflict("borrow recall journal changed concurrently") from error

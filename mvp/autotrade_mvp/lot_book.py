@@ -10,7 +10,6 @@ from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
     bounded_fraction,
-    exact_add,
     exact_multiply,
     exact_subtract,
     exact_sum,
@@ -20,6 +19,7 @@ from .exact_decimal import (
 
 
 _EXACT_ERROR = "lot-book exact arithmetic exceeds resource envelope"
+ExactBasis = Decimal | Fraction
 
 
 def _decimal(value: Decimal | str | int | float) -> Decimal:
@@ -31,35 +31,15 @@ def _decimal(value: Decimal | str | int | float) -> Decimal:
         raise ValueError("Value must be a bounded exact decimal") from error
 
 
-def _translate(operation, *args):
+def _fraction(value: Decimal | Fraction | int) -> Fraction:
     try:
-        return operation(*args)
-    except ExactDecimalError as error:
-        raise ValueError(_EXACT_ERROR) from error
-
-
-def _add(left: Decimal, right: Decimal) -> Decimal:
-    return _translate(exact_add, left, right)
-
-
-def _subtract(left: Decimal, right: Decimal) -> Decimal:
-    return _translate(exact_subtract, left, right)
-
-
-def _multiply(left: Decimal, right: Decimal) -> Decimal:
-    return _translate(exact_multiply, left, right)
-
-
-def _sum(values) -> Decimal:
-    return _translate(exact_sum, values)
-
-
-ExactAmount = Decimal | Fraction
-
-
-def _fraction(value: Decimal) -> Fraction:
-    try:
-        return bounded_fraction(as_fraction(value))
+        if type(value) is Fraction:
+            return bounded_fraction(value)
+        if type(value) is Decimal:
+            return bounded_fraction(as_fraction(value))
+        if type(value) is int:
+            return bounded_fraction(Fraction(value, 1))
+        raise ExactDecimalError("unsupported exact lot-book scalar")
     except ExactDecimalError as error:
         raise ValueError(_EXACT_ERROR) from error
 
@@ -85,33 +65,34 @@ def _fraction_multiply(left: Fraction, right: Fraction) -> Fraction:
         raise ValueError(_EXACT_ERROR) from error
 
 
-def _fraction_divide(left: Fraction, right: Fraction) -> Fraction:
-    if right == 0:
-        raise ValueError("lot-book exact division by zero")
+def _exact_decimal_multiply(left: Decimal, right: Decimal) -> Decimal:
     try:
-        return bounded_fraction(left / right)
+        return exact_multiply(left, right)
     except ExactDecimalError as error:
         raise ValueError(_EXACT_ERROR) from error
 
 
-def _fraction_sum(values) -> Fraction:
-    total = Fraction(0, 1)
-    for value in values:
-        total = _fraction_add(total, value)
-    return total
-
-
-def _project_fraction(value: Fraction) -> ExactAmount:
-    """Return Decimal when exact/terminating, otherwise retain exact Fraction."""
-
+def _exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
     try:
-        bounded = bounded_fraction(value)
+        return exact_subtract(left, right)
     except ExactDecimalError as error:
         raise ValueError(_EXACT_ERROR) from error
+
+
+def _decimal_sum(values) -> Decimal:
     try:
-        return terminating_decimal(bounded)
+        return exact_sum(values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ERROR) from error
+
+
+def _public_exact(value: Fraction) -> ExactBasis:
+    """Prefer Decimal for backwards-compatible terminating values, else Fraction."""
+    value = _fraction(value)
+    try:
+        return terminating_decimal(value)
     except ExactDecimalError:
-        return bounded
+        return value
 
 
 @dataclass(frozen=True)
@@ -120,28 +101,28 @@ class Lot:
     total_basis: Fraction
 
     @property
-    def unit_cost(self) -> ExactAmount:
-        return _project_fraction(
-            _fraction_divide(self.total_basis, _fraction(self.quantity))
+    def unit_cost(self) -> ExactBasis:
+        ratio = _fraction_multiply(
+            self.total_basis,
+            _fraction(Fraction(1, 1) / as_fraction(self.quantity)),
         )
-
-    @property
-    def basis(self) -> ExactAmount:
-        return _project_fraction(self.total_basis)
+        return _public_exact(ratio)
 
 
 @dataclass(frozen=True)
 class BasisSnapshot:
     position: Decimal
-    open_basis: ExactAmount
-    realized_pnl: ExactAmount
+    open_basis: ExactBasis
+    realized_pnl: ExactBasis
 
 
 class FifoLotBook:
-    """Tracks one instrument using exact FIFO quantity and rational lot basis.
+    """Tracks one instrument using exact FIFO lots.
 
+    Authoritative lot basis is retained as a bounded rational total, not a
+    rounded per-unit Decimal. Terminating public values remain Decimals for
+    compatibility; non-terminating exact values are exposed as Fractions.
     Fees are included in basis on buys and deducted from proceeds on sells.
-    A non-terminating per-unit basis stays rational rather than being rounded.
     Short inventory is intentionally unsupported at this foundation stage.
     """
 
@@ -153,14 +134,29 @@ class FifoLotBook:
     def lots(self) -> tuple[Lot, ...]:
         return tuple(self._lots)
 
-    def snapshot(self) -> BasisSnapshot:
-        position = _sum(lot.quantity for lot in self._lots)
-        basis = _fraction_sum(lot.total_basis for lot in self._lots)
+    def _open_basis_fraction(self) -> Fraction:
+        total = Fraction(0, 1)
+        for lot in self._lots:
+            total = _fraction_add(total, lot.total_basis)
+        return total
+
+    @staticmethod
+    def _snapshot_for(
+        lots: list[Lot],
+        realized: Fraction,
+    ) -> BasisSnapshot:
+        position = _decimal_sum(lot.quantity for lot in lots)
+        basis = Fraction(0, 1)
+        for lot in lots:
+            basis = _fraction_add(basis, lot.total_basis)
         return BasisSnapshot(
             position=position,
-            open_basis=_project_fraction(basis),
-            realized_pnl=_project_fraction(self._realized),
+            open_basis=_public_exact(basis),
+            realized_pnl=_public_exact(realized),
         )
+
+    def snapshot(self) -> BasisSnapshot:
+        return self._snapshot_for(self._lots, self._realized)
 
     def buy(
         self,
@@ -174,10 +170,15 @@ class FifoLotBook:
         cost_fee = _decimal(fee)
         if qty <= 0 or px <= 0 or cost_fee < 0:
             raise ValueError("Buy quantity and price must be positive and fee non-negative")
-        total_cost = _add(_multiply(qty, px), cost_fee)
-        total_basis = _fraction(total_cost)
-        self._lots.append(Lot(qty, total_basis))
-        return self.snapshot()
+        total_cost = _fraction_add(
+            _fraction(_exact_decimal_multiply(qty, px)),
+            _fraction(cost_fee),
+        )
+        candidate = Lot(qty, total_cost)
+        candidate_lots = [*self._lots, candidate]
+        next_snapshot = self._snapshot_for(candidate_lots, self._realized)
+        self._lots = candidate_lots
+        return next_snapshot
 
     def sell(
         self,
@@ -202,45 +203,43 @@ class FifoLotBook:
         while remaining > 0:
             lot = working_lots[0]
             taken = min(remaining, lot.quantity)
-            taken_ratio = _fraction_divide(
-                _fraction(taken),
-                _fraction(lot.quantity),
-            )
-            taken_basis = _fraction_multiply(lot.total_basis, taken_ratio)
-            removed_basis = _fraction_add(removed_basis, taken_basis)
-            leftover = _subtract(lot.quantity, taken)
-            if leftover == 0:
+            if taken == lot.quantity:
+                taken_basis = lot.total_basis
                 working_lots.pop(0)
             else:
-                working_lots[0] = Lot(
-                    leftover,
-                    _fraction_subtract(lot.total_basis, taken_basis),
+                share = _fraction_multiply(
+                    _fraction(taken),
+                    _fraction(Fraction(1, 1) / as_fraction(lot.quantity)),
                 )
-            remaining = _subtract(remaining, taken)
+                taken_basis = _fraction_multiply(lot.total_basis, share)
+                leftover_quantity = _exact_decimal_subtract(lot.quantity, taken)
+                leftover_basis = _fraction_subtract(lot.total_basis, taken_basis)
+                working_lots[0] = Lot(leftover_quantity, leftover_basis)
+            removed_basis = _fraction_add(removed_basis, taken_basis)
+            remaining = _exact_decimal_subtract(remaining, taken)
 
-        net_proceeds = _fraction(
-            _subtract(_multiply(qty, px), sell_fee)
+        net_proceeds = _fraction_subtract(
+            _fraction(_exact_decimal_multiply(qty, px)),
+            _fraction(sell_fee),
         )
         new_realized = _fraction_add(
             self._realized,
             _fraction_subtract(net_proceeds, removed_basis),
         )
 
-        # Commit the derived state only after every exact calculation succeeds.
+        next_snapshot = self._snapshot_for(working_lots, new_realized)
         self._lots = working_lots
         self._realized = new_realized
-        return self.snapshot()
+        return next_snapshot
 
     def mark_to_market(
         self,
         price: Decimal | str | int | float,
-    ) -> ExactAmount:
+    ) -> ExactBasis:
         px = _decimal(price)
         if px <= 0:
             raise ValueError("Mark price must be positive")
-        state = self.snapshot()
-        market_value = _fraction(_multiply(state.position, px))
-        open_basis = _fraction_sum(lot.total_basis for lot in self._lots)
-        return _project_fraction(
-            _fraction_subtract(market_value, open_basis)
+        market_value = _fraction(_exact_decimal_multiply(self.snapshot().position, px))
+        return _public_exact(
+            _fraction_subtract(market_value, self._open_basis_fraction())
         )

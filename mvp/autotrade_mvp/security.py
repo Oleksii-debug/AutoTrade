@@ -19,6 +19,7 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .host_actions import required_roles_for_host_action
+from .decision_trace import _redact_embedded_secret_text
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -513,12 +514,22 @@ class SecurityBoundary:
     @staticmethod
     def redact(value: object) -> object:
         if isinstance(value, Mapping):
-            return {
-                key: "[REDACTED]"
-                if _REDACT_RE.search(str(key))
-                else SecurityBoundary.redact(item)
-                for key, item in value.items()
-            }
+            result: dict[object, object] = {}
+            for key, item in value.items():
+                raw_key = str(key)
+                safe_key: object = _redact_embedded_secret_text(raw_key)
+                if safe_key in result and safe_key != key:
+                    base_key = str(safe_key)
+                    suffix = 2
+                    while safe_key in result:
+                        safe_key = f"{base_key} [{suffix}]"
+                        suffix += 1
+                result[safe_key] = (
+                    "[REDACTED]"
+                    if _REDACT_RE.search(raw_key)
+                    else SecurityBoundary.redact(item)
+                )
+            return result
         if isinstance(value, list):
             return [SecurityBoundary.redact(item) for item in value]
         if isinstance(value, tuple):

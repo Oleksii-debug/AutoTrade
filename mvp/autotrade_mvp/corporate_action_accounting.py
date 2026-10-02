@@ -31,6 +31,13 @@ from .corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_subtract,
+    exact_sum,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
@@ -205,10 +212,15 @@ def _canonical_entitlement_position_proof(
                 "canonical position history contains invalid entitlement timestamps"
             ) from error
         if effective <= event.effective_at and observed <= observed_cut:
-            quantity += sum(
-                (posting.signed_amount for posting in position_postings),
-                Decimal("0"),
-            )
+            try:
+                position_delta = exact_sum(
+                    posting.signed_amount for posting in position_postings
+                )
+                quantity = exact_add(quantity, position_delta)
+            except ExactDecimalError as error:
+                raise AccountingConflict(
+                    "canonical entitlement position exceeds exact resource envelope"
+                ) from error
             contributors.append(
                 {
                     "transaction_id": transaction.transaction_id,
@@ -234,7 +246,7 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": str(quantity),
+        "quantity": canonical_decimal_text(quantity),
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)
@@ -300,7 +312,16 @@ def _dividend_transaction(
     economic_effective_at: str | None = None,
     observed_at: str | None = None,
 ) -> JournalTransaction | None:
-    amount = transition.after.unsettled_cash - transition.before.unsettled_cash
+    try:
+        amount = exact_subtract(
+            transition.after.unsettled_cash,
+            transition.before.unsettled_cash,
+        )
+        offset = exact_subtract(Decimal("0"), amount)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action dividend economics exceed exact resource envelope"
+        ) from error
     if amount == 0:
         return None
     currency = transition.after.currency
@@ -309,7 +330,7 @@ def _dividend_transaction(
         cause_event_id=_cause_id(accepted, "effect"),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
-            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
+            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, offset),
         ),
         economic_effective_at=(
             economic_effective_at

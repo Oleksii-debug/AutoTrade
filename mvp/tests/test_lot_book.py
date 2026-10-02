@@ -1,7 +1,9 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 import unittest
+from unittest.mock import patch
 
+from mvp.autotrade_mvp import lot_book as lot_module
 from mvp.autotrade_mvp.lot_book import FifoLotBook
 
 
@@ -77,21 +79,19 @@ class FifoLotBookTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             book.buy(HostileDecimal("2"), "100")
 
-    def test_nonterminating_unit_basis_is_accounted_as_exact_rational(self):
+    def test_nonterminating_unit_basis_remains_exact_through_partial_fifo_sale(self):
         book = FifoLotBook()
         state = book.buy("3", "100", fee="1")
         self.assertEqual(state.position, Decimal("3"))
         self.assertEqual(state.open_basis, Decimal("301"))
         self.assertEqual(book.lots[0].unit_cost, Fraction(301, 3))
-        self.assertEqual(book.lots[0].total_basis, Fraction(301, 1))
 
         state = book.sell("1", "110")
         self.assertEqual(state.position, Decimal("2"))
         self.assertEqual(state.open_basis, Fraction(602, 3))
         self.assertEqual(state.realized_pnl, Fraction(29, 3))
-        self.assertEqual(book.lots[0].total_basis, Fraction(602, 3))
         self.assertEqual(book.lots[0].unit_cost, Fraction(301, 3))
-        self.assertEqual(book.mark_to_market("105"), Fraction(28, 3))
+        self.assertEqual(book.mark_to_market("110"), Fraction(58, 3))
 
         state = book.sell("2", "110")
         self.assertEqual(state.position, Decimal("0"))
@@ -100,7 +100,12 @@ class FifoLotBookTests(unittest.TestCase):
         self.assertEqual(book.lots, ())
 
     def test_nonterminating_basis_is_independent_of_ambient_decimal_context(self):
-        results = []
+        expected = (
+            Decimal("2"),
+            Fraction(602, 3),
+            Fraction(29, 3),
+            Fraction(58, 3),
+        )
         for precision, rounding in (
             (2, ROUND_CEILING),
             (3, ROUND_FLOOR),
@@ -114,23 +119,41 @@ class FifoLotBookTests(unittest.TestCase):
                     book = FifoLotBook()
                     book.buy("3", "100", fee="1")
                     state = book.sell("1", "110")
-                    result = (
-                        state.position,
-                        state.open_basis,
-                        state.realized_pnl,
-                        book.mark_to_market("105"),
-                    )
                     self.assertEqual(
-                        result,
                         (
-                            Decimal("2"),
-                            Fraction(602, 3),
-                            Fraction(29, 3),
-                            Fraction(28, 3),
+                            state.position,
+                            state.open_basis,
+                            state.realized_pnl,
+                            book.mark_to_market("110"),
                         ),
+                        expected,
                     )
-                    results.append(result)
-        self.assertTrue(all(result == results[0] for result in results))
+
+    def test_candidate_snapshot_failure_never_publishes_partial_state(self):
+        book = FifoLotBook()
+        book.buy("2", "100")
+        before_lots = book.lots
+        before_snapshot = book.snapshot()
+
+        with patch.object(
+            lot_module,
+            "_decimal_sum",
+            side_effect=ValueError("synthetic exact resource failure"),
+        ):
+            with self.assertRaisesRegex(ValueError, "synthetic exact resource failure"):
+                book.buy("1", "120")
+        self.assertEqual(book.lots, before_lots)
+        self.assertEqual(book.snapshot(), before_snapshot)
+
+        with patch.object(
+            lot_module,
+            "_decimal_sum",
+            side_effect=ValueError("synthetic exact resource failure"),
+        ):
+            with self.assertRaisesRegex(ValueError, "synthetic exact resource failure"):
+                book.sell("1", "130")
+        self.assertEqual(book.lots, before_lots)
+        self.assertEqual(book.snapshot(), before_snapshot)
 
     def test_authoritative_arithmetic_is_independent_of_ambient_decimal_context(self):
         book = FifoLotBook()

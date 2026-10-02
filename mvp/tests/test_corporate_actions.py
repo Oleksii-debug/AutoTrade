@@ -1110,7 +1110,7 @@ class CorporateSettlementTests(unittest.TestCase):
     def test_split_uses_exact_rational_before_decimal_projection(self):
         book = bound_book(
             state(
-                quantity="3",
+                quantity="9",
                 total_basis="31",
                 settled_cash="100",
                 unsettled_cash="0",
@@ -1128,7 +1128,7 @@ class CorporateSettlementTests(unittest.TestCase):
                     payload={"numerator": "1", "denominator": "3"},
                 )
             )
-        self.assertEqual(result.after.quantity, Decimal("1"))
+        self.assertEqual(result.after.quantity, Decimal("3"))
         self.assertEqual(result.after.total_basis, Decimal("31"))
         with self.assertRaisesRegex(ValueError, "unit_basis"):
             _ = result.after.unit_basis

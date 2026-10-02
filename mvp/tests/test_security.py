@@ -505,6 +505,32 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(redacted["nested"]["safe"], "visible")
         self.assertEqual(redacted["rows"][0]["refresh_token"], "[REDACTED]")
 
+    def test_diagnostic_redaction_scrubs_secret_material_from_mapping_keys(self):
+        value = {
+            "Authorization: Bearer SECURITY-KEY-SECRET": "ignored",
+            "https://security-user:SECURITY-URL-PASSWORD@provider.test/path": "visible",
+            "api_key=SECURITY-ASSIGNMENT-ONE": "ignored-one",
+            "api_key=SECURITY-ASSIGNMENT-TWO": "ignored-two",
+            "safe": "visible",
+        }
+        redacted = self.boundary.redact(value)
+        serialized = repr(redacted)
+        for leaked in (
+            "SECURITY-KEY-SECRET",
+            "SECURITY-URL-PASSWORD",
+            "SECURITY-ASSIGNMENT-ONE",
+            "SECURITY-ASSIGNMENT-TWO",
+        ):
+            self.assertNotIn(leaked, serialized)
+        self.assertEqual(redacted["Authorization: [REDACTED]"], "[REDACTED]")
+        self.assertEqual(
+            redacted["https://[REDACTED]@provider.test/path"],
+            "visible",
+        )
+        self.assertEqual(redacted["api_key=[REDACTED]"], "[REDACTED]")
+        self.assertEqual(redacted["api_key=[REDACTED] [2]"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "visible")
+
     def test_handle_description_never_contains_secret_value(self):
         handle = self._credential()
         description = self.boundary.describe_handle(handle.handle_id)

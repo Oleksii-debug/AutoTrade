@@ -13,7 +13,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from . import _provider_activity_accounting_impl as _impl
 from ._provider_activity_accounting_impl import *  # noqa: F401,F403
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 
 
 def __getattr__(name: str):
@@ -44,10 +48,22 @@ def book_external_provider_cash_activity(
     a partial financial effect.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(activity, _impl.ProviderActivityEvidence):
-        raise TypeError("activity must be ProviderActivityEvidence")
+    store_identity = require_exact_journal_store_authority(
+        store,
+        subject="provider cash JournalStore",
+    )
+    if type(activity) is not _impl.ProviderActivityEvidence:
+        raise TypeError("activity must be canonical ProviderActivityEvidence")
+
+    def journal_call(operation, /, *args, **kwargs):
+        current_identity = require_exact_journal_store_authority(
+            store,
+            subject="provider cash JournalStore",
+        )
+        if current_identity != store_identity:
+            raise _impl.AccountingConflict("provider cash JournalStore changed")
+        with journal_store_authority_scope(store, store_identity):
+            return operation(store, *args, **kwargs)
 
     provider = _impl._text(provider_id, name="provider_id").upper()
     account = _impl._text(account_id, name="account_id")
@@ -129,7 +145,7 @@ def book_external_provider_cash_activity(
             account_id=account,
             environment=scope,
         )
-        if store.load_events("economic_book", legacy_id):
+        if journal_call(JournalStore.load_events, "economic_book", legacy_id):
             raise _impl.AccountingConflict(
                 "ambiguous legacy provider economic book requires explicit migration"
             )
@@ -240,7 +256,7 @@ def book_external_provider_cash_activity(
     def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
         replay_request: Mapping[str, object] = request
         try:
-            snapshot = store.load_command_event_batch(
+            snapshot = journal_call(JournalStore.load_command_event_batch, 
                 command_id=command_identity,
                 actor=actor,
                 environment=scope,
@@ -253,7 +269,7 @@ def book_external_provider_cash_activity(
                     "provider cash durable command/effect authority is invalid"
                 ) from current_error
             try:
-                snapshot = store.load_command_event_batch(
+                snapshot = journal_call(JournalStore.load_command_event_batch, 
                     command_id=command_identity,
                     actor=actor,
                     environment=scope,
@@ -358,7 +374,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        saved_result, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = journal_call(JournalStore.commit_command, 
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -388,10 +404,10 @@ def book_external_provider_cash_activity(
     if resolved is not None:
         return resolved
 
-    activity_version = store.next_aggregate_version(
+    activity_version = journal_call(JournalStore.next_aggregate_version, 
         "provider_activity", identity
     )
-    book_version = store.next_aggregate_version("economic_book", book_id)
+    book_version = journal_call(JournalStore.next_aggregate_version, "economic_book", book_id)
 
     imported_payload = {
         **request,
@@ -433,7 +449,7 @@ def book_external_provider_cash_activity(
     }
 
     try:
-        saved_result, inserted, _ = store.commit_command(
+        saved_result, inserted, _ = journal_call(JournalStore.commit_command, 
             command_id=command_identity,
             actor=actor,
             environment=scope,

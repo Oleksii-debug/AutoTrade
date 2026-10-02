@@ -27,7 +27,6 @@ from autotrade_runtime.strict_json import strict_json_loads
 
 from .host_network import (
     AuthenticatedHostApplication,
-    _require_canonical_security_boundary,
     AuthenticatedHostServer,
     PrincipalResolver,
     SnapshotProvider,
@@ -107,6 +106,20 @@ class ProductionHostConfig:
 
         object.__setattr__(self, "journal_path", journal_path)
         object.__setattr__(self, "public_origin", canonical_origin)
+
+
+def _require_production_security_boundary(value: object) -> SecurityBoundary:
+    """Admit the exact canonical authentication object before host side effects."""
+
+    if type(value) is not SecurityBoundary:
+        raise TypeError("security_boundary must be exact SecurityBoundary")
+    state = vars(value)
+    for method_name in ("validate_session", "validate_host_session"):
+        if method_name in state:
+            raise TypeError(
+                "security_boundary canonical validation methods must not be shadowed"
+            )
+    return value
 
 
 def _readmit_production_host_config(value: object) -> ProductionHostConfig:
@@ -607,7 +620,7 @@ def build_production_host(
     """Compose the existing durable host authorities into one runnable process seam."""
 
     config = _readmit_production_host_config(config)
-    security_boundary = _require_canonical_security_boundary(security_boundary)
+    security_boundary = _require_production_security_boundary(security_boundary)
     if not callable(principal_resolver):
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):

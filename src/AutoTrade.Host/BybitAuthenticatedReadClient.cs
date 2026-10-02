@@ -20,11 +20,13 @@ internal sealed class ProviderAuthenticatedReadEvidence
         ProviderIssuerSession issuerSession,
         ProviderAuthenticatedReadAttemptBinding attempt,
         ProviderAuthenticatedReadReceipt receipt,
+        ProviderAuthenticatedReadDurabilityReceipt durabilityReceipt,
         byte[] responseBytes)
     {
         ArgumentNullException.ThrowIfNull(issuerSession);
         ArgumentNullException.ThrowIfNull(attempt);
         ArgumentNullException.ThrowIfNull(receipt);
+        ArgumentNullException.ThrowIfNull(durabilityReceipt);
         ArgumentNullException.ThrowIfNull(responseBytes);
         if (responseBytes.Length == 0)
         {
@@ -35,12 +37,14 @@ internal sealed class ProviderAuthenticatedReadEvidence
         IssuerSession = issuerSession;
         Attempt = attempt;
         Receipt = receipt;
+        DurabilityReceipt = durabilityReceipt;
         _responseBytes = responseBytes.ToArray();
     }
 
     internal ProviderIssuerSession IssuerSession { get; }
     internal ProviderAuthenticatedReadAttemptBinding Attempt { get; }
     internal ProviderAuthenticatedReadReceipt Receipt { get; }
+    internal ProviderAuthenticatedReadDurabilityReceipt DurabilityReceipt { get; }
     internal ReadOnlyMemory<byte> ResponseBytes => _responseBytes;
     internal byte[] CopyResponseBytes() => _responseBytes.ToArray();
 }
@@ -67,17 +71,33 @@ internal sealed class BybitAuthenticatedReadClient
     private readonly IProviderAuthenticatedReadAuthorityBoundary _currentAuthority;
     private readonly IProviderCredentialMaterialSource _credentialSource;
     private readonly ProviderIssuerAuthority _issuer;
+    private readonly IProviderAuthenticatedReadDurabilityBoundary _durability;
 
     internal BybitAuthenticatedReadClient(
         IProviderAuthenticatedReadAuthorityBoundary currentAuthority,
         IProviderCredentialMaterialSource credentialSource,
         ProviderIssuerAuthority issuer)
+        : this(
+            currentAuthority,
+            credentialSource,
+            issuer,
+            new UnavailableProviderAuthenticatedReadDurabilityBoundary())
+    {
+    }
+
+    internal BybitAuthenticatedReadClient(
+        IProviderAuthenticatedReadAuthorityBoundary currentAuthority,
+        IProviderCredentialMaterialSource credentialSource,
+        ProviderIssuerAuthority issuer,
+        IProviderAuthenticatedReadDurabilityBoundary durability)
     {
         _currentAuthority =
             currentAuthority ?? throw new ArgumentNullException(nameof(currentAuthority));
         _credentialSource =
             credentialSource ?? throw new ArgumentNullException(nameof(credentialSource));
         _issuer = issuer ?? throw new ArgumentNullException(nameof(issuer));
+        _durability =
+            durability ?? throw new ArgumentNullException(nameof(durability));
     }
 
     internal async Task<ProviderAuthenticatedReadEvidence> ExecuteAsync(
@@ -92,59 +112,105 @@ internal sealed class BybitAuthenticatedReadClient
         RequireBybitAuthority(authority);
         _currentAuthority.RequireStillCurrent(authority);
 
-        using ResolvedProviderCredential resolved = _credentialSource.Resolve(
-            authority,
-            authority.CredentialHandleId,
-            "READ");
-        if (!string.Equals(
-                resolved.HandleId,
-                authority.CredentialHandleId,
-                StringComparison.Ordinal)
-            || !string.Equals(resolved.Purpose, "READ", StringComparison.Ordinal))
-        {
-            throw new ProviderIssuerAuthorityException(
-                "resolved credential does not match current authenticated-read authority");
-        }
-
-        using BybitCredentialMaterial credential =
-            BybitCredentialMaterial.Parse(resolved.SecretBytes);
-
-        ProviderAuthenticatedReadSubject subject = new(
-            ProviderId: authority.ProviderId,
-            AccountId: authority.AccountId,
-            EntityId: authority.EntityId,
-            RuntimeEnvironment: authority.RuntimeEnvironment,
-            ProviderEnvironment: authority.ProviderEnvironment,
-            Endpoint: authority.Endpoint,
-            Surface: authority.Surface,
-            PermissionScope: authority.PermissionScope,
-            DataEntitlement: authority.DataEntitlement,
-            InstrumentVersion: authority.InstrumentVersion,
-            QueryDigest: authority.QueryDigest,
-            EndpointRuleIdentity: authority.EndpointRuleIdentity,
-            CredentialHandleId: resolved.HandleId,
-            CredentialGeneration: resolved.Generation,
-            CapabilityId: authority.CapabilityId,
-            QualificationId: authority.QualificationId,
-            QualificationBuildId: authority.QualificationBuildId,
-            AdapterBuildIdentity: authority.AdapterBuildIdentity,
-            NetworkPolicyIdentity: authority.NetworkPolicyIdentity,
-            TransportIdentity: authority.TransportIdentity);
-        ProviderIssuerAuthority.RequireReadSubject(subject);
-
-        long timestampMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        using HttpRequestMessage outbound =
-            BuildRequestMessage(authority, credential, timestampMilliseconds);
-
-        // No credential resolution, signing, hostname selection, query mutation or
-        // waits may occur after this revalidation and before the actual send.
-        _currentAuthority.RequireStillCurrent(authority);
-        ProviderAuthenticatedReadAttemptBinding attempt =
-            _issuer.IssueAuthenticatedReadAttempt(subject, DateTimeOffset.UtcNow);
-        bool attemptOpen = true;
+        ProviderAuthenticatedReadAttemptBinding? attempt = null;
+        bool attemptOpen = false;
+        ProviderAuthenticatedReadPreparedEvidence? preparedEvidence = null;
 
         try
         {
+            // Resolve only long enough to bind the exact current generation into
+            // the signed Host attempt. Secret bytes are zeroed before the durable
+            // Prepared boundary is invoked and are never retained in the evidence.
+            using (ResolvedProviderCredential preparedCredential =
+                _credentialSource.Resolve(
+                    authority,
+                    authority.CredentialHandleId,
+                    "READ"))
+            {
+                RequireResolvedCredentialMatchesAuthority(
+                    preparedCredential,
+                    authority,
+                    expectedGeneration: null);
+
+                ProviderAuthenticatedReadSubject subject = new(
+                    ProviderId: authority.ProviderId,
+                    AccountId: authority.AccountId,
+                    EntityId: authority.EntityId,
+                    RuntimeEnvironment: authority.RuntimeEnvironment,
+                    ProviderEnvironment: authority.ProviderEnvironment,
+                    Endpoint: authority.Endpoint,
+                    Surface: authority.Surface,
+                    PermissionScope: authority.PermissionScope,
+                    DataEntitlement: authority.DataEntitlement,
+                    InstrumentVersion: authority.InstrumentVersion,
+                    QueryDigest: authority.QueryDigest,
+                    EndpointRuleIdentity: authority.EndpointRuleIdentity,
+                    CredentialHandleId: preparedCredential.HandleId,
+                    CredentialGeneration: preparedCredential.Generation,
+                    CapabilityId: authority.CapabilityId,
+                    QualificationId: authority.QualificationId,
+                    QualificationBuildId: authority.QualificationBuildId,
+                    AdapterBuildIdentity: authority.AdapterBuildIdentity,
+                    NetworkPolicyIdentity: authority.NetworkPolicyIdentity,
+                    TransportIdentity: authority.TransportIdentity);
+                ProviderIssuerAuthority.RequireReadSubject(subject);
+
+                // The first currentness recheck is after credential-generation
+                // resolution and immediately before the process issuer creates
+                // the Prepared evidence. No wire request has been built or sent.
+                _currentAuthority.RequireStillCurrent(authority);
+                attempt = _issuer.IssueAuthenticatedReadAttempt(
+                    subject,
+                    DateTimeOffset.UtcNow);
+                attemptOpen = true;
+            }
+
+            preparedEvidence = new ProviderAuthenticatedReadPreparedEvidence(
+                _issuer.Session,
+                attempt,
+                authority.Query);
+
+            // This is the mandatory cross-authority barrier. A real implementation
+            // must durably commit the exact signed attempt before returning. The
+            // only product implementation today is fail-closed, so no authenticated
+            // provider read can reach the network until the journal bridge exists.
+            ProviderAuthenticatedReadDurabilityReceipt durabilityReceipt =
+                _durability.CommitPrepared(preparedEvidence);
+            ProviderAuthenticatedReadDurabilityVerifier.RequireMatches(
+                preparedEvidence,
+                durabilityReceipt);
+
+            // The durability wait is intentionally outside the final wire cut.
+            // Re-resolve every mutable authority after it and require the exact
+            // same terminal route/C+Q/query identity before touching credentials.
+            ProviderCurrentAuthenticatedReadAuthority current =
+                _currentAuthority.RequireCurrent(request);
+            RequireRequestMatchesAuthority(request, current);
+            RequireExactAuthoritySnapshot(authority, current);
+            RequireBybitAuthority(current);
+            _currentAuthority.RequireStillCurrent(current);
+
+            using ResolvedProviderCredential resolved =
+                _credentialSource.Resolve(
+                    current,
+                    current.CredentialHandleId,
+                    "READ");
+            RequireResolvedCredentialMatchesAuthority(
+                resolved,
+                current,
+                expectedGeneration: attempt.Subject.CredentialGeneration);
+
+            using BybitCredentialMaterial credential =
+                BybitCredentialMaterial.Parse(resolved.SecretBytes);
+            long timestampMilliseconds =
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            using HttpRequestMessage outbound =
+                BuildRequestMessage(current, credential, timestampMilliseconds);
+
+            // No credential resolution, signing, hostname selection, query
+            // mutation or waits may occur after this revalidation and before send.
+            _currentAuthority.RequireStillCurrent(current);
+
             using SocketsHttpHandler handler = NewWireHandler();
             using HttpMessageInvoker invoker = new(handler, disposeHandler: false);
             using CancellationTokenSource timeout =
@@ -184,15 +250,117 @@ internal sealed class BybitAuthenticatedReadClient
                 _issuer.Session,
                 attempt,
                 receipt,
+                durabilityReceipt,
                 responseBytes);
         }
         catch
         {
-            if (attemptOpen)
+            if (attemptOpen && attempt is not null)
             {
                 _issuer.AbandonAuthenticatedReadAttempt(attempt);
             }
             throw;
+        }
+    }
+
+    private static void RequireResolvedCredentialMatchesAuthority(
+        ResolvedProviderCredential resolved,
+        ProviderCurrentAuthenticatedReadAuthority authority,
+        long? expectedGeneration)
+    {
+        ArgumentNullException.ThrowIfNull(resolved);
+        ArgumentNullException.ThrowIfNull(authority);
+        if (!string.Equals(
+                resolved.HandleId,
+                authority.CredentialHandleId,
+                StringComparison.Ordinal)
+            || !string.Equals(resolved.Purpose, "READ", StringComparison.Ordinal)
+            || resolved.Generation <= 0
+            || (expectedGeneration is not null
+                && resolved.Generation != expectedGeneration.Value))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "resolved credential does not match current authenticated-read authority generation");
+        }
+    }
+
+    internal static void RequireExactAuthoritySnapshot(
+        ProviderCurrentAuthenticatedReadAuthority expected,
+        ProviderCurrentAuthenticatedReadAuthority current)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(current);
+
+        bool same =
+            string.Equals(expected.ProviderId, current.ProviderId, StringComparison.Ordinal)
+            && string.Equals(expected.AccountId, current.AccountId, StringComparison.Ordinal)
+            && string.Equals(expected.EntityId, current.EntityId, StringComparison.Ordinal)
+            && string.Equals(
+                expected.RuntimeEnvironment,
+                current.RuntimeEnvironment,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.ProviderEnvironment,
+                current.ProviderEnvironment,
+                StringComparison.Ordinal)
+            && string.Equals(expected.Endpoint, current.Endpoint, StringComparison.Ordinal)
+            && string.Equals(expected.Surface, current.Surface, StringComparison.Ordinal)
+            && string.Equals(
+                expected.PermissionScope,
+                current.PermissionScope,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.DataEntitlement,
+                current.DataEntitlement,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.InstrumentVersion,
+                current.InstrumentVersion,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.QueryDigest,
+                current.QueryDigest,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.EndpointRuleIdentity,
+                current.EndpointRuleIdentity,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.CredentialHandleId,
+                current.CredentialHandleId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.CapabilityId,
+                current.CapabilityId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.QualificationId,
+                current.QualificationId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.QualificationBuildId,
+                current.QualificationBuildId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.AdapterBuildIdentity,
+                current.AdapterBuildIdentity,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.NetworkPolicyIdentity,
+                current.NetworkPolicyIdentity,
+                StringComparison.Ordinal)
+            && string.Equals(
+                expected.TransportIdentity,
+                current.TransportIdentity,
+                StringComparison.Ordinal)
+            && string.Equals(
+                CanonicalQuery(expected.Query),
+                CanonicalQuery(current.Query),
+                StringComparison.Ordinal);
+        if (!same)
+        {
+            throw new ProviderIssuerAuthorityException(
+                "authenticated-read current authority changed across durable Prepared barrier");
         }
     }
 

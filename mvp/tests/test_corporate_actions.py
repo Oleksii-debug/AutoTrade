@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.corporate_actions import (
@@ -996,6 +996,142 @@ class CorporateSettlementTests(unittest.TestCase):
             ("split-before-rename", "symbol-change-after-split"),
         )
 
+
+
+    def test_corporate_action_economics_ignore_hostile_decimal_context(self):
+        split = corporate_event(
+            event_id="exact-split-context",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": "3", "denominator": "2"},
+        )
+        dividend = corporate_event(
+            event_id="exact-dividend-context",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 3),
+            source_revision="r2",
+            payload={"per_share": "0.0000000000000000001", "currency": "USD"},
+        )
+        expected = None
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (28, ROUND_FLOOR),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    book = bound_book(
+                        state(
+                            quantity="1000000000000000000000000000",
+                            total_basis="1000000000000000000000000000",
+                            settled_cash="1000000000000000000000000000",
+                            unsettled_cash="0",
+                        )
+                    )
+                    book.apply(split)
+                    result = book.apply(dividend)
+                snapshot = (
+                    result.after.quantity,
+                    result.after.unsettled_cash,
+                    result.economic_pnl,
+                )
+                if expected is None:
+                    expected = snapshot
+                self.assertEqual(snapshot, expected)
+        self.assertEqual(
+            expected,
+            (
+                Decimal("1500000000000000000000000000"),
+                Decimal("150000000"),
+                Decimal("150000000"),
+            ),
+        )
+
+    def test_equity_helpers_preserve_tiny_residual_under_hostile_context(self):
+        initial = state(
+            quantity="0",
+            total_basis="0",
+            settled_cash="1000000000000000000000000000.1",
+            unsettled_cash="0",
+        )
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            purchased = record_unsettled_purchase(
+                initial,
+                quantity="1",
+                price="1000000000000000000000000000",
+            )
+        self.assertEqual(purchased.settled_cash, Decimal("0.1"))
+        self.assertEqual(
+            purchased.total_basis,
+            Decimal("1000000000000000000000000000"),
+        )
+
+    def test_decimal_subclasses_and_oversized_values_fail_before_financial_use(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal virtual dispatch")
+
+            def as_tuple(self):
+                raise AssertionError("hostile Decimal virtual dispatch")
+
+        with self.assertRaises(TypeError):
+            EquityState.create(
+                symbol="AAA",
+                quantity=HostileDecimal("1"),
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+        with self.assertRaises(TypeError):
+            corporate_event(
+                event_id="hostile-payload",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                source_revision="r1",
+                payload={
+                    "per_share": HostileDecimal("1"),
+                    "currency": "USD",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            EquityState.create(
+                symbol="AAA",
+                quantity="1" * 10000,
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+
+    def test_split_uses_exact_rational_before_decimal_projection(self):
+        book = bound_book(
+            state(
+                quantity="3",
+                total_basis="31",
+                settled_cash="100",
+                unsettled_cash="0",
+            )
+        )
+        with localcontext() as context:
+            context.prec = 3
+            context.rounding = ROUND_CEILING
+            result = book.apply(
+                corporate_event(
+                    event_id="one-third-split",
+                    kind="SPLIT",
+                    effective_date=date(2026, 1, 2),
+                    source_revision="r1",
+                    payload={"numerator": "1", "denominator": "3"},
+                )
+            )
+        self.assertEqual(result.after.quantity, Decimal("1"))
+        self.assertEqual(result.after.total_basis, Decimal("31"))
+        with self.assertRaisesRegex(ValueError, "unit_basis"):
+            _ = result.after.unit_basis
 
 
 if __name__ == "__main__":

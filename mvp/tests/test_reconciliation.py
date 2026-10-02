@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import unittest
 from types import MappingProxyType
 
@@ -930,6 +930,19 @@ class ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(result.unexpected_execution_ids, ("manual-e2",))
         self.assertIn("INSTRUMENT:XYZ", result.blocking_resources)
+        self.assertFalse(result.complete)
+
+    def test_financial_differences_are_independent_of_ambient_decimal_context(self):
+        with localcontext() as context:
+            context.prec = 3
+            result = self.base(
+                local_cash={"USD": "1000000.1"},
+                provider_cash={"USD": "1000000.2"},
+                local_positions={"ABC": "1000000.1"},
+                provider_positions={"ABC": "1000000.2"},
+            )
+        self.assertEqual(result.cash_differences["USD"], Decimal("0.1"))
+        self.assertEqual(result.position_differences["ABC"], Decimal("0.1"))
         self.assertFalse(result.complete)
 
     def test_late_fee_or_cash_adjustment_blocks_currency_until_explained(self):

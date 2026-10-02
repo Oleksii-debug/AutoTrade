@@ -8,7 +8,12 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_abs,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+)
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .securities_borrow import BorrowAvailabilityEvidence
 
@@ -1574,10 +1579,10 @@ def reconcile_account(
 
     borrow_differences: dict[str, Decimal] = {}
     for resource in sorted(set(local_borrowed) | set(provider_borrowed)):
-        difference = provider_borrowed.get(
-            resource,
-            Decimal("0"),
-        ) - local_borrowed.get(resource, Decimal("0"))
+        difference = exact_subtract(
+            provider_borrowed.get(resource, Decimal("0")),
+            local_borrowed.get(resource, Decimal("0")),
+        )
         if difference != 0:
             borrow_differences[resource] = difference
 
@@ -1629,28 +1634,33 @@ def reconcile_account(
             ("PAYABLE", local_payable, provider_payable),
         ):
             for currency in sorted(set(local_map) | set(provider_map)):
-                difference = provider_map.get(currency, Decimal("0")) - local_map.get(currency, Decimal("0"))
+                difference = exact_subtract(
+                    provider_map.get(currency, Decimal("0")),
+                    local_map.get(currency, Decimal("0")),
+                )
                 if difference != 0:
                     settlement_differences[f"{prefix}:{currency}"] = difference
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
-        difference = provider_cash_map.get(currency, Decimal("0")) - local_cash_map.get(
-            currency, Decimal("0")
+        difference = exact_subtract(
+            provider_cash_map.get(currency, Decimal("0")),
+            local_cash_map.get(currency, Decimal("0")),
         )
         tolerance = cash_tol.get(currency, Decimal("0"))
-        if abs(difference) > tolerance:
+        if exact_abs(difference) > tolerance:
             cash_differences[currency] = difference
 
     position_differences: dict[str, Decimal] = {}
     for instrument in sorted(
         set(local_position_map) | set(provider_position_map)
     ):
-        difference = provider_position_map.get(
-            instrument, Decimal("0")
-        ) - local_position_map.get(instrument, Decimal("0"))
+        difference = exact_subtract(
+            provider_position_map.get(instrument, Decimal("0")),
+            local_position_map.get(instrument, Decimal("0")),
+        )
         tolerance = pos_tol.get(instrument, Decimal("0"))
-        if abs(difference) > tolerance:
+        if exact_abs(difference) > tolerance:
             position_differences[instrument] = difference
 
     local_activity_ids = tuple(

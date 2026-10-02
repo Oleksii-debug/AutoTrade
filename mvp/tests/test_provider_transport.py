@@ -2929,7 +2929,7 @@ class ProviderTransportTests(unittest.TestCase):
                 self.assertNotIn("response", terminal)
                 restarted = GuardedDispatcher(
                     JournalStore(f"{directory}/journal.sqlite3"),
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="acct-1",
                     owner_token="owner-1",
                 )

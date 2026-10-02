@@ -30,7 +30,7 @@ from mvp.autotrade_mvp.reconciliation import (
     ReconciliationResult,
     SubmissionResolution,
 )
-from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 
@@ -603,6 +603,31 @@ class BackupRestoreTests(unittest.TestCase):
                 restore_backup(backup, root / "restored")
             self.assertFalse((root / "restored").exists())
 
+    @staticmethod
+    def _assume_externally_authorized_owner(
+        controller: RecoveryController,
+        owner_id: str,
+    ) -> OwnerFence:
+        """Fixture-only precondition for downstream restore-gate tests.
+
+        Production durable takeover deliberately remains fail-closed until an
+        independent external fence issuer exists. These backup tests exercise
+        reconciliation/fence-proof semantics after that authority decision; the
+        public takeover boundary is covered separately by
+        test_recovery_takeover_authority.py.
+        """
+        durable = controller._latest_durable_owner()
+        if durable is None:
+            raise AssertionError("fixture requires an existing durable owner")
+        candidate = OwnerFence(owner_id=owner_id, epoch=durable.epoch + 1)
+        controller._append_durable_owner(candidate)
+        controller.owner = candidate
+        controller.state = HostState.RECOVERING
+        controller.provider_reconciled = False
+        controller.reason_codes = {"startup_reconciliation_required"}
+        controller._recover_scoped_submission_uncertainty_from_owner_scope()
+        return candidate
+
     def _restored_with_owner(
         self,
         root: Path,
@@ -628,7 +653,7 @@ class BackupRestoreTests(unittest.TestCase):
             owner_store=restored_store,
             owner_scope="PAPER:paper-account",
         )
-        controller.takeover_durable_owner("restored-owner")
+        self._assume_externally_authorized_owner(controller, "restored-owner")
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
@@ -762,7 +787,7 @@ class BackupRestoreTests(unittest.TestCase):
                 owner_store=replacement_store,
                 owner_scope="PAPER:paper-account",
             )
-            controller.takeover_durable_owner("replacement-owner")
+            self._assume_externally_authorized_owner(controller, "replacement-owner")
             checkpoint_id = self._record_durable_ready(
                 controller,
                 replacement_store,

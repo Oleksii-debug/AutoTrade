@@ -1089,12 +1089,15 @@ class DispatchTests(unittest.TestCase):
         for environment in ("PAPER", "LIVE"):
             with self.subTest(environment=environment), TemporaryDirectory() as directory:
                 store = self.store(directory)
-                dispatcher = GuardedDispatcher(
+                recovery = RecoveryController(
+                    owner_store=store,
+                    owner_scope=f"{environment}:acct",
+                )
+                recovery.start("owner")
+                dispatcher = recovery.build_guarded_dispatcher(
                     store,
                     environment=environment,
                     account_id="acct",
-                    owner_token="owner",
-                    owner_epoch=1,
                 )
                 authority = AuthorityService(store)
                 authority_check = authority.dispatch_guard(

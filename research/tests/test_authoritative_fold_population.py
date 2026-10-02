@@ -12,11 +12,17 @@ from autotrade_research.data.vintages import (
     market_event_population_digest,
 )
 from autotrade_research.features.authoritative import (
+    AuthoritativeFoldNormalizer,
     HistoricalFeatureInputSpec,
     fit_authoritative_fold_normalizer,
     resolve_authoritative_feature_points,
 )
-from autotrade_research.features.causal import CausalFold, FeaturePoint
+from autotrade_research.features.causal import (
+    CausalFold,
+    FeaturePoint,
+    FoldNormalizer,
+    fit_normalizer,
+)
 
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -411,6 +417,60 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertIn(original_id, before_correction.input_ids)
         self.assertNotIn(correction_id, before_correction.input_ids)
         self.assertIn(correction_id, after_correction.input_ids)
+
+    def test_full_dataset_fitted_normalizer_cannot_masquerade_as_fold_fit(self):
+        rows = self._base_events()
+        manifest_digest = self._register([rows])
+        legitimate = fit_authoritative_fold_normalizer(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            events=rows,
+            fold=self.fold,
+            spec=self.spec,
+        )
+        all_points = resolve_authoritative_feature_points(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            events=rows,
+            cutoff=BASE + timedelta(days=6, minutes=2),
+            spec=self.spec,
+        )
+        leaked = fit_normalizer(
+            all_points,
+            fit_cutoff=BASE + timedelta(days=6, minutes=2),
+        )
+        forged_fold_fit = FoldNormalizer(
+            fold_id=legitimate.fold_normalizer.fold_id,
+            fold_fingerprint=legitimate.fold_normalizer.fold_fingerprint,
+            feature_name=legitimate.fold_normalizer.feature_name,
+            normalizer=leaked,
+            training_point_count=len(all_points),
+        )
+        forged = AuthoritativeFoldNormalizer(
+            dataset_id=legitimate.dataset_id,
+            dataset_version=legitimate.dataset_version,
+            manifest_digest=legitimate.manifest_digest,
+            training_population_fingerprint=legitimate.training_population_fingerprint,
+            feature_spec_fingerprint=legitimate.feature_spec_fingerprint,
+            replay_common_cut_fingerprint=None,
+            fold_normalizer=forged_fold_fit,
+        )
+        point = self._validation_point(rows, manifest_digest)
+        with self.assertRaisesRegex(
+            ValueError,
+            "stored fold normalizer differs",
+        ):
+            forged.transform_validation(
+                point,
+                fold=self.fold,
+                registry=self.registry,
+                events=rows,
+                spec=self.spec,
+            )
 
     def test_replay_common_cut_must_match_at_validation(self):
         rows = self._base_events()

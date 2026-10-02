@@ -7,11 +7,14 @@ from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
-from mvp.autotrade_mvp.persistence import canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.securities_borrow import (
     BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE,
     BorrowAvailabilityEvidence,
     BorrowEvidenceError,
+    BorrowRecallEvidence,
+    BorrowRecallResolutionEvidence,
+    DurableBorrowRecallProjection,
     provider_borrow_evidence_metadata,
     provider_borrow_evidence_receipt,
     verify_provider_borrow_evidence,
@@ -85,6 +88,63 @@ class SecuritiesBorrowSnapshotAuthorityTests(unittest.TestCase):
             ):
                 verify_provider_borrow_evidence(forged, store)
         self.assertFalse(forged.resource_detail_called)
+
+    def test_recall_projection_rejects_evidence_subclasses_before_virtual_dispatch(self):
+        class ForgedRecall(BorrowRecallEvidence):
+            def payload(self):
+                raise AssertionError("recall subclass payload must not run")
+
+        class ForgedResolution(BorrowRecallResolutionEvidence):
+            def payload(self):
+                raise AssertionError("resolution subclass payload must not run")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            projection = DurableBorrowRecallProjection(
+                journal,
+                provider_id="TEST_BROKER",
+                account_id="acct-1",
+                environment="PAPER",
+                instrument_id="44444444-4444-4444-8444-444444444444",
+                instrument_version=1,
+                evidence_artifact_store=artifacts,
+            )
+            recall = ForgedRecall(
+                recall_id="recall-1",
+                provider_id="TEST_BROKER",
+                account_id="acct-1",
+                environment="PAPER",
+                instrument_id="44444444-4444-4444-8444-444444444444",
+                instrument_version=1,
+                provider_revision="rev-recall-1",
+                quantity=Decimal("1"),
+                observed_at="2026-09-25T05:00:00Z",
+                effective_at="2026-09-25T04:59:00Z",
+                evidence_ref="placeholder",
+            )
+            with self.assertRaisesRegex(TypeError, "exact BorrowRecallEvidence"):
+                projection.record_recall(recall)
+
+            resolution = ForgedResolution(
+                resolution_id="resolution-1",
+                recall_id="recall-1",
+                provider_id="TEST_BROKER",
+                account_id="acct-1",
+                environment="PAPER",
+                instrument_id="44444444-4444-4444-8444-444444444444",
+                instrument_version=1,
+                provider_revision="rev-resolution-1",
+                resolved_quantity=Decimal("1"),
+                observed_at="2026-09-25T05:00:00Z",
+                effective_at="2026-09-25T04:59:00Z",
+                evidence_ref="placeholder",
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact BorrowRecallResolutionEvidence",
+            ):
+                projection.resolve_recall(resolution)
 
     def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
         class ForgedArtifactStore(ArtifactStore):

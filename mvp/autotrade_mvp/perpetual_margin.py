@@ -16,7 +16,7 @@ import json
 from typing import Literal, Sequence
 from uuid import UUID
 
-from autotrade_runtime.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .capabilities import CapabilitySnapshot
 from .exact_decimal import (
@@ -107,14 +107,22 @@ def _verify_immutable_artifact(
     expected_payload: object,
     expected_metadata: dict[str, object],
 ) -> None:
-    if not isinstance(store, ArtifactStore):
+    if type(store) is not ArtifactStore:
         raise PerpetualMarginError(
             "canonical ArtifactStore is required for immutable margin evidence"
         )
     try:
-        manifest = store.load_manifest(artifact_id)
-        payload = store.read_bytes(artifact_id)
-    except Exception as error:
+        manifest, payload = ArtifactStore.read_authenticated_snapshot(
+            store,
+            artifact_id,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise PerpetualMarginError(
             "immutable margin evidence artifact is missing or corrupt"
         ) from error

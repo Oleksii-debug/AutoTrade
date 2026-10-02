@@ -47,6 +47,20 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         self.assertIn("<strong>SUCCEEDED</strong>", html)
         self.assertIn("<strong>WAITING_EXTERNAL</strong>", html)
 
+    def test_mixed_operation_id_types_do_not_crash_accessible_surface(self):
+        html = render_semantic_page(
+            {
+                "state_version": "7",
+                "event_cursor": "12",
+                "operations": {2: "WAITING_EXTERNAL", "op-1": "SUCCEEDED"},
+            },
+            status_text="Ready",
+        )
+        self.assertIn('<span class="operation-id">2</span>', html)
+        self.assertIn('<span class="operation-id">op-1</span>', html)
+        self.assertIn("<strong>WAITING_EXTERNAL</strong>", html)
+        self.assertIn("<strong>SUCCEEDED</strong>", html)
+
     def test_command_form_carries_exact_state_version(self):
         html = render_semantic_page(self.snapshot(), status_text="Ready")
         self.assertIn(

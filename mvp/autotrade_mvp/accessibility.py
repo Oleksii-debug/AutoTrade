@@ -101,10 +101,28 @@ def format_accessible_status(
             "Order submission during this read: none",
         ])
         reservations = status.get("active_reservations", [])
-        lines.append(f"Active reservations: {len(reservations)}")
-        for item in reservations:
-            for resource, amount in item["remaining"].items():
-                lines.append(f"Reserved {resource}: {amount}; state: {item['state']}")
+        if not isinstance(reservations, (list, tuple)):
+            lines.append("Active reservations: unavailable; malformed state")
+            lines.append(
+                "Action required: inspect or restore reservation state before relying on exposure status"
+            )
+        else:
+            lines.append(f"Active reservations: {len(reservations)}")
+            for item in reservations:
+                if not isinstance(item, dict):
+                    lines.append("Reservation detail: unavailable; malformed state")
+                    continue
+                remaining = item.get("remaining")
+                state_text = _value(item, "state")
+                if not isinstance(remaining, dict):
+                    lines.append(
+                        f"Reservation detail: unavailable; state: {state_text}; malformed remaining resources"
+                    )
+                    continue
+                for resource, amount in remaining.items():
+                    lines.append(
+                        f"Reserved {resource}: {amount}; state: {state_text}"
+                    )
         if state == "awaiting_order_reconciliation":
             lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
 

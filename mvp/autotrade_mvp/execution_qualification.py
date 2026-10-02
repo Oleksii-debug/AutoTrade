@@ -145,7 +145,7 @@ def validate_execution_qualification(
         raise TypeError("model must be ExecutionModel")
     if not isinstance(qualification, ExecutionModelQualification):
         raise TypeError("qualification must be ExecutionModelQualification")
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise TypeError("artifact_store must be the canonical ArtifactStore")
 
     normalized_asset = _text(asset_class, name="asset_class").upper()
@@ -165,17 +165,23 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest = artifact_store.load_manifest(
-            normalized_evidence_artifact_id
+        evidence_manifest, _evidence_bytes = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            normalized_evidence_artifact_id,
         )
         if evidence_manifest.get("manifest_hash") is None:
             raise ExecutionQualificationError(
                 "execution evidence manifest lacks integrity binding"
             )
-        artifact_store.read_bytes(normalized_evidence_artifact_id)
     except ExecutionQualificationError:
         raise
-    except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
+    except (
+        FileNotFoundError,
+        ArtifactIntegrityError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise ExecutionQualificationError(
             "execution evidence artifact cannot be verified"
         ) from error

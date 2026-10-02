@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_multiply,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+)
 
 
 class FundingError(ValueError):
@@ -23,15 +29,10 @@ class FundingConflict(FundingError):
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise FundingError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FundingError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FundingError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise FundingError(f"{name} must use bounded exact decimal input") from error
 
 
 def _text(value: str, name: str) -> str:
@@ -59,10 +60,11 @@ def canonical_funding_cash_flow(
 
     notional = _decimal(signed_notional, "signed_notional")
     funding_rate = _decimal(rate, "rate")
+    raw = exact_multiply(notional, funding_rate)
     if sign_convention == "POSITIVE_LONG_PAYS":
-        return -(notional * funding_rate)
+        return exact_subtract(Decimal("0"), raw)
     if sign_convention == "POSITIVE_LONG_RECEIVES":
-        return notional * funding_rate
+        return raw
     raise FundingError("unsupported funding sign convention")
 
 
@@ -179,7 +181,7 @@ class FundingRevisionBook:
         if event.kind == "FINAL":
             self._final_cash_flow[event.funding_id] = new_final
         self._history.append(event)
-        delta = new_final - old_final
+        delta = exact_subtract(new_final, old_final)
         return FundingUpdate(
             accepted=True,
             economic_delta=delta,
@@ -204,7 +206,11 @@ def book_funding_delta(
         cause_event_id=_text(cause_event_id, "cause_event_id"),
         postings=(
             posting(f"CASH:{currency}", currency, amount),
-            posting(f"FUNDING_PNL:{currency}", currency, -amount),
+            posting(
+                f"FUNDING_PNL:{currency}",
+                currency,
+                exact_subtract(Decimal("0"), amount),
+            ),
         ),
     )
     validate_transaction(transaction)

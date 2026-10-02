@@ -13,7 +13,7 @@ import json
 from typing import Iterable, Literal, Mapping
 from uuid import UUID
 
-from autotrade_runtime.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
 from .exact_decimal import ExactDecimalError, canonical_decimal_text
@@ -618,15 +618,23 @@ def _verify_option_risk_evidence(
     evidence: OptionRiskEvidence,
     artifact_store: ArtifactStore,
 ) -> None:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise OptionError(
             "canonical ArtifactStore is required for option risk evidence"
         )
     artifact_id, digest, _ = _immutable_option_evidence_ref(evidence.evidence_ref)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        raw = artifact_store.read_bytes(artifact_id)
-    except Exception as error:
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise OptionError("option risk evidence artifact is missing or corrupt") from error
     if not isinstance(manifest, dict) or not isinstance(raw, bytes):
         raise OptionError("option risk evidence artifact representation is invalid")

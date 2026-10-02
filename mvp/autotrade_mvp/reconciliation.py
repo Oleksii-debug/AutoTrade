@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 
 from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .securities_borrow import BorrowAvailabilityEvidence
 
 
@@ -200,6 +201,7 @@ class ResourceAvailabilityEvidence:
     provider_as_of: str | None = None
     evidence_refs: tuple[str, ...] = ()
     resource_details: Mapping[str, Mapping[str, str]] | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -209,6 +211,19 @@ class ResourceAvailabilityEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(self, "environment", _environment(self.environment))
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(str(error)) from error
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
+        )
         object.__setattr__(
             self, "snapshot_id", _text(self.snapshot_id, name="snapshot_id")
         )
@@ -671,6 +686,7 @@ def _snapshot_resource_availability_evidence(
         provider_id=item.provider_id,
         account_id=item.account_id,
         environment=item.environment,
+        provider_environment=item.provider_environment,
         snapshot_id=item.snapshot_id,
         query_started_at=item.query_started_at,
         query_completed_at=item.query_completed_at,

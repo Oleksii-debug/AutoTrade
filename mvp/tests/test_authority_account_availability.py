@@ -123,13 +123,16 @@ def _checkpoint(
     reconciliation_id="availability-authority",
     snapshot_id="availability-snapshot",
     force_incomplete=False,
+    provider_id=PROVIDER_ID,
+    environment=ENVIRONMENT,
+    provider_environment=None,
 ):
     if available_cash is None:
         available_cash = cash
     result = reconcile_account(
-        provider_id=PROVIDER_ID,
+        provider_id=provider_id,
         account_id=ACCOUNT_ID,
-        environment=ENVIRONMENT,
+        environment=environment,
         local_cash={"USD": cash},
         provider_cash={"USD": cash},
         local_positions={},
@@ -137,9 +140,9 @@ def _checkpoint(
         local_execution_ids=(),
         provider_fills=(),
         snapshot_consistency=SnapshotConsistencyEvidence(
-            provider_id=PROVIDER_ID,
+            provider_id=provider_id,
             account_id=ACCOUNT_ID,
-            environment=ENVIRONMENT,
+            environment=environment,
             mode="ATOMIC",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -147,12 +150,13 @@ def _checkpoint(
         coverage_start="2026-09-24T18:00:00Z",
         coverage_end=NOW,
         pagination_complete=True,
-        provider_activity_provider_id=PROVIDER_ID,
+        provider_activity_provider_id=provider_id,
         provider_activity_account_id=ACCOUNT_ID,
         resource_availability=ResourceAvailabilityEvidence(
-            provider_id=PROVIDER_ID,
+            provider_id=provider_id,
             account_id=ACCOUNT_ID,
-            environment=ENVIRONMENT,
+            environment=environment,
+            provider_environment=provider_environment,
             snapshot_id=snapshot_id,
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -301,6 +305,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 ["provider:availability-snapshot"],
             )
             self.assertIsInstance(evidence["resource_evidence_refs"], list)
+            self.assertEqual(
+                evidence["provider_environment"],
+                ENVIRONMENT,
+            )
 
             restarted_store = JournalStore(path)
             restarted_authority = AuthorityService(restarted_store)
@@ -329,6 +337,56 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_bybit_admission_binds_testnet_availability_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(
+                replace(_policy(), environments=frozenset({"PAPER"}))
+            )
+            checkpoint = _checkpoint(
+                store,
+                provider_id="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                reconciliation_id="bybit-testnet-authority",
+                snapshot_id="bybit-testnet-capacity",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id=ACCOUNT_ID,
+            )
+
+            first = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                environment="PAPER",
+                reservation_provider_id="BYBIT",
+                reservation_provider_environment="TESTNET",
+            )
+            evidence = store.load_events(
+                "risk_decision",
+                first.risk_decision_id,
+            )[0]["payload"]["reservation_availability_evidence"]
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+
+            version_before = reservations.version
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider_environment|availability evidence changed",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    environment="PAPER",
+                    reservation_provider_id="BYBIT",
+                    reservation_provider_environment="DEMO",
+                )
+            self.assertEqual(reservations.version, version_before)
 
     def test_new_admission_cannot_select_superseded_reconciliation_truth(self):
         with TemporaryDirectory() as directory:

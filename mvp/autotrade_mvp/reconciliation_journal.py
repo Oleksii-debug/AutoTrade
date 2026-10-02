@@ -16,6 +16,7 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 from .dispatch import submission_attempt_aggregate_id
 from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation import (
     ReconciliationResult,
     UnknownSubmission,
@@ -61,6 +62,22 @@ def _scope(
     )
 
 
+def _provider_environment_scope(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(str(error)) from error
+
+
 def _reconciliation_aggregate_id(
     *,
     reconciliation_id: str,
@@ -90,6 +107,7 @@ def _require_checkpoint_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> Mapping[str, Any]:
     payload = checkpoint.get("payload")
     if not isinstance(payload, Mapping):
@@ -105,6 +123,25 @@ def _require_checkpoint_scope(
         or payload.get("environment") != scope
     ):
         raise ValueError("checkpoint reconciliation scope mismatch")
+    if provider_environment is not None:
+        domain = _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+        resource_scope = payload.get("resource_availability")
+        payload_domain = (
+            resource_scope.get("provider_environment")
+            if isinstance(resource_scope, Mapping)
+            else None
+        )
+        if payload_domain is None:
+            if provider == "BYBIT" or domain != scope:
+                raise ValueError(
+                    "checkpoint lacks an unambiguous provider_environment"
+                )
+        elif payload_domain != domain:
+            raise ValueError("checkpoint provider_environment scope mismatch")
     return payload
 
 
@@ -231,6 +268,7 @@ def reconciliation_payload(
                 "provider_id": result.resource_availability.provider_id,
                 "account_id": result.resource_availability.account_id,
                 "environment": result.resource_availability.environment,
+                "provider_environment": result.resource_availability.provider_environment,
                 "snapshot_id": result.resource_availability.snapshot_id,
                 "query_started_at": result.resource_availability.query_started_at,
                 "query_completed_at": result.resource_availability.query_completed_at,
@@ -312,8 +350,26 @@ def record_reconciliation_checkpoint(
         environment=result.environment,
     )
     existing = store.load_events("account_reconciliation", aggregate_id)
-    if existing and existing[-1]["payload"] == payload:
-        return existing[-1]
+    if existing:
+        if existing[-1]["payload"] == payload:
+            return existing[-1]
+        payload_domain = (
+            result.resource_availability.provider_environment
+            if result.resource_availability is not None
+            else None
+        )
+        if (
+            payload_domain == result.environment
+            and result.provider_id != "BYBIT"
+        ):
+            legacy_payload = dict(payload)
+            legacy_resource = legacy_payload.get("resource_availability")
+            if isinstance(legacy_resource, Mapping):
+                legacy_resource = dict(legacy_resource)
+                legacy_resource.pop("provider_environment", None)
+                legacy_payload["resource_availability"] = legacy_resource
+            if existing[-1]["payload"] == legacy_payload:
+                return existing[-1]
 
     version = store.next_aggregate_version(
         "account_reconciliation", aggregate_id
@@ -390,6 +446,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest durably recorded reconciliation fact for one scope.
 
@@ -409,6 +466,15 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
+    domain = (
+        None
+        if provider_environment is None
+        else _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+    )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
     for event in store.load_events_by_aggregate_type("account_reconciliation"):
@@ -423,6 +489,18 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("environment") != scope
         ):
             continue
+        if domain is not None:
+            resource_scope = payload.get("resource_availability")
+            payload_domain = (
+                resource_scope.get("provider_environment")
+                if isinstance(resource_scope, Mapping)
+                else None
+            )
+            if payload_domain is None:
+                if provider == "BYBIT" or domain != scope:
+                    continue
+            elif payload_domain != domain:
+                continue
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -454,6 +532,7 @@ def require_current_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless an exact checkpoint is current scope-wide truth."""
 
@@ -463,6 +542,7 @@ def require_current_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if latest is None:
         raise ValueError("no reconciliation checkpoint exists for account scope")
@@ -659,6 +739,7 @@ def load_account_resource_availability_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
@@ -678,14 +759,25 @@ def load_account_resource_availability_evidence(
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    domain = _provider_environment_scope(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     current_scope_head = None
     if require_latest_scope:
         current_scope_head = require_current_reconciliation_checkpoint(
             store,
             checkpoint_event_id=event_id,
-            provider_id=provider_id,
-            account_id=account_id,
-            environment=environment,
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
         )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
@@ -698,9 +790,10 @@ def load_account_resource_availability_evidence(
 
     payload = _require_checkpoint_scope(
         checkpoint,
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
+        provider_id=provider,
+        account_id=account,
+        environment=scope,
+        provider_environment=domain,
     )
     if (
         payload.get("complete") is not True
@@ -774,15 +867,19 @@ def load_account_resource_availability_evidence(
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
-    provider, account, scope = _scope(
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
-    )
+    resource_domain = resource_evidence.get("provider_environment")
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
         or resource_evidence.get("environment") != scope
+        or (
+            resource_domain is None
+            and (provider == "BYBIT" or domain != scope)
+        )
+        or (
+            resource_domain is not None
+            and resource_domain != domain
+        )
     ):
         raise ValueError("resource availability evidence scope mismatch")
 
@@ -923,6 +1020,12 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("environment") != scope
             ):
                 continue
+            lifecycle_domain = lifecycle_payload.get("provider_environment")
+            if (
+                lifecycle_domain is not None
+                and lifecycle_domain != domain
+            ):
+                continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates option lifecycle financial truth"
@@ -1040,6 +1143,7 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": domain,
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
         "resource_snapshot_id": _text(

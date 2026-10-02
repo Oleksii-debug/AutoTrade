@@ -61,12 +61,20 @@ def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment=
     )
 
 
-def availability(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def availability(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+    snapshot_id="snapshot-capacity-1",
+):
     return ResourceAvailabilityEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
-        snapshot_id="snapshot-capacity-1",
+        provider_environment=provider_environment,
+        snapshot_id=snapshot_id,
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
         provider_as_of="2026-09-24T18:59:59Z",
@@ -134,6 +142,116 @@ class ReconciliationJournalTests(unittest.TestCase):
             environment="PAPER",
         )
         self.assertNotEqual(left, right)
+
+    def test_bybit_resource_availability_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "BYBIT requires explicit provider_environment",
+        ):
+            availability(
+                provider_id="BYBIT",
+                account_id="bybit-domain-account",
+                environment="PAPER",
+            )
+
+    def test_provider_environment_scopes_current_availability_independently(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-domain-account"
+            testnet = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-availability",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-capacity",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            demo = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-demo-availability",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="DEMO",
+                        snapshot_id="demo-capacity",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:01Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            self.assertEqual(
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )["event_id"],
+                testnet["event_id"],
+            )
+            self.assertEqual(
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )["event_id"],
+                demo["event_id"],
+            )
+
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=testnet["event_id"],
+                provider_id="BYBIT",
+                account_id=account_id,
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+                require_latest_scope=True,
+            )
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+            self.assertEqual(
+                evidence["resource_snapshot_id"],
+                "testnet-capacity",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=testnet["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
 
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:

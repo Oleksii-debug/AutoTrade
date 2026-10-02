@@ -21,6 +21,7 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -74,6 +75,22 @@ def _instant(value: str, *, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(str(error)) from error
 
 
 @dataclass(frozen=True, order=True)
@@ -2540,6 +2557,9 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=availability_evidence.get(
+                        "provider_environment"
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -2561,6 +2581,25 @@ class AuthorityService:
                 )
             ),
         }
+        if "provider_environment" not in availability_evidence:
+            regenerated_domain = regenerated_availability.get(
+                "provider_environment"
+            )
+            regenerated_provider = _text(
+                regenerated_availability.get("provider_id"),
+                name="provider_id",
+            ).upper()
+            if (
+                regenerated_provider == "BYBIT"
+                or regenerated_domain != record.environment
+            ):
+                raise AuthorityConflict(
+                    "durable availability lacks an unambiguous provider_environment"
+                )
+            expected_availability_evidence.pop(
+                "provider_environment",
+                None,
+            )
         scope_latest_event_id = _text(
             availability_evidence.get("scope_latest_checkpoint_event_id"),
             name="scope_latest_checkpoint_event_id",
@@ -3530,6 +3569,7 @@ class AuthorityService:
         reservation_available,
         reservation_checkpoint_event_id: str,
         reservation_provider_id: str,
+        reservation_provider_environment: str | None = None,
         reservation_max_age_seconds,
         now: str,
         confirmation_id: str | None = None,
@@ -3592,6 +3632,11 @@ class AuthorityService:
             reservation_provider_id,
             name="reservation_provider_id",
         ).upper()
+        snapshot_provider_environment = _provider_environment(
+            provider_id=snapshot_provider_id,
+            environment=env,
+            provider_environment=reservation_provider_environment,
+        )
         snapshot_checkpoint_event_id = _text(
             reservation_checkpoint_event_id,
             name="reservation_checkpoint_event_id",
@@ -3951,10 +3996,24 @@ class AuthorityService:
                     raise AuthorityConflict(
                         "existing admission availability evidence is missing"
                     )
+                try:
+                    durable_provider_environment = _provider_environment(
+                        provider_id=provider_id,
+                        environment=env,
+                        provider_environment=durable_evidence.get(
+                            "provider_environment"
+                        ),
+                    )
+                except ValueError as error:
+                    raise AuthorityConflict(
+                        "existing admission availability provider_environment is invalid"
+                    ) from error
                 if (
                     durable_evidence.get("checkpoint_event_id")
                     != checkpoint_event_id
                     or durable_evidence.get("provider_id") != provider_id
+                    or durable_provider_environment
+                    != snapshot_provider_environment
                     or durable_evidence.get("max_age_seconds")
                     != normalized_max_age
                 ):
@@ -3970,6 +4029,7 @@ class AuthorityService:
                         provider_id=provider_id,
                         account_id=account_id,
                         environment=environment,
+                        provider_environment=snapshot_provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
@@ -4990,6 +5050,9 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=availability_evidence.get(
+                        "provider_environment"
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=now,
                     max_age_seconds=availability_evidence.get(

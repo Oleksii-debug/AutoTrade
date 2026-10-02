@@ -98,13 +98,16 @@ def _verify_artifact(
     expected_metadata: Mapping[str, object],
     name: str,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise SettlementConflict(f"{name} requires trusted ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -121,11 +124,11 @@ def _verify_artifact(
         rights = manifest.get("rights")
         if not isinstance(rights, dict) or rights.get("storage") is not True:
             raise ArtifactIntegrityError("settlement evidence lacks storage provenance")
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,

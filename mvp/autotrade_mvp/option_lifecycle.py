@@ -30,7 +30,6 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_abs,
-    is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion

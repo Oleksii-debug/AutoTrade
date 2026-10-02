@@ -622,7 +622,7 @@ class BackupRestoreTests(unittest.TestCase):
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
         controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller.takeover_durable_owner("restored-owner")
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )

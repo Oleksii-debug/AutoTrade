@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.authority import (
 )
 from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
+    _issue_financial_authority_check,
     _issued_financial_authority_binding,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook

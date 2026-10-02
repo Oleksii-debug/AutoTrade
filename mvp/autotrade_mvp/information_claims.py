@@ -17,14 +17,17 @@ from uuid import UUID
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    if type(value) is not datetime or value.tzinfo is None:
+        raise ValueError(f"{name} must be an exact timezone-aware datetime")
+    normalized = value.astimezone(timezone.utc)
+    if type(normalized) is not datetime:
+        raise ValueError(f"{name} must normalize to an exact datetime")
+    return normalized
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} is required")
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be non-empty exact text")
     return value.strip()
 
 
@@ -343,6 +346,47 @@ class InformationClaim:
         )
 
 
+def _snapshot_source_document(document: SourceDocument) -> SourceDocument:
+    if type(document) is not SourceDocument:
+        raise ValueError("document must be an exact SourceDocument")
+    return SourceDocument.create(
+        source_id=document.source_id,
+        source_revision=document.source_revision,
+        source_kind=document.source_kind,
+        title=document.title,
+        passage=document.passage,
+        published_at=document.published_at,
+        available_at=document.available_at,
+        ingested_at=document.ingested_at,
+        rights_basis=document.rights_basis,
+        locator=document.locator,
+    )
+
+
+def _snapshot_information_claim(claim: InformationClaim) -> InformationClaim:
+    if type(claim) is not InformationClaim:
+        raise ValueError("claim must be an exact InformationClaim")
+    return InformationClaim(
+        claim_id=claim.claim_id,
+        subject=claim.subject,
+        predicate=claim.predicate,
+        value=claim.value,
+        source_id=claim.source_id,
+        source_revision=claim.source_revision,
+        source_kind=claim.source_kind,
+        published_at=claim.published_at,
+        available_at=claim.available_at,
+        ingested_at=claim.ingested_at,
+        passage_hash=claim.passage_hash,
+        locator=claim.locator,
+        rights_basis=claim.rights_basis,
+        syndication_key=claim.syndication_key,
+        conflict_key=claim.conflict_key,
+        untrusted_content=claim.untrusted_content,
+        permission_effect=claim.permission_effect,
+    )
+
+
 @dataclass(frozen=True)
 class InformationSnapshot:
     """Causal, content-addressed view of claims visible at one replay cutoff."""
@@ -353,14 +397,17 @@ class InformationSnapshot:
     def __post_init__(self) -> None:
         cutoff = _time(self.cutoff, name="cutoff")
         object.__setattr__(self, "cutoff", cutoff)
-        if not isinstance(self.claims, tuple):
-            raise ValueError("claims must be a tuple")
+        if type(self.claims) is not tuple:
+            raise ValueError("claims must be an exact tuple")
+
+        admitted_claims = tuple(
+            _snapshot_information_claim(claim) for claim in self.claims
+        )
+        object.__setattr__(self, "claims", admitted_claims)
 
         seen: set[str] = set()
         seen_syndication: set[str] = set()
-        for claim in self.claims:
-            if not isinstance(claim, InformationClaim):
-                raise ValueError("snapshot claims must be InformationClaim values")
+        for claim in admitted_claims:
             if claim.available_at > cutoff or claim.ingested_at > cutoff:
                 raise ValueError("snapshot cannot contain future claims")
             if claim.claim_id in seen:
@@ -372,7 +419,7 @@ class InformationSnapshot:
 
         canonical = tuple(
             sorted(
-                self.claims,
+                admitted_claims,
                 key=lambda item: (
                     max(item.available_at, item.ingested_at),
                     item.published_at,
@@ -380,7 +427,7 @@ class InformationSnapshot:
                 ),
             )
         )
-        if canonical != self.claims:
+        if canonical != admitted_claims:
             raise ValueError("snapshot claims must be in canonical order")
 
     def to_manifest(self) -> dict[str, object]:
@@ -426,8 +473,7 @@ class ClaimStore:
         predicate: str,
         value: str,
     ) -> InformationClaim:
-        if not isinstance(document, SourceDocument):
-            raise ValueError("document must be a SourceDocument")
+        document = _snapshot_source_document(document)
         normalized_subject = _text(subject, name="subject")
         normalized_predicate = _text(predicate, name="predicate")
         normalized_value = _text(value, name="value")
@@ -468,6 +514,7 @@ class ClaimStore:
         )
 
     def add(self, claim: InformationClaim) -> tuple[InformationClaim, bool]:
+        claim = _snapshot_information_claim(claim)
         if claim.permission_effect != "NONE" or claim.untrusted_content is not True:
             raise ValueError("information claims cannot grant authority")
         existing_history = self._history_by_id.get(claim.claim_id)
@@ -516,6 +563,7 @@ class ClaimStore:
         return claim, True
 
     def conflicts_for(self, claim: InformationClaim) -> tuple[InformationClaim, ...]:
+        claim = _snapshot_information_claim(claim)
         return tuple(
             item
             for item in self._claims

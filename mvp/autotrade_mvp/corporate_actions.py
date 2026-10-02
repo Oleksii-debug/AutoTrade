@@ -78,15 +78,20 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    result = str.strip(value)
+    if not result:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    return result
 
 
 def _utc_instant(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be a timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ValueError(
+            f"{name} must be an exact datetime with a fixed built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -232,8 +237,8 @@ class CorporateEvent:
             or self.instrument_version < 1
         ):
             raise ValueError("instrument_version must be a positive integer")
-        if not isinstance(self.effective_date, date):
-            raise ValueError("effective_date is required")
+        if type(self.effective_date) is not date:
+            raise ValueError("effective_date must be an exact date")
         if self.effective_at is not None:
             effective_at = _utc_instant(self.effective_at, name="effective_at")
             if effective_at.date() != self.effective_date:
@@ -301,8 +306,8 @@ class CorporateEvent:
         }
         if normalized_kind not in allowed:
             raise ValueError("unsupported corporate event kind")
-        if not isinstance(effective_date, date):
-            raise ValueError("effective_date is required")
+        if type(effective_date) is not date:
+            raise ValueError("effective_date must be an exact date")
         if not isinstance(payload, Mapping):
             raise ValueError("payload must be a mapping")
         normalized_payload: dict[str, str] = {}
@@ -456,7 +461,7 @@ class CorporateActionBook:
             registry=registry,
         )
         materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
+        if not all(type(event) is CorporateEvent for event in materialized):
             raise TypeError("events must contain CorporateEvent values")
 
         by_date: dict[date, list[CorporateEvent]] = {}
@@ -506,10 +511,10 @@ class CorporateActionBook:
     ) -> "CorporateActionBook":
         """Restore checkpoint state and replay only the strict retained suffix."""
 
-        if not isinstance(checkpoint, CorporateActionCheckpoint):
-            raise TypeError("checkpoint must be CorporateActionCheckpoint")
+        if type(checkpoint) is not CorporateActionCheckpoint:
+            raise TypeError("checkpoint must be exact CorporateActionCheckpoint")
         materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
+        if not all(type(event) is CorporateEvent for event in materialized):
             raise TypeError("events must contain CorporateEvent values")
         event_ids = tuple(event.event_id for event in materialized)
         if len(set(event_ids)) != len(event_ids):
@@ -580,8 +585,8 @@ class CorporateActionBook:
         )
 
     def apply(self, event: CorporateEvent) -> Transition:
-        if not isinstance(event, CorporateEvent):
-            raise TypeError("event must be CorporateEvent")
+        if type(event) is not CorporateEvent:
+            raise TypeError("event must be exact CorporateEvent")
         existing = self._events.get(event.event_id)
         if existing is not None:
             prior_event, transition = existing

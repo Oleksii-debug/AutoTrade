@@ -20,7 +20,14 @@ from autotrade_runtime.artifacts.store import (
 )
 from autotrade_runtime.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import canonical_decimal_text
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .settlement import (
     SettlementAccountScope,
     SettlementBook,
@@ -58,12 +65,7 @@ def _instant(value: str, *, name: str) -> str:
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    return canonical_decimal_text(value)
 
 
 def _artifact_ref(value: object, *, name: str) -> tuple[str, str, str]:
@@ -188,8 +190,8 @@ def settlement_rule_evidence_receipt(
     trade_date: date,
     expected_settlement_date: date,
 ) -> dict[str, object]:
-    if not isinstance(rule, SettlementRuleBinding):
-        raise TypeError("rule must be SettlementRuleBinding")
+    if type(rule) is not SettlementRuleBinding:
+        raise TypeError("rule must be exact SettlementRuleBinding")
     if type(trade_date) is not date or type(expected_settlement_date) is not date:
         raise TypeError("trade_date and expected_settlement_date must be dates")
     return {
@@ -307,6 +309,8 @@ def _rule_from_payload(value: Mapping[str, object]) -> SettlementRuleBinding:
 
 
 def _obligation_payload(obligation: SettlementObligation) -> dict[str, object]:
+    if type(obligation) is not SettlementObligation:
+        raise TypeError("obligation must be exact SettlementObligation")
     if obligation.source_transaction_id is None or obligation.rule_binding is None:
         raise SettlementConflict(
             "durable settlement obligation requires source transaction and rule binding"
@@ -352,12 +356,12 @@ def settlement_completion_evidence_receipt(
     obligation: SettlementObligation,
     evidence: SettlementEvidence,
 ) -> dict[str, object]:
-    if not isinstance(scope, SettlementAccountScope):
-        raise TypeError("scope must be SettlementAccountScope")
-    if not isinstance(obligation, SettlementObligation):
-        raise TypeError("obligation must be SettlementObligation")
-    if not isinstance(evidence, SettlementEvidence):
-        raise TypeError("evidence must be SettlementEvidence")
+    if type(scope) is not SettlementAccountScope:
+        raise TypeError("scope must be exact SettlementAccountScope")
+    if type(obligation) is not SettlementObligation:
+        raise TypeError("obligation must be exact SettlementObligation")
+    if type(evidence) is not SettlementEvidence:
+        raise TypeError("evidence must be exact SettlementEvidence")
     return {
         "schema_version": SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
@@ -472,11 +476,16 @@ class DurableSettlementBook:
         environment: str,
         evidence_artifact_store: ArtifactStore,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        store_identity = require_exact_journal_store_authority(
+            store,
+            subject="durable-settlement JournalStore",
+        )
         self.store = store
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
+        self._store_identity = store_identity
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError(
+                "evidence_artifact_store must be canonical ArtifactStore"
+            )
         self.evidence_artifact_store = evidence_artifact_store
         self.scope = SettlementAccountScope(
             provider_id=provider_id,
@@ -487,8 +496,24 @@ class DurableSettlementBook:
         self._book = SettlementBook()
         self._reload()
 
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        store = self.store
+        expected = self._store_identity
+        current = require_exact_journal_store_authority(
+            store,
+            subject="durable-settlement JournalStore",
+        )
+        if current != expected:
+            raise SettlementConflict("durable-settlement JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
+
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.scope_id)
+        return self._journal_operation(
+            JournalStore.load_events,
+            _AGGREGATE_TYPE,
+            self.scope_id,
+        )
 
     def _replay(self, events: list[dict[str, object]]) -> SettlementBook:
         book = SettlementBook()
@@ -589,6 +614,10 @@ class DurableSettlementBook:
         batch = tuple(obligations)
         if not batch:
             raise ValueError("settlement obligation batch must not be empty")
+        if any(type(item) is not SettlementObligation for item in batch):
+            raise TypeError(
+                "settlement obligation batch requires exact SettlementObligation values"
+            )
         canonical = tuple(
             _obligation_from_payload(_obligation_payload(item))
             for item in batch
@@ -687,7 +716,8 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
+            _, inserted, _ = self._journal_operation(
+                JournalStore.commit_command,
                 command_id=_text(command_id, name="command_id"),
                 actor=_ACTOR,
                 environment=self.scope.environment,
@@ -712,8 +742,8 @@ class DurableSettlementBook:
         as_of: date,
         committed_at: str,
     ) -> PreparedSettlementMutation:
-        if not isinstance(evidence, SettlementEvidence):
-            raise TypeError("evidence must be SettlementEvidence")
+        if type(evidence) is not SettlementEvidence:
+            raise TypeError("evidence must be exact SettlementEvidence")
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
         events = self._events()
@@ -818,7 +848,8 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
+            _, inserted, _ = self._journal_operation(
+                JournalStore.commit_command,
                 command_id=_text(command_id, name="command_id"),
                 actor=_ACTOR,
                 environment=self.scope.environment,

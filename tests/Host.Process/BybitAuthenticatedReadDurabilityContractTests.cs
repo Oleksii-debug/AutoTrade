@@ -116,6 +116,39 @@ internal static class BybitAuthenticatedReadDurabilityContractTests
         Check(
             unavailableBlocked,
             "product durability boundary must remain fail-closed until journal bridge exists");
+
+        bool unavailableObservedBlocked = false;
+        try
+        {
+            unavailable.CommitObserved(
+                evidence,
+                issuer.IssueAuthenticatedReadReceipt(
+                    issuer.IssueAuthenticatedReadAttempt(
+                        evidence.Attempt.Subject,
+                        new DateTimeOffset(
+                            2026, 10, 2, 11, 0, 2, TimeSpan.Zero)),
+                    200,
+                    Encoding.UTF8.GetBytes("{\"retCode\":0}"),
+                    new DateTimeOffset(
+                        2026, 10, 2, 11, 0, 3, TimeSpan.Zero)),
+                new ProviderAuthenticatedReadDurabilityReceipt(
+                    evidence.IssuerSession.SessionIdentity,
+                    evidence.Attempt.ReadAttemptId,
+                    evidence.Attempt.BindingSha256,
+                    evidence.Attempt.Subject.QueryDigest,
+                    "sha256:" + new string('4', 64),
+                    evidence.Attempt.ReadAttemptId + ":prepared",
+                    1,
+                    "2026-10-02T11:00:00.1000000Z"),
+                Encoding.UTF8.GetBytes("{\"retCode\":0}"));
+        }
+        catch (ProviderIssuerAuthorityException)
+        {
+            unavailableObservedBlocked = true;
+        }
+        Check(
+            unavailableObservedBlocked,
+            "product Observed durability boundary must remain fail-closed until journal bridge exists");
     }
 
     private sealed class FixedAuthority
@@ -189,6 +222,16 @@ internal static class BybitAuthenticatedReadDurabilityContractTests
             LastEvidence = evidence;
             throw new ProviderIssuerAuthorityException(
                 "simulated durable Prepared refusal");
+        }
+
+        public ProviderAuthenticatedReadObservedDurabilityReceipt CommitObserved(
+            ProviderAuthenticatedReadPreparedEvidence evidence,
+            ProviderAuthenticatedReadReceipt providerReceipt,
+            ProviderAuthenticatedReadDurabilityReceipt preparedReceipt,
+            byte[] responseBytes)
+        {
+            throw new InvalidOperationException(
+                "Observed durability must not run after Prepared refusal");
         }
     }
 

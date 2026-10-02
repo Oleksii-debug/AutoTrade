@@ -481,12 +481,12 @@ class MarketNormalizer:
         max_retained_book_events_per_stream: int = _MAX_RETAINED_BOOK_EVENTS_PER_STREAM,
         book_stream_policies: tuple[BookStreamPolicyBinding, ...] = (),
     ) -> None:
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
-        if not isinstance(max_available_age, timedelta) or max_available_age <= timedelta(0):
-            raise MarketDataError("max_available_age must be positive")
-        if not isinstance(max_book_age, timedelta) or max_book_age <= timedelta(0):
-            raise MarketDataError("max_book_age must be positive")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        if type(max_available_age) is not timedelta or max_available_age <= timedelta(0):
+            raise MarketDataError("max_available_age must be an exact positive timedelta")
+        if type(max_book_age) is not timedelta or max_book_age <= timedelta(0):
+            raise MarketDataError("max_book_age must be an exact positive timedelta")
         if type(max_book_levels_per_side) is not int or max_book_levels_per_side <= 0:
             raise MarketDataError("max_book_levels_per_side must be an exact positive integer")
         if (
@@ -1591,7 +1591,8 @@ class MarketNormalizer:
             sequence_stream=update.sequence_stream,
         )
         try:
-            instrument = self._registry.resolve(
+            instrument = InstrumentRegistry.resolve(
+                self._registry,
                 update.provider_id,
                 update.venue_id,
                 update.provider_symbol,
@@ -1681,7 +1682,11 @@ class MarketNormalizer:
         if update.ingested_at - update.available_at > self._max_available_age:
             flags.add("STALE")
         try:
-            self._registry.require_tradable(instrument.instrument_id, update.source_event_at)
+            InstrumentRegistry.require_tradable(
+                self._registry,
+                instrument.instrument_id,
+                update.source_event_at,
+            )
         except InstrumentRegistryError:
             flags.add("NOT_TRADABLE_AT_EVENT_TIME")
 

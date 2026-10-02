@@ -331,6 +331,68 @@ class InformationClaimTests(unittest.TestCase):
         self.assertEqual(normalized.published_at, BASE)
         self.assertEqual(normalized.available_at, BASE + timedelta(hours=1))
 
+    def test_build_claim_rejects_source_document_subclass_before_virtual_state_use(self):
+        class ForgedSourceDocument(SourceDocument):
+            pass
+
+        base = doc("source", "r1", "passage")
+        forged = ForgedSourceDocument(**base.__dict__)
+        with self.assertRaisesRegex(ValueError, "exact SourceDocument"):
+            ClaimStore.build_claim(
+                forged,
+                subject="X",
+                predicate="state",
+                value="up",
+            )
+
+    def test_build_claim_revalidates_post_construction_source_mutation(self):
+        document = doc("source", "r1", "passage")
+        object.__setattr__(
+            document,
+            "available_at",
+            document.published_at - timedelta(seconds=1),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot precede"):
+            ClaimStore.build_claim(
+                document,
+                subject="X",
+                predicate="state",
+                value="up",
+            )
+
+    def test_claim_store_add_rejects_subclass_and_revalidates_mutated_claim(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("source", "r1", "passage"),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+
+        class ForgedClaim(InformationClaim):
+            pass
+
+        forged = ForgedClaim(**claim.__dict__)
+        with self.assertRaisesRegex(ValueError, "exact InformationClaim"):
+            store.add(forged)
+
+        object.__setattr__(claim, "value", "down")
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            store.add(claim)
+        self.assertEqual(store.claims, ())
+
+    def test_snapshot_revalidates_claim_graph_at_use_time(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("source", "r1", "passage"),
+            subject="X",
+            predicate="state",
+            value="up",
+        )
+        object.__setattr__(claim, "available_at", BASE + timedelta(days=1))
+        with self.assertRaises(ValueError):
+            InformationSnapshot(cutoff=BASE, claims=(claim,))
+
     def test_build_claim_rejects_source_document_duck_typing_bypass(self):
         forged = type(
             "ForgedSourceDocument",

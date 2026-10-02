@@ -66,6 +66,18 @@ public sealed record HostProcessOptions(
         string canonicalEnvironment = Required(environment, nameof(environment));
         string canonicalProvider = Required(provider, nameof(provider));
         string canonicalProviderEnvironment = Required(providerEnvironment, nameof(providerEnvironment));
+        if (!string.Equals(
+                canonicalProvider,
+                canonicalProvider.ToUpperInvariant(),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                canonicalProviderEnvironment,
+                canonicalProviderEnvironment.ToUpperInvariant(),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Host provider and provider environment must use canonical uppercase identity.");
+        }
         if (!CommonScalarContracts.IsValid("Environment", canonicalEnvironment))
         {
             throw new InvalidOperationException(

@@ -20,7 +20,13 @@ from .capabilities import (
     _DERIVED_SNAPSHOT_TOKEN,
     _freeze_evidence,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 
 
 _AGGREGATE_TYPE = "capability_history"
@@ -244,16 +250,32 @@ class DurableCapabilityRegistry:
     """Journal-backed history plus process-local refresh fencing."""
 
     def __init__(self, store: JournalStore) -> None:
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact JournalStore")
+        store_identity = require_exact_journal_store_authority(
+            store,
+            subject="durable-capability JournalStore",
+        )
         self.store = store
+        self._store_identity = store_identity
         # Constructing the v2 registry is the product-generation cutover. Fence
         # old v1 writers before exposing any v2 read/write authority.
-        self.store.retire_event_type(
+        self._journal_operation(
+            JournalStore.retire_event_type,
             _EVENT_TYPE_V1,
             retirement_id=_RETIREMENT_ID,
         )
         self._session_verified: dict[str, CapabilitySnapshot] = {}
+
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        store = self.store
+        expected = self._store_identity
+        current = require_exact_journal_store_authority(
+            store,
+            subject="durable-capability JournalStore",
+        )
+        if current != expected:
+            raise CapabilityError("durable-capability JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
 
     def _validated_history_cut(
         self,
@@ -271,7 +293,10 @@ class DurableCapabilityRegistry:
         """
 
         registry = CapabilityRegistry()
-        events = self.store.load_events_by_aggregate_type(_AGGREGATE_TYPE)
+        events = self._journal_operation(
+            JournalStore.load_events_by_aggregate_type,
+            _AGGREGATE_TYPE,
+        )
         seen_versions: dict[str, int] = {}
         ambiguous_bybit_latest: dict[
             tuple[str, str, str, str, str], datetime
@@ -379,7 +404,7 @@ class DurableCapabilityRegistry:
             "committed_at": snapshot.observed_at.isoformat(),
         }
         try:
-            result = self.store.append_event(envelope)
+            result = self._journal_operation(JournalStore.append_event, envelope)
         except ValueError as error:
             # A concurrent refresh won. Re-read and accept only exact replay.
             current = self._history()

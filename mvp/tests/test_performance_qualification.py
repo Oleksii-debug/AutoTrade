@@ -104,6 +104,84 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
             with self.subTest(overrides=overrides), self.assertRaises(RuntimeBudgetError):
                 RuntimeBudgetSpec(**kwargs)
 
+    def test_runtime_budget_evaluator_rejects_polymorphic_inputs(self):
+        current = spec()
+        observation = RuntimeLoadObservation.create(
+            scenario_id=current.scenario_id,
+            spec_digest=current.digest,
+            release_sha=SHA,
+            configuration_hash=HASH,
+            host_fingerprint=HOST,
+            expected_financial_events=2,
+            recovered_financial_events=2,
+            financial_latency_us=(100, 200),
+            financial_staleness_us=(100, 200),
+            research_interference_us=(50,),
+            reconnect_backlog_remaining=0,
+            declared_duration_us=1_000_000,
+            observed_duration_us=900_000,
+        )
+
+        class ForgedSpec(RuntimeBudgetSpec):
+            pass
+
+        class ForgedObservation(RuntimeLoadObservation):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact RuntimeBudgetSpec"):
+            evaluate_runtime_budget(
+                ForgedSpec(**current.__dict__),
+                observation,
+            )
+        with self.assertRaisesRegex(TypeError, "exact RuntimeLoadObservation"):
+            evaluate_runtime_budget(
+                current,
+                ForgedObservation(**observation.__dict__),
+            )
+
+    def test_runtime_budget_evaluator_revalidates_post_construction_mutation(self):
+        current = spec()
+        observation = RuntimeLoadObservation.create(
+            scenario_id=current.scenario_id,
+            spec_digest=current.digest,
+            release_sha=SHA,
+            configuration_hash=HASH,
+            host_fingerprint=HOST,
+            expected_financial_events=2,
+            recovered_financial_events=2,
+            financial_latency_us=(100, 200),
+            financial_staleness_us=(100, 200),
+            research_interference_us=(50,),
+            reconnect_backlog_remaining=0,
+            declared_duration_us=1_000_000,
+            observed_duration_us=900_000,
+        )
+        object.__setattr__(observation, "recovered_financial_events", True)
+        with self.assertRaisesRegex(RuntimeBudgetError, "recovered_financial_events"):
+            evaluate_runtime_budget(current, observation)
+
+        current = spec()
+        object.__setattr__(current, "min_financial_samples", True)
+        with self.assertRaisesRegex(RuntimeBudgetError, "min_financial_samples"):
+            evaluate_runtime_budget(
+                current,
+                RuntimeLoadObservation.create(
+                    scenario_id="declared-load",
+                    spec_digest="sha256:" + ("0" * 64),
+                    release_sha=SHA,
+                    configuration_hash=HASH,
+                    host_fingerprint=HOST,
+                    expected_financial_events=2,
+                    recovered_financial_events=2,
+                    financial_latency_us=(100, 200),
+                    financial_staleness_us=(100, 200),
+                    research_interference_us=(50,),
+                    reconnect_backlog_remaining=0,
+                    declared_duration_us=1_000_000,
+                    observed_duration_us=900_000,
+                ),
+            )
+
     def test_valid_factory_evidence_still_passes_declared_budget(self):
         current = spec()
         observation = RuntimeLoadObservation.create(

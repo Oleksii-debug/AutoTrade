@@ -35,10 +35,17 @@ _SESSION_SCHEMA = "autotrade-provider-issuer-session:v1"
 _READ_ATTEMPT_SCHEMA = "autotrade-provider-authenticated-read-attempt:v1"
 _READ_RECEIPT_SCHEMA = "autotrade-provider-authenticated-read-receipt:v1"
 _PREPARED_ENVELOPE_SCHEMA = "autotrade-host-authenticated-read-prepared:v1"
-_OBSERVED_ENVELOPE_SCHEMA = "autotrade-host-authenticated-read-observed:v1"
+_OBSERVED_ENVELOPE_SCHEMA = "autotrade-host-authenticated-read-observed:v2"
+_PREPARED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-prepared:v1"
+_OBSERVED_DURABILITY_SCHEMA = "autotrade-provider-read-durable-observed:v1"
+_HOST_SENDER_FENCE_SCHEMA = "autotrade-host-sender-fence:v1"
+_HOST_SENDER_FENCE_METHOD = "SAME_HOST_EXCLUSIVE_LEASE_HANDOFF"
+_HOST_SENDER_FENCE_ENVELOPE_SCHEMA = "autotrade-host-sender-fence-envelope:v1"
+_HOST_LIFETIME_FENCE_DOMAIN = "autotrade-host-lifetime-fence-v1"
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _SESSION_ID_RE = re.compile(r"provider-issuer-session:sha256:[0-9a-f]{64}")
 _ATTEMPT_ID_RE = re.compile(r"provider-read:[0-9a-f]{32}")
+_LEASE_SCOPE_RE = re.compile(r"hf-[0-9a-f]{64}")
 _HOST_UTC_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})Z"
 )
@@ -115,7 +122,78 @@ _RECEIPT_KEYS = frozenset(
 )
 _PREPARED_KEYS = frozenset({"schema", "issuer_session", "attempt", "query"})
 _OBSERVED_KEYS = frozenset(
-    {"schema", "issuer_session", "attempt", "receipt", "query", "response_base64"}
+    {
+        "schema",
+        "issuer_session",
+        "attempt",
+        "receipt",
+        "query",
+        "response_base64",
+        "durable_prepared",
+        "durable_observed",
+    }
+)
+_PREPARED_DURABILITY_KEYS = frozenset(
+    {
+        "schema",
+        "issuer_session_identity",
+        "read_attempt_id",
+        "read_attempt_binding_sha256",
+        "query_digest",
+        "journal_identity",
+        "prepared_event_id",
+        "journal_sequence",
+        "committed_at_utc",
+        "receipt_identity",
+    }
+)
+_OBSERVED_DURABILITY_KEYS = frozenset(
+    {
+        "schema",
+        "issuer_session_identity",
+        "read_attempt_id",
+        "read_attempt_binding_sha256",
+        "provider_receipt_sha256",
+        "response_sha256",
+        "http_status",
+        "observed_at_utc",
+        "journal_identity",
+        "prepared_receipt_identity",
+        "prepared_event_id",
+        "prepared_journal_sequence",
+        "observed_event_id",
+        "observed_journal_sequence",
+        "committed_at_utc",
+        "receipt_identity",
+    }
+)
+_HOST_SENDER_FENCE_ENVELOPE_KEYS = frozenset(
+    {"schema", "issuer_session", "receipt"}
+)
+_HOST_SENDER_FENCE_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "issuer_session_identity",
+        "fence_method",
+        "lease_scope_id",
+        "lease_owner_record_sha256",
+        "lease_acquired_at_utc",
+        "owner_scope",
+        "provider_id",
+        "account_id",
+        "runtime_environment",
+        "provider_environment",
+        "credential_handle_id",
+        "credential_generation",
+        "backup_manifest_sha256",
+        "old_owner_id",
+        "old_owner_epoch",
+        "new_owner_id",
+        "new_owner_epoch",
+        "fenced_at_utc",
+        "receipt_sha256",
+        "signature_base64",
+    }
 )
 
 
@@ -461,10 +539,74 @@ class VerifiedHostPreparedAttestation:
 
 
 @dataclass(frozen=True, slots=True)
+class HostPreparedDurabilityReceipt:
+    issuer_session_identity: str
+    read_attempt_id: str
+    read_attempt_binding_sha256: str
+    query_digest: str
+    journal_identity: str
+    prepared_event_id: str
+    journal_sequence: int
+    committed_at_utc: str
+    receipt_identity: str
+
+
+@dataclass(frozen=True, slots=True)
+class HostObservedDurabilityReceipt:
+    issuer_session_identity: str
+    read_attempt_id: str
+    read_attempt_binding_sha256: str
+    provider_receipt_sha256: str
+    response_sha256: str
+    http_status: int
+    observed_at_utc: str
+    journal_identity: str
+    prepared_receipt_identity: str
+    prepared_event_id: str
+    prepared_journal_sequence: int
+    observed_event_id: str
+    observed_journal_sequence: int
+    committed_at_utc: str
+    receipt_identity: str
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedHostObservedAttestation:
     prepared: VerifiedHostPreparedAttestation
     receipt: HostAuthenticatedReadReceipt
     response_bytes: bytes
+    prepared_durability: HostPreparedDurabilityReceipt
+    observed_durability: HostObservedDurabilityReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class HostSenderFenceReceipt:
+    issuer_session_identity: str
+    fence_method: str
+    lease_scope_id: str
+    lease_owner_record_sha256: str
+    lease_acquired_at_utc: str
+    owner_scope: str
+    provider_id: str
+    account_id: str
+    runtime_environment: str
+    provider_environment: str
+    credential_handle_id: str
+    credential_generation: int
+    backup_manifest_sha256: str
+    old_owner_id: str
+    old_owner_epoch: int
+    new_owner_id: str
+    new_owner_epoch: int
+    fenced_at_utc: str
+    receipt_sha256: str
+    signature_base64: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedHostSenderFenceAttestation:
+    issuer_session: HostIssuerSession
+    receipt: HostSenderFenceReceipt
 
 
 def _parse_session(value: object) -> HostIssuerSession:
@@ -887,15 +1029,269 @@ def _parse_receipt(
     return receipt
 
 
+def _parse_prepared_durability(
+    value: object,
+    *,
+    prepared: VerifiedHostPreparedAttestation,
+    expected_journal_identity: str,
+) -> HostPreparedDurabilityReceipt:
+    raw = _exact_mapping(
+        value,
+        name="Host durable Prepared receipt",
+        keys=_PREPARED_DURABILITY_KEYS,
+    )
+    if raw["schema"] != _PREPARED_DURABILITY_SCHEMA:
+        raise HostProviderAttestationError(
+            "Host durable Prepared receipt schema is invalid"
+        )
+    attempt = prepared.attempt
+    session_identity = _exact_text(
+        raw["issuer_session_identity"],
+        name="durable Prepared issuer_session_identity",
+    )
+    attempt_id = _exact_text(
+        raw["read_attempt_id"],
+        name="durable Prepared read_attempt_id",
+    )
+    attempt_binding = _sha256_text(
+        raw["read_attempt_binding_sha256"],
+        name="durable Prepared read_attempt_binding_sha256",
+    )
+    query_digest = _sha256_text(
+        raw["query_digest"],
+        name="durable Prepared query_digest",
+    )
+    journal_identity = _sha256_text(
+        raw["journal_identity"],
+        name="durable Prepared journal_identity",
+    )
+    prepared_event_id = _exact_text(
+        raw["prepared_event_id"],
+        name="durable Prepared prepared_event_id",
+    )
+    sequence = _positive_int(
+        raw["journal_sequence"],
+        name="durable Prepared journal_sequence",
+    )
+    committed = _exact_text(
+        raw["committed_at_utc"],
+        name="durable Prepared committed_at_utc",
+    )
+    committed_key = _host_utc_key(
+        committed,
+        name="durable Prepared committed_at_utc",
+    )
+    receipt_identity = _exact_text(
+        raw["receipt_identity"],
+        name="durable Prepared receipt_identity",
+    )
+    if (
+        session_identity != prepared.issuer_session.session_identity
+        or attempt_id != attempt.read_attempt_id
+        or attempt_binding != attempt.binding_sha256
+        or query_digest != attempt.subject.query_digest
+        or journal_identity != expected_journal_identity
+        or prepared_event_id != attempt.read_attempt_id + ":prepared"
+        or committed_key
+        < _host_utc_key(attempt.prepared_at_utc, name="prepared_at_utc")
+    ):
+        raise HostProviderAttestationError(
+            "Host durable Prepared receipt conflicts with verified read scope"
+        )
+    expected_identity = _content_identity(
+        "provider-read-durable-prepared",
+        canonical_host_material(
+            _PREPARED_DURABILITY_SCHEMA,
+            session_identity,
+            attempt_id,
+            attempt_binding,
+            query_digest,
+            journal_identity,
+            prepared_event_id,
+            str(sequence),
+            committed,
+        ),
+    )
+    if receipt_identity != expected_identity:
+        raise HostProviderAttestationError(
+            "Host durable Prepared receipt identity is invalid"
+        )
+    return HostPreparedDurabilityReceipt(
+        issuer_session_identity=session_identity,
+        read_attempt_id=attempt_id,
+        read_attempt_binding_sha256=attempt_binding,
+        query_digest=query_digest,
+        journal_identity=journal_identity,
+        prepared_event_id=prepared_event_id,
+        journal_sequence=sequence,
+        committed_at_utc=committed,
+        receipt_identity=receipt_identity,
+    )
+
+
+def _parse_observed_durability(
+    value: object,
+    *,
+    prepared: VerifiedHostPreparedAttestation,
+    provider_receipt: HostAuthenticatedReadReceipt,
+    prepared_durability: HostPreparedDurabilityReceipt,
+) -> HostObservedDurabilityReceipt:
+    raw = _exact_mapping(
+        value,
+        name="Host durable Observed receipt",
+        keys=_OBSERVED_DURABILITY_KEYS,
+    )
+    if raw["schema"] != _OBSERVED_DURABILITY_SCHEMA:
+        raise HostProviderAttestationError(
+            "Host durable Observed receipt schema is invalid"
+        )
+    attempt = prepared.attempt
+    session_identity = _exact_text(
+        raw["issuer_session_identity"],
+        name="durable Observed issuer_session_identity",
+    )
+    attempt_id = _exact_text(
+        raw["read_attempt_id"],
+        name="durable Observed read_attempt_id",
+    )
+    attempt_binding = _sha256_text(
+        raw["read_attempt_binding_sha256"],
+        name="durable Observed read_attempt_binding_sha256",
+    )
+    provider_receipt_sha = _sha256_text(
+        raw["provider_receipt_sha256"],
+        name="durable Observed provider_receipt_sha256",
+    )
+    response_sha = _sha256_text(
+        raw["response_sha256"],
+        name="durable Observed response_sha256",
+    )
+    http_status = raw["http_status"]
+    if type(http_status) is not int or not 100 <= http_status <= 599:
+        raise HostProviderAttestationError(
+            "Host durable Observed HTTP status is invalid"
+        )
+    observed_at = _exact_text(
+        raw["observed_at_utc"],
+        name="durable Observed observed_at_utc",
+    )
+    _host_utc_key(observed_at, name="durable Observed observed_at_utc")
+    journal_identity = _sha256_text(
+        raw["journal_identity"],
+        name="durable Observed journal_identity",
+    )
+    prepared_receipt_identity = _exact_text(
+        raw["prepared_receipt_identity"],
+        name="durable Observed prepared_receipt_identity",
+    )
+    prepared_event_id = _exact_text(
+        raw["prepared_event_id"],
+        name="durable Observed prepared_event_id",
+    )
+    prepared_sequence = _positive_int(
+        raw["prepared_journal_sequence"],
+        name="durable Observed prepared_journal_sequence",
+    )
+    observed_event_id = _exact_text(
+        raw["observed_event_id"],
+        name="durable Observed observed_event_id",
+    )
+    observed_sequence = _positive_int(
+        raw["observed_journal_sequence"],
+        name="durable Observed observed_journal_sequence",
+    )
+    committed = _exact_text(
+        raw["committed_at_utc"],
+        name="durable Observed committed_at_utc",
+    )
+    committed_key = _host_utc_key(
+        committed,
+        name="durable Observed committed_at_utc",
+    )
+    receipt_identity = _exact_text(
+        raw["receipt_identity"],
+        name="durable Observed receipt_identity",
+    )
+    if (
+        session_identity != prepared.issuer_session.session_identity
+        or attempt_id != attempt.read_attempt_id
+        or attempt_binding != attempt.binding_sha256
+        or provider_receipt_sha != provider_receipt.receipt_sha256
+        or response_sha != provider_receipt.response_sha256
+        or http_status != provider_receipt.http_status
+        or observed_at != provider_receipt.observed_at_utc
+        or journal_identity != prepared_durability.journal_identity
+        or prepared_receipt_identity != prepared_durability.receipt_identity
+        or prepared_event_id != prepared_durability.prepared_event_id
+        or prepared_sequence != prepared_durability.journal_sequence
+        or observed_event_id != attempt.read_attempt_id + ":observed"
+        or observed_sequence <= prepared_sequence
+        or committed_key
+        < _host_utc_key(
+            provider_receipt.observed_at_utc,
+            name="provider observed_at_utc",
+        )
+    ):
+        raise HostProviderAttestationError(
+            "Host durable Observed receipt conflicts with verified provider response"
+        )
+    expected_identity = _content_identity(
+        "provider-read-durable-observed",
+        canonical_host_material(
+            _OBSERVED_DURABILITY_SCHEMA,
+            session_identity,
+            attempt_id,
+            attempt_binding,
+            provider_receipt_sha,
+            response_sha,
+            str(http_status),
+            observed_at,
+            journal_identity,
+            prepared_receipt_identity,
+            prepared_event_id,
+            str(prepared_sequence),
+            observed_event_id,
+            str(observed_sequence),
+            committed,
+        ),
+    )
+    if receipt_identity != expected_identity:
+        raise HostProviderAttestationError(
+            "Host durable Observed receipt identity is invalid"
+        )
+    return HostObservedDurabilityReceipt(
+        issuer_session_identity=session_identity,
+        read_attempt_id=attempt_id,
+        read_attempt_binding_sha256=attempt_binding,
+        provider_receipt_sha256=provider_receipt_sha,
+        response_sha256=response_sha,
+        http_status=http_status,
+        observed_at_utc=observed_at,
+        journal_identity=journal_identity,
+        prepared_receipt_identity=prepared_receipt_identity,
+        prepared_event_id=prepared_event_id,
+        prepared_journal_sequence=prepared_sequence,
+        observed_event_id=observed_event_id,
+        observed_journal_sequence=observed_sequence,
+        committed_at_utc=committed,
+        receipt_identity=receipt_identity,
+    )
+
+
 def verify_host_observed_attestation(
     value: object,
     *,
     expected_session_identity: str,
     expected_public_key_sha256: str,
     expected_query: object,
+    expected_journal_identity: str,
 ) -> VerifiedHostObservedAttestation:
-    """Verify exact Host Prepared + provider response receipt + response bytes."""
+    """Verify signed Host response plus independently pinned durable journal cuts."""
 
+    expected_journal = _sha256_text(
+        expected_journal_identity,
+        name="expected_journal_identity",
+    )
     raw = _exact_mapping(value, name="Host Observed envelope", keys=_OBSERVED_KEYS)
     if raw["schema"] != _OBSERVED_ENVELOPE_SCHEMA:
         raise HostProviderAttestationError(
@@ -925,8 +1321,371 @@ def verify_host_observed_attestation(
         prepared=prepared,
         response_bytes=response_bytes,
     )
+    prepared_durability = _parse_prepared_durability(
+        raw["durable_prepared"],
+        prepared=prepared,
+        expected_journal_identity=expected_journal,
+    )
+    observed_durability = _parse_observed_durability(
+        raw["durable_observed"],
+        prepared=prepared,
+        provider_receipt=receipt,
+        prepared_durability=prepared_durability,
+    )
     return VerifiedHostObservedAttestation(
         prepared=prepared,
         receipt=receipt,
         response_bytes=response_bytes,
+        prepared_durability=prepared_durability,
+        observed_durability=observed_durability,
+    )
+
+
+def _host_lifetime_lease_scope_id(
+    provider_id: str,
+    provider_environment: str,
+    runtime_environment: str,
+    account_id: str,
+) -> str:
+    material = (
+        _HOST_LIFETIME_FENCE_DOMAIN
+        + "\0"
+        + provider_id
+        + "\0"
+        + provider_environment
+        + "\0"
+        + runtime_environment
+        + "\0"
+        + account_id
+    ).encode("utf-8")
+    return "hf-" + sha256(material).hexdigest()
+
+
+def _host_sender_fence_material(receipt: HostSenderFenceReceipt) -> bytes:
+    return canonical_host_material(
+        _HOST_SENDER_FENCE_SCHEMA,
+        receipt.issuer_session_identity,
+        receipt.fence_method,
+        receipt.lease_scope_id,
+        receipt.lease_owner_record_sha256,
+        receipt.lease_acquired_at_utc,
+        receipt.owner_scope,
+        receipt.provider_id,
+        receipt.account_id,
+        receipt.runtime_environment,
+        receipt.provider_environment,
+        receipt.credential_handle_id,
+        str(receipt.credential_generation),
+        receipt.backup_manifest_sha256,
+        receipt.old_owner_id,
+        str(receipt.old_owner_epoch),
+        receipt.new_owner_id,
+        str(receipt.new_owner_epoch),
+        receipt.fenced_at_utc,
+    )
+
+
+def verify_host_sender_fence_attestation(
+    value: object,
+    *,
+    expected_session_identity: str,
+    expected_public_key_sha256: str,
+    expected_backup_manifest_sha256: str,
+    expected_owner_scope: str,
+    expected_provider_id: str,
+    expected_account_id: str,
+    expected_runtime_environment: str,
+    expected_provider_environment: str,
+    expected_credential_handle_id: str,
+    expected_credential_generation: int,
+    expected_old_owner_id: str,
+    expected_old_owner_epoch: int,
+    expected_new_owner_id: str,
+    expected_new_owner_epoch: int,
+) -> VerifiedHostSenderFenceAttestation:
+    """Verify one Host-issued same-machine sender-fence challenge response.
+
+    This verifier authenticates a successor Host that currently holds the exact
+    OS lifetime lease and binds the signed proof to the caller's independently
+    resolved restore/owner/provider/credential transition.  It does not promote
+    the same-host lease into clean-machine or remote-provider credential
+    revocation authority.
+    """
+
+    expected_session = _exact_text(
+        expected_session_identity,
+        name="expected_session_identity",
+    )
+    if _SESSION_ID_RE.fullmatch(expected_session) is None:
+        raise HostProviderAttestationError(
+            "expected_session_identity is non-canonical"
+        )
+    expected_key = _sha256_text(
+        expected_public_key_sha256,
+        name="expected_public_key_sha256",
+    )
+    expected_manifest = _sha256_text(
+        expected_backup_manifest_sha256,
+        name="expected_backup_manifest_sha256",
+    )
+    expected_scope = _exact_text(expected_owner_scope, name="expected_owner_scope")
+    expected_provider = _exact_text(expected_provider_id, name="expected_provider_id")
+    expected_account = _exact_text(expected_account_id, name="expected_account_id")
+    expected_runtime = _exact_text(
+        expected_runtime_environment,
+        name="expected_runtime_environment",
+    )
+    expected_provider_environment_text = _exact_text(
+        expected_provider_environment,
+        name="expected_provider_environment",
+    )
+    expected_handle = _exact_text(
+        expected_credential_handle_id,
+        name="expected_credential_handle_id",
+    )
+    expected_old = _exact_text(expected_old_owner_id, name="expected_old_owner_id")
+    expected_new = _exact_text(expected_new_owner_id, name="expected_new_owner_id")
+    expected_generation = _positive_int(
+        expected_credential_generation,
+        name="expected_credential_generation",
+    )
+    expected_old_epoch_value = _positive_int(
+        expected_old_owner_epoch,
+        name="expected_old_owner_epoch",
+    )
+    expected_new_epoch_value = _positive_int(
+        expected_new_owner_epoch,
+        name="expected_new_owner_epoch",
+    )
+    if expected_new_epoch_value != expected_old_epoch_value + 1:
+        raise HostProviderAttestationError(
+            "expected sender-fence owner transition is not consecutive"
+        )
+
+    raw = _exact_mapping(
+        value,
+        name="Host sender-fence envelope",
+        keys=_HOST_SENDER_FENCE_ENVELOPE_KEYS,
+    )
+    if raw["schema"] != _HOST_SENDER_FENCE_ENVELOPE_SCHEMA:
+        raise HostProviderAttestationError(
+            "Host sender-fence envelope schema is invalid"
+        )
+    session = _parse_session(raw["issuer_session"])
+    if (
+        session.session_identity != expected_session
+        or session.public_key_sha256 != expected_key
+    ):
+        raise HostProviderAttestationError(
+            "Host sender-fence issuer does not match independently pinned authority"
+        )
+
+    receipt_raw = _exact_mapping(
+        raw["receipt"],
+        name="Host sender-fence receipt",
+        keys=_HOST_SENDER_FENCE_RECEIPT_KEYS,
+    )
+    if receipt_raw["schema"] != _HOST_SENDER_FENCE_SCHEMA:
+        raise HostProviderAttestationError(
+            "Host sender-fence receipt schema is invalid"
+        )
+    issuer_session_identity = _exact_text(
+        receipt_raw["issuer_session_identity"],
+        name="issuer_session_identity",
+    )
+    if issuer_session_identity != session.session_identity:
+        raise HostProviderAttestationError(
+            "Host sender-fence receipt uses a different issuer session"
+        )
+    fence_method = _exact_text(receipt_raw["fence_method"], name="fence_method")
+    if fence_method != _HOST_SENDER_FENCE_METHOD:
+        raise HostProviderAttestationError(
+            "Host sender-fence method is unsupported"
+        )
+    lease_scope_id = _exact_text(
+        receipt_raw["lease_scope_id"],
+        name="lease_scope_id",
+    )
+    if _LEASE_SCOPE_RE.fullmatch(lease_scope_id) is None:
+        raise HostProviderAttestationError(
+            "Host sender-fence lease scope is non-canonical"
+        )
+    lease_owner_record_sha256 = _sha256_text(
+        receipt_raw["lease_owner_record_sha256"],
+        name="lease_owner_record_sha256",
+    )
+    lease_acquired_at_utc = _exact_text(
+        receipt_raw["lease_acquired_at_utc"],
+        name="lease_acquired_at_utc",
+    )
+    acquired_key = _host_utc_key(
+        lease_acquired_at_utc,
+        name="lease_acquired_at_utc",
+    )
+    if acquired_key < _host_utc_key(
+        session.started_at_utc,
+        name="started_at_utc",
+    ):
+        raise HostProviderAttestationError(
+            "Host sender-fence lease predates issuer session"
+        )
+
+    owner_scope = _exact_text(receipt_raw["owner_scope"], name="owner_scope")
+    provider_id = _exact_text(receipt_raw["provider_id"], name="provider_id")
+    account_id = _exact_text(receipt_raw["account_id"], name="account_id")
+    runtime_environment = _exact_text(
+        receipt_raw["runtime_environment"],
+        name="runtime_environment",
+    )
+    provider_environment = _exact_text(
+        receipt_raw["provider_environment"],
+        name="provider_environment",
+    )
+    credential_handle_id = _exact_text(
+        receipt_raw["credential_handle_id"],
+        name="credential_handle_id",
+    )
+    credential_generation = _positive_int(
+        receipt_raw["credential_generation"],
+        name="credential_generation",
+    )
+    backup_manifest_sha256 = _sha256_text(
+        receipt_raw["backup_manifest_sha256"],
+        name="backup_manifest_sha256",
+    )
+    old_owner_id = _exact_text(
+        receipt_raw["old_owner_id"],
+        name="old_owner_id",
+    )
+    old_owner_epoch = _positive_int(
+        receipt_raw["old_owner_epoch"],
+        name="old_owner_epoch",
+    )
+    new_owner_id = _exact_text(
+        receipt_raw["new_owner_id"],
+        name="new_owner_id",
+    )
+    new_owner_epoch = _positive_int(
+        receipt_raw["new_owner_epoch"],
+        name="new_owner_epoch",
+    )
+    fenced_at_utc = _exact_text(
+        receipt_raw["fenced_at_utc"],
+        name="fenced_at_utc",
+    )
+    fenced_key = _host_utc_key(fenced_at_utc, name="fenced_at_utc")
+    if fenced_key < acquired_key:
+        raise HostProviderAttestationError(
+            "Host sender-fence receipt predates lease acquisition"
+        )
+    if old_owner_id == new_owner_id or new_owner_epoch != old_owner_epoch + 1:
+        raise HostProviderAttestationError(
+            "Host sender-fence owner transition is invalid"
+        )
+    if runtime_environment not in _FINANCIAL_RUNTIMES:
+        raise HostProviderAttestationError(
+            "Host sender-fence runtime is outside PAPER/LIVE"
+        )
+    if (
+        provider_id != provider_id.upper()
+        or provider_environment != provider_environment.upper()
+    ):
+        raise HostProviderAttestationError(
+            "Host sender-fence provider domain is non-canonical"
+        )
+    if owner_scope != runtime_environment + ":" + account_id:
+        raise HostProviderAttestationError(
+            "Host sender-fence owner scope is inconsistent"
+        )
+    if lease_scope_id != _host_lifetime_lease_scope_id(
+        provider_id,
+        provider_environment,
+        runtime_environment,
+        account_id,
+    ):
+        raise HostProviderAttestationError(
+            "Host sender-fence lease identity is inconsistent"
+        )
+
+    observed = (
+        backup_manifest_sha256,
+        owner_scope,
+        provider_id,
+        account_id,
+        runtime_environment,
+        provider_environment,
+        credential_handle_id,
+        credential_generation,
+        old_owner_id,
+        old_owner_epoch,
+        new_owner_id,
+        new_owner_epoch,
+    )
+    expected = (
+        expected_manifest,
+        expected_scope,
+        expected_provider,
+        expected_account,
+        expected_runtime,
+        expected_provider_environment_text,
+        expected_handle,
+        expected_generation,
+        expected_old,
+        expected_old_epoch_value,
+        expected_new,
+        expected_new_epoch_value,
+    )
+    if observed != expected:
+        raise HostProviderAttestationError(
+            "Host sender-fence receipt does not match independently resolved transition"
+        )
+
+    receipt_sha256 = _sha256_text(
+        receipt_raw["receipt_sha256"],
+        name="receipt_sha256",
+    )
+    signature_text = _exact_text(
+        receipt_raw["signature_base64"],
+        name="signature_base64",
+    )
+    signature = _canonical_base64(
+        signature_text,
+        name="signature_base64",
+        expected_length=64,
+    )
+    receipt = HostSenderFenceReceipt(
+        issuer_session_identity=issuer_session_identity,
+        fence_method=fence_method,
+        lease_scope_id=lease_scope_id,
+        lease_owner_record_sha256=lease_owner_record_sha256,
+        lease_acquired_at_utc=lease_acquired_at_utc,
+        owner_scope=owner_scope,
+        provider_id=provider_id,
+        account_id=account_id,
+        runtime_environment=runtime_environment,
+        provider_environment=provider_environment,
+        credential_handle_id=credential_handle_id,
+        credential_generation=credential_generation,
+        backup_manifest_sha256=backup_manifest_sha256,
+        old_owner_id=old_owner_id,
+        old_owner_epoch=old_owner_epoch,
+        new_owner_id=new_owner_id,
+        new_owner_epoch=new_owner_epoch,
+        fenced_at_utc=fenced_at_utc,
+        receipt_sha256=receipt_sha256,
+        signature_base64=signature_text,
+    )
+    material = _host_sender_fence_material(receipt)
+    if receipt.receipt_sha256 != _digest(material):
+        raise HostProviderAttestationError(
+            "Host sender-fence receipt digest conflicts with exact material"
+        )
+    _verify_p256_sha256_p1363(
+        spki=session.public_key_spki,
+        material=material,
+        signature=signature,
+    )
+    return VerifiedHostSenderFenceAttestation(
+        issuer_session=session,
+        receipt=receipt,
     )

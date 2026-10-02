@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.provider_host_attestation import (
     canonical_host_material,
     verify_host_observed_attestation,
     verify_host_prepared_attestation,
+    verify_host_sender_fence_attestation,
 )
 
 
@@ -204,6 +205,73 @@ def _fixture():
         "receipt_sha256": "sha256:" + sha256(receipt_material).hexdigest(),
         "signature_base64": _sign(receipt_material, nonce=3),
     }
+    journal_identity = "sha256:" + "4" * 64
+    prepared_committed = "2026-10-02T11:00:00.1500000Z"
+    prepared_receipt_identity = attestation._content_identity(
+        "provider-read-durable-prepared",
+        canonical_host_material(
+            attestation._PREPARED_DURABILITY_SCHEMA,
+            session_identity,
+            attempt_id,
+            attempt["binding_sha256"],
+            subject["query_digest"],
+            journal_identity,
+            attempt_id + ":prepared",
+            "1",
+            prepared_committed,
+        ),
+    )
+    durable_prepared = {
+        "schema": attestation._PREPARED_DURABILITY_SCHEMA,
+        "issuer_session_identity": session_identity,
+        "read_attempt_id": attempt_id,
+        "read_attempt_binding_sha256": attempt["binding_sha256"],
+        "query_digest": subject["query_digest"],
+        "journal_identity": journal_identity,
+        "prepared_event_id": attempt_id + ":prepared",
+        "journal_sequence": 1,
+        "committed_at_utc": prepared_committed,
+        "receipt_identity": prepared_receipt_identity,
+    }
+    observed_committed = "2026-10-02T11:00:00.2500000Z"
+    observed_receipt_identity = attestation._content_identity(
+        "provider-read-durable-observed",
+        canonical_host_material(
+            attestation._OBSERVED_DURABILITY_SCHEMA,
+            session_identity,
+            attempt_id,
+            attempt["binding_sha256"],
+            receipt["receipt_sha256"],
+            receipt["response_sha256"],
+            "200",
+            observed,
+            journal_identity,
+            prepared_receipt_identity,
+            attempt_id + ":prepared",
+            "1",
+            attempt_id + ":observed",
+            "2",
+            observed_committed,
+        ),
+    )
+    durable_observed = {
+        "schema": attestation._OBSERVED_DURABILITY_SCHEMA,
+        "issuer_session_identity": session_identity,
+        "read_attempt_id": attempt_id,
+        "read_attempt_binding_sha256": attempt["binding_sha256"],
+        "provider_receipt_sha256": receipt["receipt_sha256"],
+        "response_sha256": receipt["response_sha256"],
+        "http_status": 200,
+        "observed_at_utc": observed,
+        "journal_identity": journal_identity,
+        "prepared_receipt_identity": prepared_receipt_identity,
+        "prepared_event_id": attempt_id + ":prepared",
+        "prepared_journal_sequence": 1,
+        "observed_event_id": attempt_id + ":observed",
+        "observed_journal_sequence": 2,
+        "committed_at_utc": observed_committed,
+        "receipt_identity": observed_receipt_identity,
+    }
     observed_envelope = {
         "schema": attestation._OBSERVED_ENVELOPE_SCHEMA,
         "issuer_session": session,
@@ -211,6 +279,8 @@ def _fixture():
         "receipt": receipt,
         "query": dict(prepared_envelope["query"]),
         "response_base64": base64.b64encode(response).decode("ascii"),
+        "durable_prepared": durable_prepared,
+        "durable_observed": durable_observed,
     }
     return (
         prepared_envelope,
@@ -219,6 +289,97 @@ def _fixture():
         key_sha,
         response,
     )
+
+
+
+def _fence_fixture():
+    prepared, _observed, session_id, key_sha, _response = _fixture()
+    session = deepcopy(prepared["issuer_session"])
+    runtime = "PAPER"
+    account = "paper-account"
+    owner_scope = runtime + ":" + account
+    lease_scope_id = "hf-" + sha256(
+        (
+            attestation._HOST_LIFETIME_FENCE_DOMAIN
+            + "\0"
+            + "BYBIT"
+            + "\0"
+            + "TESTNET"
+            + "\0"
+            + runtime
+            + "\0"
+            + account
+        ).encode("utf-8")
+    ).hexdigest()
+    lease_acquired = "2026-10-02T11:00:00.3000000Z"
+    fenced_at = "2026-10-02T11:00:00.4000000Z"
+    receipt_fields = (
+        attestation._HOST_SENDER_FENCE_SCHEMA,
+        session_id,
+        attestation._HOST_SENDER_FENCE_METHOD,
+        lease_scope_id,
+        "sha256:" + "4" * 64,
+        lease_acquired,
+        owner_scope,
+        "BYBIT",
+        account,
+        runtime,
+        "TESTNET",
+        "credential-handle-7",
+        "7",
+        "sha256:" + "5" * 64,
+        "source-owner",
+        "1",
+        "restored-owner",
+        "2",
+        fenced_at,
+    )
+    material = canonical_host_material(*receipt_fields)
+    receipt = {
+        "schema": attestation._HOST_SENDER_FENCE_SCHEMA,
+        "issuer_session_identity": session_id,
+        "fence_method": attestation._HOST_SENDER_FENCE_METHOD,
+        "lease_scope_id": lease_scope_id,
+        "lease_owner_record_sha256": "sha256:" + "4" * 64,
+        "lease_acquired_at_utc": lease_acquired,
+        "owner_scope": owner_scope,
+        "provider_id": "BYBIT",
+        "account_id": account,
+        "runtime_environment": runtime,
+        "provider_environment": "TESTNET",
+        "credential_handle_id": "credential-handle-7",
+        "credential_generation": 7,
+        "backup_manifest_sha256": "sha256:" + "5" * 64,
+        "old_owner_id": "source-owner",
+        "old_owner_epoch": 1,
+        "new_owner_id": "restored-owner",
+        "new_owner_epoch": 2,
+        "fenced_at_utc": fenced_at,
+        "receipt_sha256": "sha256:" + sha256(material).hexdigest(),
+        "signature_base64": _sign(material, nonce=5),
+    }
+    envelope = {
+        "schema": attestation._HOST_SENDER_FENCE_ENVELOPE_SCHEMA,
+        "issuer_session": session,
+        "receipt": receipt,
+    }
+    expected = {
+        "expected_session_identity": session_id,
+        "expected_public_key_sha256": key_sha,
+        "expected_backup_manifest_sha256": receipt["backup_manifest_sha256"],
+        "expected_owner_scope": owner_scope,
+        "expected_provider_id": "BYBIT",
+        "expected_account_id": account,
+        "expected_runtime_environment": runtime,
+        "expected_provider_environment": "TESTNET",
+        "expected_credential_handle_id": "credential-handle-7",
+        "expected_credential_generation": 7,
+        "expected_old_owner_id": "source-owner",
+        "expected_old_owner_epoch": 1,
+        "expected_new_owner_id": "restored-owner",
+        "expected_new_owner_epoch": 2,
+    }
+    return envelope, expected
 
 
 class ProviderHostAttestationTests(unittest.TestCase):
@@ -233,6 +394,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256="sha256:" + "f" * 64,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_attempt_binding_tamper_fails_before_platform_crypto(self):
@@ -248,6 +410,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_noncanonical_or_extra_fields_are_rejected(self):
@@ -263,6 +426,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_serialized_query_cannot_replace_independently_pinned_query(self):
@@ -278,7 +442,59 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
+
+    def test_sender_fence_transition_must_match_independent_restore_context(self):
+        envelope, expected = _fence_fixture()
+        changed = deepcopy(envelope)
+        changed["receipt"]["provider_environment"] = "DEMO"
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "independently resolved transition",
+        ):
+            verify_host_sender_fence_attestation(changed, **expected)
+
+    def test_sender_fence_lease_scope_is_recomputed_from_account_runtime(self):
+        envelope, expected = _fence_fixture()
+        changed = deepcopy(envelope)
+        changed["receipt"]["lease_scope_id"] = "hf-" + "f" * 64
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "lease identity is inconsistent",
+        ):
+            verify_host_sender_fence_attestation(changed, **expected)
+
+    def test_sender_fence_requires_consecutive_owner_epoch(self):
+        envelope, expected = _fence_fixture()
+        changed = deepcopy(envelope)
+        changed["receipt"]["new_owner_epoch"] = 3
+        changed_expected = dict(expected)
+        changed_expected["expected_new_owner_epoch"] = 3
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "expected sender-fence owner transition is not consecutive",
+        ):
+            verify_host_sender_fence_attestation(changed, **changed_expected)
+
+    def test_sender_fence_self_describing_session_cannot_replace_pin(self):
+        envelope, expected = _fence_fixture()
+        changed_expected = dict(expected)
+        changed_expected["expected_public_key_sha256"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "independently pinned authority",
+        ):
+            verify_host_sender_fence_attestation(envelope, **changed_expected)
+
+    @unittest.skipIf(sys.platform == "win32", "non-Windows fail-closed contract")
+    def test_non_windows_sender_fence_never_grants_host_signature_authority(self):
+        envelope, expected = _fence_fixture()
+        with self.assertRaisesRegex(
+            HostProviderAttestationUnavailable,
+            "Windows CNG",
+        ):
+            verify_host_sender_fence_attestation(envelope, **expected)
 
     @unittest.skipIf(sys.platform == "win32", "non-Windows fail-closed contract")
     def test_non_windows_never_grants_host_signature_authority(self):
@@ -292,6 +508,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")
@@ -315,6 +532,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             expected_session_identity=session_id,
             expected_public_key_sha256=key_sha,
             expected_query=observed["query"],
+            expected_journal_identity=observed["durable_prepared"]["journal_identity"],
         )
         self.assertEqual(verified_observed.response_bytes, response)
         self.assertEqual(verified_observed.receipt.http_status, 200)
@@ -322,6 +540,39 @@ class ProviderHostAttestationTests(unittest.TestCase):
             verified_observed.receipt.read_attempt_binding_sha256,
             verified_observed.prepared.attempt.binding_sha256,
         )
+        self.assertEqual(
+            verified_observed.prepared_durability.journal_identity,
+            observed["durable_prepared"]["journal_identity"],
+        )
+        self.assertEqual(
+            verified_observed.observed_durability.prepared_receipt_identity,
+            verified_observed.prepared_durability.receipt_identity,
+        )
+
+        wrong_journal = "sha256:" + "5" * 64
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "durable Prepared receipt conflicts",
+        ):
+            verify_host_observed_attestation(
+                observed,
+                expected_session_identity=session_id,
+                expected_public_key_sha256=key_sha,
+                expected_query=observed["query"],
+                expected_journal_identity=wrong_journal,
+            )
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")
+    def test_windows_cng_verifies_same_host_sender_fence(self):
+        envelope, expected = _fence_fixture()
+        verified = verify_host_sender_fence_attestation(envelope, **expected)
+        self.assertEqual(
+            verified.receipt.fence_method,
+            "SAME_HOST_EXCLUSIVE_LEASE_HANDOFF",
+        )
+        self.assertEqual(verified.receipt.provider_environment, "TESTNET")
+        self.assertEqual(verified.receipt.credential_generation, 7)
+        self.assertEqual(verified.receipt.new_owner_epoch, 2)
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")
     def test_windows_cng_rejects_signed_response_byte_tamper(self):
@@ -339,6 +590,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
+                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
 

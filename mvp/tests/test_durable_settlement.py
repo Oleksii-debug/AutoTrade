@@ -35,7 +35,7 @@ from mvp.autotrade_mvp.settlement import (
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 
 PROVIDER = "PROVIDER-A"
@@ -891,6 +891,70 @@ class DurableSettlementBookTests(unittest.TestCase):
             self.assertEqual(reopened_economic.audit_digest(), before_economic)
             self.assertEqual(reopened_settlements.obligations, before_obligations)
 
+
+    def test_journal_store_subclass_is_rejected_before_restore_dispatch(self):
+        class ForgedJournalStore(JournalStore):
+            def load_events(self, *_args, **_kwargs):
+                raise AssertionError("subclass journal dispatch must not run")
+
+        with TemporaryDirectory() as directory:
+            forged = ForgedJournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableSettlementBook(
+                    forged,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_store=artifact_store_for(forged),
+                )
+
+    def test_post_construction_journal_shadow_fails_before_durable_mutation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            settlements = durable(store)
+            bound = obligation(store, sell_transaction())
+
+            store.commit_command = lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("instance-shadowed commit must not run")
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (TypeError, RuntimeError),
+                    "shadow|authority",
+                ):
+                    settlements.register_obligations(
+                        (bound,),
+                        command_id="shadowed-register",
+                        idempotency_key="shadowed-register",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+            finally:
+                del store.commit_command
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.load_events("settlement_book", settlements.scope_id),
+                [],
+            )
+
+    def test_settlement_evidence_subclass_is_rejected_before_virtual_fields(self):
+        class ForgedEvidence(SettlementEvidence):
+            def __getattribute__(self, name):
+                if name in {"obligation_id", "evidence_ref", "observed_at"}:
+                    raise AssertionError("evidence subclass fields must not be read")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlements = durable(store)
+            forged = object.__new__(ForgedEvidence)
+            with self.assertRaisesRegex(TypeError, "exact SettlementEvidence"):
+                settlements.prepare_settlement_mutation(
+                    forged,
+                    as_of=date(2026, 9, 26),
+                    committed_at="2026-09-26T12:00:00Z",
+                )
 
 if __name__ == "__main__":
     unittest.main()

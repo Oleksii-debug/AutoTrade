@@ -415,5 +415,54 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
             )
 
 
+    def test_post_construction_journal_method_shadow_fails_before_capability_write(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            registry = DurableCapabilityRegistry(store)
+            candidate = verified(
+                "99999999-9999-4999-8999-999999999999",
+                NOW,
+            )
+
+            store.append_event = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("instance-shadowed append must not run")
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (TypeError, RuntimeError),
+                    "shadow|authority",
+                ):
+                    registry.add(candidate)
+            finally:
+                del store.append_event
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.load_events_by_aggregate_type("capability_history"),
+                [],
+            )
+
+    def test_post_construction_store_swap_to_foreign_journal_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = JournalStore(root / "journal.sqlite3")
+            registry = DurableCapabilityRegistry(original)
+            registry.store = JournalStore(root / "foreign.sqlite3")
+
+            with self.assertRaisesRegex(
+                (RuntimeError, CapabilityError),
+                "authority|changed",
+            ):
+                registry.latest(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

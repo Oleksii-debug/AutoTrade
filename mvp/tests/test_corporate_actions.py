@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
@@ -1132,6 +1132,111 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.after.total_basis, Decimal("31"))
         with self.assertRaisesRegex(ValueError, "unit_basis"):
             _ = result.after.unit_basis
+
+
+    def test_text_and_temporal_subclasses_fail_before_virtual_dispatch(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("text subclass dispatch")
+
+        class HostileDatetime(datetime):
+            def astimezone(self, *args, **kwargs):
+                raise AssertionError("datetime subclass dispatch")
+
+        class HostileTzinfo(tzinfo):
+            def utcoffset(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+            def dst(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+            def tzname(self, dt):
+                raise AssertionError("tzinfo dispatch")
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            EquityState.create(
+                symbol=HostileText("AAA"),
+                quantity="1",
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact datetime"):
+            corporate_event(
+                event_id="datetime-subclass",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=HostileDatetime(
+                    2026, 1, 2, tzinfo=timezone.utc
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        hostile_tz = HostileTzinfo()
+        with self.assertRaisesRegex(ValueError, "fixed built-in timezone"):
+            corporate_event(
+                event_id="tzinfo-subclass",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=datetime(
+                    2026, 1, 2, tzinfo=hostile_tz
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "exact date"):
+            CorporateEvent.create(
+                event_id="date-subclass-through-datetime",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                kind="CASH_DIVIDEND",
+                effective_date=datetime(
+                    2026, 1, 2, tzinfo=timezone.utc
+                ),
+                effective_at=datetime(
+                    2026, 1, 2, tzinfo=timezone.utc
+                ),
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+    def test_corporate_event_subclass_is_rejected_before_semantic_reads(self):
+        class HostileEvent(CorporateEvent):
+            def __getattribute__(self, name):
+                if name in {
+                    "event_id",
+                    "effective_date",
+                    "source_sequence",
+                    "instrument_id",
+                }:
+                    raise AssertionError("event subclass dispatch")
+                return super().__getattribute__(name)
+
+        base = corporate_event(
+            event_id="base-event",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        hostile = object.__new__(HostileEvent)
+        for key, value in base.__dict__.items():
+            object.__setattr__(hostile, key, value)
+
+        with self.assertRaisesRegex(TypeError, "exact CorporateEvent"):
+            bound_book(state()).apply(hostile)
+
+        with self.assertRaisesRegex(TypeError, "events must contain"):
+            CorporateActionBook.replay(
+                state(),
+                instrument_version=instrument(),
+                registry=InstrumentRegistry(versions=(instrument(),)),
+                events=(hostile,),
+            )
+
 
 
 if __name__ == "__main__":

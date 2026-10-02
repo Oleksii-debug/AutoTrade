@@ -94,6 +94,28 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                 response,
                 new DateTimeOffset(
                     2026, 10, 2, 12, 0, 0, 300, TimeSpan.Zero));
+        ProviderAuthenticatedReadObservedDurabilityReceipt observedDurable = new(
+            issuer.Session.SessionIdentity,
+            attempt.ReadAttemptId,
+            attempt.BindingSha256,
+            receipt.ReceiptSha256,
+            receipt.ResponseSha256,
+            receipt.HttpStatus,
+            receipt.ObservedAtUtc,
+            durable.JournalIdentity,
+            durable.ReceiptIdentity,
+            durable.PreparedEventId,
+            durable.JournalSequence,
+            attempt.ReadAttemptId + ":observed",
+            2,
+            "2026-10-02T12:00:00.4000000Z");
+        ProviderAuthenticatedReadDurabilityVerifier.RequireObservedMatches(
+            prepared,
+            receipt,
+            durable,
+            observedDurable,
+            response);
+
         ProviderAuthenticatedReadReceipt tamperedReceipt = receipt with
         {
             HttpStatus = 201,
@@ -103,6 +125,7 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                 prepared,
                 tamperedReceipt,
                 durable,
+                observedDurable,
                 response),
             "authenticated-read evidence accepted a tampered signed receipt");
 
@@ -120,13 +143,39 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                 prepared,
                 receipt,
                 wrongDurable,
+                observedDurable,
                 response),
             "authenticated-read evidence accepted a mismatched durability receipt");
+
+        ProviderAuthenticatedReadObservedDurabilityReceipt wrongObserved = new(
+            issuer.Session.SessionIdentity,
+            attempt.ReadAttemptId,
+            attempt.BindingSha256,
+            receipt.ReceiptSha256,
+            receipt.ResponseSha256,
+            receipt.HttpStatus,
+            receipt.ObservedAtUtc,
+            "sha256:" + new string('5', 64),
+            durable.ReceiptIdentity,
+            durable.PreparedEventId,
+            durable.JournalSequence,
+            attempt.ReadAttemptId + ":observed",
+            2,
+            "2026-10-02T12:00:00.4000000Z");
+        ExpectFailure(
+            () => _ = new ProviderAuthenticatedReadEvidence(
+                prepared,
+                receipt,
+                durable,
+                wrongObserved,
+                response),
+            "authenticated-read evidence accepted an Observed receipt from a different journal");
 
         ProviderAuthenticatedReadEvidence observed = new(
             prepared,
             receipt,
             durable,
+            observedDurable,
             response);
 
         byte[] observedJson =
@@ -143,6 +192,8 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                     "receipt",
                     "query",
                     "response_base64",
+                    "durable_prepared",
+                    "durable_observed",
                 }),
             "Observed envelope shape drifted");
         Check(
@@ -161,6 +212,21 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                 .GetProperty("response_sha256")
                 .GetString() == receipt.ResponseSha256,
             "Observed envelope response digest drifted");
+        Check(
+            observedRoot.GetProperty("durable_prepared")
+                .GetProperty("receipt_identity")
+                .GetString() == durable.ReceiptIdentity,
+            "Observed envelope lost exact durable Prepared identity");
+        Check(
+            observedRoot.GetProperty("durable_observed")
+                .GetProperty("receipt_identity")
+                .GetString() == observedDurable.ReceiptIdentity,
+            "Observed envelope lost exact durable Observed identity");
+        Check(
+            observedRoot.GetProperty("durable_observed")
+                .GetProperty("journal_identity")
+                .GetString() == durable.JournalIdentity,
+            "Observed envelope durability journal identity drifted");
 
         string observedText = Encoding.UTF8.GetString(observedJson);
         Check(

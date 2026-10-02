@@ -9,7 +9,7 @@ internal static class ProviderAuthenticatedReadAttestationEnvelope
     internal const string PreparedSchema =
         "autotrade-host-authenticated-read-prepared:v1";
     internal const string ObservedSchema =
-        "autotrade-host-authenticated-read-observed:v1";
+        "autotrade-host-authenticated-read-observed:v2";
 
     internal static byte[] SerializePrepared(
         ProviderAuthenticatedReadPreparedEvidence evidence)
@@ -64,6 +64,10 @@ internal static class ProviderAuthenticatedReadAttestationEnvelope
             writer.WritePropertyName("query");
             WriteQuery(writer, evidence.PreparedEvidence.Query);
             writer.WriteBase64String("response_base64", response);
+            writer.WritePropertyName("durable_prepared");
+            WritePreparedDurability(writer, evidence.DurabilityReceipt);
+            writer.WritePropertyName("durable_observed");
+            WriteObservedDurability(writer, evidence.ObservedDurabilityReceipt);
             writer.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -162,6 +166,64 @@ internal static class ProviderAuthenticatedReadAttestationEnvelope
         writer.WriteString("observed_at_utc", receipt.ObservedAtUtc);
         writer.WriteString("receipt_sha256", receipt.ReceiptSha256);
         writer.WriteString("signature_base64", receipt.SignatureBase64);
+        writer.WriteEndObject();
+    }
+
+    private static void WritePreparedDurability(
+        Utf8JsonWriter writer,
+        ProviderAuthenticatedReadDurabilityReceipt receipt)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("schema", receipt.Schema);
+        writer.WriteString(
+            "issuer_session_identity",
+            receipt.IssuerSessionIdentity);
+        writer.WriteString("read_attempt_id", receipt.ReadAttemptId);
+        writer.WriteString(
+            "read_attempt_binding_sha256",
+            receipt.ReadAttemptBindingSha256);
+        writer.WriteString("query_digest", receipt.QueryDigest);
+        writer.WriteString("journal_identity", receipt.JournalIdentity);
+        writer.WriteString("prepared_event_id", receipt.PreparedEventId);
+        writer.WriteNumber("journal_sequence", receipt.JournalSequence);
+        writer.WriteString("committed_at_utc", receipt.CommittedAtUtc);
+        writer.WriteString("receipt_identity", receipt.ReceiptIdentity);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteObservedDurability(
+        Utf8JsonWriter writer,
+        ProviderAuthenticatedReadObservedDurabilityReceipt receipt)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("schema", receipt.Schema);
+        writer.WriteString(
+            "issuer_session_identity",
+            receipt.IssuerSessionIdentity);
+        writer.WriteString("read_attempt_id", receipt.ReadAttemptId);
+        writer.WriteString(
+            "read_attempt_binding_sha256",
+            receipt.ReadAttemptBindingSha256);
+        writer.WriteString(
+            "provider_receipt_sha256",
+            receipt.ProviderReceiptSha256);
+        writer.WriteString("response_sha256", receipt.ResponseSha256);
+        writer.WriteNumber("http_status", receipt.HttpStatus);
+        writer.WriteString("observed_at_utc", receipt.ObservedAtUtc);
+        writer.WriteString("journal_identity", receipt.JournalIdentity);
+        writer.WriteString(
+            "prepared_receipt_identity",
+            receipt.PreparedReceiptIdentity);
+        writer.WriteString("prepared_event_id", receipt.PreparedEventId);
+        writer.WriteNumber(
+            "prepared_journal_sequence",
+            receipt.PreparedJournalSequence);
+        writer.WriteString("observed_event_id", receipt.ObservedEventId);
+        writer.WriteNumber(
+            "observed_journal_sequence",
+            receipt.ObservedJournalSequence);
+        writer.WriteString("committed_at_utc", receipt.CommittedAtUtc);
+        writer.WriteString("receipt_identity", receipt.ReceiptIdentity);
         writer.WriteEndObject();
     }
 

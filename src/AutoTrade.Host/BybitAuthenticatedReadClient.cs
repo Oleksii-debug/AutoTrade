@@ -20,11 +20,13 @@ internal sealed class ProviderAuthenticatedReadEvidence
         ProviderAuthenticatedReadPreparedEvidence preparedEvidence,
         ProviderAuthenticatedReadReceipt receipt,
         ProviderAuthenticatedReadDurabilityReceipt durabilityReceipt,
+        ProviderAuthenticatedReadObservedDurabilityReceipt observedDurabilityReceipt,
         byte[] responseBytes)
     {
         ArgumentNullException.ThrowIfNull(preparedEvidence);
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(durabilityReceipt);
+        ArgumentNullException.ThrowIfNull(observedDurabilityReceipt);
         ArgumentNullException.ThrowIfNull(responseBytes);
         if (responseBytes.Length == 0)
         {
@@ -39,15 +41,19 @@ internal sealed class ProviderAuthenticatedReadEvidence
             responseBytes,
             preparedEvidence.IssuerSession.SessionIdentity,
             preparedEvidence.IssuerSession.PublicKeySha256);
-        ProviderAuthenticatedReadDurabilityVerifier.RequireMatches(
+        ProviderAuthenticatedReadDurabilityVerifier.RequireObservedMatches(
             preparedEvidence,
-            durabilityReceipt);
+            receipt,
+            durabilityReceipt,
+            observedDurabilityReceipt,
+            responseBytes);
 
         PreparedEvidence = preparedEvidence;
         IssuerSession = preparedEvidence.IssuerSession;
         Attempt = preparedEvidence.Attempt;
         Receipt = receipt;
         DurabilityReceipt = durabilityReceipt;
+        ObservedDurabilityReceipt = observedDurabilityReceipt;
         _responseBytes = responseBytes.ToArray();
     }
 
@@ -56,6 +62,7 @@ internal sealed class ProviderAuthenticatedReadEvidence
     internal ProviderAuthenticatedReadAttemptBinding Attempt { get; }
     internal ProviderAuthenticatedReadReceipt Receipt { get; }
     internal ProviderAuthenticatedReadDurabilityReceipt DurabilityReceipt { get; }
+    internal ProviderAuthenticatedReadObservedDurabilityReceipt ObservedDurabilityReceipt { get; }
     internal ReadOnlyMemory<byte> ResponseBytes => _responseBytes;
     internal byte[] CopyResponseBytes() => _responseBytes.ToArray();
 }
@@ -258,10 +265,28 @@ internal sealed class BybitAuthenticatedReadClient
                 _issuer.Session.SessionIdentity,
                 _issuer.Session.PublicKeySha256);
 
+            // A definitive wire response is not allowed to escape as provider
+            // evidence until the exact signed Observed cut is durably committed.
+            // If this barrier fails, the historical response remains unpromoted;
+            // callers must recover it from durable state rather than re-query.
+            ProviderAuthenticatedReadObservedDurabilityReceipt observedDurabilityReceipt =
+                _durability.CommitObserved(
+                    preparedEvidence,
+                    receipt,
+                    durabilityReceipt,
+                    responseBytes);
+            ProviderAuthenticatedReadDurabilityVerifier.RequireObservedMatches(
+                preparedEvidence,
+                receipt,
+                durabilityReceipt,
+                observedDurabilityReceipt,
+                responseBytes);
+
             return new ProviderAuthenticatedReadEvidence(
                 preparedEvidence,
                 receipt,
                 durabilityReceipt,
+                observedDurabilityReceipt,
                 responseBytes);
         }
         catch

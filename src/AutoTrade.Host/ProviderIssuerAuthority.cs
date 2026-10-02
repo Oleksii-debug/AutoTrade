@@ -107,6 +107,41 @@ public sealed record ProviderAuthenticatedReadReceipt(
     string ReceiptSha256,
     string SignatureBase64);
 
+public sealed record HostSenderFenceChallenge(
+    string BackupManifestSha256,
+    string OwnerScope,
+    string ProviderId,
+    string ProviderEnvironment,
+    string CredentialHandleId,
+    long CredentialGeneration,
+    string OldOwnerId,
+    long OldOwnerEpoch,
+    string NewOwnerId,
+    long NewOwnerEpoch);
+
+public sealed record HostSenderFenceReceipt(
+    string Schema,
+    string IssuerSessionIdentity,
+    string FenceMethod,
+    string LeaseScopeId,
+    string LeaseOwnerRecordSha256,
+    string LeaseAcquiredAtUtc,
+    string OwnerScope,
+    string ProviderId,
+    string AccountId,
+    string RuntimeEnvironment,
+    string ProviderEnvironment,
+    string CredentialHandleId,
+    long CredentialGeneration,
+    string BackupManifestSha256,
+    string OldOwnerId,
+    long OldOwnerEpoch,
+    string NewOwnerId,
+    long NewOwnerEpoch,
+    string FencedAtUtc,
+    string ReceiptSha256,
+    string SignatureBase64);
+
 /// <summary>
 /// Process-bound evidence issuer for authenticated provider sessions.
 /// It deliberately does not open sockets, resolve credentials, decide risk, or grant
@@ -121,6 +156,8 @@ internal sealed class ProviderIssuerAuthority : IDisposable
     internal const string FrameSchema = "autotrade-provider-private-frame-receipt:v1";
     internal const string ReadAttemptSchema = "autotrade-provider-authenticated-read-attempt:v1";
     internal const string ReadReceiptSchema = "autotrade-provider-authenticated-read-receipt:v1";
+    internal const string HostSenderFenceSchema = "autotrade-host-sender-fence:v1";
+    internal const string HostSenderFenceMethod = "SAME_HOST_EXCLUSIVE_LEASE_HANDOFF";
     private static readonly HashSet<string> FinancialRuntimes =
         new(StringComparer.Ordinal) { "PAPER", "LIVE" };
 
@@ -425,6 +462,73 @@ internal sealed class ProviderIssuerAuthority : IDisposable
         }
     }
 
+    public HostSenderFenceReceipt IssueHostSenderFence(
+        HostLifetimeExclusiveLease lease,
+        HostSenderFenceChallenge challenge,
+        DateTimeOffset fencedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(challenge);
+        lease.RequireHeld();
+        RequireHostSenderFenceChallenge(lease, challenge);
+        string fencedAt = CanonicalUtc(fencedAtUtc, nameof(fencedAtUtc));
+        RequireCanonicalUtcText(lease.AcquiredAtUtc, nameof(lease.AcquiredAtUtc));
+        if (string.CompareOrdinal(fencedAt, lease.AcquiredAtUtc) < 0)
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence receipt cannot predate exclusive lease acquisition");
+        }
+
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            lease.RequireHeld();
+            byte[] material = HostSenderFenceMaterial(
+                Session.SessionIdentity,
+                HostSenderFenceMethod,
+                lease.ScopeId,
+                lease.OwnerRecordSha256,
+                lease.AcquiredAtUtc,
+                challenge.OwnerScope,
+                challenge.ProviderId,
+                lease.Options.AccountId,
+                lease.Options.Environment,
+                challenge.ProviderEnvironment,
+                challenge.CredentialHandleId,
+                challenge.CredentialGeneration,
+                challenge.BackupManifestSha256,
+                challenge.OldOwnerId,
+                challenge.OldOwnerEpoch,
+                challenge.NewOwnerId,
+                challenge.NewOwnerEpoch,
+                fencedAt);
+            string receiptSha256 = Sha256(material);
+            string signature = Sign(material);
+            return new HostSenderFenceReceipt(
+                HostSenderFenceSchema,
+                Session.SessionIdentity,
+                HostSenderFenceMethod,
+                lease.ScopeId,
+                lease.OwnerRecordSha256,
+                lease.AcquiredAtUtc,
+                challenge.OwnerScope,
+                challenge.ProviderId,
+                lease.Options.AccountId,
+                lease.Options.Environment,
+                challenge.ProviderEnvironment,
+                challenge.CredentialHandleId,
+                challenge.CredentialGeneration,
+                challenge.BackupManifestSha256,
+                challenge.OldOwnerId,
+                challenge.OldOwnerEpoch,
+                challenge.NewOwnerId,
+                challenge.NewOwnerEpoch,
+                fencedAt,
+                receiptSha256,
+                signature);
+        }
+    }
+
     public void Dispose()
     {
         lock (_gate)
@@ -605,6 +709,151 @@ internal sealed class ProviderIssuerAuthority : IDisposable
             responseSha256,
             responseLength.ToString(CultureInfo.InvariantCulture),
             observedAtUtc);
+    }
+
+    private static void RequireHostSenderFenceChallenge(
+        HostLifetimeExclusiveLease lease,
+        HostSenderFenceChallenge challenge)
+    {
+        lease.RequireHeld();
+        RequireSha256(
+            challenge.BackupManifestSha256,
+            nameof(challenge.BackupManifestSha256));
+        ExactText(challenge.OwnerScope, nameof(challenge.OwnerScope));
+        ExactText(challenge.ProviderId, nameof(challenge.ProviderId));
+        ExactText(
+            challenge.ProviderEnvironment,
+            nameof(challenge.ProviderEnvironment));
+        ExactText(
+            challenge.CredentialHandleId,
+            nameof(challenge.CredentialHandleId));
+        ExactText(challenge.OldOwnerId, nameof(challenge.OldOwnerId));
+        ExactText(challenge.NewOwnerId, nameof(challenge.NewOwnerId));
+
+        if (!string.Equals(
+                challenge.ProviderId,
+                challenge.ProviderId.ToUpperInvariant(),
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                challenge.ProviderEnvironment,
+                challenge.ProviderEnvironment.ToUpperInvariant(),
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence provider domain must be canonical uppercase");
+        }
+        if (!FinancialRuntimes.Contains(lease.Options.Environment))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence is restricted to PAPER/LIVE runtime environments");
+        }
+        if (challenge.CredentialGeneration <= 0)
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence credential generation must be positive");
+        }
+        if (challenge.OldOwnerEpoch <= 0 ||
+            challenge.NewOwnerEpoch != checked(challenge.OldOwnerEpoch + 1))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence owner epochs must describe one exact successor transition");
+        }
+        if (string.Equals(
+                challenge.OldOwnerId,
+                challenge.NewOwnerId,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence transition must change owner identity");
+        }
+
+        string expectedOwnerScope =
+            lease.Options.Environment + ":" + lease.Options.AccountId;
+        if (!string.Equals(
+                challenge.ProviderId,
+                lease.Options.Provider,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                challenge.ProviderEnvironment,
+                lease.Options.ProviderEnvironment,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence provider domain does not match the held Host lease");
+        }
+        if (!string.Equals(
+                challenge.OwnerScope,
+                expectedOwnerScope,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence owner scope does not match the held Host lease");
+        }
+        if (!string.Equals(
+                challenge.NewOwnerId,
+                lease.Options.HostId,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence new owner is not the Host holding the lease");
+        }
+        if (!string.Equals(
+                lease.ScopeId,
+                HostLifetimeExclusiveLease.ScopeIdFor(
+                    lease.Options.Provider,
+                    lease.Options.ProviderEnvironment,
+                    lease.Options.Environment,
+                    lease.Options.AccountId),
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "sender fence lease scope identity is inconsistent");
+        }
+        RequireSha256(
+            lease.OwnerRecordSha256,
+            nameof(lease.OwnerRecordSha256));
+    }
+
+    internal static byte[] HostSenderFenceMaterial(
+        string issuerSessionIdentity,
+        string fenceMethod,
+        string leaseScopeId,
+        string leaseOwnerRecordSha256,
+        string leaseAcquiredAtUtc,
+        string ownerScope,
+        string providerId,
+        string accountId,
+        string runtimeEnvironment,
+        string providerEnvironment,
+        string credentialHandleId,
+        long credentialGeneration,
+        string backupManifestSha256,
+        string oldOwnerId,
+        long oldOwnerEpoch,
+        string newOwnerId,
+        long newOwnerEpoch,
+        string fencedAtUtc)
+    {
+        return CanonicalMaterial(
+            HostSenderFenceSchema,
+            issuerSessionIdentity,
+            fenceMethod,
+            leaseScopeId,
+            leaseOwnerRecordSha256,
+            leaseAcquiredAtUtc,
+            ownerScope,
+            providerId,
+            accountId,
+            runtimeEnvironment,
+            providerEnvironment,
+            credentialHandleId,
+            credentialGeneration.ToString(CultureInfo.InvariantCulture),
+            backupManifestSha256,
+            oldOwnerId,
+            oldOwnerEpoch.ToString(CultureInfo.InvariantCulture),
+            newOwnerId,
+            newOwnerEpoch.ToString(CultureInfo.InvariantCulture),
+            fencedAtUtc);
     }
 
     private static string ConnectionScope(ProviderConnectionSubject subject)
@@ -831,6 +1080,163 @@ internal static class ProviderIssuerVerifier
             throw new ProviderIssuerAuthorityException(
                 "provider issuer session does not match the pinned Host authority");
         }
+    }
+
+    public static void RequireValidHostSenderFenceReceipt(
+        ProviderIssuerSession session,
+        HostSenderFenceReceipt receipt,
+        string expectedSessionIdentity,
+        string expectedPublicKeySha256)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(receipt);
+        RequirePinnedSession(
+            session,
+            expectedSessionIdentity,
+            expectedPublicKeySha256);
+
+        if (!string.Equals(
+                receipt.Schema,
+                ProviderIssuerAuthority.HostSenderFenceSchema,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                receipt.IssuerSessionIdentity,
+                session.SessionIdentity,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                receipt.FenceMethod,
+                ProviderIssuerAuthority.HostSenderFenceMethod,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence schema/issuer/method is invalid");
+        }
+
+        ProviderIssuerAuthority.ExactText(
+            receipt.LeaseScopeId,
+            nameof(receipt.LeaseScopeId));
+        ProviderIssuerAuthority.RequireSha256(
+            receipt.LeaseOwnerRecordSha256,
+            nameof(receipt.LeaseOwnerRecordSha256));
+        ProviderIssuerAuthority.RequireCanonicalUtcText(
+            receipt.LeaseAcquiredAtUtc,
+            nameof(receipt.LeaseAcquiredAtUtc));
+        ProviderIssuerAuthority.ExactText(
+            receipt.OwnerScope,
+            nameof(receipt.OwnerScope));
+        ProviderIssuerAuthority.ExactText(
+            receipt.ProviderId,
+            nameof(receipt.ProviderId));
+        ProviderIssuerAuthority.ExactText(
+            receipt.AccountId,
+            nameof(receipt.AccountId));
+        ProviderIssuerAuthority.ExactText(
+            receipt.RuntimeEnvironment,
+            nameof(receipt.RuntimeEnvironment));
+        ProviderIssuerAuthority.ExactText(
+            receipt.ProviderEnvironment,
+            nameof(receipt.ProviderEnvironment));
+        ProviderIssuerAuthority.ExactText(
+            receipt.CredentialHandleId,
+            nameof(receipt.CredentialHandleId));
+        ProviderIssuerAuthority.RequireSha256(
+            receipt.BackupManifestSha256,
+            nameof(receipt.BackupManifestSha256));
+        ProviderIssuerAuthority.ExactText(
+            receipt.OldOwnerId,
+            nameof(receipt.OldOwnerId));
+        ProviderIssuerAuthority.ExactText(
+            receipt.NewOwnerId,
+            nameof(receipt.NewOwnerId));
+        ProviderIssuerAuthority.RequireCanonicalUtcText(
+            receipt.FencedAtUtc,
+            nameof(receipt.FencedAtUtc));
+        ProviderIssuerAuthority.RequireSha256(
+            receipt.ReceiptSha256,
+            nameof(receipt.ReceiptSha256));
+
+        if (receipt.CredentialGeneration <= 0 ||
+            receipt.OldOwnerEpoch <= 0 ||
+            receipt.NewOwnerEpoch != checked(receipt.OldOwnerEpoch + 1) ||
+            string.Equals(
+                receipt.OldOwnerId,
+                receipt.NewOwnerId,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence transition metadata is invalid");
+        }
+        if (receipt.RuntimeEnvironment is not ("PAPER" or "LIVE") ||
+            !string.Equals(
+                receipt.ProviderId,
+                receipt.ProviderId.ToUpperInvariant(),
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                receipt.ProviderEnvironment,
+                receipt.ProviderEnvironment.ToUpperInvariant(),
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence financial scope is invalid");
+        }
+        string expectedScope =
+            HostLifetimeExclusiveLease.ScopeIdFor(
+                receipt.ProviderId,
+                receipt.ProviderEnvironment,
+                receipt.RuntimeEnvironment,
+                receipt.AccountId);
+        if (!string.Equals(
+                receipt.LeaseScopeId,
+                expectedScope,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                receipt.OwnerScope,
+                receipt.RuntimeEnvironment + ":" + receipt.AccountId,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence lease/owner scope is inconsistent");
+        }
+        if (string.CompareOrdinal(
+                receipt.FencedAtUtc,
+                receipt.LeaseAcquiredAtUtc) < 0)
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence receipt predates exclusive lease acquisition");
+        }
+
+        byte[] material = ProviderIssuerAuthority.HostSenderFenceMaterial(
+            receipt.IssuerSessionIdentity,
+            receipt.FenceMethod,
+            receipt.LeaseScopeId,
+            receipt.LeaseOwnerRecordSha256,
+            receipt.LeaseAcquiredAtUtc,
+            receipt.OwnerScope,
+            receipt.ProviderId,
+            receipt.AccountId,
+            receipt.RuntimeEnvironment,
+            receipt.ProviderEnvironment,
+            receipt.CredentialHandleId,
+            receipt.CredentialGeneration,
+            receipt.BackupManifestSha256,
+            receipt.OldOwnerId,
+            receipt.OldOwnerEpoch,
+            receipt.NewOwnerId,
+            receipt.NewOwnerEpoch,
+            receipt.FencedAtUtc);
+        if (!string.Equals(
+                ProviderIssuerAuthority.Sha256(material),
+                receipt.ReceiptSha256,
+                StringComparison.Ordinal))
+        {
+            throw new ProviderIssuerAuthorityException(
+                "Host sender fence receipt digest does not match exact material");
+        }
+        RequireSignature(
+            session,
+            material,
+            receipt.SignatureBase64,
+            "Host sender fence receipt");
     }
 
     public static void RequireValidConnectionBinding(

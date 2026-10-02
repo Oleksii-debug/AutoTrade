@@ -611,7 +611,10 @@ class BackupRestoreTests(unittest.TestCase):
         (state / "checkpoint.json").unlink()
         (state / "learning-evidence.jsonl").unlink()
         source_store = JournalStore(state / "journal.sqlite3")
-        source = RecoveryController(owner_store=source_store)
+        source = RecoveryController(
+            owner_store=source_store,
+            owner_scope="PAPER:paper-account",
+        )
         source.start("source-owner")
         backup = create_backup(state, artifacts, root / "backup")
         restored = restore_backup(backup, root / "restored")
@@ -621,7 +624,10 @@ class BackupRestoreTests(unittest.TestCase):
             )
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
-        controller = RecoveryController(owner_store=restored_store)
+        controller = RecoveryController(
+            owner_store=restored_store,
+            owner_scope="PAPER:paper-account",
+        )
         controller.takeover_durable_owner("restored-owner")
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
@@ -707,7 +713,10 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             restored, _, marker, _checkpoint_id = self._restored_with_owner(root)
             other_store = JournalStore(root / "other" / "journal.sqlite3")
-            other = RecoveryController(owner_store=other_store)
+            other = RecoveryController(
+                owner_store=other_store,
+                owner_scope="PAPER:paper-account",
+            )
             other.start("other-owner")
             other_checkpoint_id = self._record_durable_ready(
                 other, other_store, reconciliation_id="other-readiness"

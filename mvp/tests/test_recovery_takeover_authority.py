@@ -2,85 +2,63 @@ import unittest
 from tempfile import TemporaryDirectory
 
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery import RecoveryController
 from mvp.autotrade_mvp.sender_gate import journal_sender_gate
 
 
 class RecoveryTakeoverAuthorityTests(unittest.TestCase):
-    def test_product_durable_takeover_advances_epoch_without_caller_booleans(self):
+    @staticmethod
+    def _restart_pair(directory: str):
+        path = f"{directory}/journal.sqlite3"
+        first = RecoveryController(
+            owner_store=JournalStore(path),
+            owner_scope="PAPER:acct",
+        )
+        first.start("owner-a")
+        restarted = RecoveryController(
+            owner_store=JournalStore(path),
+            owner_scope="PAPER:acct",
+        )
+        return path, first, restarted
+
+    def test_durable_takeover_without_independent_authority_is_rejected(self):
         with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            first = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-            first.start("owner-a")
-
-            restarted = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-            owner = restarted.takeover_durable_owner("owner-b")
-
-            self.assertEqual(owner.owner_id, "owner-b")
-            self.assertEqual(owner.epoch, 2)
-            self.assertEqual(restarted.state, HostState.RECOVERING)
-            self.assertFalse(restarted.provider_reconciled)
-            self.assertIn(
-                "startup_reconciliation_required",
-                restarted.reason_codes,
-            )
-            self.assertEqual(
-                [(item.owner_id, item.epoch) for item in restarted.durable_owner_chain()],
-                [("owner-a", 1), ("owner-b", 2)],
-            )
-
-    def test_stale_process_fails_sender_validation_after_durable_takeover(self):
-        with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            first = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-            old = first.start("owner-a")
-
-            restarted = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-            restarted.takeover_durable_owner("owner-b")
-
+            _path, _first, restarted = self._restart_pair(directory)
             with self.assertRaisesRegex(
                 PermissionError,
-                "Durable sender fence no longer belongs",
+                "independently issued external fence authority",
             ):
-                first.validate_sender(old.owner_id, old.epoch)
-
-    def test_takeover_cannot_reenter_sender_gate(self):
-        with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            store = JournalStore(path)
-            first = RecoveryController(
-                owner_store=store,
-                owner_scope="PAPER:acct",
-            )
-            first.start("owner-a")
-            restarted = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-
-            with journal_sender_gate(store):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "sender gate re-entry",
-                ):
-                    restarted.takeover_durable_owner("owner-b")
-
+                restarted.takeover_durable_owner("owner-b")
+            self.assertIsNone(restarted.owner)
             self.assertEqual(
                 [(item.owner_id, item.epoch) for item in restarted.durable_owner_chain()],
                 [("owner-a", 1)],
             )
+
+    def test_same_journal_sender_gate_is_mechanism_not_takeover_authority(self):
+        with TemporaryDirectory() as directory:
+            path, _first, restarted = self._restart_pair(directory)
+            with journal_sender_gate(JournalStore(path)):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "independently issued external fence authority",
+                ):
+                    restarted.takeover_durable_owner("owner-b")
+            self.assertIsNone(restarted.owner)
+            self.assertEqual(
+                [(item.owner_id, item.epoch) for item in restarted.durable_owner_chain()],
+                [("owner-a", 1)],
+            )
+
+    def test_denied_takeover_preserves_durable_owner_generation(self):
+        with TemporaryDirectory() as directory:
+            _path, first, restarted = self._restart_pair(directory)
+            current = first.owner
+            self.assertIsNotNone(current)
+            with self.assertRaises(PermissionError):
+                restarted.takeover_durable_owner("owner-b")
+            self.assertEqual(restarted.durable_owner_chain(), (current,))
+            self.assertIsNone(restarted.owner)
 
     def test_takeover_requires_existing_durable_owner(self):
         with TemporaryDirectory() as directory:
@@ -118,28 +96,15 @@ class RecoveryTakeoverAuthorityTests(unittest.TestCase):
 
     def test_restart_cannot_mint_next_durable_owner_epoch(self):
         with TemporaryDirectory() as directory:
-            path = f"{directory}/journal.sqlite3"
-            first = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
-            owner = first.start("owner-a")
-            self.assertEqual(owner.epoch, 1)
-
-            restarted = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:acct",
-            )
+            _path, _first, restarted = self._restart_pair(directory)
             with self.assertRaisesRegex(
                 PermissionError,
                 "independently authorized takeover",
             ):
                 restarted.start("owner-b")
-
             self.assertIsNone(restarted.owner)
-            chain = restarted.durable_owner_chain()
             self.assertEqual(
-                [(item.owner_id, item.epoch) for item in chain],
+                [(item.owner_id, item.epoch) for item in restarted.durable_owner_chain()],
                 [("owner-a", 1)],
             )
 
@@ -151,10 +116,6 @@ class RecoveryTakeoverAuthorityTests(unittest.TestCase):
                 owner_scope="LIVE:acct",
             )
             controller.start("owner-a")
-
-            # Even maximally favorable caller booleans cannot stand in for the
-            # independent old-sender/process/session/credential fence and
-            # accepted reconciliation authority required by the durable path.
             controller.provider_reconciled = True
             with self.assertRaisesRegex(
                 PermissionError,
@@ -165,12 +126,10 @@ class RecoveryTakeoverAuthorityTests(unittest.TestCase):
                     old_sender_fenced=True,
                     reconciled=True,
                 )
-
             self.assertEqual(controller.owner.owner_id, "owner-a")
             self.assertEqual(controller.owner.epoch, 1)
-            chain = controller.durable_owner_chain()
             self.assertEqual(
-                [(item.owner_id, item.epoch) for item in chain],
+                [(item.owner_id, item.epoch) for item in controller.durable_owner_chain()],
                 [("owner-a", 1)],
             )
 

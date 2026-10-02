@@ -1124,31 +1124,29 @@ class DispatchTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+    def test_takeover_during_provider_wait_cannot_cross_sender_gate(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
                 owner_store=store,
-                owner_scope="PAPER:acct",
+                owner_scope="SIMULATION:acct",
             )
             owner = recovery.start("host-a")
             self.durable_ready(recovery, store, reconciliation_id="dispatch-ready")
-            dispatcher = GuardedDispatcher(
+            dispatcher = recovery.build_guarded_dispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="acct",
-                owner_token=owner.owner_id,
-                owner_epoch=owner.epoch,
             )
             outbound = 0
+            takeover = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
 
             def transport(_client_id, _request, final_guard):
                 nonlocal outbound
-                recovery.transfer_owner(
-                    new_owner_id="host-b",
-                    old_sender_fenced=True,
-                    reconciled=True,
-                )
+                takeover.takeover_durable_owner("host-b")
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
@@ -1160,15 +1158,18 @@ class DispatchTests(unittest.TestCase):
                 provider="sim",
                 request={},
                 now="2026-09-24T18:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=recovery.validate_sender,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(result.reason, "transport_failed_before_send")
             self.assertEqual(outbound, 0)
+            self.assertEqual(
+                [(item.owner_id, item.epoch) for item in recovery.durable_owner_chain()],
+                [(owner.owner_id, owner.epoch)],
+            )
+            self.assertIsNone(takeover.owner)
+            recovery.validate_sender(owner.owner_id, owner.epoch)
 
     def test_paper_send_succeeds_only_with_current_durable_sender(self):
         with TemporaryDirectory() as directory:

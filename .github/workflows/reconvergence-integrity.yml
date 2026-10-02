@@ -32,9 +32,8 @@ jobs:
           set -euo pipefail
           live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
           test -n "$live_line"
-          live_sha="${live_line%%      - name: Run trusted guard regression tests
-        run: python -m unittest tests.Control.test_reconvergence_integrity -v
-\t'*}"
+          read -r live_sha _ <<< "$live_line"
+          test -n "$live_sha"
           test "$live_sha" = "$BASE_SHA"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'

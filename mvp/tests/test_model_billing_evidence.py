@@ -76,6 +76,7 @@ def body(
     provider="provider-a",
 ):
     observed = terminal_state == "OBSERVED"
+    remote_source = source_class == REMOTE_PROVIDER_BILLING_SOURCE
     return {
         "schema_version": MODEL_BILLING_SCHEMA_VERSION,
         "evidence_type": MODEL_BILLING_EVIDENCE_TYPE,

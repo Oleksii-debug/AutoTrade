@@ -208,7 +208,10 @@ def expiration_pnl_after_premium(
     if premium < 0:
         raise OptionError("premium_per_unit cannot be negative")
     intrinsic = intrinsic_value_per_unit(contract, underlying_price)
-    return exact_multiply(\n        exact_multiply(contracts, contract.multiplier),\n        exact_subtract(intrinsic, premium),\n    )
+    return exact_multiply(
+        exact_multiply(contracts, contract.multiplier),
+        exact_subtract(intrinsic, premium),
+    )
 
 
 def physical_exercise_obligation(
@@ -236,7 +239,10 @@ def physical_exercise_obligation(
     )
     if contract.exercise_cash_per_contract is None:
         raise OptionError("physical exercise cash is not evidenced")
-    cash = exact_subtract(\n        Decimal("0"),\n        exact_multiply(direction, contract.exercise_cash_per_contract),\n    )
+    cash = exact_subtract(
+        Decimal("0"),
+        exact_multiply(direction, contract.exercise_cash_per_contract),
+    )
     return ExerciseObligation(
         asset_quantities=assets,
         settlement_cash=cash,
@@ -327,7 +333,11 @@ def book_cash_option_settlement(
         cause_event_id=_text(cause_event_id, "cause_event_id"),
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(\n                f"OPTION_SETTLEMENT_PNL:{currency}",\n                currency,\n                exact_subtract(Decimal("0"), value),\n            ),
+            posting(
+                f"OPTION_SETTLEMENT_PNL:{currency}",
+                currency,
+                exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)
@@ -345,7 +355,11 @@ def book_physical_option_settlement(
         postings.extend(
             (
                 posting(f"POSITION:{asset_id}", asset_id, quantity),
-                posting(\n                    f"OPTION_DELIVERY_CLEARING:{asset_id}",\n                    asset_id,\n                    exact_subtract(Decimal("0"), quantity),\n                ),
+                posting(
+                    f"OPTION_DELIVERY_CLEARING:{asset_id}",
+                    asset_id,
+                    exact_subtract(Decimal("0"), quantity),
+                ),
             )
         )
     if obligation.settlement_cash != 0:

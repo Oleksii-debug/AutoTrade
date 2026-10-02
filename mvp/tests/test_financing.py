@@ -264,11 +264,11 @@ class FinancingTests(unittest.TestCase):
                 economic_delta=corrected.economic_delta,
             )
         self.assertEqual(
-            transaction.postings[0].amount,
+            transaction.postings[0].signed_amount,
             Decimal("1.000000001"),
         )
         self.assertEqual(
-            transaction.postings[1].amount,
+            transaction.postings[1].signed_amount,
             Decimal("-1.000000001"),
         )
 

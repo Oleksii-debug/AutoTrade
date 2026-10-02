@@ -1315,7 +1315,7 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
             trade_date=date(2026, 9, 24),
             settlement_date=date(2026, 9, 25),
         )
-        expected_capital = book.capital_availability(
+        expected_capital = book.available_capital(
             scope=scope,
             currency="USD",
             as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),
@@ -1335,7 +1335,7 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 trade_date=date(2026, 9, 24),
                 settlement_date=date(2026, 9, 25),
             )
-            actual_capital = book.capital_availability(
+            actual_capital = book.available_capital(
                 scope=scope,
                 currency="USD",
                 as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),

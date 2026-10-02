@@ -226,11 +226,11 @@ class FundingTests(unittest.TestCase):
             Decimal("-12345678901.234567890123456789"),
         )
         self.assertEqual(
-            transaction.postings[0].amount,
+            transaction.postings[0].signed_amount,
             Decimal("-12345678901.234567890123456789"),
         )
         self.assertEqual(
-            transaction.postings[1].amount,
+            transaction.postings[1].signed_amount,
             Decimal("12345678901.234567890123456789"),
         )
 

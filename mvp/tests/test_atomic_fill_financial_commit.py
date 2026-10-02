@@ -1536,7 +1536,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertTrue(inserted)
             before_snapshot = reservations.get("reservation-1")
             before_transactions = economics.transactions
-            before_settlements = settlements.obligations()
+            before_settlements = settlements.obligations
 
             corrected_projected = self.projected_fill(
                 fill_id="fill-position-effect-correction",
@@ -1570,7 +1570,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
 
             self.assertEqual(reservations.get("reservation-1"), before_snapshot)
             self.assertEqual(economics.transactions, before_transactions)
-            self.assertEqual(settlements.obligations(), before_settlements)
+            self.assertEqual(settlements.obligations, before_settlements)
             self.assertEqual(
                 store.load_events_by_aggregate_type(
                     "provider_fill_reservation_correction_binding"

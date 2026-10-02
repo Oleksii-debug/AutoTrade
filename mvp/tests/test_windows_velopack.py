@@ -314,6 +314,63 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
                 runner=lambda *args, **kwargs: self.fail("vpk must not run"),
             )
 
+    def test_windows_reparse_output_is_rejected_during_validation(self):
+        generated = self.root / "reparse-output"
+        generated.mkdir()
+        (generated / "AutoTrade-Setup.exe").write_bytes(b"setup")
+        (generated / "AutoTrade-1.2.3-full.nupkg").write_bytes(b"package")
+        (generated / "releases.win.json").write_text(
+            '{"channel":"win"}\n',
+            encoding="utf-8",
+        )
+
+        real_stat = os.stat
+
+        class ReparseMetadata:
+            st_file_attributes = velopack_module.FILE_ATTRIBUTE_REPARSE_POINT
+
+        def stat_with_reparse(path, *args, **kwargs):
+            if (
+                Path(path).name == "AutoTrade-Setup.exe"
+                and kwargs.get("follow_symlinks") is False
+            ):
+                return ReparseMetadata()
+            return real_stat(path, *args, **kwargs)
+
+        with (
+            patch.object(velopack_module.os, "stat", side_effect=stat_with_reparse),
+            self.assertRaisesRegex(
+                VelopackPackagingError,
+                "must not be a Windows reparse point",
+            ),
+        ):
+            velopack_module._validate_vpk_outputs(
+                generated,
+                version="1.2.3",
+            )
+
+    def test_output_becoming_reparse_after_read_fails_validation(self):
+        output = self.root / "becomes-reparse.exe"
+        output.write_bytes(b"stable")
+        admitted = os.stat(output, follow_symlinks=False)
+
+        with patch.object(
+            velopack_module,
+            "_nonreparse_path_metadata",
+            side_effect=[
+                admitted,
+                VelopackPackagingError(
+                    "Velopack output becomes-reparse.exe must not be "
+                    "a Windows reparse point"
+                ),
+            ],
+        ):
+            with self.assertRaisesRegex(
+                VelopackPackagingError,
+                "must not be a Windows reparse point",
+            ):
+                velopack_module._snapshot_vpk_output(output)
+
     def test_portable_output_is_rejected_before_final_publication(self):
         bundle, manifest = self.release_inputs(stem="portable")
         output = self.root / "portable-out"

@@ -148,7 +148,10 @@ def _reconcile(provider: SimulatedProvider, economic: DurableProviderEconomicBoo
             client_order_id=client_order_id, instrument=fill["instrument_version"],
             quantity=fill["last_quantity"]["value"], price=fill["last_price"],
             fee_amount=fee["amount"], fee_currency=fee["currency"],
-            trade_time=fill["trade_time"],
+            trade_time=fill["trade_time"], side=fill["side"],
+            evidence_refs=(
+                f"simulated:provider-execution:{fill['provider_execution_id']}",
+            ),
         ),)
         ids = (fill["provider_execution_id"],)
     result = reconcile_account(

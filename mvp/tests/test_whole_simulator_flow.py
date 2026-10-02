@@ -347,6 +347,10 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_amount=fee["amount"],
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
+                side=fill["side"],
+                evidence_refs=(
+                    f"simulated:provider-execution:{fill['provider_execution_id']}",
+                ),
             )
             unresolved_submission = UnknownSubmission.create(
                 attempt_id=attempt_id,

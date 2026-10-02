@@ -116,7 +116,8 @@ class ReconciliationTests(unittest.TestCase):
     def test_resource_availability_is_bound_to_same_provider_snapshot_cut(self):
         evidence = resource_availability()
         result = self.base(resource_availability=evidence)
-        self.assertIs(result.resource_availability, evidence)
+        self.assertEqual(result.resource_availability, evidence)
+        self.assertIsNot(result.resource_availability, evidence)
         self.assertEqual(
             result.resource_availability.available_resources["CASH:USD"],
             Decimal("850"),
@@ -946,7 +947,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertIn("INSTRUMENT:ABC", result.blocking_resources)
 
     def test_account_truth_rejects_non_string_and_normalized_duplicate_keys(self):
-        with self.assertRaisesRegex(TypeError, "keys must be strings"):
+        with self.assertRaisesRegex(TypeError, "keys must be exact strings"):
             self.base(local_cash={1: "900"})
         with self.assertRaisesRegex(ValueError, "unique after normalization"):
             self.base(local_cash={"USD": "900", " USD ": "900"})

@@ -56,6 +56,8 @@ def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment=
         price="100",
         fee_currency="USD",
         trade_time="2026-09-24T18:00:00Z",
+        side="BUY",
+        evidence_refs=("provider-read:sha256:" + "1" * 64,),
     )
 
 

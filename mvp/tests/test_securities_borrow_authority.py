@@ -701,7 +701,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 Decimal("-1"),
             )
             self.assertIn(key, result.blocking_resources)
-            self.assertTrue(result.complete)
+            self.assertFalse(result.complete)
 
             checkpoint = record_reconciliation_checkpoint(
                 store,

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -166,6 +166,40 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 instrument_version="BTCUSDT@1",
                 mark=Decimal("100"),
             )
+
+    def test_nested_tzinfo_callbacks_are_rejected_before_dispatch(self):
+        class HostileTimezone(tzinfo):
+            callbacks = 0
+
+            def _called(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller timezone callback executed")
+
+            def utcoffset(self, _dt):
+                return self._called()
+
+            def dst(self, _dt):
+                return self._called()
+
+            def fromutc(self, _dt):
+                return self._called()
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableValuationBook(store)
+            hostile = datetime(
+                2026,
+                10,
+                1,
+                0,
+                0,
+                tzinfo=HostileTimezone(),
+            )
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(ValuationError, "datetime.timezone"):
+                book.record(mark(source_event_at=hostile))
+            self.assertEqual(HostileTimezone.callbacks, 0)
+            self.assertEqual(store.current_journal_sequence(), before)
 
     def test_provider_environment_changes_content_and_scope_identity(self):
         testnet = mark(provider_environment="TESTNET")
@@ -482,6 +516,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 observation,
                 resolved,
+                policy_store=store,
                 as_of=NOW + timedelta(seconds=2),
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -507,6 +542,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     mark(),
                     resolved,
+                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -519,6 +555,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 observation,
                 resolved,
+                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -531,6 +568,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     too_old,
                     resolved,
+                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -544,6 +582,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     observation,
                     resolved,
+                    policy_store=store,
                     as_of=NOW + timedelta(seconds=2),
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -551,6 +590,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     observation,
                     resolved,
+                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut - 1,
                 )
@@ -563,6 +603,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     future,
                     resolved,
+                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -590,6 +631,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             first = evaluate_valuation_freshness(
                 observation,
                 first_policy,
+                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=first_policy.resolved_journal_sequence_cut,
             )
@@ -611,6 +653,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             second = evaluate_valuation_freshness(
                 observation,
                 second_policy,
+                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=second_policy.resolved_journal_sequence_cut,
             )
@@ -648,6 +691,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 fx,
                 resolved,
+                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -680,6 +724,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     wrong_scope,
                     resolved,
+                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )

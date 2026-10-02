@@ -28,6 +28,7 @@ from .persistence import (
 )
 from .provider_domain import ProviderDomainError, provider_financial_scope
 from .risk_policy_authority import (
+    DurableRiskPolicyRegistry,
     ResolvedRiskPolicy,
     RiskPolicyAuthorityError,
     require_registry_issued_resolved_policy,
@@ -74,9 +75,13 @@ def _digest(value: object, name: str) -> str:
 
 
 def _instant(value: datetime, name: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ValuationError(f"{name} must be an exact timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    # An exact datetime can still carry a caller-defined tzinfo subclass.
+    # Reject nested polymorphism before any utcoffset/dst/fromutc callback.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ValuationError(
+            f"{name} must be an exact datetime with datetime.timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _instant_text(value: datetime) -> str:
@@ -535,15 +540,17 @@ def evaluate_valuation_freshness(
     observation: ValuationObservation,
     policy: ResolvedRiskPolicy,
     *,
+    policy_store: JournalStore,
     as_of: datetime,
     journal_sequence_cut: int,
 ) -> ValuationFreshnessEvidence:
-    """Prove one selected observation is fresh under one registry-issued policy."""
+    """Prove freshness under policy authority from the exact durable journal."""
 
     observation = _canonical_observation(observation)
     try:
-        policy = require_registry_issued_resolved_policy(policy)
-    except RiskPolicyAuthorityError as error:
+        registry = DurableRiskPolicyRegistry(policy_store)
+        policy = registry.require_resolved_policy(policy)
+    except (TypeError, RiskPolicyAuthorityError) as error:
         raise ValuationError(str(error)) from error
     if type(journal_sequence_cut) is not int or journal_sequence_cut < 0:
         raise ValuationError("journal_sequence_cut must be a non-negative integer")
@@ -1229,9 +1236,11 @@ class DurableValuationBook:
     ) -> tuple[ValuationObservation, ValuationFreshnessEvidence]:
         """Resolve one production observation and prove freshness at the same cut."""
 
+        _store, expected_identity = self._journal_store_authority()
         try:
-            policy = require_registry_issued_resolved_policy(policy)
-        except RiskPolicyAuthorityError as error:
+            registry = DurableRiskPolicyRegistry(_store)
+            policy = registry.require_resolved_policy(policy)
+        except (TypeError, RiskPolicyAuthorityError) as error:
             raise ValuationError(str(error)) from error
         if (
             type(journal_sequence_cut) is not int
@@ -1244,7 +1253,6 @@ class DurableValuationBook:
             raise ValuationError(
                 "valuation and risk policy must resolve at the same journal sequence cut"
             )
-        _store, expected_identity = self._journal_store_authority()
         if (
             policy.journal_store_identity_digest
             != _store_identity_digest(expected_identity)
@@ -1269,6 +1277,7 @@ class DurableValuationBook:
         freshness = evaluate_valuation_freshness(
             selected,
             policy,
+            policy_store=_store,
             as_of=as_of,
             journal_sequence_cut=journal_sequence_cut,
         )

@@ -1839,7 +1839,7 @@ class AuthorityService:
                 "financial admission requires durable quantitative RiskPolicy authority"
             )
         try:
-            sealed_policy = require_registry_issued_resolved_policy(
+            sealed_policy = registry.require_resolved_policy(
                 resolved_policy
             )
             resolved_scope = sealed_policy.identity.scope
@@ -1851,7 +1851,7 @@ class AuthorityService:
                 resolved_scope,
                 journal_sequence_cut=request.journal_sequence_cut,
             )
-            current_policy = require_registry_issued_resolved_policy(
+            current_policy = registry.require_resolved_policy(
                 current_policy
             )
         except AuthorityConflict:

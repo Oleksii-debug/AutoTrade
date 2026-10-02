@@ -92,6 +92,54 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                     journal_store_identity_digest=issued.journal_store_identity_digest,
                 )
 
+    def test_durable_policy_verifier_rejects_imported_token_forgery(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+
+            forged_policy = policy(max_gross_leverage="99")
+            forged = authority.ResolvedRiskPolicy(
+                identity=RiskPolicyIdentity(
+                    policy_id="forged-risk",
+                    version=1,
+                    content_digest=risk_policy_digest(forged_policy),
+                    scope=exact_scope,
+                ),
+                policy=forged_policy,
+                registration_event_id="forged-registration",
+                registration_journal_sequence=issued.registration_journal_sequence,
+                activation_event_id="forged-activation",
+                activation_journal_sequence=issued.activation_journal_sequence,
+                resolved_journal_sequence_cut=issued.resolved_journal_sequence_cut,
+                journal_store_identity_digest=issued.journal_store_identity_digest,
+                _authority_token=authority._RESOLVED_POLICY_AUTHORITY_TOKEN,
+            )
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "durable registry authority",
+            ):
+                registry.require_resolved_policy(forged)
+
+            verified = registry.require_resolved_policy(issued)
+            self.assertEqual(verified.evidence_payload, issued.evidence_payload)
+            self.assertEqual(verified.policy, issued.policy)
+
     def test_resolved_policy_use_time_seal_rejects_post_issuance_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

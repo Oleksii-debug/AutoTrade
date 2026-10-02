@@ -468,7 +468,12 @@ def _resolved_policy_authority_digest(value: ResolvedRiskPolicy) -> str:
 def require_registry_issued_resolved_policy(
     value: object,
 ) -> ResolvedRiskPolicy:
-    """Use-time seal for a policy result issued by the durable registry."""
+    """Verify the immutable in-object seal of one resolved policy.
+
+    This detects post-construction mutation only. Durable provenance is
+    established by DurableRiskPolicyRegistry.require_resolved_policy(), which
+    replays the canonical JournalStore at the claimed exact cut.
+    """
 
     if type(value) is not ResolvedRiskPolicy:
         raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
@@ -1305,3 +1310,43 @@ class DurableRiskPolicyRegistry:
             ),
             _authority_token=_RESOLVED_POLICY_AUTHORITY_TOKEN,
         )
+
+    def require_resolved_policy(
+        self,
+        value: object,
+    ) -> ResolvedRiskPolicy:
+        """Revalidate one resolved policy against durable registry authority.
+
+        The constructor token and in-object digest are tamper-evidence only.
+        Financial use must prove that the claimed registration and activation
+        actually exist in this exact JournalStore generation at the claimed
+        journal cut and resolve to the same policy identity and content.
+        """
+
+        sealed = require_registry_issued_resolved_policy(value)
+        _store, expected_store_identity = (
+            DurableRiskPolicyRegistry._journal_store_authority(self)
+        )
+        expected_store_digest = journal_store_identity_digest(
+            expected_store_identity
+        )
+        if sealed.journal_store_identity_digest != expected_store_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy JournalStore generation mismatch"
+            )
+
+        current = DurableRiskPolicyRegistry.resolve_current(
+            self,
+            sealed.identity.scope,
+            journal_sequence_cut=sealed.resolved_journal_sequence_cut,
+        )
+        current = require_registry_issued_resolved_policy(current)
+        if (
+            current.evidence_payload != sealed.evidence_payload
+            or canonical_risk_policy(current.policy)
+            != canonical_risk_policy(sealed.policy)
+        ):
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy does not match durable registry authority"
+            )
+        return current

@@ -210,6 +210,55 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
 
+    def test_protected_sentinel_content_modification_fails_closed_by_default(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (
+                sentinel
+                + " (content modification requires trusted authorization)",
+            ),
+        )
+
+    def test_general_mutation_scope_does_not_authorize_protected_modification(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            "content modification requires trusted authorization",
+            result.protected_violations[0],
+        )
+
+    def test_separate_trusted_scope_can_authorize_protected_content_only(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            protected_modification_scopes=(sentinel,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
+        deletion = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="D", path=sentinel)],
+            protected_modification_scopes=(sentinel,),
+        )
+        self.assertFalse(deletion.allowed)
+        self.assertEqual(deletion.protected_deletions, (sentinel,))
+
     def test_protected_sentinel_type_change_fails_closed(self):
         sentinel = "control/qualification.json"
         result = assess_reconvergence(
@@ -310,6 +359,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
+        self.assertNotIn("--protected-modification-scope", workflow)
         self.assertNotIn("edited", workflow)
 
 

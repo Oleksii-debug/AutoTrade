@@ -1530,5 +1530,67 @@ class FillAccountingTests(unittest.TestCase):
 
 
 
+class HostileFillDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal as_tuple dispatch")
+
+    def __str__(self):
+        raise AssertionError("hostile Decimal string dispatch")
+
+
+class FillAccountingExactIngressTests(unittest.TestCase):
+    def test_projected_fill_rejects_decimal_subclass_before_virtual_dispatch(self):
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-hostile",
+                provider_execution_id="exec-hostile",
+                intent_id="intent-hostile",
+                client_order_id="client-hostile",
+                side="BUY",
+                quantity=HostileFillDecimal("2"),
+                price="100",
+            )
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-hostile",
+                provider_execution_id="exec-hostile",
+                intent_id="intent-hostile",
+                client_order_id="client-hostile",
+                side="BUY",
+                quantity="2",
+                price=HostileFillDecimal("100"),
+            )
+
+    def test_projected_fill_rejects_oversized_exact_presentation(self):
+        with self.assertRaisesRegex(ValueError, "bounded exact decimal"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-oversized",
+                provider_execution_id="exec-oversized",
+                intent_id="intent-oversized",
+                client_order_id="client-oversized",
+                side="BUY",
+                quantity="1" * 10000,
+                price="100",
+            )
+
+    def test_projected_fill_builtin_decimal_identity_is_preserved(self):
+        quantity = Decimal("2.000")
+        price = Decimal("100.2500")
+        observed = ProjectedFillEvidence.create(
+            fill_id="fill-decimal",
+            provider_execution_id="exec-decimal",
+            intent_id="intent-decimal",
+            client_order_id="client-decimal",
+            side="BUY",
+            quantity=quantity,
+            price=price,
+        )
+        self.assertIs(observed.quantity, quantity)
+        self.assertIs(observed.price, price)
+
+
 if __name__ == "__main__":
     unittest.main()

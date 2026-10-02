@@ -394,13 +394,21 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "0.000000000000000000123456789",
         )
 
-    def test_sealed_invalid_financial_payload_fails_closed_without_name_error(self):
-        reference = self.evidence(cash_settlement_amount="NaN")
+    def test_sealed_provider_invalid_cash_settlement_fails_as_lifecycle_error(self):
+        reference = self.evidence(
+            external_event_id="invalid-cash-settlement",
+            cash_settlement_amount="NaN",
+        )
         with self.assertRaisesRegex(
             OptionLifecycleError,
             "provider lifecycle payload contains invalid financial values",
         ):
             self.authority.apply(reference)
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
 
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):
         with self.assertRaisesRegex(
@@ -639,7 +647,14 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
         self.assertEqual(self.book.position("ABC"), Decimal("-100"))
-        # The -2 seed is itself canonical economics: selling two contracts at\n        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected\n        # correction evidence must leave that exact 5002 USD state unchanged.\n        self.assertEqual(self.book.cash("USD"), Decimal("5002"))\n        self.assertEqual(\n            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),\n            1,\n        )
+        # The -2 seed is itself canonical economics: selling two contracts at
+        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected
+        # correction evidence must leave that exact 5002 USD state unchanged.
+        self.assertEqual(self.book.cash("USD"), Decimal("5002"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            1,
+        )
 
     def test_correction_atomically_reverses_and_replaces_economics(self):
         self.seed_option_position("-2")

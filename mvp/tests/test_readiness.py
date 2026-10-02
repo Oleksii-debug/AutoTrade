@@ -222,6 +222,36 @@ class RuntimeReadinessTests(unittest.TestCase):
             result.blockers,
         )
 
+    def test_decimal_subclass_cannot_supply_readiness_threshold_authority(self):
+        class ForgedDecimal(Decimal):
+            pass
+
+        with self.assertRaisesRegex(ReadinessError, "exact finite decimal"):
+            healthy(clock_skew_seconds=ForgedDecimal("0"))
+
+    def test_runtime_signal_subclass_is_rejected_before_virtual_field_reads(self):
+        class ForgedSignals(RuntimeSafetySignals):
+            def __getattribute__(self, name):
+                if name == "schema_compatible":
+                    raise AssertionError("subclass field dispatch must not run")
+                return super().__getattribute__(name)
+
+        base = healthy()
+        forged = ForgedSignals(
+            **{
+                field: getattr(base, field)
+                for field in RuntimeSafetySignals.__dataclass_fields__
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "exact RuntimeSafetySignals"):
+            evaluate_readiness(forged)
+
+    def test_mutated_noncanonical_signal_field_fails_during_terminal_snapshot(self):
+        signals = healthy()
+        object.__setattr__(signals, "journal_writable", 1)
+        with self.assertRaisesRegex(ReadinessError, "boolean"):
+            evaluate_readiness(signals)
+
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):
             healthy(journal_writable=1)

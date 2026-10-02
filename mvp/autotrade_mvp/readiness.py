@@ -8,8 +8,10 @@ failover. Its only job is to prevent a false READY state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
+
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 
 
 class ReadinessError(ValueError):
@@ -24,25 +26,23 @@ class RuntimeMode(StrEnum):
 
 
 def _bool(value: object, *, name: str) -> bool:
-    if not isinstance(value, bool):
+    if type(value) is not bool:
         raise ReadinessError(f"{name} must be boolean")
     return value
 
 
 def _decimal(value: object, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ReadinessError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
         raise ReadinessError(f"{name} must be an exact finite decimal") from error
-    if not result.is_finite() or result < 0:
+    if result < 0:
         raise ReadinessError(f"{name} must be a non-negative finite decimal")
     return result
 
 
 def _count(value: object, *, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if type(value) is not int or value < 0:
         raise ReadinessError(f"{name} must be a non-negative integer")
     return value
 
@@ -124,9 +124,34 @@ class RuntimeReadiness:
         return self.mode is RuntimeMode.READY
 
 
+def _snapshot_signals(signals: RuntimeSafetySignals) -> RuntimeSafetySignals:
+    if type(signals) is not RuntimeSafetySignals:
+        raise TypeError("signals must be exact RuntimeSafetySignals")
+    return RuntimeSafetySignals(
+        journal_writable=signals.journal_writable,
+        emergency_disk_reserve_available=signals.emergency_disk_reserve_available,
+        schema_compatible=signals.schema_compatible,
+        provider_authenticated=signals.provider_authenticated,
+        provider_reconciled=signals.provider_reconciled,
+        market_data_fresh=signals.market_data_fresh,
+        sender_ownership_proven=signals.sender_ownership_proven,
+        old_sender_fenced=signals.old_sender_fenced,
+        provider_native_protection_present=signals.provider_native_protection_present,
+        emergency_execution_path_qualified=signals.emergency_execution_path_qualified,
+        protection_required_for_new_exposure=signals.protection_required_for_new_exposure,
+        new_exposure_protection_path_qualified=signals.new_exposure_protection_path_qualified,
+        unknown_send_count=signals.unknown_send_count,
+        reconciliation_lag_seconds=signals.reconciliation_lag_seconds,
+        maximum_reconciliation_lag_seconds=signals.maximum_reconciliation_lag_seconds,
+        clock_skew_seconds=signals.clock_skew_seconds,
+        maximum_clock_skew_seconds=signals.maximum_clock_skew_seconds,
+        unresolved_external_uncertainty=signals.unresolved_external_uncertainty,
+        recovery_in_progress=signals.recovery_in_progress,
+    )
+
+
 def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
-    if not isinstance(signals, RuntimeSafetySignals):
-        raise TypeError("signals must be RuntimeSafetySignals")
+    signals = _snapshot_signals(signals)
 
     blockers: list[str] = []
     warnings: list[str] = []

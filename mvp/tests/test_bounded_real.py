@@ -1,4 +1,11 @@
 import hashlib
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
@@ -689,6 +696,69 @@ class BoundedRealQualificationTests(unittest.TestCase):
             ).envelope_digest,
             original.envelope_digest,
         )
+
+    def test_bounded_real_digest_is_independent_of_ambient_decimal_context(self):
+        values = {
+            "max_capital": "1234567890123456789012345678.1",
+            "max_single_notional": "1.0000000000000000001",
+            "max_gross_leverage": "1.234567890123456789",
+        }
+        identities = set()
+        rendered_values = set()
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_HALF_EVEN),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    bounded = envelope(**values)
+                    identities.add(bounded.envelope_digest)
+                    rendered_values.add(
+                        (
+                            str(bounded.max_capital),
+                            str(bounded.max_single_notional),
+                            str(bounded.max_gross_leverage),
+                        )
+                    )
+        self.assertEqual(len(identities), 1)
+        self.assertEqual(
+            rendered_values,
+            {
+                (
+                    values["max_capital"],
+                    values["max_single_notional"],
+                    values["max_gross_leverage"],
+                )
+            },
+        )
+
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("virtual is_finite must not run")
+
+            def normalize(self, *args, **kwargs):
+                raise AssertionError("virtual normalize must not run")
+
+            def __format__(self, spec):
+                raise AssertionError("virtual format must not run")
+
+            def __lt__(self, other):
+                raise AssertionError("virtual comparison must not run")
+
+            def __eq__(self, other):
+                raise AssertionError("virtual equality must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            envelope(max_capital=HostileDecimal("1000"))
+
+    def test_bounded_real_rejects_values_outside_shared_exact_envelope(self):
+        with self.assertRaisesRegex(ValueError, "exact decimal authority"):
+            envelope(max_capital="1e300")
 
     def test_single_notional_cannot_exceed_bounded_capital(self):
         with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):

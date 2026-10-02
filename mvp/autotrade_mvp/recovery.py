@@ -17,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .dispatch import (
     GuardedDispatcher,
     _issue_recovery_guarded_dispatcher,
+    provider_domain_submission_attempt_keys,
     submission_attempt_aggregate_id,
 )
 from .persistence import (
@@ -24,6 +25,7 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
+from .provider_domain import normalize_provider_environment
 from .sender_gate import journal_sender_gate
 from .store_identity import (
     JournalStoreIdentity,
@@ -529,6 +531,7 @@ class RecoveryController:
         intent_id: str,
         client_order_id: str,
         provider_id: str,
+        provider_environment: str | None,
         environment: str,
         account_id: str,
     ) -> bool:
@@ -553,6 +556,18 @@ class RecoveryController:
         normalized_provider = provider_id.strip().upper()
         normalized_account = account_id.strip()
         normalized_environment = environment.strip().upper()
+        normalized_provider_environment: str | None = None
+        if provider_environment is not None:
+            try:
+                normalized_provider_environment = normalize_provider_environment(
+                    provider_id=normalized_provider,
+                    environment=normalized_environment,
+                    provider_environment=provider_environment,
+                )
+            except ValueError as error:
+                raise RuntimeError(
+                    "Submission provider-domain identity is invalid"
+                ) from error
         latest_explicit: dict[str, object] | None = None
         latest_explicit_sequence = 0
         last_scope_sequence = 0
@@ -573,6 +588,23 @@ class RecoveryController:
                 or payload.get("environment") != normalized_environment
             ):
                 continue
+            if normalized_provider_environment is not None:
+                checkpoint_domain_value = payload.get(
+                    "provider_environment",
+                    payload.get("environment"),
+                )
+                try:
+                    checkpoint_domain = normalize_provider_environment(
+                        provider_id=normalized_provider,
+                        environment=normalized_environment,
+                        provider_environment=checkpoint_domain_value,
+                    )
+                except ValueError as error:
+                    raise RuntimeError(
+                        "Reconciliation checkpoint provider-domain identity is invalid"
+                    ) from error
+                if checkpoint_domain != normalized_provider_environment:
+                    continue
 
             checkpoint_sequence = checkpoint.get("journal_sequence")
             if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
@@ -638,6 +670,7 @@ class RecoveryController:
                 provider_id=normalized_provider,
                 account_id=normalized_account,
                 environment=normalized_environment,
+                provider_environment=normalized_provider_environment,
                 attempt_id=attempt_id,
                 intent_id=intent_id,
                 client_order_id=client_order_id,
@@ -727,17 +760,67 @@ class RecoveryController:
             )
             last = aggregate_events[-1]
             raw_attempt_id = payload.get("attempt_id")
+            recovery_provider_environment: str | None = None
             if isinstance(raw_attempt_id, str) and raw_attempt_id.strip():
                 attempt_key = raw_attempt_id.strip()
-                expected_aggregate = submission_attempt_aggregate_id(
-                    environment=normalized_environment,
-                    account_id=normalized_account,
-                    attempt_id=attempt_key,
-                )
-                if expected_aggregate != aggregate_id:
-                    raise RuntimeError(
-                        "SubmissionPrepared attempt identity does not match durable aggregate"
+                if normalized_environment in {"PAPER", "LIVE"}:
+                    raw_provider = payload.get("provider")
+                    if not isinstance(raw_provider, str) or not raw_provider.strip():
+                        raise RuntimeError(
+                            "SubmissionPrepared provider identity is invalid"
+                        )
+                    normalized_provider = raw_provider.strip().upper()
+                    try:
+                        recovery_provider_environment = (
+                            normalize_provider_environment(
+                                provider_id=normalized_provider,
+                                environment=normalized_environment,
+                                provider_environment=payload.get(
+                                    "provider_environment"
+                                ),
+                            )
+                        )
+                        durable_attempt_keys = provider_domain_submission_attempt_keys(
+                            attempt_id=attempt_key,
+                            provider_id=normalized_provider,
+                            environment=normalized_environment,
+                            provider_environment=recovery_provider_environment,
+                        )
+                    except ValueError as error:
+                        raise RuntimeError(
+                            "SubmissionPrepared provider-domain identity is invalid"
+                        ) from error
+                    candidate_aggregates = tuple(
+                        submission_attempt_aggregate_id(
+                            environment=normalized_environment,
+                            account_id=normalized_account,
+                            attempt_id=durable_attempt_key,
+                        )
+                        for durable_attempt_key in durable_attempt_keys
                     )
+                    if aggregate_id not in candidate_aggregates:
+                        raise RuntimeError(
+                            "SubmissionPrepared attempt identity does not match durable aggregate"
+                        )
+                    present_aggregates = tuple(
+                        candidate
+                        for candidate in candidate_aggregates
+                        if candidate in grouped
+                    )
+                    if len(present_aggregates) != 1:
+                        raise RuntimeError(
+                            "SubmissionPrepared attempt exists under multiple durable identity versions"
+                        )
+                else:
+                    expected_aggregate = submission_attempt_aggregate_id(
+                        environment=normalized_environment,
+                        account_id=normalized_account,
+                        attempt_id=attempt_key,
+                    )
+                    if expected_aggregate != aggregate_id:
+                        raise RuntimeError(
+                            "SubmissionPrepared attempt identity does not match durable aggregate"
+                        )
             else:
                 attempt_key = "legacy_submission:" + aggregate_id
             scope_keys.add(attempt_key)
@@ -778,6 +861,7 @@ class RecoveryController:
                 intent_id=str(intent_id).strip(),
                 client_order_id=str(client_order_id).strip(),
                 provider_id=str(provider).strip().upper(),
+                provider_environment=recovery_provider_environment,
                 environment=normalized_environment,
                 account_id=normalized_account,
             ):

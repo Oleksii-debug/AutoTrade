@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import re
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
@@ -31,6 +31,7 @@ from .exact_decimal import (
     canonical_decimal_text,
     exact_abs,
     is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
@@ -193,15 +194,12 @@ def _text(value: str, name: str) -> str:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise OptionLifecycleError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionLifecycleError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionLifecycleError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -305,6 +303,12 @@ class OptionLifecycleObservation:
             underlying = _decimal(underlying, "underlying_price")
             if underlying <= 0:
                 raise OptionLifecycleError("underlying_price must be positive")
+        cash_settlement = self.cash_settlement_amount
+        if cash_settlement is not None:
+            cash_settlement = _decimal(
+                cash_settlement,
+                "cash_settlement_amount",
+            )
         correction = self.corrects_external_event_id
         if correction is not None:
             correction = _text(correction, "corrects_external_event_id")
@@ -324,6 +328,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "provider_revision", revision)
         object.__setattr__(self, "underlying_price", underlying)
+        object.__setattr__(self, "cash_settlement_amount", cash_settlement)
         object.__setattr__(self, "corrects_external_event_id", correction)
 
 

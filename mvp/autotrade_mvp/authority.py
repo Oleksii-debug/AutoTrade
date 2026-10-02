@@ -1526,6 +1526,8 @@ class AuthorityService:
         ]
         | None = None,
         risk_policy_registry: DurableRiskPolicyRegistry | None = None,
+        settlement_book: object | None = None,
+        economic_book: object | None = None,
     ):
         store_identity = None
         if store is not None:
@@ -1565,6 +1567,36 @@ class AuthorityService:
                     "risk policy registry must share the financial authority JournalStore"
                 )
         self.risk_policy_registry = risk_policy_registry
+        if (settlement_book is None) != (economic_book is None):
+            raise AuthorityConflict(
+                "settlement and economic books must be composed together"
+            )
+        if settlement_book is not None:
+            # Local imports avoid a module cycle: provider accounting itself
+            # consumes financial AuthorityService for fill bindings.
+            from .durable_settlement import DurableSettlementBook
+            from ._provider_activity_accounting_impl import (
+                DurableProviderEconomicBook,
+            )
+
+            if type(settlement_book) is not DurableSettlementBook:
+                raise TypeError(
+                    "settlement_book must be exact DurableSettlementBook"
+                )
+            if type(economic_book) is not DurableProviderEconomicBook:
+                raise TypeError(
+                    "economic_book must be exact DurableProviderEconomicBook"
+                )
+            if (
+                store is None
+                or settlement_book.store is not store
+                or economic_book.store is not store
+            ):
+                raise AuthorityConflict(
+                    "settlement/economic books must share the financial authority JournalStore"
+                )
+        self.settlement_book = settlement_book
+        self.economic_book = economic_book
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -1595,6 +1627,151 @@ class AuthorityService:
             raise AuthorityConflict("financial authority JournalStore changed")
         with journal_store_authority_scope(store, expected):
             return operation(store, *args, **kwargs)
+
+    def _settlement_cash_availability_adjustments(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        provider_environment: str,
+        provider_available: Mapping[str, Decimal],
+    ) -> dict[str, object] | None:
+        cash_resources = tuple(
+            sorted(
+                resource
+                for resource in provider_available
+                if resource.startswith("CASH:")
+            )
+        )
+        if not cash_resources:
+            return None
+
+        settlement_book = self.settlement_book
+        economic_book = self.economic_book
+        if settlement_book is None or economic_book is None:
+            if environment in {"PAPER", "LIVE"}:
+                raise AuthorityConflict(
+                    "PAPER/LIVE cash admission requires durable settlement authority"
+                )
+            return None
+
+        from .accounting import ScopedEconomicBook
+        from .durable_settlement import DurableSettlementBook
+        from ._provider_activity_accounting_impl import (
+            DurableProviderEconomicBook,
+        )
+
+        if (
+            type(settlement_book) is not DurableSettlementBook
+            or type(economic_book) is not DurableProviderEconomicBook
+        ):
+            raise AuthorityConflict(
+                "durable settlement/economic authority type changed"
+            )
+        if (
+            settlement_book.store is not self.store
+            or economic_book.store is not self.store
+        ):
+            raise AuthorityConflict(
+                "durable settlement/economic authority JournalStore changed"
+            )
+
+        expected_provider = _text(provider_id, name="provider_id").upper()
+        expected_account = _text(account_id, name="account_id")
+        expected_environment = _text(
+            environment, name="environment"
+        ).upper()
+        expected_provider_environment = _provider_environment(
+            provider_id=expected_provider,
+            environment=expected_environment,
+            provider_environment=provider_environment,
+        )
+        if (
+            settlement_book.scope.provider_id != expected_provider
+            or settlement_book.scope.account_id != expected_account
+            or settlement_book.scope.environment != expected_environment
+            or economic_book.provider_id != expected_provider
+            or economic_book.account_id != expected_account
+            or economic_book.environment != expected_environment
+            or economic_book.provider_environment
+            != expected_provider_environment
+        ):
+            raise AuthorityConflict(
+                "settlement/economic authority scope does not match admission"
+            )
+
+        # SettlementAccountScope v1 does not yet carry provider_environment.
+        # It is safe only where provider-domain identity is not narrower than
+        # runtime environment. Never let TESTNET/DEMO share one settlement cut.
+        if expected_provider_environment != expected_environment:
+            raise AuthorityConflict(
+                "durable settlement authority lacks exact provider_environment"
+            )
+
+        before = self._journal_operation(
+            JournalStore.current_journal_sequence
+        )
+        economic_cut = economic_book.read_cut()
+        settlement_book.refresh()
+        settlement_events = self._journal_operation(
+            JournalStore.load_events,
+            "settlement_book",
+            settlement_book.scope_id,
+        )
+        after = self._journal_operation(
+            JournalStore.current_journal_sequence
+        )
+        if before != after:
+            raise AuthorityConflict(
+                "settlement/economic authority changed during cash availability read"
+            )
+
+        economic_projection = ScopedEconomicBook(
+            environment=economic_cut.environment,
+            account_id=economic_cut.account_id,
+            transactions=economic_cut.transactions,
+        )
+        projection = settlement_book.project(economic_projection)
+        settlement_version = (
+            0
+            if not settlement_events
+            else int(settlement_events[-1]["aggregate_version"])
+        )
+        adjustments: dict[str, object] = {}
+        for resource in cash_resources:
+            currency = resource[len("CASH:") :]
+            if not currency:
+                raise AuthorityConflict(
+                    "cash reservation resource lacks currency"
+                )
+            provider_amount = provider_available[resource]
+            local_amount = projection.available_to_spend(currency)
+            reservable = (
+                provider_amount
+                if provider_amount <= local_amount
+                else local_amount
+            )
+            adjustments[resource] = {
+                "provider_available": _canonical_decimal_text(
+                    provider_amount
+                ),
+                "local_available_to_spend": _canonical_decimal_text(
+                    local_amount
+                ),
+                "reservable_available": _canonical_decimal_text(
+                    reservable
+                ),
+            }
+
+        return {
+            "journal_sequence_cut": before,
+            "economic_book_digest": economic_cut.book_digest,
+            "economic_aggregate_version": economic_cut.aggregate_version,
+            "settlement_scope_id": settlement_book.scope_id,
+            "settlement_aggregate_version": settlement_version,
+            "resources": adjustments,
+        }
 
     def _resolve_authoritative_risk_snapshot(
         self,
@@ -2765,7 +2942,8 @@ class AuthorityService:
                 )
         try:
             regenerated_availability = (
-                load_account_resource_availability_evidence(
+                current_availability_evidence = (
+                    load_account_resource_availability_evidence(
                     self.store,
                     checkpoint_event_id=_text(
                         availability_evidence.get("checkpoint_event_id"),
@@ -4325,6 +4503,101 @@ class AuthorityService:
                 for resource, amount in authoritative_available.items()
             }
             caller_expected_available = dict(canonical_available)
+
+            raw_cash_adjustments = availability_evidence.get(
+                "settlement_cash_adjustments"
+            )
+            if existing is not None and raw_cash_adjustments is not None:
+                if not isinstance(raw_cash_adjustments, Mapping):
+                    raise AuthorityConflict(
+                        "existing settlement cash adjustment is malformed"
+                    )
+                expected_adjustment_fields = {
+                    "journal_sequence_cut",
+                    "economic_book_digest",
+                    "economic_aggregate_version",
+                    "settlement_scope_id",
+                    "settlement_aggregate_version",
+                    "resources",
+                }
+                if set(raw_cash_adjustments) != expected_adjustment_fields:
+                    raise AuthorityConflict(
+                        "existing settlement cash adjustment shape is invalid"
+                    )
+                raw_resources = raw_cash_adjustments.get("resources")
+                if not isinstance(raw_resources, Mapping) or not raw_resources:
+                    raise AuthorityConflict(
+                        "existing settlement cash adjustment resources are invalid"
+                    )
+                for resource, raw_adjustment in raw_resources.items():
+                    if (
+                        not isinstance(resource, str)
+                        or not resource.startswith("CASH:")
+                        or not isinstance(raw_adjustment, Mapping)
+                        or set(raw_adjustment)
+                        != {
+                            "provider_available",
+                            "local_available_to_spend",
+                            "reservable_available",
+                        }
+                    ):
+                        raise AuthorityConflict(
+                            "existing settlement cash resource adjustment is invalid"
+                        )
+                    provider_amount = _decimal(
+                        raw_adjustment.get("provider_available"),
+                        name=f"{resource}.provider_available",
+                    )
+                    local_amount = _decimal(
+                        raw_adjustment.get("local_available_to_spend"),
+                        name=f"{resource}.local_available_to_spend",
+                    )
+                    reservable = _decimal(
+                        raw_adjustment.get("reservable_available"),
+                        name=f"{resource}.reservable_available",
+                    )
+                    if (
+                        provider_amount < 0
+                        or local_amount < 0
+                        or reservable < 0
+                        or reservable
+                        != (
+                            provider_amount
+                            if provider_amount <= local_amount
+                            else local_amount
+                        )
+                        or canonical_available.get(resource) != reservable
+                    ):
+                        raise AuthorityConflict(
+                            "existing settlement cash adjustment is inconsistent"
+                        )
+                    caller_expected_available[resource] = provider_amount
+            elif existing is None:
+                cash_adjustments = self._settlement_cash_availability_adjustments(
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment=env,
+                    provider_environment=snapshot_provider_environment,
+                    provider_available=canonical_available,
+                )
+                if cash_adjustments is not None:
+                    raw_resources = cash_adjustments["resources"]
+                    assert isinstance(raw_resources, Mapping)
+                    for resource, raw_adjustment in raw_resources.items():
+                        assert isinstance(raw_adjustment, Mapping)
+                        canonical_available[resource] = _decimal(
+                            raw_adjustment["reservable_available"],
+                            name=f"{resource}.reservable_available",
+                        )
+                    availability_evidence = {
+                        **availability_evidence,
+                        "availability": {
+                            resource: _canonical_decimal_text(amount)
+                            for resource, amount in canonical_available.items()
+                        },
+                        "settlement_cash_adjustments": cash_adjustments,
+                    }
+
             durable_borrow_adjustment: tuple[Decimal, Decimal] | None = None
             if existing is not None and required_borrow_resource is not None:
                 raw_adjustments = availability_evidence.get(
@@ -5327,7 +5600,81 @@ class AuthorityService:
                     ),
                     evidence_artifact_store=self.evidence_artifact_store,
                     require_latest_scope=True,
+                    )
                 )
+                persisted_cash_adjustments = availability_evidence.get(
+                    "settlement_cash_adjustments"
+                )
+                cash_requirements = {
+                    resource: _decimal(
+                        amount,
+                        name=f"dispatch requirement[{resource}]",
+                    )
+                    for resource, amount in risk_requirements.items()
+                    if isinstance(resource, str)
+                    and resource.startswith("CASH:")
+                }
+                if persisted_cash_adjustments is not None:
+                    current_raw = current_availability_evidence.get(
+                        "availability"
+                    )
+                    if not isinstance(current_raw, Mapping):
+                        raise AuthorityConflict(
+                            "current provider cash availability is malformed"
+                        )
+                    current_provider_available = {
+                        _text(resource, name="cash availability resource"): _decimal(
+                            amount,
+                            name=f"cash availability[{resource}]",
+                        )
+                        for resource, amount in current_raw.items()
+                        if isinstance(resource, str)
+                        and resource.startswith("CASH:")
+                    }
+                    current_adjustments = (
+                        self._settlement_cash_availability_adjustments(
+                            provider_id=_text(
+                                availability_evidence.get("provider_id"),
+                                name="provider_id",
+                            ),
+                            account_id=record.account_id,
+                            environment=record.environment,
+                            provider_environment=availability_evidence.get(
+                                "provider_environment"
+                            ),
+                            provider_available=current_provider_available,
+                        )
+                    )
+                    if current_adjustments is None:
+                        raise AuthorityConflict(
+                            "settlement cash authority is unavailable at dispatch"
+                        )
+                    current_resources = current_adjustments.get("resources")
+                    if not isinstance(current_resources, Mapping):
+                        raise AuthorityConflict(
+                            "current settlement cash adjustment is malformed"
+                        )
+                    for resource, required_amount in cash_requirements.items():
+                        detail = current_resources.get(resource)
+                        if not isinstance(detail, Mapping):
+                            raise AuthorityConflict(
+                                "current settlement cash authority lacks required resource"
+                            )
+                        current_reservable = _decimal(
+                            detail.get("reservable_available"),
+                            name=f"{resource}.reservable_available",
+                        )
+                        if current_reservable < required_amount:
+                            raise AuthorityConflict(
+                                "current settlement cash is below reserved requirement"
+                            )
+                elif (
+                    cash_requirements
+                    and record.environment in {"PAPER", "LIVE"}
+                ):
+                    raise AuthorityConflict(
+                        "PAPER/LIVE cash dispatch lacks durable settlement authority"
+                    )
                 borrow_resources = tuple(
                     resource
                     for resource in risk_requirements

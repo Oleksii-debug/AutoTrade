@@ -492,10 +492,12 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(live_owner.epoch, 1)
 
             self._record_durable_ready(paper)
-            transferred = paper.transfer_owner(
-                new_owner_id="paper-host-2",
-                old_sender_fenced=True,
-                reconciled=True,
+            paper_restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
+            )
+            transferred = paper_restarted.takeover_durable_owner(
+                "paper-host-2"
             )
             self.assertEqual(transferred.epoch, 2)
             self._record_durable_ready(live)
@@ -520,11 +522,11 @@ class RuntimeRecoveryTests(unittest.TestCase):
             stale.reason_codes.clear()
             stale.state = HostState.READY
 
-            transferred = first.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
             )
+            transferred = restarted.takeover_durable_owner("host-b")
             self.assertEqual(transferred.epoch, 2)
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
                 stale.validate_sender(owner.owner_id, owner.epoch)

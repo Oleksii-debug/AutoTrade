@@ -97,16 +97,10 @@ def _canonical_bytes(value: Any) -> bytes:
 
 
 
-def market_event_population_digest(
+def canonical_market_event_population_bytes(
     events: Iterable[Mapping[str, Any]],
-) -> str:
-    """Return an order-independent digest over the exact raw market-event population.
-
-    This digest is suitable for a DatasetManifest.content_hashes entry. It
-    authenticates the complete supplied population before any point-in-time
-    revision selection occurs, so a caller cannot swap values/revisions while
-    retaining a registered dataset identity.
-    """
+) -> bytes:
+    """Encode one complete market-event population as canonical artifact bytes."""
 
     rows: list[bytes] = []
     for raw in events:
@@ -116,8 +110,22 @@ def market_event_population_digest(
     if not rows:
         raise HistoricalDataError("market event population must be non-empty")
     rows.sort()
-    framed = b"[" + b",".join(rows) + b"]"
-    return "sha256:" + sha256(framed).hexdigest()
+    return b"[" + b",".join(rows) + b"]"
+
+
+def market_event_population_digest(
+    events: Iterable[Mapping[str, Any]],
+) -> str:
+    """Return the content hash of canonical market-population artifact bytes.
+
+    A dataset that uses this resolver must register this exact canonical
+    population artifact in DatasetManifest.content_hashes. The digest is thus a
+    real byte-content hash, not a semantic label detached from representation.
+    """
+
+    return "sha256:" + sha256(
+        canonical_market_event_population_bytes(events)
+    ).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -373,6 +373,45 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertNotEqual(first.fold_normalizer, second.fold_normalizer)
         self.assertNotEqual(first.fingerprint, second.fingerprint)
 
+    def test_pre_cut_correction_preserves_what_was_known_before_correction(self):
+        baseline = self._base_events(through=3)
+        original = baseline[2]
+        correction_known_at = BASE + timedelta(days=3, hours=1)
+        correction = event(
+            2,
+            "500",
+            revision=2,
+            event_id=original["event_id"],
+            known_at=correction_known_at,
+        )
+        rows = baseline + [correction]
+        manifest_digest = self._register([rows])
+        points = resolve_authoritative_feature_points(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            events=rows,
+            cutoff=self.fold.training_information_cutoff,
+            spec=self.spec,
+        )
+
+        before_correction = next(
+            point
+            for point in points
+            if point.decision_time == BASE + timedelta(days=3, minutes=2)
+        )
+        after_correction = next(
+            point
+            for point in points
+            if point.decision_time == correction_known_at + timedelta(minutes=1)
+        )
+        original_id = f"{original['event_id']}@r1"
+        correction_id = f"{original['event_id']}@r2"
+        self.assertIn(original_id, before_correction.input_ids)
+        self.assertNotIn(correction_id, before_correction.input_ids)
+        self.assertIn(correction_id, after_correction.input_ids)
+
     def test_replay_common_cut_must_match_at_validation(self):
         rows = self._base_events()
         manifest_digest = self._register([rows])

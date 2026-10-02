@@ -52,6 +52,7 @@ MAIN_EXE = "AutoTrade.Desktop.exe"
 BUILD_MANIFEST_NAME = "autotrade-velopack-build.json"
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 EXPECTED_INSTALLER_FIELDS = {
     "schema_version",
     "product",
@@ -78,6 +79,21 @@ EXPECTED_INSTALLER_FIELDS = {
 
 class VelopackPackagingError(ValueError):
     """Raised when a Velopack build cannot preserve AutoTrade release invariants."""
+
+
+def _nonreparse_path_metadata(path: Path, *, name: str):
+    """Return path metadata only when Windows reparse authority is absent."""
+
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise VelopackPackagingError(f"{name} identity cannot be verified") from error
+    if (
+        int(getattr(metadata, "st_file_attributes", 0))
+        & FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise VelopackPackagingError(f"{name} must not be a Windows reparse point")
+    return metadata
 
 
 def _strict_object(pairs):
@@ -417,12 +433,17 @@ def _snapshot_vpk_output(path: Path) -> tuple[str, int]:
     """Bind one generated artifact to exact bytes before final publication."""
 
     name = f"Velopack output {path.name}"
+    _nonreparse_path_metadata(path, name=name)
     try:
         with _open_stable_regular_file(path, name=name) as stream:
             before = os.fstat(stream.fileno())
             digest = "sha256:" + _sha256_stream(stream)
             after = _assert_open_file_identity(path, stream, name=name)
+            after_path = _nonreparse_path_metadata(path, name=name)
             if (
+                (after_path.st_dev, after_path.st_ino)
+                != (after.st_dev, after.st_ino)
+                or
                 (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                 or before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns
@@ -447,7 +468,10 @@ def _validate_vpk_outputs(
             raise VelopackPackagingError("Velopack emitted a symlink")
         if not path.is_file():
             raise VelopackPackagingError("Velopack emitted an unsupported filesystem entry")
-        metadata = os.stat(path, follow_symlinks=False)
+        metadata = _nonreparse_path_metadata(
+            path,
+            name=f"Velopack output {path.name}",
+        )
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise VelopackPackagingError(
                 "Velopack output must be a regular file without hard-link aliases"
@@ -522,6 +546,7 @@ def _stage_validated_vpk_output(
     """Freeze one validated vpk artifact before touching final output paths."""
 
     name = f"Velopack output {source.name}"
+    _nonreparse_path_metadata(source, name=name)
     try:
         input_stream = _open_stable_regular_file(source, name=name)
     except InstallerManifestError as error:
@@ -549,10 +574,13 @@ def _stage_validated_vpk_output(
                         input_stream,
                         name=name,
                     )
+                    after_path = _nonreparse_path_metadata(source, name=name)
                 except InstallerManifestError as error:
                     raise VelopackPackagingError(str(error)) from error
                 if (
-                    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                    (after_path.st_dev, after_path.st_ino)
+                    != (after.st_dev, after.st_ino)
+                    or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                     or before.st_size != after.st_size
                     or before.st_mtime_ns != after.st_mtime_ns
                     or before.st_ctime_ns != after.st_ctime_ns

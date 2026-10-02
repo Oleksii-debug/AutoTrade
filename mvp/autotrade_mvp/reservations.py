@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Protocol
+
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_add,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 
 
 class CapitalAvailabilityEvidence(Protocol):
@@ -33,12 +41,11 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be an exact finite decimal within the resource envelope"
+        ) from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -88,14 +95,16 @@ class ReservationBook:
 
     def total_reserved(self, resource: str) -> Decimal:
         key = _text(resource, name="resource")
-        return sum(
-            (
+        try:
+            return exact_sum(
                 record.remaining.get(key, Decimal("0"))
                 for record in self._records.values()
                 if record.state in ACTIVE_STATES
-            ),
-            Decimal("0"),
-        )
+            )
+        except ExactDecimalError as error:
+            raise ReservationConflict(
+                "reserved total exceeds exact decimal authority"
+            ) from error
 
     def reserve(
         self,
@@ -127,7 +136,13 @@ class ReservationBook:
             if resource not in availability:
                 raise InsufficientAvailable(f"No availability evidence for {resource}")
             already_reserved = self.total_reserved(resource)
-            if already_reserved + amount > availability[resource]:
+            try:
+                projected_reserved = exact_add(already_reserved, amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation admission exceeds exact decimal authority"
+                ) from error
+            if projected_reserved > availability[resource]:
                 raise InsufficientAvailable(
                     f"Insufficient {resource}: available={availability[resource]}, "
                     f"reserved={already_reserved}, requested={amount}"
@@ -194,8 +209,15 @@ class ReservationBook:
                 raise ReservationConflict(
                     f"Consumption exceeds remaining reservation for {resource}"
                 )
-            remaining[resource] -= amount
-            consumed[resource] += amount
+            try:
+                next_remaining = exact_subtract(remaining[resource], amount)
+                next_consumed = exact_add(consumed[resource], amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation consumption exceeds exact decimal authority"
+                ) from error
+            remaining[resource] = next_remaining
+            consumed[resource] = next_consumed
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,

@@ -1,5 +1,5 @@
 from contextlib import closing
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -244,6 +244,58 @@ class DurableReservationBookTests(unittest.TestCase):
             requirements={"CASH:USD": amount},
             available={"CASH:USD": "100"},
         )
+
+    def test_exact_consumption_replays_identically_across_decimal_contexts(self):
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            first = self.book()
+            first.reserve(
+                command_id="cmd-exact-reserve",
+                idempotency_key="idem-exact-reserve",
+                reservation_id="r-exact",
+                intent_id="i-exact",
+                requirements={"CASH:USD": "100000.0000001"},
+                available={"CASH:USD": "200000"},
+            )
+            first.consume(
+                command_id="cmd-exact-consume",
+                idempotency_key="idem-exact-consume",
+                reservation_id="r-exact",
+                usage={"CASH:USD": "0.0000001"},
+            )
+            before = first.get("r-exact")
+            before_total = first.total_reserved("CASH:USD")
+
+        with localcontext() as context:
+            context.prec = 80
+            context.rounding = ROUND_HALF_EVEN
+            restarted = self.book()
+            after = restarted.get("r-exact")
+            after_total = restarted.total_reserved("CASH:USD")
+
+        self.assertEqual(before, after)
+        self.assertEqual(before.remaining["CASH:USD"], Decimal("100000"))
+        self.assertEqual(before.consumed["CASH:USD"], Decimal("0.0000001"))
+        self.assertEqual(before_total, Decimal("100000"))
+        self.assertEqual(after_total, Decimal("100000"))
+        self.assertEqual(restarted.version, 2)
+
+    def test_durable_reserve_rejects_oversized_amount_before_journal_mutation(self):
+        book = self.book()
+        before = book.version
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.reserve(
+                command_id="cmd-oversized",
+                idempotency_key="idem-oversized",
+                reservation_id="r-oversized",
+                intent_id="i-oversized",
+                requirements={"CASH:USD": "1e1000"},
+                available={"CASH:USD": "1e1000"},
+            )
+        self.assertEqual(book.version, before)
+        self.assertEqual(book.active(), ())
+        self.assertEqual(self.book().version, before)
 
     def test_restart_reconstructs_active_reservation_from_journal(self):
         first = self.book()

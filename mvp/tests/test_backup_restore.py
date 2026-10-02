@@ -755,14 +755,17 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            controller.transfer_owner(
-                new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+            replacement_store = JournalStore(
+                restored / "state" / "journal.sqlite3"
             )
+            controller = RecoveryController(
+                owner_store=replacement_store,
+                owner_scope="PAPER:paper-account",
+            )
+            controller.takeover_durable_owner("replacement-owner")
             checkpoint_id = self._record_durable_ready(
                 controller,
-                JournalStore(restored / "state" / "journal.sqlite3"),
+                replacement_store,
                 reconciliation_id="replacement-readiness",
             )
             second = _publish_sender_fence_evidence(
@@ -908,11 +911,13 @@ class BackupRestoreTests(unittest.TestCase):
             )
             self.assertFalse(restore_requires_reconciliation(restored))
 
-            controller.transfer_owner(
-                new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+            later = RecoveryController(
+                owner_store=JournalStore(
+                    restored / "state" / "journal.sqlite3"
+                ),
+                owner_scope="PAPER:paper-account",
             )
+            later.takeover_durable_owner("later-owner")
             self.assertTrue(restore_requires_reconciliation(restored))
 
     def test_missing_or_corrupt_restore_marker_fails_closed(self):

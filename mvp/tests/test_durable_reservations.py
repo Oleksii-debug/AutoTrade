@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, _issue_financial_authority_check
+from mvp.autotrade_mvp.dispatch import stable_client_order_id
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
@@ -28,6 +28,7 @@ from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
+from mvp.tests.provider_write_fixture import journal_unknown_submission
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
@@ -111,36 +112,32 @@ class DurableReservationBookTests(unittest.TestCase):
         intent_id="i1",
         provider="SIMULATED",
     ):
-        dispatcher = GuardedDispatcher(
-            self.store,
+        client_order_id = stable_client_order_id(
+            provider,
+            intent_id,
             environment="PAPER",
             account_id="paper-account",
         )
-
-        def ambiguous_transport(client_order_id, request, final_guard):
-            final_guard()
-            raise TimeoutError("simulated ambiguous provider result")
-
-        def sender_check(owner_token, owner_epoch):
-            self.assertTrue(owner_token)
-            self.assertEqual(owner_epoch, 1)
-
-        outcome = dispatcher.dispatch(
+        request = {"instrument": "TEST", "quantity": "1"}
+        journal_unknown_submission(
+            self.store,
+            environment="PAPER",
+            account_id="paper-account",
             attempt_id=attempt_id,
             intent_id=intent_id,
-            intent_hash="sha256:" + "1" * 64,
             provider=provider,
-            request={"instrument": "TEST", "quantity": "1"},
+            request_hash=payload_digest(request),
+            client_order_id=client_order_id,
+            submission_scope={},
             now="2026-09-25T00:00:00Z",
-            authority_check=_issue_financial_authority_check(
-                lambda intent_hash, now: (True, "allowed"), store=self.store
-            ),
-            transport_send=ambiguous_transport,
-            sender_check=sender_check,
+            reason="simulated_ambiguous_provider_result",
+            intent_hash="sha256:" + "1" * 64,
         )
-        self.assertEqual(outcome.status, "UNKNOWN")
-        return outcome
-
+        events = self.store.load_events_by_aggregate_type(
+            "submission_attempt"
+        )
+        self.assertEqual(events[-1]["event_type"], "SubmissionUnknown")
+        return client_order_id
     def record_reconciliation_resolution(
         self,
         *,

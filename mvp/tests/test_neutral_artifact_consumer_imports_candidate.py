@@ -36,8 +36,16 @@ import sys
 sys.path.insert(0, {str(ROOT)!r})
 for name in {module_list}:
     importlib.import_module(name)
-assert not any(name == 'research' or name.startswith('research.') for name in sys.modules)
-assert not any(name == 'autotrade_research' or name.startswith('autotrade_research.') for name in sys.modules)
+research_modules = sorted(
+    name for name in sys.modules
+    if name == 'research' or name.startswith('research.')
+)
+compat_modules = sorted(
+    name for name in sys.modules
+    if name == 'autotrade_research' or name.startswith('autotrade_research.')
+)
+assert not research_modules, f"research tree leaked into production imports: {research_modules!r}"
+assert not compat_modules, f"research compatibility tree leaked into production imports: {compat_modules!r}"
 import autotrade_runtime.artifacts as artifacts
 assert artifacts.ArtifactStore.__module__ == 'autotrade_runtime.artifacts.store'
 assert artifacts.CANONICAL_ARTIFACT_STORE_MODULE == 'autotrade_runtime.artifacts.store'

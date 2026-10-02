@@ -62,7 +62,7 @@ _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 def _product_artifact_root(journal_path: Path) -> Path:
     """Select the product artifact root independently from caller publication stores."""
 
-    if type(journal_path) is not Path or not journal_path.is_absolute():
+    if not isinstance(journal_path, Path) or not journal_path.is_absolute():
         raise ValueError("product artifact root requires canonical absolute journal path")
     return Path(str(journal_path) + ".artifacts")
 

@@ -19,6 +19,7 @@ from uuid import UUID
 from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
@@ -81,16 +82,22 @@ def _digest(value: str) -> str:
 def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(f"{name} must use an exact built-in Decimal")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
+    if not Decimal.is_finite(result):
         raise ValueError(f"{name} must be a finite decimal")
     if result < 0 or (result == 0 and not allow_zero):
         raise ValueError(
             f"{name} must be {'non-negative' if allow_zero else 'positive'}"
         )
+    try:
+        canonical_decimal_text(result)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} exceeds exact decimal authority") from error
     return result
 
 
@@ -125,11 +132,10 @@ _BOUNDED_REAL_ENVELOPE_SCHEMA_VERSION = 1
 def _canonical_decimal_text(value: Decimal) -> str:
     """Canonical exact numeric identity for bounded-real risk limits."""
 
-    normalized = value.normalize()
-    rendered = format(normalized, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered or "0"
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError("bounded-real limit exceeds exact decimal authority") from error
 
 
 def _bounded_real_envelope_digest(

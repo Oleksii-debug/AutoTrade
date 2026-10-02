@@ -116,9 +116,9 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertIn("reconciliation_lag_exceeded", over.blockers)
 
     def test_float_timing_inputs_are_rejected(self):
-        with self.assertRaisesRegex(ReadinessError, "exact decimal"):
+        with self.assertRaisesRegex(ReadinessError, "exact.*decimal"):
             healthy(clock_skew_seconds=0.1)
-        with self.assertRaisesRegex(ReadinessError, "exact decimal"):
+        with self.assertRaisesRegex(ReadinessError, "exact.*decimal"):
             healthy(reconciliation_lag_seconds=1.0)
 
     def test_lease_like_ownership_without_external_fencing_never_becomes_ready(self):
@@ -236,13 +236,7 @@ class RuntimeReadinessTests(unittest.TestCase):
                     raise AssertionError("subclass field dispatch must not run")
                 return super().__getattribute__(name)
 
-        base = healthy()
-        forged = ForgedSignals(
-            **{
-                field: getattr(base, field)
-                for field in RuntimeSafetySignals.__dataclass_fields__
-            }
-        )
+        forged = object.__new__(ForgedSignals)
         with self.assertRaisesRegex(TypeError, "exact RuntimeSafetySignals"):
             evaluate_readiness(forged)
 

@@ -130,7 +130,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
 
             store = JournalStore(Path(directory) / "journal.sqlite3")
             base = activity(signed_amount="1")
-            forged_activity = ForgedActivity(**base.__dict__)
+            forged_activity = object.__new__(ForgedActivity)
             with self.assertRaisesRegex(TypeError, "canonical ProviderActivityEvidence"):
                 book_external_provider_cash_activity(
                     store,

@@ -525,7 +525,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(redacted["Authorization: [REDACTED]"], "[REDACTED]")
         self.assertEqual(
             redacted["https://[REDACTED]@provider.test/path"],
-            "visible",
+            "[REDACTED]",
         )
         self.assertEqual(redacted["api_key=[REDACTED]"], "[REDACTED]")
         self.assertEqual(redacted["api_key=[REDACTED] [2]"], "[REDACTED]")

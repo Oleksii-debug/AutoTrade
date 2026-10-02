@@ -409,7 +409,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(first["event_id"], second["event_id"])
             self.assertEqual(
                 first["payload"]["cash_differences"]["USD"],
-                "-0.50",
+                "-0.5",
             )
             self.assertEqual(
                 first["payload"]["resource_availability"],

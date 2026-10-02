@@ -269,10 +269,16 @@ def _validated_fill_evidence(
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
     if (
-        provider_fill.client_order_id is not None
-        and projected_fill.client_order_id != provider_fill.client_order_id
+        projected_fill.client_order_id is None
+        or provider_fill.client_order_id is None
     ):
-        raise AccountingConflict("provider client order identity does not match projection")
+        raise AccountingConflict(
+            "admitted provider fill requires exact client order identity"
+        )
+    if projected_fill.client_order_id != provider_fill.client_order_id:
+        raise AccountingConflict(
+            "provider client order identity does not match projection"
+        )
     if projected_fill.quantity != provider_fill.quantity:
         raise AccountingConflict("provider fill quantity does not match projection")
     if projected_fill.price != provider_fill.price:

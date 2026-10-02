@@ -16,6 +16,7 @@ from autotrade_runtime.artifacts import (
 from mvp.autotrade_mvp import host_network, production_host
 from mvp.autotrade_mvp.host_network import TransportResponse
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.production_host import (
     ProductionHostConfig,
     _InstanceFence,
@@ -376,6 +377,86 @@ class ProductionHostCompositionTests(unittest.TestCase):
                         principal_resolver=Mock(),
                         snapshot_provider=Mock(),
                     )
+
+
+    def test_polymorphic_security_boundary_is_rejected_before_side_effects(self):
+        class HostileSecurityBoundary(SecurityBoundary):
+            def validate_session(self, *args, **kwargs):
+                raise AssertionError("hostile validate_session must not run")
+
+            def validate_host_session(self, *args, **kwargs):
+                raise AssertionError("hostile validate_host_session must not run")
+
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            hostile = object.__new__(HostileSecurityBoundary)
+            with (
+                patch.object(production_host, "_InstanceFence") as fence_type,
+                patch.object(production_host, "JournalStore") as journal_factory,
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostApplication",
+                ) as app_factory,
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                ) as server_factory,
+            ):
+                with self.assertRaisesRegex(TypeError, "exact SecurityBoundary"):
+                    build_production_host(
+                        config,
+                        security_boundary=hostile,
+                        principal_resolver=Mock(),
+                        snapshot_provider=Mock(),
+                    )
+            fence_type.acquire.assert_not_called()
+            journal_factory.assert_not_called()
+            app_factory.assert_not_called()
+            server_factory.assert_not_called()
+
+    def test_config_is_exact_and_structurally_readmitted_before_side_effects(self):
+        class HostileConfig(ProductionHostConfig):
+            pass
+
+        with TemporaryDirectory() as directory:
+            canonical = self._config(directory)
+            hostile = HostileConfig(
+                journal_path=canonical.journal_path,
+                account_id=canonical.account_id,
+                environment=canonical.environment,
+                host_id=canonical.host_id,
+                bind_host=canonical.bind_host,
+                bind_port=canonical.bind_port,
+                public_origin=canonical.public_origin,
+            )
+            structurally_mutated = self._config(directory, journal_name="mutated.sqlite3")
+            object.__setattr__(structurally_mutated, "bind_port", 70000)
+
+            for invalid in (hostile, structurally_mutated):
+                with self.subTest(config_type=type(invalid).__name__):
+                    with (
+                        patch.object(production_host, "_InstanceFence") as fence_type,
+                        patch.object(production_host, "JournalStore") as journal_factory,
+                        patch.object(
+                            production_host,
+                            "AuthenticatedHostApplication",
+                        ) as app_factory,
+                        patch.object(
+                            production_host,
+                            "AuthenticatedHostServer",
+                        ) as server_factory,
+                    ):
+                        with self.assertRaises((TypeError, ValueError)):
+                            build_production_host(
+                                invalid,
+                                security_boundary=object(),
+                                principal_resolver=Mock(),
+                                snapshot_provider=Mock(),
+                            )
+                    fence_type.acquire.assert_not_called()
+                    journal_factory.assert_not_called()
+                    app_factory.assert_not_called()
+                    server_factory.assert_not_called()
 
 
 if __name__ == "__main__":

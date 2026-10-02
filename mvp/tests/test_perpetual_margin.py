@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -17,7 +18,10 @@ from mvp.autotrade_mvp.perpetual_margin import (
     PerpetualStress,
     evaluate_perpetual_margin,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 
 def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
@@ -561,6 +565,84 @@ class PerpetualMarginTests(unittest.TestCase):
             "canonical ArtifactStore",
         ):
             evaluate(evidence=trusted, artifact_store=fake_store)
+
+    def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
+        class ForgedArtifactStore(ArtifactStore):
+            snapshot_called = False
+
+            def read_authenticated_snapshot(self, artifact_id):
+                self.snapshot_called = True
+                raise AssertionError("subclass method must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            publish_margin_artifacts(canonical, trusted)
+            forged = ForgedArtifactStore(directory)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "canonical ArtifactStore",
+            ):
+                evaluate(evidence=trusted, artifact_store=forged)
+            self.assertFalse(forged.snapshot_called)
+
+    def test_each_margin_artifact_uses_one_class_qualified_authenticated_snapshot(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            original = ArtifactStore.read_authenticated_snapshot
+            calls = []
+
+            def counted(instance, artifact_id):
+                calls.append((instance, artifact_id))
+                return original(instance, artifact_id)
+
+            store.load_manifest = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("split manifest read")
+            )
+            store.read_bytes = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("split payload read")
+            )
+            store.read_authenticated_snapshot = lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(AssertionError("instance virtual dispatch"))
+            )
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                new=counted,
+            ):
+                result = evaluate(evidence=trusted, artifact_store=store)
+
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+            self.assertEqual(
+                calls,
+                [
+                    (store, TIER_TABLE_ID),
+                    (store, EVIDENCE_BUNDLE_ID),
+                ],
+            )
+
+    def test_authenticated_snapshot_storage_failures_are_fail_closed(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            for failure in (
+                OSError("simulated storage race"),
+                ArtifactIntegrityError("simulated integrity failure"),
+            ):
+                with self.subTest(failure=type(failure).__name__):
+                    with patch.object(
+                        ArtifactStore,
+                        "read_authenticated_snapshot",
+                        side_effect=failure,
+                    ):
+                        with self.assertRaisesRegex(
+                            PerpetualMarginError,
+                            "artifact is missing or corrupt",
+                        ):
+                            evaluate(evidence=trusted, artifact_store=store)
 
     def test_margin_evidence_payloads_ignore_ambient_decimal_context(self):
         trusted = evidence(

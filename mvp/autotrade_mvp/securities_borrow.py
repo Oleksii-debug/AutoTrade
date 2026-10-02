@@ -576,8 +576,8 @@ class DurableBorrowRecallProjection:
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
         if type(evidence_artifact_store) is not ArtifactStore:
             raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.store = store

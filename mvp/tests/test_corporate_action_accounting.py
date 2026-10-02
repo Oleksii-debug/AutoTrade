@@ -196,6 +196,38 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             )
             self.assertEqual(len(economics.transactions), 2)
 
+    def test_provider_environment_mismatch_fails_before_financial_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            accepted = resolve_action(sealed_action())
+            durable_evidence = DurableCorporateActionEvidenceStore(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_environment="OTHER",
+            )
+            economics = economic_book(store)
+            before_transactions = economics.transactions
+
+            with self.assertRaisesRegex(ValueError, "different scope"):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+
     def test_prepared_evidence_does_not_mutate_until_shared_commit(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

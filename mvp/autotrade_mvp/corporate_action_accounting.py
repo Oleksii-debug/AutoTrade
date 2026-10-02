@@ -44,16 +44,56 @@ def _identity(kind: str, *parts: str) -> str:
     ).hexdigest()
 
 
-def _order_key(external_event_id: str) -> str:
-    return _identity("corporate-action-order", external_event_id)
+def _provider_scope_parts(
+    accepted: AuthoritativeCorporateAction,
+) -> tuple[str, ...]:
+    parts = [
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
+    ]
+    if accepted.provider_environment != accepted.environment:
+        parts.append(accepted.provider_environment)
+    return tuple(parts)
+
+
+def _order_key(
+    accepted: AuthoritativeCorporateAction,
+    external_event_id: str,
+) -> str:
+    if accepted.provider_environment == accepted.environment:
+        return _identity("corporate-action-order", external_event_id)
+    return _identity(
+        "corporate-action-order",
+        *_provider_scope_parts(accepted),
+        external_event_id,
+    )
+
+
+def _cause_id(
+    accepted: AuthoritativeCorporateAction,
+    suffix: str,
+) -> str:
+    if accepted.provider_environment == accepted.environment:
+        return _identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            suffix,
+        )
+    return _identity(
+        "corporate-action-cause",
+        *_provider_scope_parts(accepted),
+        accepted.external_event_id,
+        accepted.provenance_digest,
+        suffix,
+    )
 
 
 def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
     return _identity(
         "corporate-action-transaction",
-        accepted.provider_id,
-        accepted.account_id,
-        accepted.environment,
+        *_provider_scope_parts(accepted),
         accepted.external_event_id,
         accepted.provenance_digest,
         suffix,
@@ -257,12 +297,7 @@ def _dividend_transaction(
     currency = transition.after.currency
     transaction = JournalTransaction(
         transaction_id=_transaction_id(accepted, "effect"),
-        cause_event_id=_identity(
-            "corporate-action-cause",
-            accepted.external_event_id,
-            accepted.provenance_digest,
-            "effect",
-        ),
+        cause_event_id=_cause_id(accepted, "effect"),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
             Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
@@ -308,7 +343,7 @@ def _correction_transactions(
     target_id = accepted.corrects_external_event_id
     if target_id is None:
         raise AssertionError("correction target is required")
-    order_key = _order_key(target_id)
+    order_key = _order_key(accepted, target_id)
     expected_reversal_id = _transaction_id(accepted, "reversal")
     expected_replacement_id = _transaction_id(accepted, "effect")
 
@@ -386,12 +421,7 @@ def _correction_transactions(
     reversal = reverse_transaction(
         original,
         transaction_id=expected_reversal_id,
-        cause_event_id=_identity(
-            "corporate-action-cause",
-            accepted.external_event_id,
-            accepted.provenance_digest,
-            "reversal",
-        ),
+        cause_event_id=_cause_id(accepted, "reversal"),
         observed_at=accepted.observed_at,
     )
     replacement = _dividend_transaction(
@@ -425,7 +455,7 @@ def _economic_transactions(
             exact_retry=exact_retry,
         )
 
-    order_key = _order_key(accepted.external_event_id)
+    order_key = _order_key(accepted, accepted.external_event_id)
     transaction = _dividend_transaction(
         accepted,
         transition,
@@ -484,6 +514,13 @@ def commit_authoritative_corporate_action(
         evidence_store.provider_id != economic_book.provider_id
         or evidence_store.account_id != economic_book.account_id
         or evidence_store.environment != economic_book.environment
+        or evidence_store.provider_environment
+        != economic_book.provider_environment
+        or accepted.provider_id != economic_book.provider_id
+        or accepted.account_id != economic_book.account_id
+        or accepted.environment != economic_book.environment
+        or accepted.provider_environment
+        != economic_book.provider_environment
     ):
         raise ValueError("corporate-action durable authorities have different scope")
 
@@ -625,9 +662,7 @@ def commit_authoritative_corporate_action(
             "https://commands.autotrade.local/corporate-action-financial/"
             + canonical_json(
                 [
-                    accepted.provider_id,
-                    accepted.account_id,
-                    accepted.environment,
+                    *_provider_scope_parts(accepted),
                     accepted.external_event_id,
                     accepted.provenance_digest,
                 ]
@@ -636,9 +671,7 @@ def commit_authoritative_corporate_action(
     )
     idempotency_key = _identity(
         "corporate-action-financial",
-        accepted.provider_id,
-        accepted.account_id,
-        accepted.environment,
+        *_provider_scope_parts(accepted),
         accepted.external_event_id,
         accepted.provenance_digest,
     )

@@ -126,7 +126,7 @@ def _verify_immutable_artifact(
         raise PerpetualMarginError(
             "immutable margin evidence artifact is missing or corrupt"
         ) from error
-    if type(manifest) is not dict or not isinstance(payload, bytes):
+    if type(manifest) is not dict or type(payload) is not bytes:
         raise PerpetualMarginError(
             "immutable margin evidence artifact has unsupported representation"
         )
@@ -514,7 +514,7 @@ def evaluate_perpetual_margin(
         raise TypeError("evidence must be PerpetualMarginEvidence")
     if not isinstance(stress, PerpetualStress):
         raise TypeError("stress must be PerpetualStress")
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise PerpetualMarginError(
             "canonical ArtifactStore is required for immutable margin evidence"
         )

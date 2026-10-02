@@ -3,11 +3,13 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 import mvp.autotrade_mvp.release_candidate as release_candidate_module
+import mvp.autotrade_mvp.supply_chain_qualification as supply_chain_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -15,6 +17,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
@@ -22,6 +25,12 @@ from mvp.autotrade_mvp.release_candidate import (
     ReleaseCandidateError,
     ReleaseCandidateInput,
     freeze_release_candidate,
+)
+from mvp.autotrade_mvp.supply_chain_qualification import (
+    ComponentEvidence,
+    ModelDataRightsEvidence,
+    SupplyChainEvidence,
+    supply_chain_subject_requirement,
 )
 
 
@@ -110,7 +119,10 @@ def _trust_root():
         verifier_id="autotrade.trust.verifier",
         public_modulus_hex=format(_RSA_N, "x"),
         public_exponent=65537,
-        allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+        allowed_scopes=(
+            QualificationScope("RELEASE", "FREEZE"),
+            QualificationScope("SUPPLY_CHAIN", "RELEASE"),
+        ),
         valid_from="2026-09-01T00:00:00Z",
     )
 
@@ -135,8 +147,16 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
         EvidenceArtifactRef(
             artifact_id=item.artifact_id,
             sha256=item.artifact_sha256,
-            media_type=RELEASE_MEDIA_TYPE,
-            evidence_kind=RELEASE_EVIDENCE_KIND,
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_MEDIA_TYPE
+            ),
+            evidence_kind=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_EVIDENCE_KIND
+            ),
             source_sha=item.source_sha,
         )
         for item in (candidate.artifacts if artifacts is None else artifacts)
@@ -175,6 +195,294 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
     return SignedQualificationAttestation(value, _sign(value))
 
 
+def _publish_supply_artifact(
+    store,
+    *,
+    label,
+    media_type,
+    metadata,
+    source_sha=SOURCE,
+):
+    artifact_id = str(uuid5(NAMESPACE_URL, "wp64-artifact:" + label))
+    data = ("wp64-artifact:" + label).encode("utf-8")
+    digest = "sha256:" + sha256(data).hexdigest()
+    store.publish_bytes(
+        artifact_id=artifact_id,
+        data=data,
+        media_type=media_type,
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{source_sha}"],
+        metadata=metadata,
+    )
+    return artifact_id, digest
+
+
+def _supply_chain_fixture(
+    candidate, store, *, release_artifact=None, source_sha=SOURCE
+):
+    windows = (
+        release_artifact
+        if release_artifact is not None
+        else next(
+            item for item in candidate.artifacts
+            if item.role == "WINDOWS_PACKAGE"
+        )
+    )
+    sbom_id, sbom_hash = _publish_supply_artifact(
+        store,
+        label="sbom",
+        media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+        source_sha=source_sha,
+        metadata={"evidence_kind": "SBOM", "release_sha": source_sha},
+    )
+    provenance_id, provenance_hash = _publish_supply_artifact(
+        store,
+        label="provenance",
+        media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+        source_sha=source_sha,
+        metadata={"evidence_kind": "PROVENANCE", "release_sha": source_sha},
+    )
+    lock_id, lock_hash = _publish_supply_artifact(
+        store,
+        label="dependency-lock",
+        media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+        source_sha=source_sha,
+        metadata={"evidence_kind": "DEPENDENCY_LOCK", "release_sha": source_sha},
+    )
+    component_id = "autotrade-core"
+    component_version = "1.0.0"
+    component_artifact_id, component_hash = _publish_supply_artifact(
+        store,
+        label="component",
+        media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+        source_sha=source_sha,
+        metadata={
+            "evidence_kind": "DISTRIBUTED_COMPONENT",
+            "component_id": component_id,
+            "version": component_version,
+            "release_sha": source_sha,
+        },
+    )
+    rights_scope = "distribution"
+    rights_id, rights_hash = _publish_supply_artifact(
+        store,
+        label="rights",
+        media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+        source_sha=source_sha,
+        metadata={
+            "evidence_kind": "MODEL_DATA_RIGHTS",
+            "use_scope": rights_scope,
+            "release_sha": source_sha,
+        },
+    )
+    component = ComponentEvidence(
+        component_id=component_id,
+        artifact_id=component_artifact_id,
+        version=component_version,
+        declared_artifact_hash=component_hash,
+        observed_artifact_hash=component_hash,
+        source_revision="git:" + source_sha,
+        license_status="APPROVED",
+        distribution_rights="APPROVED",
+        advisory_status="CLEAR",
+        notice_required=False,
+        notice_present=True,
+        reviewed_for_release_sha=source_sha,
+    )
+    rights = ModelDataRightsEvidence(
+        artifact_id=rights_id,
+        artifact_hash=rights_hash,
+        use_scope=rights_scope,
+        rights_status="APPROVED",
+        reviewed_for_release_sha=source_sha,
+    )
+    return SupplyChainEvidence(
+        release_commit_sha=source_sha,
+        built_from_commit_sha=source_sha,
+        sbom_artifact_id=sbom_id,
+        sbom_hash=sbom_hash,
+        provenance_artifact_id=provenance_id,
+        provenance_hash=provenance_hash,
+        dependency_lock_artifact_id=lock_id,
+        dependency_lock_hash=lock_hash,
+        sbom_reviewed_for_release_sha=source_sha,
+        provenance_reviewed_for_release_sha=source_sha,
+        dependency_lock_reviewed_for_release_sha=source_sha,
+        distributed_component_ids=(component_id,),
+        sbom_component_ids=(component_id,),
+        components=(component,),
+        model_data_rights=(rights,),
+        release_artifact_id=windows.artifact_id,
+        release_artifact_sha256=windows.artifact_sha256,
+    )
+
+
+def _supply_chain_receipt(evidence, trust_root):
+    refs = [
+        EvidenceArtifactRef(
+            artifact_id=evidence.sbom_artifact_id,
+            sha256=evidence.sbom_hash,
+            media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+            evidence_kind="SBOM",
+            source_sha=evidence.release_commit_sha,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.provenance_artifact_id,
+            sha256=evidence.provenance_hash,
+            media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+            evidence_kind="PROVENANCE",
+            source_sha=evidence.release_commit_sha,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.dependency_lock_artifact_id,
+            sha256=evidence.dependency_lock_hash,
+            media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+            evidence_kind="DEPENDENCY_LOCK",
+            source_sha=evidence.release_commit_sha,
+        ),
+    ]
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.observed_artifact_hash,
+            media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+            evidence_kind="DISTRIBUTED_COMPONENT",
+            source_sha=evidence.release_commit_sha,
+        )
+        for item in evidence.components
+    )
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.artifact_hash,
+            media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+            evidence_kind="MODEL_DATA_RIGHTS",
+            source_sha=evidence.release_commit_sha,
+        )
+        for item in evidence.model_data_rights
+    )
+    value = QualificationAttestation(
+        attestation_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                "wp64:"
+                + evidence.release_artifact_id
+                + ":"
+                + evidence.release_artifact_sha256,
+            )
+        ),
+        source_sha=evidence.release_commit_sha,
+        domain="SUPPLY_CHAIN",
+        gate="RELEASE",
+        package_id="WP-64",
+        protocol_id="supply-chain-review-v1",
+        protocol_version="1.0.0",
+        requirement_ids=(
+            "independent-supply-chain-review",
+            supply_chain_subject_requirement(evidence),
+        ),
+        evidence_refs=tuple(refs),
+        producer_id=trust_root.producer_id,
+        verifier_id=trust_root.verifier_id,
+        trust_root_id=trust_root.root_id,
+        runner_id="supply-chain-review-runner",
+        harness_version="1.0.0",
+        started_at="2026-09-25T01:00:00Z",
+        completed_at="2026-09-25T01:10:00Z",
+        signed_at="2026-09-25T01:11:00Z",
+        result="PASS",
+        unresolved_limits=(),
+        release_artifact_id=evidence.release_artifact_id,
+        release_artifact_sha256=evidence.release_artifact_sha256,
+    )
+    return SignedQualificationAttestation(value, _sign(value))
+
+
+def _bind_supply_chain_proof(
+    candidate,
+    store,
+    trust_root,
+    *,
+    supply_chain_evidence_override=None,
+    supply_chain_receipt_override=None,
+    supply_chain_release_artifact_override=None,
+    supply_chain_source_sha=SOURCE,
+):
+    supply_chain_evidence = (
+        supply_chain_evidence_override
+        if supply_chain_evidence_override is not None
+        else _supply_chain_fixture(
+            candidate,
+            store,
+            release_artifact=supply_chain_release_artifact_override,
+            source_sha=supply_chain_source_sha,
+        )
+    )
+    supply_chain_receipt = (
+        supply_chain_receipt_override
+        if supply_chain_receipt_override is not None
+        else _supply_chain_receipt(supply_chain_evidence, trust_root)
+    )
+    proof_bytes = supply_chain_module.canonical_supply_chain_proof_bytes(
+        supply_chain_evidence,
+        supply_chain_receipt,
+    )
+    dependency_rights = next(
+        item for item in candidate.artifacts
+        if item.role == "DEPENDENCY_RIGHTS"
+    )
+    bound_dependency_rights = ReleaseArtifactEvidence.create(
+        role=dependency_rights.role,
+        artifact_id=dependency_rights.artifact_id,
+        artifact_sha256="sha256:" + sha256(proof_bytes).hexdigest(),
+        source_sha=dependency_rights.source_sha,
+        signature_status=dependency_rights.signature_status,
+        evidence_status=dependency_rights.evidence_status,
+    )
+    _ARTIFACT_BYTES[bound_dependency_rights.artifact_id] = proof_bytes
+    bound_candidate = ReleaseCandidateInput.create(
+        release_id=candidate.release_id,
+        source_sha=candidate.source_sha,
+        baseline_hash=candidate.baseline_hash,
+        schema_contract_hash=candidate.schema_contract_hash,
+        artifacts=tuple(
+            bound_dependency_rights if item.role == "DEPENDENCY_RIGHTS" else item
+            for item in candidate.artifacts
+        ),
+        unresolved_blockers=candidate.unresolved_blockers,
+    )
+    return bound_candidate, supply_chain_evidence, supply_chain_receipt
+
+
+def _publish_candidate_artifacts(store, candidate, *, omit_roles=()):
+    for item in candidate.artifacts:
+        if item.role in omit_roles:
+            continue
+        is_supply_chain_proof = item.role == "DEPENDENCY_RIGHTS"
+        store.publish_bytes(
+            artifact_id=item.artifact_id,
+            data=_ARTIFACT_BYTES[item.artifact_id],
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if is_supply_chain_proof
+                else RELEASE_MEDIA_TYPE
+            ),
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{item.source_sha}"],
+            metadata={
+                "evidence_kind": (
+                    supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                    if is_supply_chain_proof
+                    else RELEASE_EVIDENCE_KIND
+                ),
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        )
+
+
 def freeze_with_integrity_store(
     candidate,
     *,
@@ -183,27 +491,33 @@ def freeze_with_integrity_store(
     with_attestation=False,
     receipt_override=None,
     policy_override=None,
+    before_canonical_verify=None,
+    supply_chain_evidence_override=None,
+    supply_chain_receipt_override=None,
+    supply_chain_release_artifact_override=None,
+    supply_chain_source_sha=SOURCE,
+    qualification_omit_roles=(),
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
-        for item in candidate.artifacts:
-            if item.role in omit_roles:
-                continue
-            data = _ARTIFACT_BYTES[item.artifact_id]
-            store.publish_bytes(
-                artifact_id=item.artifact_id,
-                data=data,
-                media_type=RELEASE_MEDIA_TYPE,
-                rights={"storage": True, "export": False},
-                source_refs=[f"git:{item.source_sha}"],
-                metadata={
-                    "evidence_kind": RELEASE_EVIDENCE_KIND,
-                    "role": item.role,
-                    "source_sha": item.source_sha,
-                    "signature_status": item.signature_status,
-                    "evidence_status": item.evidence_status,
-                },
+        trust_root = _trust_root()
+        if with_attestation or receipt_override is not None:
+            candidate, _, _ = _bind_supply_chain_proof(
+                candidate,
+                store,
+                trust_root,
+                supply_chain_evidence_override=supply_chain_evidence_override,
+                supply_chain_receipt_override=supply_chain_receipt_override,
+                supply_chain_release_artifact_override=(
+                    supply_chain_release_artifact_override
+                ),
+                supply_chain_source_sha=supply_chain_source_sha,
             )
+        _publish_candidate_artifacts(
+            store,
+            candidate,
+            omit_roles=omit_roles,
+        )
         if corrupt_role is not None:
             item = next(
                 artifact for artifact in candidate.artifacts
@@ -218,29 +532,59 @@ def freeze_with_integrity_store(
                 evidence_store=store,
                 evidence_root=directory,
             )
-        trust_root = _trust_root()
-        trust_policy = (
+        canonical_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(trust_root,),
+        )
+        caller_policy = (
             policy_override
             if policy_override is not None
-            else QualificationTrustPolicy(
-                policy_version="2026.09",
-                roots=(trust_root,),
-            )
+            else canonical_policy
         )
         receipt = (
             receipt_override
             if receipt_override is not None
-            else _qualification(candidate, trust_root)
+            else _qualification(
+                candidate,
+                trust_root,
+                artifacts=tuple(
+                    item
+                    for item in candidate.artifacts
+                    if item.role not in set(qualification_omit_roles)
+                ),
+            )
         )
-        return freeze_release_candidate(
-            candidate,
-            evidence_store=store,
-            evidence_root=directory,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+
+        def canonical_verify(receipt_arg, **kwargs):
+            if before_canonical_verify is not None:
+                before_canonical_verify()
+            return verify_qualification_attestation(
+                receipt_arg,
+                policy=canonical_policy,
+                expected_policy_id=canonical_policy.policy_id,
+                expected_policy_version=canonical_policy.policy_version,
+                **kwargs,
+            )
+
+        with patch.object(
+            release_candidate_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_verify,
+        ), patch.object(
+            supply_chain_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_verify,
+        ):
+            return freeze_release_candidate(
+                candidate,
+                evidence_store=store,
+                evidence_root=directory,
+                qualification_receipt=receipt,
+                qualification_policy=caller_policy,
+                expected_policy_id=caller_policy.policy_id,
+                expected_policy_version=caller_policy.policy_version,
+            )
+
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
@@ -276,33 +620,180 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
         )
+        self.assertEqual(
+            manifest["supply_chain"]["source_sha"],
+            candidate.source_sha,
+        )
+
+    def test_freeze_uses_one_exact_detached_candidate_graph_across_callbacks(self):
+        phase = {"mutated": False}
+
+        class HostileArtifact(ReleaseArtifactEvidence):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "evidence_status":
+                        return "FAIL"
+                    if name == "signature_status":
+                        return "INVALID"
+                return super().__getattribute__(name)
+
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "source_sha":
+                        return OTHER_SOURCE
+                    if name == "unresolved_blockers":
+                        return ("late-caller-blocker",)
+                return super().__getattribute__(name)
+
+        base = self.candidate()
+        first = base.artifacts[0]
+        hostile_artifact = HostileArtifact(
+            role=first.role,
+            artifact_id=first.artifact_id,
+            artifact_sha256=first.artifact_sha256,
+            source_sha=first.source_sha,
+            signature_status=first.signature_status,
+            evidence_status=first.evidence_status,
+        )
+        hostile_artifacts = (hostile_artifact,) + base.artifacts[1:]
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=hostile_artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        decision = freeze_with_integrity_store(
+            hostile_candidate,
+            with_attestation=True,
+            before_canonical_verify=lambda: phase.__setitem__("mutated", True),
+        )
+
+        self.assertTrue(phase["mutated"])
+        self.assertEqual(decision.status, "FROZEN")
+        manifest = json.loads(decision.manifest_json)
+        self.assertEqual(manifest["source_sha"], SOURCE)
+        by_role = {item["role"]: item for item in manifest["artifacts"]}
+        self.assertEqual(by_role[first.role]["evidence_status"], "PASS")
+        self.assertEqual(by_role[first.role]["signature_status"], first.signature_status)
+        self.assertNotIn("late-caller-blocker", decision.reasons)
+
+    def test_freeze_rejects_nonexact_terminal_container_views_before_callbacks(self):
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name == "artifacts":
+                    return list(value)
+                return value
+
+        base = self.candidate()
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=base.artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "candidate.artifacts must be an exact tuple",
+        ):
+            freeze_release_candidate(hostile_candidate)
+
+    def test_caller_selected_trust_policy_cannot_freeze_release(self):
+        candidate = self.candidate()
+        canonical_root = _trust_root()
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=canonical_root.verifier_id,
+            public_modulus_hex=canonical_root.public_modulus_hex,
+            public_exponent=canonical_root.public_exponent,
+            allowed_scopes=canonical_root.allowed_scopes,
+            valid_from=canonical_root.valid_from,
+        )
+        hostile_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(hostile_root,),
+        )
+        hostile_receipt = _qualification(candidate, hostile_root)
+        decision = freeze_with_integrity_store(
+            candidate,
+            receipt_override=hostile_receipt,
+            policy_override=hostile_policy,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn("independent_evidence_trust_invalid", decision.reasons)
 
     def test_attestation_must_cover_exact_candidate_artifact_set(self):
         candidate = self.candidate()
-        trust_root = _trust_root()
-        incomplete = _qualification(
-            candidate,
-            trust_root,
-            artifacts=candidate.artifacts[:-1],
-        )
         decision = freeze_with_integrity_store(
             candidate,
-            receipt_override=incomplete,
-            policy_override=QualificationTrustPolicy(
-                policy_version="2026.09",
-                roots=(trust_root,),
-            ),
+            with_attestation=True,
+            qualification_omit_roles=("RELEASE_QUALIFICATION",),
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn("qualification_evidence_set_mismatch", decision.reasons)
+
+    def test_wp64_review_for_package_a_cannot_freeze_package_b(self):
+        candidate_a = self.candidate()
+        windows_a = next(
+            item for item in candidate_a.artifacts
+            if item.role == "WINDOWS_PACKAGE"
+        )
+        windows_b = artifact("WINDOWS_PACKAGE", digest_char="e")
+        candidate_b = self.candidate(
+            artifacts=tuple(
+                windows_b if item.role == "WINDOWS_PACKAGE" else item
+                for item in candidate_a.artifacts
+            )
+        )
+
+        wrong = freeze_with_integrity_store(
+            candidate_b,
+            with_attestation=True,
+            supply_chain_release_artifact_override=windows_a,
+        )
+        self.assertEqual(wrong.status, "BLOCKED")
+        self.assertIn(
+            "supply_chain_release_artifact_mismatch",
+            wrong.reasons,
+        )
+
+        correct = freeze_with_integrity_store(
+            candidate_b,
+            with_attestation=True,
+        )
+        self.assertEqual(correct.status, "FROZEN")
+        manifest = json.loads(correct.manifest_json)
+        self.assertEqual(
+            manifest["supply_chain"]["release_artifact_id"],
+            windows_b.artifact_id,
+        )
+        self.assertEqual(
+            manifest["supply_chain"]["release_artifact_sha256"],
+            windows_b.artifact_sha256,
+        )
+
+    def test_wp64_review_for_different_source_cannot_freeze_same_package(self):
+        candidate = self.candidate()
+        decision = freeze_with_integrity_store(
+            candidate,
+            with_attestation=True,
+            supply_chain_source_sha=OTHER_SOURCE,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn("supply_chain_source_mismatch", decision.reasons)
+        self.assertIsNone(decision.manifest_json)
 
     def test_attestation_for_different_release_package_cannot_freeze(self):
         candidate = self.candidate()
         trust_root = _trust_root()
         receipt = _qualification(candidate, trust_root)
-        wrong_windows = next(
-            item for item in candidate.artifacts if item.role == "WINDOWS_PACKAGE"
-        )
         wrong = QualificationAttestation(
             **{
                 **receipt.attestation.__dict__,
@@ -375,7 +866,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReleaseCandidateError,
-            "requires verified factory authority",
+            "requires canonical qualification verification context",
         ):
             ReleaseCandidateDecision(
                 status="FROZEN",
@@ -388,7 +879,137 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_trust_root_id=decision.qualification_trust_root_id,
             )
 
-    def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
+    def test_frozen_rehydration_reverifies_canonical_signature_and_evidence(self):
+        candidate = self.candidate()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            trust_root = _trust_root()
+            candidate, _, _ = _bind_supply_chain_proof(
+                candidate,
+                store,
+                trust_root,
+            )
+            _publish_candidate_artifacts(store, candidate)
+            canonical_policy = QualificationTrustPolicy(
+                policy_version="2026.09",
+                roots=(trust_root,),
+            )
+            receipt = _qualification(candidate, trust_root)
+
+            def canonical_verify(receipt_arg, **kwargs):
+                return verify_qualification_attestation(
+                    receipt_arg,
+                    policy=canonical_policy,
+                    expected_policy_id=canonical_policy.policy_id,
+                    expected_policy_version=canonical_policy.policy_version,
+                    **kwargs,
+                )
+
+            with patch.object(
+                release_candidate_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ), patch.object(
+                supply_chain_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ):
+                original = freeze_release_candidate(
+                    candidate,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+                rehydrated = ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=original.manifest_json,
+                    manifest_sha256=original.manifest_sha256,
+                    qualification_attestation_id=original.qualification_attestation_id,
+                    qualification_attestation_digest=original.qualification_attestation_digest,
+                    qualification_policy_id=original.qualification_policy_id,
+                    qualification_trust_root_id=original.qualification_trust_root_id,
+                    _verification_store=store,
+                    _verification_root=directory,
+                )
+                self.assertEqual(rehydrated, original)
+
+                wrong_source_body = json.loads(original.manifest_json)
+                wrong_source_body["supply_chain"]["source_sha"] = OTHER_SOURCE
+                wrong_source_json = json.dumps(
+                    wrong_source_body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                wrong_source_sha = (
+                    "sha256:"
+                    + sha256(wrong_source_json.encode("utf-8")).hexdigest()
+                )
+                with self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "WP-64 proof source does not match manifest source",
+                ):
+                    ReleaseCandidateDecision(
+                        status="FROZEN",
+                        reasons=(),
+                        manifest_json=wrong_source_json,
+                        manifest_sha256=wrong_source_sha,
+                        qualification_attestation_id=(
+                            original.qualification_attestation_id
+                        ),
+                        qualification_attestation_digest=(
+                            original.qualification_attestation_digest
+                        ),
+                        qualification_policy_id=original.qualification_policy_id,
+                        qualification_trust_root_id=(
+                            original.qualification_trust_root_id
+                        ),
+                        _verification_store=store,
+                        _verification_root=directory,
+                    )
+
+                body = json.loads(original.manifest_json)
+                encoded_signature = body["qualification"]["receipt"]["signature_b64"]
+                signature_bytes = base64.b64decode(encoded_signature)
+                body["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
+                    b"\\x00" * len(signature_bytes)
+                ).decode("ascii")
+                forged_json = json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                forged_sha = (
+                    "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+                )
+                with self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "qualification receipt is not canonically verified",
+                ):
+                    ReleaseCandidateDecision(
+                        status="FROZEN",
+                        reasons=(),
+                        manifest_json=forged_json,
+                        manifest_sha256=forged_sha,
+                        qualification_attestation_id=(
+                            original.qualification_attestation_id
+                        ),
+                        qualification_attestation_digest=(
+                            original.qualification_attestation_digest
+                        ),
+                        qualification_policy_id=original.qualification_policy_id,
+                        qualification_trust_root_id=(
+                            original.qualification_trust_root_id
+                        ),
+                        _verification_store=store,
+                        _verification_root=directory,
+                    )
+
+    def test_structural_rehydration_rejects_changed_signed_artifact_binding(self):
         decision = freeze_with_integrity_store(
             self.candidate(),
             with_attestation=True,
@@ -421,10 +1042,9 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
-    def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
+    def test_structural_rehydration_rejects_changed_signed_role_binding(self):
         decision = freeze_with_integrity_store(
             self.candidate(),
             with_attestation=True,
@@ -459,7 +1079,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):
@@ -767,7 +1386,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertIsNone(original.manifest_sha256)
         self.assertIsNone(changed.manifest_sha256)
 
-
     def test_nonbinary_missing_or_invalid_signature_status_is_unresolved(self):
         for status in ("MISSING", "INVALID"):
             with self.subTest(status=status):
@@ -787,8 +1405,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     "signature_status_unresolved:SBOM",
                     decision.reasons,
                 )
-
-
 
     def test_freeze_without_store_reports_both_missing_integrity_and_trust(self):
         decision = freeze_release_candidate(self.candidate())
@@ -828,6 +1444,129 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 self.candidate(),
                 evidence_store=lambda _artifact: True,
             )
+
+
+    def test_freeze_rejects_wp64_pass_for_different_source_even_same_package(self):
+        candidate = self.candidate()
+        windows = next(
+            item
+            for item in candidate.artifacts
+            if item.role == "WINDOWS_PACKAGE"
+        )
+        cross_source = supply_chain_module.SupplyChainQualification(
+            qualification_id="supply-cross-source",
+            status="PASS",
+            checks=(),
+            reason_codes=(),
+            accepted_attestation_id=str(
+                uuid5(NAMESPACE_URL, "wp64:accepted-cross-source")
+            ),
+            accepted_attestation_digest="sha256:" + "a" * 64,
+            accepted_policy_id="sha256:" + "b" * 64,
+            accepted_trust_root_id="sha256:" + "c" * 64,
+            accepted_source_sha=OTHER_SOURCE,
+            subject_requirement=(
+                "supply-chain-subject-sha256:" + "d" * 64
+            ),
+            release_artifact_id=windows.artifact_id,
+            release_artifact_sha256=windows.artifact_sha256,
+        )
+
+        with patch.object(
+            release_candidate_module,
+            "qualify_supply_chain",
+            return_value=cross_source,
+        ):
+            decision = freeze_with_integrity_store(
+                candidate,
+                with_attestation=True,
+            )
+
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn("supply_chain_source_mismatch", decision.reasons)
+
+    def test_frozen_rehydration_rejects_wp64_source_different_from_manifest_source(self):
+        candidate = self.candidate()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            trust_root = _trust_root()
+            candidate, _, _ = _bind_supply_chain_proof(
+                candidate,
+                store,
+                trust_root,
+            )
+            _publish_candidate_artifacts(store, candidate)
+            canonical_policy = QualificationTrustPolicy(
+                policy_version="2026.09",
+                roots=(trust_root,),
+            )
+            receipt = _qualification(candidate, trust_root)
+
+            def canonical_verify(receipt_arg, **kwargs):
+                return verify_qualification_attestation(
+                    receipt_arg,
+                    policy=canonical_policy,
+                    expected_policy_id=canonical_policy.policy_id,
+                    expected_policy_version=canonical_policy.policy_version,
+                    **kwargs,
+                )
+
+            with patch.object(
+                release_candidate_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ), patch.object(
+                supply_chain_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ):
+                original_decision = freeze_release_candidate(
+                    candidate,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+                self.assertEqual(original_decision.status, "FROZEN")
+                body = json.loads(original_decision.manifest_json)
+                self.assertEqual(body["supply_chain"]["source_sha"], SOURCE)
+                body["supply_chain"]["source_sha"] = OTHER_SOURCE
+                forged_json = json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                forged_sha = (
+                    "sha256:"
+                    + sha256(forged_json.encode("utf-8")).hexdigest()
+                )
+
+                with self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "WP-64 proof source does not match manifest source",
+                ):
+                    ReleaseCandidateDecision(
+                        status="FROZEN",
+                        reasons=(),
+                        manifest_json=forged_json,
+                        manifest_sha256=forged_sha,
+                        qualification_attestation_id=(
+                            original_decision.qualification_attestation_id
+                        ),
+                        qualification_attestation_digest=(
+                            original_decision.qualification_attestation_digest
+                        ),
+                        qualification_policy_id=(
+                            original_decision.qualification_policy_id
+                        ),
+                        qualification_trust_root_id=(
+                            original_decision.qualification_trust_root_id
+                        ),
+                        _verification_store=store,
+                        _verification_root=directory,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

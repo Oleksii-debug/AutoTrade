@@ -1594,7 +1594,7 @@ class AuthorityService:
                                 "durable admitted record fingerprint is inconsistent"
                             )
                     else:
-                        self._validate_durable_financial_evidence(record, policy)
+                        self._validate_restored_financial_evidence(record, policy)
                 if record.confirmation_id is not None:
                     if record.confirmation_id not in self._confirmations:
                         raise AuthorityConflict(
@@ -1631,6 +1631,46 @@ class AuthorityService:
             else:
                 raise AuthorityConflict(f"unknown durable authority event: {event_type}")
             self._journal_version = event_version
+
+    def _validate_restored_financial_evidence(
+        self,
+        record: AdmissionRecord,
+        policy: AuthorityPolicy,
+    ) -> None:
+        """Validate current evidence strictly; admit only exact predecessor replay on restore."""
+
+        if self.store is None:
+            raise AuthorityConflict(
+                "restored financial evidence requires a JournalStore"
+            )
+        if record.risk_decision_id is None:
+            raise AuthorityConflict(
+                "restored financial record is missing risk decision identity"
+            )
+        risk_events = self.store.load_events(
+            "risk_decision", record.risk_decision_id
+        )
+        if (
+            len(risk_events) != 1
+            or risk_events[0]["event_type"] != "RiskDecisionRecorded"
+            or type(risk_events[0].get("payload")) is not dict
+        ):
+            raise AuthorityConflict(
+                "restored financial risk evidence is missing or ambiguous"
+            )
+        risk_payload = risk_events[0]["payload"]
+        if "arithmetic_policy_id" in risk_payload:
+            self._validate_durable_financial_evidence(record, policy)
+            return
+
+        # The immediately preceding durable schema had no arithmetic-policy
+        # field.  Restore that historical fact only after the already-bounded
+        # replay validator proves the exact old request fingerprint, journal
+        # cut, reservation, availability checkpoint and authoritative snapshot.
+        # This path is restore-only: retries and dispatch keep their current
+        # arithmetic-policy requirements.
+        self._validate_historical_financial_retry_evidence(record, policy)
+
 
     def _validate_historical_financial_retry_evidence(
         self,

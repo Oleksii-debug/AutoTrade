@@ -1,4 +1,10 @@
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -1283,6 +1289,69 @@ class ReconciliationJournalTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
             )
+
+
+    def test_availability_max_age_is_exact_across_decimal_contexts(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="exact-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            contexts = (
+                (6, ROUND_FLOOR),
+                (6, ROUND_CEILING),
+                (6, ROUND_HALF_EVEN),
+                (10, ROUND_FLOOR),
+                (28, ROUND_HALF_EVEN),
+                (80, ROUND_HALF_EVEN),
+            )
+            for precision, rounding in contexts:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        evidence = load_account_resource_availability_evidence(
+                            store,
+                            checkpoint_event_id=checkpoint["event_id"],
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                            resources=("CASH:USD",),
+                            now="2026-09-24T19:02:03.456789Z",
+                            max_age_seconds="123.4568",
+                        )
+                    self.assertEqual(
+                        evidence.available_resources["CASH:USD"],
+                        Decimal("850"),
+                    )
+
+            load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:02:03.456800Z",
+                max_age_seconds=Decimal("123.4568"),
+            )
+            with self.assertRaisesRegex(ValueError, "checkpoint is stale"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:02:03.456801Z",
+                    max_age_seconds=Decimal("123.4568"),
+                )
 
 
     def test_availability_max_age_rejects_decimal_subclass_before_virtual_dispatch(self):

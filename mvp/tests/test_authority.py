@@ -2608,6 +2608,171 @@ class AuthorityTests(unittest.TestCase):
             )
 
 
+    def test_pre_arithmetic_policy_journal_restores_only_as_historical_authority(self):
+        with TemporaryDirectory() as directory:
+            template_store = JournalStore(f"{directory}/template.sqlite3")
+            template = authority_service(template_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            template.register_policy(item)
+            template_reservations = DurableReservationBook(
+                template_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-legacy-risk-policy",
+                idempotency_key="idem-legacy-risk-policy",
+                admission_id="admission-legacy-risk-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-legacy-risk-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-legacy-risk-policy",
+                **public_financial_kwargs(template_store),
+            )
+            current = template.admit(
+                reservation_book=template_reservations,
+                **kwargs,
+            )
+
+            current_risk_event = template_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            legacy_risk_payload = dict(current_risk_event["payload"])
+            self.assertEqual(
+                legacy_risk_payload.pop("arithmetic_policy_id"),
+                RISK_ARITHMETIC_POLICY_ID,
+            )
+            reservation_book = DurableReservationBook(
+                template_store,
+                environment=current.environment,
+                account_id=current.account_id,
+            )
+            reservation_event = next(
+                event
+                for event in template_store.load_events(
+                    "reservation_book", reservation_book.scope_id
+                )
+                if (
+                    event["payload"].get("operation") == "RESERVE"
+                    and event["payload"].get("snapshot", {}).get("reservation_id")
+                    == current.reservation_id
+                )
+            )
+            legacy_request = {
+                "command_id": current.financial_command_id,
+                "admission_id": current.admission_id,
+                "policy_id": current.policy_id,
+                "policy_version": current.policy_version,
+                "intent_id": current.intent_id,
+                "intent_hash": current.intent_hash,
+                "risk_intent": legacy_risk_payload["risk_intent"],
+                "financial_idempotency_key": legacy_risk_payload[
+                    "financial_idempotency_key"
+                ],
+                "account_id": current.account_id,
+                "environment": current.environment,
+                "instrument_id": current.instrument_version.instrument_id,
+                "instrument_version": current.instrument_version.version,
+                "action": current.action,
+                "notional": str(current.notional),
+                "current_state_version": current.state_version,
+                "capability_snapshot_id": current.capability_snapshot_id,
+                "risk_decision_id": current.risk_decision_id,
+                "risk_decision_fingerprint": legacy_risk_payload["fingerprint"],
+                "reservation_id": legacy_risk_payload[
+                    "financial_reservation_id"
+                ],
+                "reservation": reservation_event["payload"]["request"],
+                "reservation_availability_evidence": legacy_risk_payload[
+                    "reservation_availability_evidence"
+                ],
+                "authoritative_risk_snapshot": legacy_risk_payload[
+                    "authoritative_risk_snapshot"
+                ],
+                "confirmation_id": current.confirmation_id,
+                "risk_reducing": current.risk_reducing,
+                "journal_sequence_cut": legacy_risk_payload[
+                    "journal_sequence_cut"
+                ],
+            }
+            if "allocation_evidence" in legacy_risk_payload:
+                legacy_request["allocation_evidence"] = legacy_risk_payload[
+                    "allocation_evidence"
+                ]
+            legacy_fingerprint = sha256(
+                json.dumps(
+                    legacy_request,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            legacy_store = JournalStore(f"{directory}/legacy.sqlite3")
+            for stored in template_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    payload = legacy_risk_payload
+                elif (
+                    stored["event_type"] == "AuthorityAdmissionRecorded"
+                    and payload.get("admission_id") == current.admission_id
+                ):
+                    payload["request_fingerprint"] = legacy_fingerprint
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                legacy_store.append_event(envelope)
+
+            before_restore_sequence = legacy_store.current_journal_sequence()
+            restarted = authority_service(legacy_store)
+            self.assertEqual(
+                legacy_store.current_journal_sequence(),
+                before_restore_sequence,
+            )
+            historical = restarted._admissions[current.admission_id]
+            self.assertEqual(
+                historical.request_fingerprint,
+                legacy_fingerprint,
+            )
+
+            replay_reservations = DurableReservationBook(
+                legacy_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            replayed = restarted.admit(
+                reservation_book=replay_reservations,
+                **kwargs,
+            )
+            self.assertEqual(replayed, historical)
+            self.assertEqual(
+                legacy_store.current_journal_sequence(),
+                before_restore_sequence,
+            )
+
+            allowed, reason = restarted.dispatch_allowed(
+                current.admission_id,
+                intent_hash=current.intent_hash,
+                account_id=current.account_id,
+                environment=current.environment,
+                instrument_id=current.instrument_version.instrument_id,
+                instrument_version=current.instrument_version.version,
+                action=current.action,
+                now="2026-09-24T18:01:01Z",
+                capability_snapshot_id=current.capability_snapshot_id,
+            )
+            self.assertFalse(allowed)
+            self.assertEqual(reason, "financial_evidence_invalid")
+
+
     def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):
         import inspect
 

@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -609,7 +610,13 @@ class DurableSettlementBookTests(unittest.TestCase):
             def fail(**kwargs):
                 raise RuntimeError("injected settlement commit failure")
 
-            store.commit_command = fail
+            commit_patch = patch_journal_store_method(
+
+                store, "commit_command", side_effect=fail
+
+            )
+
+            commit_patch.start()
             try:
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     settlements.register_obligations(
@@ -619,7 +626,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                         committed_at="2026-09-25T09:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                commit_patch.stop()
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
 
@@ -854,7 +861,13 @@ class DurableSettlementBookTests(unittest.TestCase):
             def fail(**kwargs):
                 raise RuntimeError("injected correction commit failure")
 
-            store.commit_command = fail
+            commit_patch = patch_journal_store_method(
+
+                store, "commit_command", side_effect=fail
+
+            )
+
+            commit_patch.start()
             try:
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     commit_economic_correction_with_settlement_replacement(
@@ -868,7 +881,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                         committed_at="2026-09-25T10:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                commit_patch.stop()
 
             self.assertEqual(economic.audit_digest(), before_economic)
             self.assertEqual(settlements.obligations, before_obligations)

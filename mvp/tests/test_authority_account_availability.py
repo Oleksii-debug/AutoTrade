@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
@@ -588,19 +589,23 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     )
                 return original_commit(**kwargs)
 
-            store.commit_command = commit_with_newer_truth
-            with self.assertRaisesRegex(ValueError, "journal sequence changed"):
-                _admit(
-                    authority,
-                    reservations,
-                    selected,
-                    command_id="availability-command-race",
-                    idempotency_key="availability-command-race",
-                    admission_id="availability-admission-race",
-                    intent_id="availability-intent-race",
-                    intent_hash="sha256:" + "d" * 64,
-                    reservation_id="availability-reservation-race",
-                )
+            with patch_journal_store_method(
+                store,
+                "commit_command",
+                side_effect=commit_with_newer_truth,
+            ):
+                with self.assertRaisesRegex(ValueError, "journal sequence changed"):
+                    _admit(
+                        authority,
+                        reservations,
+                        selected,
+                        command_id="availability-command-race",
+                        idempotency_key="availability-command-race",
+                        admission_id="availability-admission-race",
+                        intent_id="availability-intent-race",
+                        intent_hash="sha256:" + "d" * 64,
+                        reservation_id="availability-reservation-race",
+                    )
 
             self.assertTrue(injected)
             self.assertEqual(
@@ -768,7 +773,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "evidence_refs"
                 ] = bad_refs
 
-                with patch.object(store, "get_event", return_value=tampered):
+                with patch_journal_store_method(store, "get_event", return_value=tampered):
                     with self.assertRaisesRegex(
                         ValueError,
                         "resource availability evidence_refs",

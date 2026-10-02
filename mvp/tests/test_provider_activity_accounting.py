@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     AccountingConflict,
@@ -293,7 +294,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 wraps=store.commit_command,
@@ -358,7 +359,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             def command_without_effects(**kwargs):
                 return kwargs["result"], False, ()
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 side_effect=command_without_effects,
@@ -396,7 +397,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     return saved_result, False, ()
                 return saved_result, inserted, topics
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 side_effect=competing_exact_commit,
@@ -464,7 +465,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 return_value=({"tampered": True}, False, ()),
@@ -682,7 +683,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 kwargs["events"] = legacy_events
                 return original_commit(**kwargs)
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 side_effect=commit_historical_facade_shape,

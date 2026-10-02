@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import (
     AccountingConflict,
@@ -54,7 +55,7 @@ class ProviderCashSnapshotReplayTests(unittest.TestCase):
         activity_id: str,
     ):
         source = JournalStore(Path(directory) / "source.sqlite3")
-        with patch.object(
+        with patch_journal_store_method(
             source,
             "commit_command",
             wraps=source.commit_command,
@@ -92,7 +93,7 @@ class ProviderCashSnapshotReplayTests(unittest.TestCase):
                     return None
                 return snapshot
 
-            with patch.object(
+            with patch_journal_store_method(
                 target,
                 "load_command_event_batch",
                 side_effect=absent_then_competing_commit,

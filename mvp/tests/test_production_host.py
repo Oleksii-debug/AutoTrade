@@ -9,6 +9,10 @@ from _test_production_host_impl import (
     ProductionHostConfigTests,
     ProductionHostRuntimeTests,
 )
+from autotrade_runtime.artifacts import (
+    ArtifactStore,
+    require_product_trusted_authenticated_reader,
+)
 from mvp.autotrade_mvp import host_network, production_host
 from mvp.autotrade_mvp.host_network import TransportResponse
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -125,6 +129,55 @@ class ProductionHostCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
             fence.release.assert_called_once_with()
+    def test_product_composition_issues_terminal_artifact_reader_across_restart(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            security = self.DummySecurityBoundary()
+            patches = self._composition_patches()
+            with patches[0], patches[1], patches[2], patches[3]:
+                first = build_production_host(
+                    config,
+                    security_boundary=security,
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+                try:
+                    first_reader = require_product_trusted_authenticated_reader(
+                        first.product_artifact_reader
+                    )
+                    artifact_root = production_host._product_artifact_root(
+                        config.journal_path
+                    )
+                    store = ArtifactStore(artifact_root)
+                    artifact_id = "11111111-1111-4111-8111-111111111111"
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"product-selected-evidence",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                        metadata={"authority": "product-host"},
+                    )
+                    _manifest, payload = first_reader(artifact_id)
+                    self.assertEqual(payload, b"product-selected-evidence")
+                finally:
+                    first.close()
+
+                successor = build_production_host(
+                    config,
+                    security_boundary=security,
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+                try:
+                    successor_reader = require_product_trusted_authenticated_reader(
+                        successor.product_artifact_reader
+                    )
+                    self.assertIsNot(first_reader, successor_reader)
+                    _manifest, payload = successor_reader(artifact_id)
+                    self.assertEqual(payload, b"product-selected-evidence")
+                finally:
+                    successor.close()
+
 
     def test_resource_lock_failure_constructs_no_financial_or_listener_components(self):
         with TemporaryDirectory() as directory:

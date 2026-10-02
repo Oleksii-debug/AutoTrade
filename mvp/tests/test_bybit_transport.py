@@ -7,7 +7,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     guarded_order_projection,
     prepare_order_submission,
 )
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id, _issue_financial_authority_check
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
@@ -560,7 +560,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             dispatcher = GuardedDispatcher(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="bybit-account",
                 owner_token="owner-bybit",
             )
@@ -568,7 +568,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             client_id = stable_client_order_id(
                 "BYBIT",
                 intent_id,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="bybit-account",
             )
             capability, request = prepared(client_id)
@@ -586,11 +586,8 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
                 submission_scope={
                     "capability_snapshot_id": capability.snapshot_id,
@@ -611,11 +608,8 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:02Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "capability_snapshot_id": capability.snapshot_id,
                     "provider": "BYBIT",

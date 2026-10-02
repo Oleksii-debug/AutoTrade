@@ -1,5 +1,8 @@
+from hashlib import sha256
 import unittest
 from tempfile import TemporaryDirectory
+
+from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.performance_qualification import (
     RuntimeBudgetError,
@@ -20,6 +23,45 @@ CONFIG = "sha256:" + ("b" * 64)
 HOST = "sha256:" + ("c" * 64)
 WORKLOAD = "sha256:" + ("d" * 64)
 RESOURCE = "sha256:" + ("e" * 64)
+RELEASE_ARTIFACT_ID = "11111111-1111-4111-8111-111111111111"
+RELEASE_ARTIFACT_BYTES = b"autotrade-delivered-release-artifact"
+RELEASE_ARTIFACT_SHA256 = "sha256:" + sha256(RELEASE_ARTIFACT_BYTES).hexdigest()
+
+
+def release_store(
+    directory: str,
+    *,
+    source_sha: str = SHA,
+    role: str = "WINDOWS_PACKAGE",
+    signature_status: str = "VERIFIED",
+    evidence_status: str = "PASS",
+) -> ArtifactStore:
+    store = ArtifactStore(f"{directory}/release-artifacts")
+    store.publish_bytes(
+        artifact_id=RELEASE_ARTIFACT_ID,
+        data=RELEASE_ARTIFACT_BYTES,
+        media_type="application/vnd.autotrade.release-artifact",
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{source_sha}"],
+        metadata={
+            "evidence_kind": "AUTOTRADE_RELEASE_EVIDENCE_V1",
+            "role": role,
+            "source_sha": source_sha,
+            "signature_status": signature_status,
+            "evidence_status": evidence_status,
+        },
+    )
+    return store
+
+
+def evaluate_campaign(spec, evidence, directory: str):
+    return evaluate_runtime_campaign(
+        spec,
+        evidence,
+        expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+        expected_release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
+        release_artifact_store=release_store(directory),
+    )
 
 
 def runtime_spec(*, samples: int = 2) -> RuntimeBudgetSpec:
@@ -63,6 +105,8 @@ def plan(spec: RuntimeBudgetSpec, *event_ids: str) -> RuntimeCampaignPlan:
         declared_duration_ms=1000,
         expected_financial_event_ids=event_ids,
         financial_aggregate_types=("financial",),
+        release_artifact_id=RELEASE_ARTIFACT_ID,
+        release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
     )
 
 
@@ -105,7 +149,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
+            self.assertEqual(evaluate_campaign(spec, first, directory).status, "PASS")
 
             reopened = JournalStore(path)
             second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
@@ -142,7 +186,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             )
             self.assertEqual(evidence.declared_duration_us, 1_000_000)
             self.assertEqual(evidence.observed_duration_us, 1_100_000)
-            decision = evaluate_runtime_campaign(spec, evidence)
+            decision = evaluate_campaign(spec, evidence, directory)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("declared_throughput_not_met", decision.reasons)
 
@@ -191,7 +235,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 resource_evidence_hash=RESOURCE,
                 resource_metrics={"cpu_peak_millis": 500},
             )
-            decision = evaluate_runtime_campaign(spec, evidence)
+            decision = evaluate_campaign(spec, evidence, directory)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("financial_event_loss", decision.reasons)
             self.assertEqual(decision.metrics["expected_financial_events"], 2)
@@ -266,7 +310,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 resource_evidence_hash=RESOURCE,
                 resource_metrics={"cpu_peak_millis": 500},
             )
-            decision = evaluate_runtime_campaign(spec, evidence)
+            decision = evaluate_campaign(spec, evidence, directory)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertEqual(evidence.reconnect_backlog_remaining, 1)
@@ -299,9 +343,206 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 resource_metrics={"cpu_peak_millis": 500},
             )
             self.assertEqual(evidence.reconnect_backlog_remaining, 1001)
-            decision = evaluate_runtime_campaign(spec, evidence)
+            decision = evaluate_campaign(spec, evidence, directory)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("reconnect_backlog_not_drained", decision.reasons)
+
+    def test_terminal_evaluation_requires_bound_delivered_release(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            journal.append_event(envelope("fin-1"))
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+                monotonic_ns=lambda: 1_900_000_000,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "delivered release artifact identity is required",
+            ):
+                evaluate_runtime_campaign(spec, evidence)
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "canonical delivered release artifact store is required",
+            ):
+                evaluate_runtime_campaign(
+                    spec,
+                    evidence,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+                    expected_release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
+                )
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "not bound to the delivered release artifact",
+            ):
+                evaluate_runtime_campaign(
+                    spec,
+                    evidence,
+                    expected_release_artifact_id=(
+                        "22222222-2222-4222-8222-222222222222"
+                    ),
+                    expected_release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
+                    release_artifact_store=release_store(directory),
+                )
+
+    def test_release_artifact_pair_is_all_or_none_and_retained(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            for kwargs in (
+                {"release_artifact_id": RELEASE_ARTIFACT_ID},
+                {"release_artifact_sha256": RELEASE_ARTIFACT_SHA256},
+            ):
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                    RuntimeBudgetError,
+                    "must be provided together",
+                ):
+                    RuntimeCampaignPlan.create(
+                        spec=spec,
+                        workload_profile_hash=WORKLOAD,
+                        declared_duration_ms=1000,
+                        expected_financial_event_ids=("fin-1",),
+                        financial_aggregate_types=("financial",),
+                        **kwargs,
+                    )
+
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            journal.append_event(envelope("fin-1"))
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+                monotonic_ns=lambda: 1_900_000_000,
+            )
+            self.assertEqual(evidence.release_artifact_id, RELEASE_ARTIFACT_ID)
+            self.assertEqual(
+                evidence.release_artifact_sha256,
+                RELEASE_ARTIFACT_SHA256,
+            )
+            unbound = RuntimeCampaignPlan.create(
+                spec=spec,
+                workload_profile_hash=WORKLOAD,
+                declared_duration_ms=1000,
+                expected_financial_event_ids=("fin-1",),
+                financial_aggregate_types=("financial",),
+            )
+            self.assertNotEqual(current_plan.digest, unbound.digest)
+
+    def test_runtime_qualification_rejects_wrong_release_provenance(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            journal.append_event(envelope("fin-1"))
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+                monotonic_ns=lambda: 1_900_000_000,
+            )
+            wrong_store = release_store(directory, source_sha="f" * 40)
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "canonical Windows-package provenance",
+            ):
+                evaluate_runtime_campaign(
+                    spec,
+                    evidence,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+                    expected_release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
+                    release_artifact_store=wrong_store,
+                )
+
+    def test_release_artifact_substitution_changes_plan_and_evidence_digest(self):
+        spec = runtime_spec(samples=1)
+
+        def collect_for(artifact_id: str, artifact_sha256: str):
+            with TemporaryDirectory() as directory:
+                journal = JournalStore(f"{directory}/journal.sqlite3")
+                current_plan = RuntimeCampaignPlan.create(
+                    spec=spec,
+                    workload_profile_hash=WORKLOAD,
+                    declared_duration_ms=1000,
+                    expected_financial_event_ids=("fin-1",),
+                    financial_aggregate_types=("financial",),
+                    release_artifact_id=artifact_id,
+                    release_artifact_sha256=artifact_sha256,
+                )
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    monotonic_ns=lambda: 1_000_000_000,
+                )
+                journal.append_event(envelope("fin-1"))
+                evidence = collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                    monotonic_ns=lambda: 1_900_000_000,
+                )
+                return current_plan, evidence
+
+        first_plan, first = collect_for(
+            RELEASE_ARTIFACT_ID,
+            RELEASE_ARTIFACT_SHA256,
+        )
+        second_plan, second = collect_for(
+            "22222222-2222-4222-8222-222222222222",
+            "sha256:" + ("8" * 64),
+        )
+
+        self.assertNotEqual(first_plan.digest, second_plan.digest)
+        self.assertNotEqual(first.digest, second.digest)
 
     def test_plan_factory_rejects_scalar_text_as_event_or_aggregate_collection(self):
         spec = runtime_spec(samples=1)

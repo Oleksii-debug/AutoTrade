@@ -29,7 +29,10 @@ from mvp.autotrade_mvp.futures_journal import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from autotrade_runtime.artifacts import ArtifactStore, trusted_authenticated_reader
+from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_runtime.artifacts._root_authority import (
+    _product_trusted_authenticated_reader,
+)
 
 
 def utc(day: int, hour: int = 0):
@@ -37,10 +40,7 @@ def utc(day: int, hour: int = 0):
 
 
 def _trusted_reader(artifacts: ArtifactStore):
-    return trusted_authenticated_reader(
-        artifacts.root,
-        publication_store=artifacts,
-    )
+    return _product_trusted_authenticated_reader(artifacts.root)
 
 
 class DurableFuturesVariationMarginTests(unittest.TestCase):

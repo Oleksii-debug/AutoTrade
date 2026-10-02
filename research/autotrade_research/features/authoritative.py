@@ -30,6 +30,8 @@ from autotrade_research.features.causal import (
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _SCIENTIFIC_DECIMAL_POLICY_ID = "WP34_DECIMAL_V1_PREC50_HALF_EVEN"
+_DECISION_SCHEDULE_ID = "EACH_ELIGIBLE_SOURCE_KNOWLEDGE_TIME_V1"
+_SYMBOL_BASIS_ID = "INSTRUMENT_VERSION_V1"
 _SCIENTIFIC_DECIMAL_CONTEXT = Context(
     prec=50,
     rounding=ROUND_HALF_EVEN,
@@ -147,6 +149,8 @@ class HistoricalFeatureInputSpec:
                 "event_kinds": list(self.event_kinds),
                 "feature_name": self.feature_name,
                 "decimal_policy_id": _SCIENTIFIC_DECIMAL_POLICY_ID,
+                "decision_schedule_id": _DECISION_SCHEDULE_ID,
+                "symbol_basis_id": _SYMBOL_BASIS_ID,
             }
         )
 

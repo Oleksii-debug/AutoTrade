@@ -4,7 +4,9 @@ The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
 binds every changed path to those scopes. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
-cannot be deleted, renamed away or changed to another Git object type. A PR that
+cannot be deleted, renamed away or changed to another Git object type, and ordinary
+content modification is denied unless a separate trusted protected-mutation scope
+explicitly covers that sentinel. A PR that
 deletes both a material absolute number and a material fraction of the base tree
 is blocked.
 
@@ -101,6 +103,7 @@ def assess_reconvergence(
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
     base_is_ancestor: bool = True,
     allowed_scopes: Sequence[str] | None = None,
+    protected_modification_scopes: Sequence[str] | None = None,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
@@ -116,6 +119,12 @@ def assess_reconvergence(
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
 
+    trusted_protected_scopes: tuple[str, ...] | None = None
+    if protected_modification_scopes is not None:
+        trusted_protected_scopes = _normalized_scopes(
+            protected_modification_scopes
+        )
+
     protected_damage: set[str] = set(protected)
     for change in changes:
         kind = change.status[:1]
@@ -129,6 +138,24 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
+
+        # A protected destination/content identity is independently guarded.
+        # Copying *from* a protected sentinel does not mutate its source.
+        protected_content_paths = (change.path,)
+        for path in protected_content_paths:
+            if path not in protected_sentinels or kind in {"D", "T"}:
+                continue
+            authorized = (
+                trusted_protected_scopes is not None
+                and any(
+                    path_covers(scope, path)
+                    for scope in trusted_protected_scopes
+                )
+            )
+            if not authorized:
+                protected_damage.add(
+                    f"{path} (content modification requires trusted authorization)"
+                )
     protected_violations = tuple(sorted(protected_damage))
 
     normalized_scopes: tuple[str, ...] | None = None
@@ -235,6 +262,7 @@ def assess_git_revisions(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     allowed_scopes: Sequence[str] | None = None,
+    protected_modification_scopes: Sequence[str] | None = None,
     cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
     """Assess revisions inside one explicit Git repository/worktree.
@@ -263,6 +291,7 @@ def assess_git_revisions(
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,
         allowed_scopes=allowed_scopes,
+        protected_modification_scopes=protected_modification_scopes,
     )
 
 
@@ -284,6 +313,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "PR-authored metadata. When omitted, scope enforcement is disabled."
         ),
     )
+    parser.add_argument(
+        "--protected-modification-scope",
+        action="append",
+        default=None,
+        help=(
+            "Separately trusted repository-relative authorization for content "
+            "modification of protected sentinels. Never derive this authority "
+            "from candidate PR content or ordinary mutation scopes."
+        ),
+    )
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
 
@@ -293,6 +332,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=allowed_scopes,
+        protected_modification_scopes=args.protected_modification_scope,
     )
     print(
         "Reconvergence tree guard: "

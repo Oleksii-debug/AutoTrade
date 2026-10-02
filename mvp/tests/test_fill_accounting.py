@@ -68,6 +68,70 @@ def matched_fill(
 
 
 class FillAccountingTests(unittest.TestCase):
+    def test_admitted_fill_requires_provider_client_order_identity(self):
+        projected, provider = matched_fill()
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        without_client_order = ProviderFillEvidence.create(
+            provider_id=provider.provider_id,
+            account_id=provider.account_id,
+            environment=provider.environment,
+            provider_execution_id=provider.provider_execution_id,
+            client_order_id=None,
+            instrument=provider.instrument,
+            side=provider.side,
+            position_side=provider.position_side,
+            position_effect=provider.position_effect,
+            quantity=provider.quantity,
+            price=provider.price,
+            fee_amount=provider.fee_amount,
+            fee_currency=provider.fee_currency,
+            trade_time=provider.trade_time,
+            evidence_refs=provider.evidence_refs,
+            provider_environment=provider.provider_environment,
+        )
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "requires exact client order identity",
+        ):
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=projected,
+                provider_fill=without_client_order,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        unbound_projection = ProjectedFillEvidence.create(
+            fill_id=projected.fill_id,
+            provider_execution_id=projected.provider_execution_id,
+            intent_id=projected.intent_id,
+            client_order_id=None,
+            side=projected.side,
+            quantity=projected.quantity,
+            price=projected.price,
+            position_side=projected.position_side,
+            position_effect=projected.position_effect,
+            provider_revision=projected.provider_revision,
+        )
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "requires exact client order identity",
+        ):
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=unbound_projection,
+                provider_fill=without_client_order,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        self.assertEqual(book.transactions, ())
+        self.assertEqual(book.cash("USD"), Decimal("0"))
+        self.assertEqual(book.position("ABC"), Decimal("0"))
+
     def test_only_matched_fill_evidence_books_economics(self):
         observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")

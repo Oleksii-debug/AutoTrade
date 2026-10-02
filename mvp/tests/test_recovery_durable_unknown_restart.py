@@ -10,6 +10,15 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
+from mvp.autotrade_mvp.reconciliation_journal import (
+    record_reconciliation_checkpoint,
+    unknown_submissions_from_dispatch,
+)
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
@@ -380,46 +389,85 @@ class DurableUnknownRestartTests(unittest.TestCase):
             owner = recovery.start("host-restarted")
             self.assertEqual(recovery.unresolved_attempts, {"attempt-1"})
 
-            checkpoint = {
-                "event_id": "reconciliation-event-1",
-                "payload_hash": "sha256:" + "a" * 64,
-                "journal_sequence": 99,
-                "payload": {
-                    "provider_id": "SIM",
-                    "account_id": "acct",
-                    "environment": "SIMULATION",
-                    "complete": True,
-                    "snapshot_consistent": True,
-                    "activity_coverage_complete": True,
-                    "blocking_resources": [],
-                    "submission_resolutions": [
-                        {
-                            "attempt_id": "attempt-1",
-                            "intent_id": "intent-1",
-                            "client_order_id": outcome.client_order_id,
-                            "outcome": "PROVEN_ABSENT",
-                            "evidence_reason": "complete provider absence proof",
-                            "provider_order_ids": [],
-                            "provider_execution_ids": [],
-                        }
-                    ],
-                },
-            }
-            with patch(
-                "mvp.autotrade_mvp.recovery.load_reconciliation_checkpoint_for_readiness",
-                return_value=checkpoint,
-            ):
-                evidence = recovery.record_reconciliation_checkpoint(
-                    reconciliation_id="recon-1",
-                    provider_id="SIM",
-                    account_id="acct",
-                    environment="SIMULATION",
+            unknowns = unknown_submissions_from_dispatch(
+                store,
+                attempt_ids=("attempt-1",),
+                environment="SIMULATION",
+                account_id="acct",
+            )
+            self.assertEqual(len(unknowns), 1)
+            unknown = unknowns[0]
+            absence_coverage = tuple(
+                CoverageSurfaceEvidence(
+                    provider_id=unknown.provider_id,
+                    account_id=unknown.account_id,
+                    environment=unknown.environment,
+                    surface=surface,
+                    coverage_start="2026-09-25T19:59:00Z",
+                    coverage_end="2026-09-25T20:05:00Z",
+                    pagination_complete=True,
+                    consistency_horizon_satisfied=True,
+                    provider_semantics_exclude_execution=True,
                 )
+                for surface in (
+                    "OPEN_ORDERS",
+                    "ORDER_HISTORY",
+                    "EXECUTIONS",
+                    "ACTIVITIES",
+                )
+            )
+            result = reconcile_account(
+                provider_id=unknown.provider_id,
+                account_id=unknown.account_id,
+                environment=unknown.environment,
+                local_cash={},
+                provider_cash={},
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(),
+                snapshot_consistency=SnapshotConsistencyEvidence(
+                    provider_id=unknown.provider_id,
+                    account_id=unknown.account_id,
+                    environment=unknown.environment,
+                    mode="ATOMIC",
+                    query_started_at="2026-09-25T20:01:00Z",
+                    query_completed_at="2026-09-25T20:02:00Z",
+                ),
+                unknown_submissions=unknowns,
+                searched_client_order_ids=(outcome.client_order_id,),
+                coverage_start="2026-09-25T19:59:00Z",
+                coverage_end="2026-09-25T20:05:00Z",
+                pagination_complete=True,
+                absence_coverage=absence_coverage,
+            )
+            self.assertTrue(result.complete)
+            self.assertEqual(
+                result.submission_resolutions[0].outcome,
+                "PROVEN_ABSENT",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="recon-1",
+                result=result,
+                observed_at="2026-09-25T20:05:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
 
-            self.assertEqual(evidence["event_id"], "reconciliation-event-1")
+            evidence = recovery.record_reconciliation_checkpoint(
+                reconciliation_id="recon-1",
+                provider_id=unknown.provider_id,
+                account_id=unknown.account_id,
+                environment=unknown.environment,
+            )
+
+            self.assertEqual(evidence["event_id"], checkpoint["event_id"])
             self.assertEqual(recovery.unresolved_attempts, set())
             self.assertEqual(recovery.state, HostState.READY)
             recovery.validate_admission(owner.epoch)
+            self.assertEqual(recovery.unresolved_attempts, set())
+            self.assertEqual(recovery.state, HostState.READY)
 
     def test_observed_execution_without_execution_identity_cannot_clear_unknown(self):
         with TemporaryDirectory() as directory:

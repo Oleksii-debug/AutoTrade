@@ -449,12 +449,14 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
             if observed.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
 
-            # DirEntry.stat() and os.stat() can expose different Windows inode
-            # representations even for the same stable file.  Keep the
-            # enumeration result for type/reparse/link/metadata checks, but
-            # establish the mutation-fence identity with os.stat() because
-            # _read_retained_windows_regular_file() rechecks that same pathname
-            # API immediately after the retained no-WRITE/no-DELETE open.
+            # DirEntry.stat() is enumeration evidence only.  On Windows it
+            # may expose inode and timestamp representations that differ from
+            # os.stat() for the same unchanged file, so never compare metadata
+            # across those API domains.  Establish the authoritative pathname
+            # generation with os.stat(); the retained relative open then denies
+            # WRITE/DELETE and rechecks that same os.stat identity before and
+            # after the descriptor read, while CRT fstat metadata is compared
+            # only against CRT fstat metadata.
             try:
                 path_observed = os.stat(path, follow_symlinks=False)
             except OSError as error:
@@ -468,14 +470,6 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                 raise BundleError(f"hardlinked staged files are forbidden: {path}")
             if path_observed.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
-            if (
-                observed.st_size != path_observed.st_size
-                or observed.st_mtime_ns != path_observed.st_mtime_ns
-                or observed.st_ctime_ns != path_observed.st_ctime_ns
-                or observed.st_nlink != path_observed.st_nlink
-            ):
-                raise BundleError(f"staged file changed during collection: {path}")
-
             snapshots.append(
                 (
                     path,

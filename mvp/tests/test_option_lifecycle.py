@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleConflict,
     OptionLifecycleError,
     OptionLifecycleObservation,
+    canonical_option_lifecycle_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -306,6 +307,50 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             observed_at=utc(12, 18, 19, 1),
             raw_evidence_digest="sha256:" + "f" * 64,
             provider_revision="forged-r1",
+        )
+
+    def test_lifecycle_decimal_identity_is_context_independent(self):
+        observation = OptionLifecycleObservation(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            venue_id="OPTIONS",
+            instrument_version=f"{OPTION_ID}@1",
+            external_event_id="context-independent-life",
+            event_kind="EXERCISE",
+            signed_contracts=Decimal("1.2345678901234567890123456789"),
+            effective_at=utc(12, 18, 19),
+            observed_at=utc(12, 18, 19, 1),
+            raw_evidence_digest="sha256:" + "d" * 64,
+            provider_revision="provider-context-r1",
+            underlying_price=Decimal("12345678901234567890.123456789"),
+            cash_settlement_amount=Decimal("0.000000000000000000123456789"),
+        )
+
+        payloads = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        payloads.append(
+                            canonical_option_lifecycle_observation(observation)
+                        )
+
+        self.assertTrue(all(payload == payloads[0] for payload in payloads))
+        self.assertEqual(
+            payloads[0]["signed_contracts"],
+            "1.2345678901234567890123456789",
+        )
+        self.assertEqual(
+            payloads[0]["underlying_price"],
+            "12345678901234567890.123456789",
+        )
+        self.assertEqual(
+            payloads[0]["cash_settlement_amount"],
+            "0.000000000000000000123456789",
         )
 
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):

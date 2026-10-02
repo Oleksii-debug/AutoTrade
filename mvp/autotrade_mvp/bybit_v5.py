@@ -26,6 +26,7 @@ from .provider_core import (
     ProviderSubmissionObservation,
     Surface,
 )
+from .provider_origin import ProviderOriginObservation
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -712,6 +713,68 @@ def _submission_evidence(
         "rights_id": "provider-observation-bybit",
     }
 
+def _classify_submission_response_payload(
+    *,
+    prepared_request: BybitPreparedSubmission,
+    payload: object,
+) -> dict[str, Any]:
+    """Classify untrusted Bybit response semantics without issuing authority.
+
+    This helper parses provider-shaped data only. It carries no provider-origin
+    evidence and must not be used as proof that a response crossed a qualified
+    wire. The public parse_submission_response path adds evidence only after an
+    authoritative observation has been validated.
+    """
+
+    if not isinstance(prepared_request, BybitPreparedSubmission):
+        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    cid = _client_order_id(prepared_request.body.get("orderLinkId"))
+    envelope = _mapping(payload, name="response")
+    code = _integer(envelope.get("retCode"), name="retCode")
+    provider_received_at = (
+        _millis_to_utc(envelope.get("time"), name="response.time")
+        if envelope.get("time") is not None
+        else None
+    )
+
+    if code == 0:
+        result = _mapping(envelope.get("result"), name="result")
+        provider_order_id = _text(result.get("orderId"), name="result.orderId")
+        echoed_client_id = _text(
+            result.get("orderLinkId"), name="result.orderLinkId"
+        )
+        if echoed_client_id != cid:
+            raise ProviderCoreError(
+                "Bybit orderLinkId response does not match request"
+            )
+        return {
+            "outcome": "ACKNOWLEDGED",
+            "provider_order_id": provider_order_id,
+            "client_order_id": cid,
+            **(
+                {"provider_received_at": provider_received_at}
+                if provider_received_at is not None
+                else {}
+            ),
+            "retry_disposition": "NEVER",
+        }
+
+    outcome = "UNKNOWN" if code in _AMBIGUOUS_RESPONSE_CODES else "REJECTED"
+    return {
+        "outcome": outcome,
+        "client_order_id": cid,
+        **(
+            {"provider_received_at": provider_received_at}
+            if provider_received_at is not None
+            else {}
+        ),
+        "reason_code": f"BYBIT_{code}",
+        "retry_disposition": (
+            "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
+        ),
+    }
+
+
 def parse_submission_response(
     *,
     attempt_id: str,
@@ -752,67 +815,53 @@ def parse_submission_response(
             prepared_request=prepared_request,
         )
     ]
-    envelope = _mapping(observation.payload, name="response")
-    code = _integer(envelope.get("retCode"), name="retCode")
-    provider_received_at = (
-        _millis_to_utc(envelope.get("time"), name="response.time")
-        if envelope.get("time") is not None
-        else None
+    classification = _classify_submission_response_payload(
+        prepared_request=prepared_request,
+        payload=observation.payload,
     )
-
-    if code == 0:
-        result = _mapping(envelope.get("result"), name="result")
-        provider_order_id = _text(result.get("orderId"), name="result.orderId")
-        echoed_client_id = _text(
-            result.get("orderLinkId"), name="result.orderLinkId"
-        )
-        if echoed_client_id != cid:
-            raise ProviderCoreError(
-                "Bybit orderLinkId response does not match request"
-            )
-        return {
-            "attempt_id": aid,
-            "outcome": "ACKNOWLEDGED",
-            "provider_order_id": provider_order_id,
-            "client_order_id": cid,
-            **(
-                {"provider_received_at": provider_received_at}
-                if provider_received_at is not None
-                else {}
-            ),
-            "evidence": evidence,
-            "retry_disposition": "NEVER",
-        }
-
-    outcome = "UNKNOWN" if code in _AMBIGUOUS_RESPONSE_CODES else "REJECTED"
     return {
         "attempt_id": aid,
-        "outcome": outcome,
-        "client_order_id": cid,
-        **(
-            {"provider_received_at": provider_received_at}
-            if provider_received_at is not None
-            else {}
-        ),
-        "reason_code": f"BYBIT_{code}",
+        **classification,
         "evidence": evidence,
-        "retry_disposition": (
-            "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
-        ),
     }
 
 
-def parse_executions(
+@dataclass(frozen=True)
+class BybitExecutionClassification:
+    """Normalized Bybit execution semantics without provider-origin authority."""
+
+    account_id: str
+    environment: str
+    provider_execution_id: str
+    client_order_id: str | None
+    instrument: str
+    quantity: Decimal
+    price: Decimal
+    fee_amount: Decimal
+    fee_currency: str
+    trade_time: str
+    side: str
+    position_side: str | None = None
+    position_effect: str | None = None
+
+    @property
+    def evidence_refs(self) -> tuple[str, ...]:
+        # Semantic classification deliberately issues no financial evidence.
+        return ()
+
+
+def _classify_executions_payload(
     observation: ProviderResponseObservation,
     *,
     instrument_versions: Mapping[str, str],
     qualified_fee_currencies: Mapping[str, str] | None = None,
-) -> tuple[ProviderFillEvidence, ...]:
-    """Map one authenticated, exact-byte Bybit execution read into fills."""
+) -> tuple[BybitExecutionClassification, ...]:
+    """Normalize exact Bybit execution payload semantics without authority."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    ProviderResponseObservation.require_scope(
+        observation,
         provider_id="BYBIT",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
@@ -834,7 +883,7 @@ def parse_executions(
     ):
         raise ProviderCoreError("qualified_fee_currencies must be a mapping")
 
-    by_execution: dict[str, ProviderFillEvidence] = {}
+    by_execution: dict[str, BybitExecutionClassification] = {}
     for index, value in enumerate(rows):
         row = _mapping(value, name=f"result.list[{index}]")
         execution_id = _text(row.get("execId"), name="execId")
@@ -861,7 +910,7 @@ def parse_executions(
 
         provider_fee_currency = row.get("feeCurrency")
         if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
-            fee_currency = provider_fee_currency.strip()
+            fee_currency = provider_fee_currency.strip().upper()
         else:
             if qualified_fee_currencies is None:
                 raise ProviderCoreError(
@@ -877,34 +926,70 @@ def parse_executions(
             fee_currency = _text(
                 fee_currency,
                 name="qualified fee currency",
-            )
+            ).upper()
 
         side = _text(row.get("side"), name="side").upper()
         if side not in {"BUY", "SELL"}:
             raise ProviderCoreError("execution side must be BUY or SELL")
-        fill = ProviderFillEvidence.create(
-            provider_id="BYBIT",
+        classification = BybitExecutionClassification(
             account_id=account_id,
             environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
             side=side,
-            quantity=row.get("execQty"),
-            price=row.get("execPrice"),
-            fee_amount=row.get("execFee"),
+            quantity=_decimal(row.get("execQty"), name="execQty", positive=True),
+            price=_decimal(row.get("execPrice"), name="execPrice", positive=True),
+            fee_amount=_decimal(row.get("execFee"), name="execFee"),
             fee_currency=fee_currency,
             trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
-            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)
-        if previous is not None and previous != fill:
+        if previous is not None and previous != classification:
             raise ProviderCoreError(
                 "Bybit execution id appears with conflicting economic content"
             )
-        by_execution[execution_id] = fill
+        by_execution[execution_id] = classification
 
     return tuple(by_execution.values())
+
+
+def parse_executions(
+    observation: ProviderOriginObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+    qualified_fee_currencies: Mapping[str, str] | None = None,
+) -> tuple[ProviderFillEvidence, ...]:
+    """Promote Bybit execution semantics only from provider-origin authority."""
+
+    if type(observation) is not ProviderOriginObservation:
+        raise TypeError("observation must be exact ProviderOriginObservation")
+    observation.response_binding.require_provider_origin()
+    classified = _classify_executions_payload(
+        observation.observation,
+        instrument_versions=instrument_versions,
+        qualified_fee_currencies=qualified_fee_currencies,
+    )
+    return tuple(
+        ProviderFillEvidence.create(
+            provider_id="BYBIT",
+            account_id=item.account_id,
+            environment=item.environment,
+            provider_execution_id=item.provider_execution_id,
+            client_order_id=item.client_order_id,
+            instrument=item.instrument,
+            side=item.side,
+            position_side=item.position_side,
+            position_effect=item.position_effect,
+            quantity=item.quantity,
+            price=item.price,
+            fee_amount=item.fee_amount,
+            fee_currency=item.fee_currency,
+            trade_time=item.trade_time,
+            evidence_refs=(observation.origin_ref,),
+        )
+        for item in classified
+    )
 
 
 def coverage_evidence(

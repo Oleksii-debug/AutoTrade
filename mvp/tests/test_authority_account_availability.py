@@ -338,7 +338,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 1,
             )
 
-    def test_bybit_admission_binds_testnet_availability_domain(self):
+    def test_bybit_paper_admission_requires_product_owned_risk_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
@@ -359,24 +359,10 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
-            first = _admit(
-                authority,
-                reservations,
-                checkpoint,
-                environment="PAPER",
-                reservation_provider_id="BYBIT",
-                reservation_provider_environment="TESTNET",
-            )
-            evidence = store.load_events(
-                "risk_decision",
-                first.risk_decision_id,
-            )[0]["payload"]["reservation_availability_evidence"]
-            self.assertEqual(evidence["provider_environment"], "TESTNET")
-
             version_before = reservations.version
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "provider_environment|availability evidence changed",
+                "product-owned authoritative risk resolver",
             ):
                 _admit(
                     authority,
@@ -384,7 +370,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     checkpoint,
                     environment="PAPER",
                     reservation_provider_id="BYBIT",
-                    reservation_provider_environment="DEMO",
+                    reservation_provider_environment="TESTNET",
                 )
             self.assertEqual(reservations.version, version_before)
 

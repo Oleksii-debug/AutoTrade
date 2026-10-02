@@ -1,8 +1,6 @@
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import json
 from pathlib import Path
-from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -10,6 +8,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    _classify_submission_response_payload,
     parse_submission_response,
     prepare_order_submission,
 )
@@ -19,9 +18,6 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
-from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_core import observe_submission_json_response
-from mvp.tests.provider_write_fixture import journal_sent_response
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +61,7 @@ def write_capability():
     )
 
 
-def durable_submission(payload, *, intent_id):
+def submission_fixture(payload, *, intent_id):
     attempt_id = str(uuid4())
     client_order_id = stable_client_order_id(
         "BYBIT",
@@ -89,44 +85,7 @@ def durable_submission(payload, *, intent_id):
     result = material.get("result")
     if isinstance(result, dict) and result.get("orderLinkId") == "__CLIENT__":
         result["orderLinkId"] = client_order_id
-    raw = json.dumps(
-        material,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    submission_scope = {
-        "endpoint": prepared.endpoint,
-        "prepared_request_sha256": prepared.body_sha256,
-        "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
-        "instrument_versions": list(prepared.instrument_versions),
-    }
-    with TemporaryDirectory() as directory:
-        store = JournalStore(f"{directory}/journal.sqlite3")
-        binding = journal_sent_response(
-            store,
-            environment="LIVE",
-            account_id="contract-account",
-            attempt_id=attempt_id,
-            intent_id=intent_id,
-            provider="BYBIT",
-            request_hash=prepared.body_sha256,
-            client_order_id=client_order_id,
-            response_bytes=raw,
-            submission_scope=submission_scope,
-            now="2026-09-24T20:00:00Z",
-            intent_hash="contract-intent-hash",
-        )
-        observation = observe_submission_json_response(
-            response_binding=binding,
-            provider_id="BYBIT",
-            endpoint=prepared.endpoint,
-            prepared_request_sha256=prepared.body_sha256,
-            capability_snapshot_ids=prepared.capability_snapshot_ids,
-            instrument_versions=prepared.instrument_versions,
-        )
-    return attempt_id, prepared, observation
+    return attempt_id, prepared, material
 
 
 class BybitV5ContractTests(unittest.TestCase):
@@ -152,7 +111,7 @@ class BybitV5ContractTests(unittest.TestCase):
         ).validate(value)
 
     def test_success_and_ambiguous_results_match_provider_contract(self):
-        attempt, prepared, observation = durable_submission(
+        attempt, prepared, payload = submission_fixture(
             {
                 "retCode": 0,
                 "retMsg": "OK",
@@ -165,22 +124,22 @@ class BybitV5ContractTests(unittest.TestCase):
             },
             intent_id="contract-bybit-ok",
         )
-        accepted = parse_submission_response(
-            attempt_id=attempt,
-            prepared_request=prepared,
-            observation=observation,
-        )
+        accepted = {
+            "attempt_id": attempt,
+            **_classify_submission_response_payload(
+                prepared_request=prepared,
+                payload=payload,
+            ),
+            "evidence": [],
+        }
         self.assertEqual(
             accepted["provider_received_at"],
             "2026-09-24T20:00:00.123Z",
         )
-        self.assertEqual(
-            accepted["evidence"][0]["sha256"],
-            observation.response_sha256,
-        )
+        self.assertEqual(accepted["evidence"], [])
         self.validate_submission(accepted)
 
-        attempt, prepared, observation = durable_submission(
+        attempt, prepared, payload = submission_fixture(
             {
                 "retCode": 10000,
                 "retMsg": "Server Timeout",
@@ -190,17 +149,17 @@ class BybitV5ContractTests(unittest.TestCase):
             },
             intent_id="contract-bybit-unknown",
         )
-        unknown = parse_submission_response(
-            attempt_id=attempt,
-            prepared_request=prepared,
-            observation=observation,
-        )
+        unknown = {
+            "attempt_id": attempt,
+            **_classify_submission_response_payload(
+                prepared_request=prepared,
+                payload=payload,
+            ),
+            "evidence": [],
+        }
         self.assertEqual(unknown["outcome"], "UNKNOWN")
         self.assertEqual(unknown["retry_disposition"], "RECONCILE_FIRST")
-        self.assertEqual(
-            unknown["evidence"][0]["sha256"],
-            observation.response_sha256,
-        )
+        self.assertEqual(unknown["evidence"], [])
         self.validate_submission(unknown)
 
         client_order_id = stable_client_order_id(

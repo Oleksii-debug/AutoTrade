@@ -397,6 +397,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     "provider_id": "TEST_PROVIDER",
                     "account_id": "test-account",
                     "environment": "PAPER",
+                    "provider_environment": "PAPER",
                     "snapshot_id": "snapshot-capacity-1",
                     "query_started_at": "2026-09-24T17:00:00Z",
                     "query_completed_at": "2026-09-24T19:00:00Z",

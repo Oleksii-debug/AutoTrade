@@ -200,6 +200,7 @@ class DurableFillAccountingTests(unittest.TestCase):
                     provider_id=PROVIDER,
                     account_id=ACCOUNT,
                     environment=ENVIRONMENT,
+                    provider_environment=ENVIRONMENT,
                 ),
             )
             self.assertEqual(len(events), 1)
@@ -421,6 +422,7 @@ class DurableFillAccountingTests(unittest.TestCase):
                 provider_id=PROVIDER,
                 account_id=ACCOUNT,
                 environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
                 transactions=batch,
             )
             payload = {

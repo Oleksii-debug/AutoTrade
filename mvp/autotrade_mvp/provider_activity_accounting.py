@@ -32,6 +32,7 @@ def book_external_provider_cash_activity(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     activity: _impl.ProviderActivityEvidence,
     observed_at: str,
 ) -> tuple[_impl.JournalTransaction, bool]:
@@ -51,6 +52,11 @@ def book_external_provider_cash_activity(
     provider = _impl._text(provider_id, name="provider_id").upper()
     account = _impl._text(account_id, name="account_id")
     scope = _impl._environment(environment)
+    domain = _impl._provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     if activity.provider_id != provider:
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
@@ -104,13 +110,25 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=domain,
         activity_id=activity.activity_id,
     )
     book_id = _impl._book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=domain,
     )
+    if domain != scope:
+        legacy_id = _impl._legacy_book_id(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+        )
+        if store.load_events("economic_book", legacy_id):
+            raise _impl.AccountingConflict(
+                "ambiguous legacy provider economic book requires explicit migration"
+            )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
         uuid5(
@@ -127,9 +145,12 @@ def book_external_provider_cash_activity(
     amount_text = _impl._decimal_text(value)
 
     request = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_impl._scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "activity": {
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
@@ -144,9 +165,12 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
     }
     result = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_impl._scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "activity_id": activity.activity_id,
         "transaction_id": transaction_id,
         "amount": amount_text,
@@ -270,6 +294,8 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or economic_payload.get("provider_environment")
+            != (domain if domain != scope else None)
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _impl._transaction_payload(transaction)
@@ -345,9 +371,12 @@ def book_external_provider_cash_activity(
     }
 
     economic_payload = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_impl._scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "source_activity_identity": identity,
         "observed_at": observed_text,
         "transaction": _impl._transaction_payload(transaction),

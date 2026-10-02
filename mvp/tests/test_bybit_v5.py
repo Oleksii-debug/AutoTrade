@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
     prepare_order_submission,
     coverage_evidence,
+    _classify_executions_payload,
     parse_executions,
     parse_submission_response,
     server_time_from_response,
@@ -897,7 +898,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "time": 1790280001000,
         }
         observation = bound_execution_response(response)
-        fills = parse_executions(
+        fills = _classify_executions_payload(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -912,7 +913,29 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.side, "BUY")
         self.assertIsNone(fill.position_side)
-        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+        self.assertEqual(fill.evidence_refs, ())
+
+    def test_plain_exact_byte_observation_cannot_become_financial_fill(self):
+        response = {
+            "retCode": 0,
+            "result": {"list": [{
+                "execId": "origin-gate",
+                "orderLinkId": "",
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "execQty": "1",
+                "execPrice": "10",
+                "execFee": "0",
+                "feeCurrency": "USDT",
+                "execTime": "1790280000000",
+            }]},
+        }
+        observation = bound_execution_response(response)
+        with self.assertRaisesRegex(TypeError, "ProviderOriginObservation"):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
 
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {
@@ -926,7 +949,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }
         with self.assertRaisesRegex(ProviderCoreError, "side"):
-            parse_executions(
+            _classify_executions_payload(
                 bound_execution_response(
                     {"retCode": 0, "result": {"list": [base]}}
                 ),
@@ -937,14 +960,14 @@ class BybitV5AdapterTests(unittest.TestCase):
         observation = bound_execution_response(
             {"retCode": 0, "result": {"list": [documented]}}
         )
-        fill = parse_executions(
+        fill = _classify_executions_payload(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )[0]
         self.assertEqual(fill.side, "SELL")
         self.assertIsNone(fill.position_side)
         self.assertIsNone(fill.position_effect)
-        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+        self.assertEqual(fill.evidence_refs, ())
 
     def test_execution_scope_is_derived_from_prepared_read_not_parser_labels(self):
         response = {"retCode": 0, "result": {"list": [{
@@ -953,7 +976,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
         observation = bound_execution_response(response, account_id="account-a")
-        fills = parse_executions(
+        fills = _classify_executions_payload(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -969,8 +992,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }]}}
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
-            parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        fills = parse_executions(
+            _classify_executions_payload(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
+        fills = _classify_executions_payload(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
@@ -988,7 +1011,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "extraFees"):
-            parse_executions(
+            _classify_executions_payload(
                 bound_execution_response(response),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -1003,7 +1026,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 }
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
-                fills = parse_executions(
+                fills = _classify_executions_payload(
                     bound_execution_response({"retCode": 0, "result": {"list": [row]}}),
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 )
@@ -1015,7 +1038,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
         ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
-            parse_executions(
+            _classify_executions_payload(
                 bound_execution_response(conflict),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -1025,7 +1048,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(bound_execution_response(unknown), instrument_versions={})
+            _classify_executions_payload(bound_execution_response(unknown), instrument_versions={})
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000

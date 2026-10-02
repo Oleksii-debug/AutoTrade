@@ -49,12 +49,24 @@ def activity(
     )
 
 
+def _paper_provider_environment(provider_id):
+    return "TESTNET" if str(provider_id).upper() == "BYBIT" else "PAPER"
+
+
 def paper_activity_identity(**kwargs):
-    return _activity_identity(environment="PAPER", **kwargs)
+    return _activity_identity(
+        environment="PAPER",
+        provider_environment=_paper_provider_environment(kwargs.get("provider_id")),
+        **kwargs,
+    )
 
 
 def paper_book_id(**kwargs):
-    return _book_id(environment="PAPER", **kwargs)
+    return _book_id(
+        environment="PAPER",
+        provider_environment=_paper_provider_environment(kwargs.get("provider_id")),
+        **kwargs,
+    )
 
 
 def book_paper_activity(store, **kwargs):
@@ -66,6 +78,10 @@ def book_paper_activity(store, **kwargs):
         if evidence is None:
             raise AssertionError("activity test evidence is required")
         kwargs["activity"] = replace(evidence, signed_amount=amount)
+    kwargs.setdefault(
+        "provider_environment",
+        _paper_provider_environment(kwargs.get("provider_id")),
+    )
     return book_external_provider_cash_activity(
         store,
         environment="PAPER",
@@ -74,6 +90,10 @@ def book_paper_activity(store, **kwargs):
 
 
 def load_paper_book(store, **kwargs):
+    kwargs.setdefault(
+        "provider_environment",
+        _paper_provider_environment(kwargs.get("provider_id")),
+    )
     return load_provider_account_economic_book(
         store,
         environment="PAPER",
@@ -723,7 +743,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         self.assertNotEqual(first_activity, second_activity)
 
         first_book = paper_book_id(provider_id="ALPACA", account_id="a/b")
-        second_book = paper_book_id(provider_id="ALPACA/A", account_id="b")
+        second_book = paper_book_id(provider_id="ALPACA_A", account_id="b")
         self.assertNotEqual(first_book, second_book)
 
     def test_provider_activity_evidence_cannot_cross_account_or_provider(self):

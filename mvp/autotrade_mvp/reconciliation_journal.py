@@ -769,16 +769,6 @@ def load_account_resource_availability_evidence(
         environment=scope,
         provider_environment=provider_environment,
     )
-    current_scope_head = None
-    if require_latest_scope:
-        current_scope_head = require_current_reconciliation_checkpoint(
-            store,
-            checkpoint_event_id=event_id,
-            provider_id=provider,
-            account_id=account,
-            environment=scope,
-            provider_environment=domain,
-        )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
@@ -795,6 +785,16 @@ def load_account_resource_availability_evidence(
         environment=scope,
         provider_environment=domain,
     )
+    current_scope_head = None
+    if require_latest_scope:
+        current_scope_head = require_current_reconciliation_checkpoint(
+            store,
+            checkpoint_event_id=event_id,
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        )
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True

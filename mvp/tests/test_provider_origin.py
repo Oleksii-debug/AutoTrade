@@ -1,4 +1,6 @@
+import base64
 from datetime import timedelta
+from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -8,8 +10,8 @@ from mvp.autotrade_mvp.provider_origin import (
     AuthenticatedReadResponseBinding,
     ProviderOriginError,
     ProviderOriginJournal,
-    _PROVIDER_ORIGIN_RECORD_TOKEN,
     observe_provider_origin_json_response,
+    observe_test_injected_json_response,
 )
 from mvp.tests.test_bybit_v5 import READ_AT as BYBIT_READ_AT, read_capability
 from mvp.tests.test_provider_transport import (
@@ -19,7 +21,7 @@ from mvp.tests.test_provider_transport import (
 
 
 class ProviderOriginJournalTests(unittest.TestCase):
-    def test_provider_origin_survives_restart_without_network_requery(self):
+    def test_test_injected_replay_survives_restart_without_network_requery(self):
         query = authenticated_read_binding()
         body = b'{"balances":[{"asset":"USDT","free":"100.00"}]}'
         with TemporaryDirectory() as directory:
@@ -31,39 +33,77 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "1" * 64,
                 recorded_at=READ_NOW,
             )
-            binding = journal._record_provider_origin(
+            binding = journal._record_test_injected_response(
                 attempt_id,
                 query,
                 http_status=200,
                 response_bytes=body,
                 observed_at=READ_NOW + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             self.assertEqual(binding.response_bytes, body)
             self.assertEqual(binding.http_status, 200)
             self.assertEqual(binding.provider_environment, "PAPER")
             self.assertEqual(binding.transport_identity, "UrllibJsonWireClient:v1")
             self.assertEqual(binding.network_policy_identity, "sha256:" + "1" * 64)
-            self.assertTrue(binding.origin_ref.startswith("provider-origin:sha256:"))
+            self.assertEqual(binding.evidence_class, "TEST_INJECTED")
+            self.assertTrue(binding.origin_ref.startswith("provider-test:sha256:"))
             self.assertGreater(binding.journal_sequence, 0)
 
             restarted = ProviderOriginJournal(JournalStore(path))
             recovered = restarted.load_response_binding(attempt_id, query)
             self.assertEqual(recovered, binding)
             self.assertEqual(recovered.response_bytes, body)
-            observation = observe_provider_origin_json_response(
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "independently authenticated provider-wire origin",
+            ):
+                observe_provider_origin_json_response(
+                    response_binding=recovered,
+                    query_binding=query,
+                    accepted_success_statuses=frozenset({200}),
+                )
+            observation = observe_test_injected_json_response(
                 response_binding=recovered,
                 query_binding=query,
                 accepted_success_statuses=frozenset({200}),
             )
-            self.assertEqual(observation.origin_ref, binding.origin_ref)
             self.assertEqual(observation.provider_id, "BINANCE")
             self.assertEqual(observation.account_id, "acct-1")
             self.assertEqual(observation.environment, "PAPER")
-            self.assertEqual(observation.provider_environment, "PAPER")
             self.assertEqual(observation.payload["balances"][0]["free"], "100.00")
 
-    def test_caller_cannot_self_assert_provider_origin_token(self):
+    def test_mutating_test_binding_cannot_promote_provider_origin(self):
+        query = authenticated_read_binding()
+        with TemporaryDirectory() as directory:
+            journal = ProviderOriginJournal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "a" * 64,
+                recorded_at=READ_NOW,
+            )
+            binding = journal._record_test_injected_response(
+                attempt_id,
+                query,
+                http_status=200,
+                response_bytes=b'{"ok":true}',
+                observed_at=READ_NOW + timedelta(seconds=1),
+            )
+            object.__setattr__(binding, "evidence_class", "PROVIDER_ORIGIN")
+            object.__setattr__(
+                binding,
+                "origin_ref",
+                "provider-origin:sha256:" + "b" * 64,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "in-process response binding",
+            ):
+                binding.require_provider_origin()
+
+    def test_in_process_caller_cannot_issue_provider_origin(self):
         query = authenticated_read_binding()
         with TemporaryDirectory() as directory:
             journal = ProviderOriginJournal(
@@ -76,7 +116,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 recorded_at=READ_NOW,
             )
             with self.assertRaisesRegex(
-                ProviderOriginError, "may only be issued by provider transport"
+                ProviderOriginError, "independent external provider-wire issuer"
             ):
                 journal._record_provider_origin(
                     attempt_id,
@@ -84,16 +124,16 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     http_status=200,
                     response_bytes=b'{"ok":true}',
                     observed_at=READ_NOW + timedelta(seconds=1),
-                    _origin_token=object(),
                 )
             events = JournalStore.load_events(
                 journal._store,
                 "authenticated_provider_read",
                 attempt_id,
             )
-            self.assertEqual([event["event_type"] for event in events], [
-                "AuthenticatedReadPrepared"
-            ])
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared"],
+            )
 
     def test_prepared_only_attempt_cannot_become_response_binding(self):
         query = authenticated_read_binding()
@@ -122,13 +162,12 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "4" * 64,
                 recorded_at=READ_NOW,
             )
-            journal._record_provider_origin(
+            journal._record_test_injected_response(
                 attempt_id,
                 query,
                 http_status=200,
                 response_bytes=b'{"ok":true}',
                 observed_at=READ_NOW + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             other = authenticated_read_binding(
                 query={"omitZeroBalances": "false"}
@@ -152,24 +191,22 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "5" * 64,
                 recorded_at=READ_NOW,
             )
-            first = journal._record_provider_origin(
+            first = journal._record_test_injected_response(
                 attempt_id,
                 query,
                 http_status=200,
                 response_bytes=b'{"value":1}',
                 observed_at=READ_NOW + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             with self.assertRaisesRegex(
                 ProviderOriginError, "requires one exact durable Prepared event"
             ):
-                journal._record_provider_origin(
+                journal._record_test_injected_response(
                     attempt_id,
                     query,
                     http_status=200,
                     response_bytes=b'{"value":2}',
                     observed_at=READ_NOW + timedelta(seconds=2),
-                    _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
                 )
             recovered = journal.load_response_binding(
                 attempt_id, authenticated_read_binding()
@@ -189,17 +226,16 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "6" * 64,
                 recorded_at=READ_NOW,
             )
-            binding = journal._record_provider_origin(
+            binding = journal._record_test_injected_response(
                 attempt_id,
                 query,
                 http_status=429,
                 response_bytes=b'{"code":-1003,"msg":"too many requests"}',
                 observed_at=READ_NOW + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             self.assertEqual(binding.http_status, 429)
             with self.assertRaisesRegex(ProviderOriginError, "endpoint policy"):
-                observe_provider_origin_json_response(
+                observe_test_injected_json_response(
                     response_binding=binding,
                     query_binding=query,
                     accepted_success_statuses=frozenset({200}),
@@ -217,21 +253,20 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "7" * 64,
                 recorded_at=READ_NOW,
             )
-            binding = journal._record_provider_origin(
+            binding = journal._record_test_injected_response(
                 attempt_id,
                 query,
                 http_status=201,
                 response_bytes=b'{"ok":true}',
                 observed_at=READ_NOW + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             with self.assertRaisesRegex(ProviderOriginError, "endpoint policy"):
-                observe_provider_origin_json_response(
+                observe_test_injected_json_response(
                     response_binding=binding,
                     query_binding=query,
                     accepted_success_statuses=frozenset({200}),
                 )
-            observation = observe_provider_origin_json_response(
+            observation = observe_test_injected_json_response(
                 response_binding=binding,
                 query_binding=query,
                 accepted_success_statuses=frozenset({200, 201}),
@@ -272,13 +307,12 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "8" * 64,
                 recorded_at=BYBIT_READ_AT,
             )
-            testnet_binding = journal._record_provider_origin(
+            testnet_binding = journal._record_test_injected_response(
                 testnet_attempt,
                 testnet_query,
                 http_status=200,
                 response_bytes=body,
                 observed_at=BYBIT_READ_AT + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             self.assertEqual(testnet_binding.provider_environment, "TESTNET")
             with self.assertRaisesRegex(ProviderOriginError, "does not match exact query binding"):
@@ -290,13 +324,12 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 network_policy_identity="sha256:" + "8" * 64,
                 recorded_at=BYBIT_READ_AT,
             )
-            demo_binding = journal._record_provider_origin(
+            demo_binding = journal._record_test_injected_response(
                 demo_attempt,
                 demo_query,
                 http_status=200,
                 response_bytes=body,
                 observed_at=BYBIT_READ_AT + timedelta(seconds=1),
-                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             self.assertEqual(demo_binding.provider_environment, "DEMO")
             self.assertNotEqual(testnet_binding.origin_ref, demo_binding.origin_ref)
@@ -310,6 +343,55 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 restarted.load_response_binding(demo_attempt, demo_query).provider_environment,
                 "DEMO",
             )
+
+    def test_forged_provider_origin_event_cannot_cross_restart_loader(self):
+        query = authenticated_read_binding()
+        body = b'{"ok":true}'
+        with TemporaryDirectory() as directory:
+            journal = ProviderOriginJournal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "9" * 64,
+                recorded_at=READ_NOW,
+            )
+            prepared = JournalStore.load_events(
+                journal._store,
+                "authenticated_provider_read",
+                attempt_id,
+            )[0]
+            observed_at = (
+                READ_NOW + timedelta(seconds=1)
+            ).isoformat().replace("+00:00", "Z")
+            observed_payload = {
+                "origin_kind": "PROVIDER_ORIGIN",
+                "prepared_event_id": prepared["event_id"],
+                "query_digest": query.query_digest,
+                "transport_identity": "UrllibJsonWireClient:v1",
+                "network_policy_identity": "sha256:" + "9" * 64,
+                "http_status": 200,
+                "response_sha256": "sha256:" + sha256(body).hexdigest(),
+                "response_base64": base64.b64encode(body).decode("ascii"),
+                "observed_at": observed_at,
+            }
+            JournalStore.append_event(
+                journal._store,
+                journal._event(
+                    event_id=attempt_id + ":observed",
+                    event_type="AuthenticatedReadObserved",
+                    attempt_id=attempt_id,
+                    aggregate_version=2,
+                    payload=observed_payload,
+                    committed_at=observed_at,
+                ),
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "external provider-wire attestation verifier",
+            ):
+                journal.load_response_binding(attempt_id, query)
 
     def test_response_binding_cannot_be_publicly_constructed(self):
         with self.assertRaisesRegex(
@@ -332,6 +414,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 response_bytes=b"{}",
                 transport_identity="UrllibJsonWireClient:v1",
                 network_policy_identity="sha256:" + "d" * 64,
+                evidence_class="PROVIDER_ORIGIN",
                 origin_ref="provider-origin:sha256:" + "c" * 64,
                 journal_sequence=2,
             )

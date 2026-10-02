@@ -1,14 +1,15 @@
 import hashlib
-from decimal import (
-    Decimal,
-    ROUND_CEILING,
-    ROUND_FLOOR,
-    ROUND_HALF_EVEN,
-    localcontext,
-)
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
+
+import mvp.autotrade_mvp.bounded_real as bounded_real_module
+from mvp.autotrade_mvp.exact_decimal import (
+    MAX_INTEGER_DIGITS,
+    MAX_SIGNIFICANT_DIGITS,
+)
 
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
@@ -16,6 +17,7 @@ from research.autotrade_research.artifacts.store import (
 )
 
 from mvp.autotrade_mvp.bounded_real import (
+    ArtifactStoreEvidenceVerifier,
     BoundedRealEnvelope,
     BoundedRealObservations,
     EvidenceVerification,
@@ -216,6 +218,14 @@ def _all_refs(prerequisite_items, observed):
     )
 
 
+def _canonical_policy_fixture(trust_policy):
+    return patch(
+        "mvp.autotrade_mvp.qualification_attestation."
+        "load_canonical_qualification_trust_policy",
+        return_value=trust_policy,
+    )
+
+
 def _signed_bounded_receipt(bounded, refs):
     trust_root = attestation_root(
         scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
@@ -334,16 +344,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
@@ -356,6 +365,294 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.qualification_trust_root_id.startswith("sha256:")
         )
 
+    def test_terminal_assessment_uses_one_detached_graph_across_verifier_callbacks(self):
+        phase = {"mutated": False}
+
+        class HostileRef(ImmutableEvidenceRef):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "provider_id":
+                        return "attacker-provider"
+                    if name == "evidence_kind":
+                        return "ATTACKER_KIND"
+                return super().__getattribute__(name)
+
+        class HostileEvidence(QualificationEvidence):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "passed":
+                        return False
+                    if name == "unresolved_blockers":
+                        return ("late-caller-blocker",)
+                return super().__getattribute__(name)
+
+        class HostileObservations(BoundedRealObservations):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "observed_partial_fill":
+                        return False
+                    if name == "unauthorized_action_count":
+                        return 1
+                    if name == "unresolved_unknown_count":
+                        return 1
+                return super().__getattribute__(name)
+
+        bounded = envelope()
+        base_prerequisites = prerequisites()
+        hostile_prerequisites = []
+        for index, item in enumerate(base_prerequisites):
+            evidence_ref = item.evidence_ref
+            if index == 0:
+                evidence_ref = HostileRef(
+                    artifact_id=evidence_ref.artifact_id,
+                    sha256=evidence_ref.sha256,
+                    evidence_kind=evidence_ref.evidence_kind,
+                    source_sha=evidence_ref.source_sha,
+                    envelope_id=evidence_ref.envelope_id,
+                    envelope_digest=evidence_ref.envelope_digest,
+                    provider_id=evidence_ref.provider_id,
+                    account_id=evidence_ref.account_id,
+                )
+                item = HostileEvidence(
+                    evidence_id=item.evidence_id,
+                    evidence_kind=item.evidence_kind,
+                    source_sha=item.source_sha,
+                    envelope_id=item.envelope_id,
+                    envelope_digest=item.envelope_digest,
+                    passed=item.passed,
+                    evidence_ref=evidence_ref,
+                    unresolved_blockers=item.unresolved_blockers,
+                )
+            hostile_prerequisites.append(item)
+
+        base_observed = observations()
+        hostile_observed = HostileObservations(
+            source_sha=base_observed.source_sha,
+            envelope_id=base_observed.envelope_id,
+            envelope_digest=base_observed.envelope_digest,
+            provider_id=base_observed.provider_id,
+            account_id=base_observed.account_id,
+            observed_fill_count=base_observed.observed_fill_count,
+            observed_partial_fill=base_observed.observed_partial_fill,
+            all_fills_reconciled=base_observed.all_fills_reconciled,
+            fees_reconciled=base_observed.fees_reconciled,
+            revocation_verified=base_observed.revocation_verified,
+            protection_verified=base_observed.protection_verified,
+            unauthorized_action_count=base_observed.unauthorized_action_count,
+            unresolved_unknown_count=base_observed.unresolved_unknown_count,
+            evidence_refs=base_observed.evidence_refs,
+        )
+        refs = _all_refs(hostile_prerequisites, hostile_observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+
+        original_verify = ArtifactStoreEvidenceVerifier.verify
+
+        def mutate_after_first_verify(verifier, evidence_ref):
+            verification = original_verify(verifier, evidence_ref)
+            phase["mutated"] = True
+            return verification
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, hostile_prerequisites, hostile_observed)
+            with _canonical_policy_fixture(trust_policy), patch.object(
+                ArtifactStoreEvidenceVerifier,
+                "verify",
+                new=mutate_after_first_verify,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=hostile_prerequisites,
+                    observations=hostile_observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+
+        self.assertTrue(phase["mutated"])
+        self.assertTrue(result.complete)
+        self.assertEqual(result.reason_codes, ())
+        self.assertEqual(result.exact_source_sha, SHA)
+        self.assertEqual(result.envelope_digest, bounded.envelope_digest)
+
+    def test_terminal_assessment_rejects_nonexact_observation_ref_container(self):
+        class HostileObservations(BoundedRealObservations):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name == "evidence_refs":
+                    return list(value)
+                return value
+
+        base = observations()
+        hostile = HostileObservations(
+            source_sha=base.source_sha,
+            envelope_id=base.envelope_id,
+            envelope_digest=base.envelope_digest,
+            provider_id=base.provider_id,
+            account_id=base.account_id,
+            observed_fill_count=base.observed_fill_count,
+            observed_partial_fill=base.observed_partial_fill,
+            all_fills_reconciled=base.all_fills_reconciled,
+            fees_reconciled=base.fees_reconciled,
+            revocation_verified=base.revocation_verified,
+            protection_verified=base.protection_verified,
+            unauthorized_action_count=base.unauthorized_action_count,
+            unresolved_unknown_count=base.unresolved_unknown_count,
+            evidence_refs=base.evidence_refs,
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "observations.evidence_refs must be an exact tuple",
+        ):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisites(),
+                observations=hostile,
+            )
+
+    def test_caller_self_signed_policy_cannot_select_terminal_trust_root(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        attacker_receipt, attacker_policy = _signed_bounded_receipt(bounded, refs)
+
+        canonical_root = attestation_root(
+            scopes=(QualificationScope("RELEASE", "FREEZE"),)
+        )
+        canonical_policy = attestation_policy(canonical_root)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with _canonical_policy_fixture(canonical_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=attacker_receipt,
+                    qualification_policy=attacker_policy,
+                    expected_policy_id=attacker_policy.policy_id,
+                    expected_policy_version=attacker_policy.policy_version,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertIsNone(result.qualification_trust_root_id)
+
+    def test_verifier_subclass_cannot_waive_bounded_manifest_scope(self):
+        class ForgedVerifier(ArtifactStoreEvidenceVerifier):
+            def verify(self, _ref):
+                return EvidenceVerification(valid=True)
+
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        bad_ref = prerequisite_items[0].evidence_ref
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                bad_ref,
+                metadata_overrides={"provider_id": "attacker-provider"},
+            )
+            _populate_bundle(
+                store,
+                prerequisite_items,
+                observed,
+                exclude=(bad_ref.artifact_id,),
+            )
+            forged = ForgedVerifier(store, evidence_root=directory)
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=forged,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
+            result.reason_codes,
+        )
+
+    def test_exact_verifier_backing_rebind_cannot_waive_manifest_scope(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        bad_ref = prerequisite_items[0].evidence_ref
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                bad_ref,
+                metadata_overrides={"provider_id": "attacker-provider"},
+            )
+            _populate_bundle(
+                store,
+                prerequisite_items,
+                observed,
+                exclude=(bad_ref.artifact_id,),
+            )
+            verifier = artifact_store_evidence_verifier(
+                store,
+                evidence_root=directory,
+            )
+            # Reproduce the exact-instance low-level rebinding class from
+            # review: terminal assessment must not recover authority from these
+            # caller-owned backing fields.
+            with TemporaryDirectory() as attacker_directory:
+                attacker_store = ArtifactStore(attacker_directory)
+                verifier._read_snapshot = lambda _artifact_id: (
+                    {
+                        "artifact_id": bad_ref.artifact_id,
+                        "sha256": bad_ref.sha256,
+                        "metadata": {
+                            "provider_id": bounded.provider_id,
+                            "account_id": bounded.account_id,
+                            "outcome": "PASS",
+                        },
+                    },
+                    b"forged",
+                )
+                verifier._store = attacker_store
+                verifier._evidence_root = attacker_directory
+                verifier._store_identity = "sha256:" + ("0" * 64)
+                verifier.verify = lambda _ref: EvidenceVerification(valid=True)
+                with _canonical_policy_fixture(trust_policy):
+                    result = assess_bounded_real_qualification(
+                        envelope=bounded,
+                        prerequisite_evidence=prerequisite_items,
+                        observations=observed,
+                        evidence_verifier=verifier,
+                        evidence_store=store,
+                        evidence_root=directory,
+                        qualification_receipt=receipt,
+                    )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
+            result.reason_codes,
+        )
+
     def test_signed_bounded_real_receipt_must_cover_exact_evidence_set(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
@@ -365,19 +662,97 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_terminal_coverage_uses_accepted_snapshot_after_receipt_rebound(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        forged_receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        legitimate_receipt, _ = _signed_bounded_receipt(bounded, refs[:-1])
+
+        rebound = SignedQualificationAttestation(
+            forged_receipt.attestation,
+            legitimate_receipt.signature_b64,
+        )
+        real_verify = bounded_real_module.verify_canonical_qualification_attestation
+
+        def swap_then_verify(receipt, **kwargs):
+            object.__setattr__(
+                receipt,
+                "attestation",
+                legitimate_receipt.attestation,
+            )
+            return real_verify(receipt, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with (
+                _canonical_policy_fixture(trust_policy),
+                patch.object(
+                    bounded_real_module,
+                    "verify_canonical_qualification_attestation",
+                    side_effect=swap_then_verify,
+                ),
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=rebound,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_caller_owned_exact_verifier_is_diagnostic_only_for_terminal_signed_path(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            caller_verifier = artifact_store_evidence_verifier(
+                store,
+                evidence_root=directory,
+            )
             result = assess_bounded_real_qualification(
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
+                evidence_verifier=caller_verifier,
                 qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
             )
+
         self.assertFalse(result.complete)
         self.assertIn(
-            "independent_evidence_set_mismatch",
+            "caller_immutable_evidence_verifier_non_terminal",
+            result.reason_codes,
+        )
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
             result.reason_codes,
         )
 
@@ -697,69 +1072,6 @@ class BoundedRealQualificationTests(unittest.TestCase):
             original.envelope_digest,
         )
 
-    def test_bounded_real_digest_is_independent_of_ambient_decimal_context(self):
-        values = {
-            "max_capital": "1234567890123456789012345678.1",
-            "max_single_notional": "1.0000000000000000001",
-            "max_gross_leverage": "1.234567890123456789",
-        }
-        identities = set()
-        rendered_values = set()
-        for precision, rounding in (
-            (6, ROUND_FLOOR),
-            (10, ROUND_CEILING),
-            (28, ROUND_HALF_EVEN),
-            (80, ROUND_HALF_EVEN),
-        ):
-            with self.subTest(precision=precision, rounding=rounding):
-                with localcontext() as context:
-                    context.prec = precision
-                    context.rounding = rounding
-                    bounded = envelope(**values)
-                    identities.add(bounded.envelope_digest)
-                    rendered_values.add(
-                        (
-                            str(bounded.max_capital),
-                            str(bounded.max_single_notional),
-                            str(bounded.max_gross_leverage),
-                        )
-                    )
-        self.assertEqual(len(identities), 1)
-        self.assertEqual(
-            rendered_values,
-            {
-                (
-                    values["max_capital"],
-                    values["max_single_notional"],
-                    values["max_gross_leverage"],
-                )
-            },
-        )
-
-    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
-        class HostileDecimal(Decimal):
-            def is_finite(self):
-                raise AssertionError("virtual is_finite must not run")
-
-            def normalize(self, *args, **kwargs):
-                raise AssertionError("virtual normalize must not run")
-
-            def __format__(self, spec):
-                raise AssertionError("virtual format must not run")
-
-            def __lt__(self, other):
-                raise AssertionError("virtual comparison must not run")
-
-            def __eq__(self, other):
-                raise AssertionError("virtual equality must not run")
-
-        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
-            envelope(max_capital=HostileDecimal("1000"))
-
-    def test_bounded_real_rejects_values_outside_shared_exact_envelope(self):
-        with self.assertRaisesRegex(ValueError, "exact decimal authority"):
-            envelope(max_capital="1e300")
-
     def test_single_notional_cannot_exceed_bounded_capital(self):
         with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):
             envelope(max_capital="100", max_single_notional="101")
@@ -773,6 +1085,75 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 evidence_kind="ACTUAL_FILL",
                 sha256=("sha256:" + "A" * 64),
             )
+
+    def test_numeric_ingress_uses_shared_bounded_exact_authority_before_construction(self):
+        class HostileText(str):
+            pass
+
+        class HostileInt(int):
+            pass
+
+        class HostileDecimal(Decimal):
+            pass
+
+        for value in (
+            HostileText("1000"),
+            HostileInt(1000),
+            HostileDecimal("1000"),
+            True,
+            1000.0,
+        ):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(TypeError):
+                    envelope(max_capital=value)
+
+        with self.assertRaises(ValueError):
+            envelope(max_capital="9" * (MAX_SIGNIFICANT_DIGITS + 1))
+        with self.assertRaises(ValueError):
+            envelope(max_capital=10 ** MAX_INTEGER_DIGITS)
+
+        builtin_decimal = envelope(
+            max_capital=Decimal("1000.00"),
+            max_single_notional=Decimal("100.0"),
+            max_gross_leverage=Decimal("1.500"),
+        )
+        textual = envelope(
+            max_capital="1000.00",
+            max_single_notional="100.0",
+            max_gross_leverage="1.500",
+        )
+        self.assertEqual(builtin_decimal.envelope_digest, textual.envelope_digest)
+
+        with localcontext() as context:
+            context.prec = 2
+            context.rounding = ROUND_FLOOR
+            floor_digest = envelope(
+                max_capital="1000.001",
+                max_single_notional="100.001",
+                max_gross_leverage="1.501",
+            ).envelope_digest
+        with localcontext() as context:
+            context.prec = 50
+            context.rounding = ROUND_CEILING
+            ceiling_digest = envelope(
+                max_capital="1000.001",
+                max_single_notional="100.001",
+                max_gross_leverage="1.501",
+            ).envelope_digest
+        self.assertEqual(
+            floor_digest,
+            ceiling_digest,
+            "bounded-real identity must not depend on ambient Decimal context",
+        )
+        self.assertNotEqual(
+            floor_digest,
+            envelope(
+                max_capital="1000.002",
+                max_single_notional="100.001",
+                max_gross_leverage="1.501",
+            ).envelope_digest,
+            "bounded-real ingress must preserve exact values without clamping",
+        )
 
     def test_forbidden_actions_float_bounds_and_direct_bool_bypasses_are_rejected(self):
         for action in ("WITHDRAW", "TRANSFER", "CREDENTIAL.ROTATE", "OTHER"):

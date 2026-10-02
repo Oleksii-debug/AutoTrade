@@ -2,7 +2,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.authority import AuthorityService
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    _issue_recovery_guarded_dispatcher,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
@@ -41,7 +45,7 @@ class RecoverySenderIssuanceTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             with self.assertRaisesRegex(
                 PermissionError,
-                "issued by recovery composition",
+                "issued by RecoveryController",
             ):
                 GuardedDispatcher(
                     store,
@@ -50,6 +54,59 @@ class RecoverySenderIssuanceTests(unittest.TestCase):
                     owner_token="caller",
                     owner_epoch=1,
                     bound_sender_check=lambda _owner, _epoch: None,
+                )
+
+    def test_direct_recovery_dispatcher_issuer_rejects_caller_sender_callback(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact RecoveryController"):
+                _issue_recovery_guarded_dispatcher(
+                    lambda _owner, _epoch: None,
+                    store,
+                    environment="PAPER",
+                    account_id="acct",
+                    prepared_lease_seconds=60,
+                )
+
+    def test_paper_live_per_call_sender_callback_cannot_replace_product_issuer(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token="caller",
+                    owner_epoch=1,
+                )
+                financial = AuthorityService(store).dispatch_guard(
+                    "missing-admission",
+                    account_id="acct",
+                    environment=environment,
+                    instrument_id="11111111-1111-4111-8111-111111111111",
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                )
+                wire_calls = []
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "sender authority must be issued by RecoveryController",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id=f"caller-sender-{environment.lower()}",
+                        intent_id="intent",
+                        intent_hash="hash",
+                        provider="provider",
+                        request={},
+                        now="2026-10-02T05:55:00Z",
+                        authority_check=financial,
+                        transport_send=lambda *_args: wire_calls.append("wire"),
+                        sender_check=lambda _owner, _epoch: None,
+                    )
+                self.assertEqual(wire_calls, [])
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("submission_attempt"),
+                    [],
                 )
 
     def test_recovery_dispatcher_ignores_per_call_sender_replacement(self):

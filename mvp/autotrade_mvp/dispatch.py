@@ -756,16 +756,51 @@ def _envelope(
     }
 
 
+@dataclass(frozen=True)
+class _RecoverySenderBinding:
+    """Exact RecoveryController ownership behind one guarded dispatcher."""
+
+    recovery_controller: object
+    store: JournalStore
+    environment: str
+    account_id: str
+    owner_token: str
+    owner_epoch: int
+    issued_check: SenderCheck
+
+
 def _issued_sender_check(dispatcher: object) -> SenderCheck | None:
-    """Return the module-issued sender check and reject post-mint replacement."""
+    """Return only a canonical RecoveryController-issued sender check."""
 
     if type(dispatcher) is not GuardedDispatcher:
         raise TypeError("dispatcher must be exact GuardedDispatcher")
     binding = _DISPATCHER_SENDER_BINDINGS.get(dispatcher)
     if binding is None:
-        raise PermissionError("dispatcher lacks issued sender binding")
-    issued_check = binding[0]
-    if dispatcher._bound_sender_check is not issued_check:
+        if dispatcher._bound_sender_check is not None:
+            raise PermissionError("dispatcher sender authority changed")
+        return None
+    if type(binding) is not _RecoverySenderBinding:
+        raise PermissionError("dispatcher sender binding is invalid")
+
+    from .recovery import RecoveryController
+
+    if type(binding.recovery_controller) is not RecoveryController:
+        raise PermissionError("dispatcher sender issuer changed")
+    if binding.store is not dispatcher.store:
+        raise PermissionError("dispatcher sender journal authority changed")
+    if (
+        binding.environment != dispatcher.environment
+        or binding.account_id != dispatcher.account_id
+        or binding.owner_token != dispatcher.owner_token
+        or binding.owner_epoch != dispatcher.owner_epoch
+    ):
+        raise PermissionError("dispatcher sender scope changed")
+    issued_check = binding.issued_check
+    if (
+        getattr(issued_check, "__self__", None) is not binding.recovery_controller
+        or getattr(issued_check, "__func__", None) is not RecoveryController.validate_sender
+        or dispatcher._bound_sender_check is not issued_check
+    ):
         raise PermissionError("dispatcher sender authority changed")
     return issued_check
 
@@ -817,27 +852,15 @@ class GuardedDispatcher:
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
-        if (
-            bound_sender_check is not None
-            and _bound_sender_issuance_token is not _BOUND_SENDER_ISSUANCE_TOKEN
-        ):
+        # Public construction never accepts an authority-bearing sender callback.
+        # RecoveryController issuance attaches the exact class-owned validation
+        # method only after this neutral dispatcher has been constructed.
+        if bound_sender_check is not None or _bound_sender_issuance_token is not None:
             raise PermissionError(
-                "bound sender authority must be issued by recovery composition"
+                "bound sender authority must be issued by RecoveryController"
             )
-        if (
-            _bound_sender_issuance_token is not None
-            and _bound_sender_issuance_token is not _BOUND_SENDER_ISSUANCE_TOKEN
-        ):
-            raise PermissionError("invalid bound sender issuance token")
-        if (
-            _bound_sender_issuance_token is _BOUND_SENDER_ISSUANCE_TOKEN
-            and bound_sender_check is None
-        ):
-            raise ValueError("issued sender authority requires a sender check")
-        if bound_sender_check is not None and not callable(bound_sender_check):
-            raise TypeError("bound_sender_check must be callable when provided")
-        self._bound_sender_check = bound_sender_check
-        _DISPATCHER_SENDER_BINDINGS[self] = (bound_sender_check,)
+        self._bound_sender_check = None
+        _DISPATCHER_SENDER_BINDINGS[self] = None
 
     def _journal_store_authority(self) -> JournalStore:
         store = self.store
@@ -1038,6 +1061,10 @@ class GuardedDispatcher:
                 raise PermissionError(
                     "PAPER/LIVE financial authority belongs to another journal authority"
                 )
+            if _issued_sender_check(self) is None:
+                raise PermissionError(
+                    "PAPER/LIVE sender authority must be issued by RecoveryController"
+                )
         _instant(now)
         request_canonical = canonical_json(dict(request))
         request_dict = json.loads(request_canonical)
@@ -1217,9 +1244,8 @@ class GuardedDispatcher:
             if (
                 self.environment in {"PAPER", "LIVE"}
                 and bound_sender_check is None
-                and sender_check is None
             ):
-                barrier_reason = "sender_fence_required"
+                barrier_reason = "sender_authority_required"
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionBlocked",
@@ -1502,25 +1528,71 @@ class GuardedDispatcher:
 
 
 def _issue_recovery_guarded_dispatcher(
+    recovery_controller: object,
     store: JournalStore,
     *,
     environment: str,
     account_id: str,
-    owner_token: str,
-    owner_epoch: int,
     prepared_lease_seconds: int,
-    bound_sender_check: SenderCheck,
 ) -> GuardedDispatcher:
-    """Issue a recovery-bound dispatcher from the trusted product composition."""
+    """Issue a dispatcher bound to exact RecoveryController ownership.
 
-    return GuardedDispatcher(
-        store,
-        environment=environment,
-        account_id=account_id,
-        owner_token=owner_token,
-        owner_epoch=owner_epoch,
-        prepared_lease_seconds=prepared_lease_seconds,
-        bound_sender_check=bound_sender_check,
-        _bound_sender_issuance_token=_BOUND_SENDER_ISSUANCE_TOKEN,
+    No caller-selected sender callback is accepted. The binding always invokes
+    the canonical RecoveryController.validate_sender method for the controller's
+    exact current owner, journal generation and submission scope.
+    """
+
+    from .recovery import RecoveryController
+
+    if type(recovery_controller) is not RecoveryController:
+        raise TypeError("sender authority issuer must be exact RecoveryController")
+    RecoveryController._require_current_durable_owner(recovery_controller)
+    RecoveryController._journal_store_authority(recovery_controller)
+    selected_identity = RecoveryController._selected_journal_identity(
+        recovery_controller
     )
+    if _canonical_journal_authority_snapshot(store)[1] != selected_identity:
+        raise PermissionError(
+            "Dispatcher journal does not match selected recovery authority"
+        )
+    normalized_environment, normalized_account = (
+        RecoveryController._normalized_submission_scope(
+            environment,
+            account_id,
+        )
+    )
+    if (
+        recovery_controller._owner_scope
+        != f"{normalized_environment}:{normalized_account}"
+    ):
+        raise PermissionError(
+            "Dispatcher scope does not match recovery owner scope"
+        )
+    owner = recovery_controller.owner
+    if owner is None:
+        raise RuntimeError("No active recovery owner")
+
+    dispatcher = GuardedDispatcher(
+        store,
+        environment=normalized_environment,
+        account_id=normalized_account,
+        owner_token=owner.owner_id,
+        owner_epoch=owner.epoch,
+        prepared_lease_seconds=prepared_lease_seconds,
+    )
+    issued_check = RecoveryController.validate_sender.__get__(
+        recovery_controller,
+        RecoveryController,
+    )
+    dispatcher._bound_sender_check = issued_check
+    _DISPATCHER_SENDER_BINDINGS[dispatcher] = _RecoverySenderBinding(
+        recovery_controller=recovery_controller,
+        store=store,
+        environment=normalized_environment,
+        account_id=normalized_account,
+        owner_token=owner.owner_id,
+        owner_epoch=owner.epoch,
+        issued_check=issued_check,
+    )
+    return dispatcher
 

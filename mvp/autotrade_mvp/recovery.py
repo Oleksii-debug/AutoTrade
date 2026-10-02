@@ -1271,18 +1271,12 @@ class RecoveryController:
             raise PermissionError(
                 "Dispatcher scope does not match recovery owner scope"
             )
-        issued_sender_check = RecoveryController.validate_sender.__get__(
-            self,
-            RecoveryController,
-        )
         return _issue_recovery_guarded_dispatcher(
+            self,
             store,
             environment=normalized_environment,
             account_id=normalized_account,
-            owner_token=self.owner.owner_id,
-            owner_epoch=self.owner.epoch,
             prepared_lease_seconds=prepared_lease_seconds,
-            bound_sender_check=issued_sender_check,
         )
 
     def validate_sender(self, owner_id: str, owner_epoch: int) -> None:

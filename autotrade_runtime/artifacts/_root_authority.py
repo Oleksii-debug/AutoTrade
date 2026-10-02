@@ -555,6 +555,13 @@ def _reader_capability(reader: object) -> tuple[str, tuple[int, ...]]:
     return state
 
 
+def require_trusted_authenticated_reader(reader: object):
+    """Admit only a live sealed reader issued by trusted_authenticated_reader()."""
+
+    _reader_capability(reader)
+    return reader
+
+
 class _TrustedAuthenticatedReader(str):
     """Immutable token for module-owned retained namespace capabilities."""
 

@@ -137,7 +137,7 @@ class FrozenMarketPopulation:
     manifest_digest: str
     cutoff: datetime
     source_content_digest: str
-    selected_event_json: tuple[str, ...]
+    visible_event_json: tuple[str, ...]
     fingerprint: str
 
     def __post_init__(self) -> None:
@@ -154,21 +154,21 @@ class FrozenMarketPopulation:
             "source_content_digest",
             _digest(self.source_content_digest, "source_content_digest"),
         )
-        rows = tuple(self.selected_event_json)
+        rows = tuple(self.visible_event_json)
         if not rows:
             raise HistoricalDataError("frozen market population must contain events")
         for row in rows:
             if not isinstance(row, str) or not row:
-                raise HistoricalDataError("selected_event_json must contain canonical JSON text")
+                raise HistoricalDataError("visible_event_json must contain canonical JSON text")
             try:
                 parsed = strict_json_loads(row)
             except (TypeError, ValueError) as error:
-                raise HistoricalDataError("selected_event_json is invalid") from error
+                raise HistoricalDataError("visible_event_json is invalid") from error
             if not isinstance(parsed, Mapping):
-                raise HistoricalDataError("selected_event_json must decode to objects")
+                raise HistoricalDataError("visible_event_json must decode to objects")
             if row != _canonical_bytes(parsed).decode("utf-8"):
-                raise HistoricalDataError("selected_event_json must use canonical encoding")
-        object.__setattr__(self, "selected_event_json", rows)
+                raise HistoricalDataError("visible_event_json must use canonical encoding")
+        object.__setattr__(self, "visible_event_json", rows)
         object.__setattr__(
             self,
             "fingerprint",
@@ -180,7 +180,7 @@ class FrozenMarketPopulation:
 
         return tuple(
             dict(strict_json_loads(row))
-            for row in self.selected_event_json
+            for row in self.visible_event_json
         )
 
 
@@ -202,21 +202,22 @@ def _evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def point_in_time_market_events(
+def causal_market_event_history(
     events: Iterable[Mapping[str, Any]],
     cutoff: datetime,
 ) -> tuple[dict[str, Any], ...]:
-    """Return only revisions that were available by the requested cutoff.
+    """Return every event revision causally visible by the requested cutoff.
 
-    Revisions after the cutoff remain invisible even if they are now known.
-    Duplicate identities with different bytes are rejected rather than guessed.
+    Historical revisions remain present so downstream causal feature builders
+    can reconstruct which revision was knowable at each earlier decision time.
+    Future revisions remain invisible. Exact duplicate rows collapse; conflicting
+    bytes or impossible revision chronology fail closed.
     """
 
     point = _utc(cutoff, "cutoff")
-    selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
     visible_revisions: dict[
         str,
-        dict[int, tuple[datetime, datetime, str, bytes]],
+        dict[int, tuple[datetime, datetime, str, bytes, dict[str, Any]]],
     ] = {}
     for raw in events:
         if not isinstance(raw, Mapping):
@@ -241,10 +242,6 @@ def point_in_time_market_events(
             )
         if evidence_observed > ingested:
             raise HistoricalDataError("raw evidence cannot be observed after event ingestion")
-        # Replay visibility is bounded by what the system could actually have
-        # known at the cutoff, not merely by external publication availability.
-        # An event published before the cutoff but ingested/evidenced later is
-        # future information from the perspective of that replay.
         if (
             available > point
             or ingested > point
@@ -258,26 +255,59 @@ def point_in_time_market_events(
         if same_revision is not None:
             if same_revision[3] != canonical:
                 raise HistoricalConflict("same event revision has conflicting bytes")
-        else:
-            for other_revision, (
-                other_available,
-                other_source_at,
-                other_instrument_version,
-                _,
-            ) in history.items():
-                if source_at != other_source_at or instrument_version != other_instrument_version:
-                    raise HistoricalConflict("event revision changed source identity metadata")
-                if revision > other_revision and available < other_available:
-                    raise HistoricalConflict("higher event revision cannot backdate availability")
-                if revision < other_revision and available > other_available:
-                    raise HistoricalConflict("higher event revision cannot predate lower revision availability")
-            history[revision] = (
-                available,
-                source_at,
-                instrument_version,
-                canonical,
-            )
+            continue
 
+        for other_revision, (
+            other_available,
+            other_source_at,
+            other_instrument_version,
+            _,
+            _other_event,
+        ) in history.items():
+            if source_at != other_source_at or instrument_version != other_instrument_version:
+                raise HistoricalConflict("event revision changed source identity metadata")
+            if revision > other_revision and available < other_available:
+                raise HistoricalConflict("higher event revision cannot backdate availability")
+            if revision < other_revision and available > other_available:
+                raise HistoricalConflict(
+                    "higher event revision cannot predate lower revision availability"
+                )
+        history[revision] = (
+            available,
+            source_at,
+            instrument_version,
+            canonical,
+            event,
+        )
+
+    rows = [
+        item[4]
+        for revisions in visible_revisions.values()
+        for item in revisions.values()
+    ]
+    rows.sort(
+        key=lambda row: (
+            _utc(row["available_at"], "available_at"),
+            _utc(row["source_event_at"], "source_event_at"),
+            row["event_id"],
+            _sequence(row["revision"], "revision"),
+        )
+    )
+    return tuple(rows)
+
+
+def point_in_time_market_events(
+    events: Iterable[Mapping[str, Any]],
+    cutoff: datetime,
+) -> tuple[dict[str, Any], ...]:
+    """Return the latest revision per event identity knowable at the cutoff."""
+
+    history = causal_market_event_history(events, cutoff)
+    selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
+    for event in history:
+        event_id = _uuid(event.get("event_id"), "event_id")
+        revision = _sequence(event.get("revision"), "revision")
+        canonical = _canonical_bytes(event)
         previous = selected.get(event_id)
         if previous is None or revision > previous[0]:
             selected[event_id] = (revision, canonical, event)
@@ -294,7 +324,6 @@ def point_in_time_market_events(
         )
     )
     return tuple(rows)
-
 
 def point_in_time_universe(
     instrument_versions: Iterable[Mapping[str, Any]],
@@ -656,15 +685,15 @@ class HistoricalVintageRegistry:
                 "market event population digest is not registered by dataset manifest"
             )
 
-        selected = point_in_time_market_events(detached, point)
-        selected_json = tuple(
+        visible_history = causal_market_event_history(detached, point)
+        visible_json = tuple(
             _canonical_bytes(row).decode("utf-8")
-            for row in selected
+            for row in visible_history
         )
-        selected_identities = []
-        for row, encoded in zip(selected, selected_json):
+        visible_identities = []
+        for row, encoded in zip(visible_history, visible_json):
             raw_evidence = _evidence(row["raw_evidence_ref"])
-            selected_identities.append(
+            visible_identities.append(
                 {
                     "event_id": _uuid(row["event_id"], "event_id"),
                     "instrument_version": _text(
@@ -698,7 +727,7 @@ class HistoricalVintageRegistry:
             "version": canonical_version,
             "manifest_digest": actual_manifest_digest,
             "cutoff": _utc_text(point),
-            "selected_events": selected_identities,
+            "visible_event_revisions": visible_identities,
         }
         fingerprint = "sha256:" + sha256(_canonical_bytes(material)).hexdigest()
         return FrozenMarketPopulation(
@@ -707,6 +736,6 @@ class HistoricalVintageRegistry:
             manifest_digest=actual_manifest_digest,
             cutoff=point,
             source_content_digest=source_content_digest,
-            selected_event_json=selected_json,
+            visible_event_json=visible_json,
             fingerprint=fingerprint,
         )

@@ -51,7 +51,14 @@ from .risk import (
     risk_decision_fingerprint,
     validate_bound_risk_decision,
 )
-from .risk_policy_authority import canonical_risk_policy, risk_policy_payload
+from .risk_policy_authority import (
+    DurableRiskPolicyRegistry,
+    ResolvedRiskPolicy,
+    RiskPolicyAuthorityError,
+    canonical_risk_policy,
+    require_registry_issued_resolved_policy,
+    risk_policy_payload,
+)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -1261,6 +1268,7 @@ class AuthoritativeRiskSnapshot:
     evaluated_at: str
     valid_until: str
     evidence_refs: Mapping[str, str]
+    resolved_risk_policy: ResolvedRiskPolicy | None = None
 
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
@@ -1363,6 +1371,36 @@ class AuthoritativeRiskSnapshot:
                 "authoritative risk snapshot is missing evidence dimensions: "
                 + ", ".join(missing)
             )
+        resolved_policy = self.resolved_risk_policy
+        if resolved_policy is not None:
+            try:
+                resolved_policy = require_registry_issued_resolved_policy(
+                    resolved_policy
+                )
+            except (TypeError, RiskPolicyAuthorityError) as error:
+                raise ValueError(
+                    "authoritative risk snapshot quantitative policy proof is invalid"
+                ) from error
+            resolved_scope = resolved_policy.identity.scope
+            if (
+                resolved_scope.provider_id != provider
+                or resolved_scope.account_id != account
+                or resolved_scope.environment != environment
+            ):
+                raise ValueError(
+                    "authoritative risk snapshot quantitative policy scope mismatch"
+                )
+            if (
+                resolved_policy.resolved_journal_sequence_cut
+                != self.journal_sequence_cut
+            ):
+                raise ValueError(
+                    "authoritative risk snapshot quantitative policy cut mismatch"
+                )
+            if canonical_risk_policy(resolved_policy.policy) != canonical_policy:
+                raise ValueError(
+                    "authoritative risk snapshot policy differs from durable authority"
+                )
         object.__setattr__(self, "context", normalized_context)
         object.__setattr__(self, "risk_policy", canonical_policy)
         object.__setattr__(self, "account_id", account)
@@ -1415,6 +1453,7 @@ class AuthoritativeRiskSnapshot:
             "evidence_refs",
             _CanonicalEvidenceRefs(tuple(sorted(refs.items()))),
         )
+        object.__setattr__(self, "resolved_risk_policy", resolved_policy)
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -1440,6 +1479,11 @@ class AuthoritativeRiskSnapshot:
             "evaluated_at": self.evaluated_at,
             "valid_until": self.valid_until,
             "evidence_refs": dict(self.evidence_refs.items()),
+            "quantitative_risk_policy_authority": (
+                None
+                if self.resolved_risk_policy is None
+                else self.resolved_risk_policy.evidence_payload
+            ),
         }
 
     @property
@@ -1481,6 +1525,7 @@ class AuthorityService:
             AuthoritativeRiskSnapshot,
         ]
         | None = None,
+        risk_policy_registry: DurableRiskPolicyRegistry | None = None,
     ):
         store_identity = None
         if store is not None:
@@ -1510,6 +1555,16 @@ class AuthorityService:
         ):
             raise TypeError("risk_authority_resolver must be callable")
         self.risk_authority_resolver = risk_authority_resolver
+        if risk_policy_registry is not None:
+            if type(risk_policy_registry) is not DurableRiskPolicyRegistry:
+                raise TypeError(
+                    "risk_policy_registry must be exact DurableRiskPolicyRegistry"
+                )
+            if store is None or risk_policy_registry.store is not store:
+                raise AuthorityConflict(
+                    "risk policy registry must share the financial authority JournalStore"
+                )
+        self.risk_policy_registry = risk_policy_registry
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
         self._confirmations: dict[str, Confirmation] = {}
@@ -1593,6 +1648,48 @@ class AuthorityService:
         if actual != expected:
             raise AuthorityConflict(
                 "authoritative risk snapshot does not match the financial writer cut"
+            )
+        registry = self.risk_policy_registry
+        resolved_policy = snapshot.resolved_risk_policy
+        if registry is None:
+            if resolved_policy is not None:
+                raise AuthorityConflict(
+                    "quantitative RiskPolicy proof is not bound to this AuthorityService"
+                )
+            return snapshot
+        if resolved_policy is None:
+            raise AuthorityConflict(
+                "financial admission requires durable quantitative RiskPolicy authority"
+            )
+        try:
+            sealed_policy = require_registry_issued_resolved_policy(
+                resolved_policy
+            )
+            resolved_scope = sealed_policy.identity.scope
+            if resolved_scope.instrument_family != request.risk_intent.instrument_type:
+                raise AuthorityConflict(
+                    "quantitative RiskPolicy instrument family does not match risk intent"
+                )
+            current_policy = registry.resolve_current(
+                resolved_scope,
+                journal_sequence_cut=request.journal_sequence_cut,
+            )
+            current_policy = require_registry_issued_resolved_policy(
+                current_policy
+            )
+        except AuthorityConflict:
+            raise
+        except (TypeError, ValueError, RiskPolicyAuthorityError) as error:
+            raise AuthorityConflict(
+                "durable quantitative RiskPolicy could not be resolved at financial cut"
+            ) from error
+        if (
+            current_policy.evidence_payload != sealed_policy.evidence_payload
+            or canonical_risk_policy(current_policy.policy)
+            != canonical_risk_policy(snapshot.risk_policy)
+        ):
+            raise AuthorityConflict(
+                "authoritative risk snapshot does not match durable quantitative policy"
             )
         return snapshot
 
@@ -3979,6 +4076,19 @@ class AuthorityService:
             risk_snapshot = self._resolve_authoritative_risk_snapshot(
                 risk_authority_request
             )
+            if self.risk_policy_registry is not None:
+                resolved_policy = risk_snapshot.resolved_risk_policy
+                if resolved_policy is None:
+                    raise AuthorityConflict(
+                        "durable quantitative RiskPolicy authority is missing"
+                    )
+                if (
+                    resolved_policy.identity.scope.provider_environment
+                    != snapshot_provider_environment
+                ):
+                    raise AuthorityConflict(
+                        "quantitative RiskPolicy provider environment does not match admission"
+                    )
             if (
                 _risk_context_compatibility_payload(canonical_caller_risk_context)
                 != _risk_context_compatibility_payload(risk_snapshot.context)

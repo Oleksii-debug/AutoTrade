@@ -1,8 +1,10 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import sys
+from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -33,6 +35,20 @@ class CannotDecryptProtector(DeterministicProtector):
 
     def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
         raise OSError("different OS identity")
+
+
+class BlockingResolveProtector(DeterministicProtector):
+    """Pauses one resolve after vault state has been read but before plaintext returns."""
+
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise OSError("test resolve release timed out")
+        return super().unprotect(ciphertext, entropy=entropy)
 
 
 class ProtectedCredentialVaultTests(unittest.TestCase):
@@ -123,6 +139,282 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
         for values in cases:
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
+
+    def test_revoke_cannot_commit_between_resolve_snapshot_and_plaintext_return(self):
+        handle = self.register(secret="original-secret")
+        blocking = BlockingResolveProtector()
+        resolver = ProtectedCredentialVault(self.path, protector=blocking)
+        revoker = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolve_future = executor.submit(
+                resolver.resolve,
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(blocking.entered.wait(timeout=2))
+            revoke_future = executor.submit(
+                revoker.revoke,
+                handle,
+                execution_identity="windows-user-1",
+            )
+
+            with self.assertRaises(FuturesTimeoutError):
+                revoke_future.result(timeout=0.2)
+
+            blocking.release.set()
+            self.assertEqual(resolve_future.result(timeout=2), "original-secret")
+            self.assertIsNone(revoke_future.result(timeout=2))
+
+        with self.assertRaises(PermissionError):
+            resolver.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    def test_rotate_cannot_commit_between_resolve_snapshot_and_plaintext_return(self):
+        handle = self.register(secret="original-secret")
+        blocking = BlockingResolveProtector()
+        resolver = ProtectedCredentialVault(self.path, protector=blocking)
+        rotator = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolve_future = executor.submit(
+                resolver.resolve,
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(blocking.entered.wait(timeout=2))
+            rotate_future = executor.submit(
+                rotator.rotate,
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+
+            with self.assertRaises(FuturesTimeoutError):
+                rotate_future.result(timeout=0.2)
+
+            blocking.release.set()
+            self.assertEqual(resolve_future.result(timeout=2), "original-secret")
+            new_handle = rotate_future.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "stale"):
+            resolver.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            rotator.resolve(
+                new_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "rotated-secret",
+        )
+
+
+    def test_execution_lease_blocks_rotate_until_release(self):
+        handle = self.register(secret="original-secret")
+        rotator = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+        entered = Event()
+        release = Event()
+
+        def hold_lease():
+            with self.vault.lease(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ) as plaintext:
+                self.assertEqual(plaintext, "original-secret")
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+                return plaintext
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            lease_future = executor.submit(hold_lease)
+            self.assertTrue(entered.wait(timeout=2))
+            rotate_future = executor.submit(
+                rotator.rotate,
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+            with self.assertRaises(FuturesTimeoutError):
+                rotate_future.result(timeout=0.2)
+            release.set()
+            self.assertEqual(lease_future.result(timeout=2), "original-secret")
+            new_handle = rotate_future.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "stale"):
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            rotator.resolve(
+                new_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "rotated-secret",
+        )
+
+    def test_execution_lease_blocks_revoke_until_release(self):
+        handle = self.register(secret="original-secret")
+        revoker = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+        entered = Event()
+        release = Event()
+
+        def hold_lease():
+            with self.vault.lease(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ) as plaintext:
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+                return plaintext
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            lease_future = executor.submit(hold_lease)
+            self.assertTrue(entered.wait(timeout=2))
+            revoke_future = executor.submit(
+                revoker.revoke,
+                handle,
+                execution_identity="windows-user-1",
+            )
+            with self.assertRaises(FuturesTimeoutError):
+                revoke_future.result(timeout=0.2)
+            release.set()
+            self.assertEqual(lease_future.result(timeout=2), "original-secret")
+            self.assertIsNone(revoke_future.result(timeout=2))
+
+        with self.assertRaises(PermissionError):
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX symlink canonicalization oracle")
+    def test_symlink_alias_cannot_select_an_independent_generation_lock(self):
+        handle = self.register(secret="original-secret")
+        alias = Path(self.directory.name) / "credential-alias.json"
+        alias.symlink_to(self.path)
+        aliased = ProtectedCredentialVault(
+            alias,
+            protector=DeterministicProtector(),
+        )
+        self.assertEqual(aliased.path, self.vault.path)
+        self.assertEqual(aliased.lock_path, self.vault.lock_path)
+
+        entered = Event()
+        release = Event()
+
+        def hold_lease():
+            with self.vault.lease(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ):
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            lease_future = executor.submit(hold_lease)
+            self.assertTrue(entered.wait(timeout=2))
+            rotate_future = executor.submit(
+                aliased.rotate,
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+            with self.assertRaises(FuturesTimeoutError):
+                rotate_future.result(timeout=0.2)
+            release.set()
+            lease_future.result(timeout=2)
+            rotated = rotate_future.result(timeout=2)
+
+        self.assertEqual(rotated.generation, 2)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX lock symlink oracle")
+    def test_symlinked_generation_lock_is_rejected_before_vault_use(self):
+        alternate = Path(self.directory.name) / "alternate.lock"
+        alternate.write_bytes(b"0")
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        lock_path.unlink()
+        lock_path.symlink_to(alternate)
+        with self.assertRaisesRegex(SecretVaultError, "ordinary local file"):
+            ProtectedCredentialVault(
+                self.path,
+                protector=DeterministicProtector(),
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX hard-link ambiguity oracle")
+    def test_hard_linked_vault_is_rejected_before_secret_resolution(self):
+        handle = self.register(secret="original-secret")
+        alias = Path(self.directory.name) / "credential-hardlink.json"
+        os.link(self.path, alias)
+        with self.assertRaisesRegex(SecretVaultError, "hard-link aliases"):
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
 
     def test_rotation_invalidates_old_generation_across_restart(self):
         old = self.register()

@@ -27,7 +27,7 @@ import json
 import os
 from threading import Lock
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import (
@@ -74,7 +74,7 @@ class ProviderTransportScopeError(ValueError):
 
 
 class ProviderSecretResolver(Protocol):
-    def resolve_for_execution(
+    def lease_for_execution(
         self,
         token: str,
         *,
@@ -85,7 +85,7 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
-    ) -> str: ...
+    ) -> ContextManager[str]: ...
 
 
 class ProviderWireClient(Protocol):
@@ -1975,9 +1975,9 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, WhiteBitDurableNonceAllocator):
             raise TypeError(
@@ -2078,7 +2078,7 @@ class WhiteBitHttpTransport:
             "ORDER_WRITE",
         )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2087,36 +2087,36 @@ class WhiteBitHttpTransport:
             provider="WHITEBIT",
             environment="LIVE",
             purpose="TRADE",
-        )
-        try:
-            credential = WhiteBitCredential.parse(credential_plaintext)
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                credential = WhiteBitCredential.parse(credential_plaintext)
+            finally:
+                credential_plaintext = None
 
-        provider_nonce = self.nonce_allocator.for_provider_api_key(
-            credential.api_key
-        )
-        with provider_nonce.serialized_send():
-            nonce = provider_nonce.allocate()
-            provider_signed = sign_private_request(
-                endpoint=endpoint,
-                parameters=body,
-                nonce=nonce,
-                api_key=credential.api_key,
-                api_secret=credential.api_secret,
-                nonce_window=False,
+            provider_nonce = self.nonce_allocator.for_provider_api_key(
+                credential.api_key
             )
-            signed = SignedHttpRequest(
-                method="POST",
-                url=self.policy.absolute_url(provider_signed.endpoint),
-                headers=provider_signed.headers,
-                body=provider_signed.body,
-                timeout_seconds=self.policy.timeout_seconds,
-            )
+            with provider_nonce.serialized_send():
+                nonce = provider_nonce.allocate()
+                provider_signed = sign_private_request(
+                    endpoint=endpoint,
+                    parameters=body,
+                    nonce=nonce,
+                    api_key=credential.api_key,
+                    api_secret=credential.api_secret,
+                    nonce_window=False,
+                )
+                signed = SignedHttpRequest(
+                    method="POST",
+                    url=self.policy.absolute_url(provider_signed.endpoint),
+                    headers=provider_signed.headers,
+                    body=provider_signed.body,
+                    timeout_seconds=self.policy.timeout_seconds,
+                )
 
-            final_guard()
-            wire_response = self.wire_client.send(signed)
-            return _whitebit_exact_trading_response(wire_response)
+                final_guard()
+                wire_response = self.wire_client.send(signed)
+                return _whitebit_exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)
@@ -2650,9 +2650,9 @@ class KrakenSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, KrakenSpotDurableNonceAllocator):
             raise TypeError(
@@ -2750,7 +2750,7 @@ class KrakenSpotHttpTransport:
                 "ORDER_WRITE",
             )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2759,40 +2759,40 @@ class KrakenSpotHttpTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="TRADE",
-        )
-        provider_api_key = None
-        try:
-            provider_api_key = KrakenSpotCredential.parse(
-                credential_plaintext
-            ).api_key
-            nonce_domain = self.nonce_allocator.for_provider_api_key(
-                provider_api_key
-            )
+        ) as credential_plaintext:
             provider_api_key = None
-            with nonce_domain.serialized_send():
-                nonce = nonce_domain.allocate()
-                signed = KrakenSpotSigner.sign(
-                    policy=self.policy,
-                    endpoint=endpoint,
-                    body=body,
-                    credential_plaintext=credential_plaintext,
-                    nonce=nonce,
+            try:
+                provider_api_key = KrakenSpotCredential.parse(
+                    credential_plaintext
+                ).api_key
+                nonce_domain = self.nonce_allocator.for_provider_api_key(
+                    provider_api_key
                 )
-
-                final_guard()
-                wire_response = self.wire_client.send(signed)
-                exact = _exact_trading_response(wire_response)
-                if spot_submission_requires_reconciliation(exact.payload):
-                    return ExactJsonTransportResponse(
-                        exact.response_bytes,
-                        http_status=exact.http_status,
-                        requires_reconciliation=True,
-                        ambiguity_reason="kraken_spot_deadline_elapsed",
+                provider_api_key = None
+                with nonce_domain.serialized_send():
+                    nonce = nonce_domain.allocate()
+                    signed = KrakenSpotSigner.sign(
+                        policy=self.policy,
+                        endpoint=endpoint,
+                        body=body,
+                        credential_plaintext=credential_plaintext,
+                        nonce=nonce,
                     )
-                return exact
-        finally:
-            provider_api_key = None
-            credential_plaintext = None
+
+                    final_guard()
+                    wire_response = self.wire_client.send(signed)
+                    exact = _exact_trading_response(wire_response)
+                    if spot_submission_requires_reconciliation(exact.payload):
+                        return ExactJsonTransportResponse(
+                            exact.response_bytes,
+                            http_status=exact.http_status,
+                            requires_reconciliation=True,
+                            ambiguity_reason="kraken_spot_deadline_elapsed",
+                        )
+                    return exact
+            finally:
+                provider_api_key = None
+                credential_plaintext = None
 
 
 
@@ -2851,9 +2851,9 @@ class KrakenSpotAuthenticatedReadTransport:
         )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, KrakenSpotDurableNonceAllocator):
             raise TypeError(
@@ -2974,7 +2974,7 @@ class KrakenSpotAuthenticatedReadTransport:
         # Revalidate after quota delay and before READ credential access.
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2983,52 +2983,52 @@ class KrakenSpotAuthenticatedReadTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="READ",
-        )
-        provider_api_key = None
-        try:
-            provider_api_key = KrakenSpotCredential.parse(
-                credential_plaintext
-            ).api_key
-            nonce_domain = self.nonce_allocator.for_provider_api_key(
-                provider_api_key
-            )
+        ) as credential_plaintext:
             provider_api_key = None
-            with nonce_domain.serialized_send():
-                nonce = nonce_domain.allocate()
-                signed = KrakenSpotAuthenticatedReadSigner.sign(
-                    policy=self.policy,
-                    query_binding=query_binding,
-                    credential_plaintext=credential_plaintext,
-                    nonce=nonce,
+            try:
+                provider_api_key = KrakenSpotCredential.parse(
+                    credential_plaintext
+                ).api_key
+                nonce_domain = self.nonce_allocator.for_provider_api_key(
+                    provider_api_key
                 )
+                provider_api_key = None
+                with nonce_domain.serialized_send():
+                    nonce = nonce_domain.allocate()
+                    signed = KrakenSpotAuthenticatedReadSigner.sign(
+                        policy=self.policy,
+                        query_binding=query_binding,
+                        credential_plaintext=credential_plaintext,
+                        nonce=nonce,
+                    )
 
-                # Resolve authority again immediately before the irreversible read.
-                self._require_current_capability(query_binding, rule)
-                wire_response = self.wire_client.send(signed)
-        finally:
-            provider_api_key = None
-            credential_plaintext = None
+                    # Resolve authority again immediately before the irreversible read.
+                    self._require_current_capability(query_binding, rule)
+                    wire_response = self.wire_client.send(signed)
+            finally:
+                provider_api_key = None
+                credential_plaintext = None
 
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "authenticated-read wire client must preserve HTTP status"
-            )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "authenticated provider read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-                + "; allowed="
-                + ",".join(
-                    str(status) for status in sorted(rule.success_statuses)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "authenticated-read wire client must preserve HTTP status"
                 )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "authenticated provider read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                    + "; allowed="
+                    + ",".join(
+                        str(status) for status in sorted(rule.success_statuses)
+                    )
+                )
+            observed_at = self.clock_utc()
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=observed_at,
             )
-        observed_at = self.clock_utc()
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=observed_at,
-        )
 
 
 @dataclass(frozen=True)
@@ -3121,9 +3121,9 @@ class AlpacaTradingHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if quota_gate is not None and not callable(quota_gate):
             raise TypeError("quota_gate must be callable or None")
@@ -3270,7 +3270,7 @@ class AlpacaTradingHttpTransport:
                 "ORDER_WRITE",
             )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -3279,38 +3279,38 @@ class AlpacaTradingHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            credential = AlpacaTradingCredential.parse(
-                credential_plaintext
-            )
-            exact_body = json.dumps(
-                dict(body),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-            signed = SignedHttpRequest(
-                method="POST",
-                url=self.policy.absolute_url(endpoint),
-                headers=MappingProxyType(
-                    {
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "APCA-API-KEY-ID": credential.api_key,
-                        "APCA-API-SECRET-KEY": credential.api_secret,
-                    }
-                ),
-                body=exact_body,
-                timeout_seconds=self.policy.timeout_seconds,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                credential = AlpacaTradingCredential.parse(
+                    credential_plaintext
+                )
+                exact_body = json.dumps(
+                    dict(body),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                signed = SignedHttpRequest(
+                    method="POST",
+                    url=self.policy.absolute_url(endpoint),
+                    headers=MappingProxyType(
+                        {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                            "APCA-API-KEY-ID": credential.api_key,
+                            "APCA-API-SECRET-KEY": credential.api_secret,
+                        }
+                    ),
+                    body=exact_body,
+                    timeout_seconds=self.policy.timeout_seconds,
+                )
+            finally:
+                credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)
@@ -3480,9 +3480,9 @@ class BybitV5HttpTransport:
             )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis) or not callable(clock_utc):
             raise TypeError("Bybit write clocks must be callable")
@@ -3728,7 +3728,7 @@ class BybitV5HttpTransport:
             instrument_version=instrument_version,
         )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -3737,28 +3737,28 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            signed = BybitV5Signer.sign(
-                policy=self.policy,
-                endpoint=endpoint,
-                body=body,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BybitV5Signer.sign(
+                    policy=self.policy,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        self._require_current_capability(
-            entity_id=entity_id,
-            instrument_version=instrument_version,
-        )
-        final_guard()
-        # Shared production urllib returns typed status+body, while legacy
-        # injected diagnostic wire clients may return exact raw bytes.
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            self._require_current_capability(
+                entity_id=entity_id,
+                instrument_version=instrument_version,
+            )
+            final_guard()
+            # Shared production urllib returns typed status+body, while legacy
+            # injected diagnostic wire clients may return exact raw bytes.
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 class BybitV5AuthenticatedReadSigner:
@@ -3903,9 +3903,9 @@ class BybitV5AuthenticatedReadTransport:
             )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis) or not callable(clock_utc):
             raise TypeError("Bybit read clocks must be callable")
@@ -4020,7 +4020,7 @@ class BybitV5AuthenticatedReadTransport:
 
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -4029,35 +4029,35 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-        )
-        try:
-            signed = BybitV5AuthenticatedReadSigner.sign(
-                policy=self.policy,
-                query_binding=query_binding,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BybitV5AuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        self._require_current_capability(query_binding, rule)
-        wire_response = self.wire_client.send(signed)
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "Bybit authenticated-read wire client must preserve HTTP status"
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(signed)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "Bybit authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "Bybit authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=self.clock_utc(),
             )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "Bybit authenticated read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-            )
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=self.clock_utc(),
-        )
 
 
 @dataclass(frozen=True)
@@ -4223,9 +4223,9 @@ class BinanceSpotHttpTransport:
         capability = _text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis):
             raise TypeError("clock_millis must be callable")
@@ -4328,7 +4328,7 @@ class BinanceSpotHttpTransport:
         # WP-46 owns secret storage and role/session authorization. Plaintext is
         # requested only now, used once for pure signing, and never attached to
         # the durable dispatch request or returned response.
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -4337,29 +4337,29 @@ class BinanceSpotHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            timestamp_ms = self.clock_millis()
-            signed = BinanceSpotSigner.sign(
-                policy=self.policy,
-                endpoint=endpoint,
-                body=body,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=timestamp_ms,
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            # Python strings cannot be securely zeroized. Drop the only local
-            # transport reference immediately; the canonical vault remains the
-            # sole persistence authority.
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                timestamp_ms = self.clock_millis()
+                signed = BinanceSpotSigner.sign(
+                    policy=self.policy,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=timestamp_ms,
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                # Python strings cannot be securely zeroized. Drop the only local
+                # transport reference immediately; the canonical vault remains the
+                # sole persistence authority.
+                credential_plaintext = None
 
-        # No waits, signing, host selection or mutation may occur after this
-        # point. A wire exception after the guard is intentionally propagated so
-        # GuardedDispatcher records UNKNOWN and requires reconciliation.
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _binance_exact_trading_response(wire_response)
+            # No waits, signing, host selection or mutation may occur after this
+            # point. A wire exception after the guard is intentionally propagated so
+            # GuardedDispatcher records UNKNOWN and requires reconciliation.
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _binance_exact_trading_response(wire_response)
 
 
 class BinanceSpotAuthenticatedReadSigner:
@@ -4497,9 +4497,9 @@ class BinanceSpotAuthenticatedReadTransport:
         )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis):
             raise TypeError("clock_millis must be callable")
@@ -4619,7 +4619,7 @@ class BinanceSpotAuthenticatedReadTransport:
         # Revalidate after any quota wait and before touching READ credentials.
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -4628,37 +4628,37 @@ class BinanceSpotAuthenticatedReadTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="READ",
-        )
-        try:
-            signed = BinanceSpotAuthenticatedReadSigner.sign(
-                policy=self.policy,
-                query_binding=query_binding,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BinanceSpotAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        # Secret access/signing may take time. Re-resolve authority at the
-        # irreversible boundary so revocation/expiry cannot race the wire send.
-        self._require_current_capability(query_binding, rule)
-        wire_response = self.wire_client.send(signed)
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "authenticated-read wire client must preserve HTTP status"
+            # Secret access/signing may take time. Re-resolve authority at the
+            # irreversible boundary so revocation/expiry cannot race the wire send.
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(signed)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "authenticated provider read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                    + "; allowed="
+                    + ",".join(str(status) for status in sorted(rule.success_statuses))
+                )
+            observed_at = self.clock_utc()
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=observed_at,
             )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "authenticated provider read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-                + "; allowed="
-                + ",".join(str(status) for status in sorted(rule.success_statuses))
-            )
-        observed_at = self.clock_utc()
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=observed_at,
-        )

@@ -892,6 +892,39 @@ class SecurityBoundaryTests(unittest.TestCase):
             "top-secret",
         )
 
+
+    def test_execution_lease_uses_session_and_vault_authority(self):
+        handle = self._credential()
+        with self.boundary.lease_for_execution(
+            self.owner.token,
+            origin=self.owner.origin,
+            handle=handle,
+            execution_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+        ) as plaintext:
+            self.assertEqual(plaintext, "top-secret")
+
+        researcher = self.boundary.create_session(
+            subject="research",
+            role="RESEARCHER",
+            origin=self.owner.origin,
+        )
+        with self.assertRaises(PermissionError):
+            with self.boundary.lease_for_execution(
+                researcher.token,
+                origin=researcher.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ):
+                self.fail("researcher must not receive execution credential lease")
+
     def test_stale_origin_session_is_invalid_even_without_origin_argument(self):
         paired = self.boundary.pair_origin(
             self.owner.token,

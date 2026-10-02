@@ -131,15 +131,20 @@ SnapshotProvider = Callable[
 ]
 
 
-def _require_canonical_security_boundary(value: object) -> SecurityBoundary:
+def _require_canonical_security_boundary(
+    value: object,
+    *,
+    authorization_use: bool = False,
+) -> SecurityBoundary:
     """Admit only the canonical host authentication authority at use time."""
 
+    error_type = PermissionError if authorization_use else TypeError
     if type(value) is not SecurityBoundary:
-        raise TypeError("security_boundary must be exact SecurityBoundary")
+        raise error_type("security_boundary must be exact SecurityBoundary")
     state = vars(value)
     for method_name in ("validate_session", "validate_host_session"):
         if method_name in state:
-            raise TypeError(
+            raise error_type(
                 "security_boundary canonical validation methods must not be shadowed"
             )
     return value
@@ -327,7 +332,8 @@ class AuthenticatedHostApplication:
         ):
             return False
         security_boundary = _require_canonical_security_boundary(
-            self.security_boundary
+            self.security_boundary,
+            authorization_use=True,
         )
         return SecurityBoundary.validate_host_session(
             security_boundary,
@@ -342,7 +348,8 @@ class AuthenticatedHostApplication:
         if not isinstance(principal, HostPrincipal):
             raise TypeError("principal_resolver must return HostPrincipal")
         security_boundary = _require_canonical_security_boundary(
-            self.security_boundary
+            self.security_boundary,
+            authorization_use=True,
         )
         session = SecurityBoundary.validate_session(
             security_boundary,

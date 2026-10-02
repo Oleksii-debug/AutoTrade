@@ -194,6 +194,8 @@ class DurableReservationBookTests(unittest.TestCase):
                 fee_amount="0",
                 fee_currency="USD",
                 trade_time="2026-09-25T00:01:00Z",
+                side="BUY",
+                evidence_refs=("provider:fixture:" + attempt_id,),
             )
             provider_fills = (fill,)
             local_execution_ids = (fill.provider_execution_id,)

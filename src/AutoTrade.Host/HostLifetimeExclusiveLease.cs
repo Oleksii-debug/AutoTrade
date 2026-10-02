@@ -99,7 +99,11 @@ public sealed class HostLifetimeExclusiveLease : IDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         byte[] material = Encoding.UTF8.GetBytes(
-            Domain + "\0" + options.Environment + "\0" + options.AccountId);
+            Domain + "\0"
+            + options.Provider + "\0"
+            + options.ProviderEnvironment + "\0"
+            + options.Environment + "\0"
+            + options.AccountId);
         try
         {
             return "hf-" + Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant();
@@ -122,6 +126,10 @@ public sealed class HostLifetimeExclusiveLease : IDisposable
             schema_version = 1,
             scope_id = scopeId,
             host_id = options.HostId,
+            provider = options.Provider,
+            provider_environment = options.ProviderEnvironment,
+            runtime_environment = options.Environment,
+            account_id = options.AccountId,
             process_id = Environment.ProcessId,
             process_started_at = startedAt.ToString("O"),
         });

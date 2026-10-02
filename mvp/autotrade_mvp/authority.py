@@ -20,7 +20,13 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
@@ -1476,7 +1482,14 @@ class AuthorityService:
         ]
         | None = None,
     ):
+        store_identity = None
+        if store is not None:
+            store_identity = require_exact_journal_store_authority(
+                store,
+                subject="financial authority JournalStore",
+            )
         self.store = store
+        self._store_identity = store_identity
         if (
             evidence_artifact_store is not None
             and not isinstance(evidence_artifact_store, ArtifactStore)
@@ -1511,6 +1524,22 @@ class AuthorityService:
         self._journal_version = 0
         if self.store is not None:
             self._restore_journal()
+
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        """Run one journal operation against the selected physical generation."""
+
+        store = self.store
+        expected = self._store_identity
+        if store is None or expected is None:
+            raise AuthorityConflict("financial authority JournalStore is unavailable")
+        current = require_exact_journal_store_authority(
+            store,
+            subject="financial authority JournalStore",
+        )
+        if current != expected:
+            raise AuthorityConflict("financial authority JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
 
     def _resolve_authoritative_risk_snapshot(
         self,
@@ -1637,7 +1666,7 @@ class AuthorityService:
         # Reading "next version" from the shared DB here would let a stale
         # AuthorityService silently append after another process and make
         # decisions from obsolete confirmation/revocation state.
-        durable_next = self.store.next_aggregate_version(
+        durable_next = self._journal_operation(JournalStore.next_aggregate_version, 
             "authority_state", "canonical"
         )
         durable_version = durable_next - 1
@@ -1647,7 +1676,7 @@ class AuthorityService:
             )
 
         event_id = _authority_event_id(event_type, key)
-        existing = self.store.get_event(event_id)
+        existing = self._journal_operation(JournalStore.get_event, event_id)
         if existing is not None:
             if existing["event_type"] != event_type or existing["payload"] != payload:
                 raise AuthorityConflict("durable authority event conflicts with existing content")
@@ -1666,17 +1695,17 @@ class AuthorityService:
             "committed_at": committed_at,
         }
         try:
-            result = self.store.append_event(envelope)
+            result = self._journal_operation(JournalStore.append_event, envelope)
         except ValueError as error:
             # A concurrent writer may have won after the version check but
             # before our append. Never reinterpret that race as idempotency:
             # the caller must reload and re-evaluate authority state.
-            existing = self.store.get_event(event_id)
+            existing = self._journal_operation(JournalStore.get_event, event_id)
             if (
                 existing is not None
                 and existing["event_type"] == event_type
                 and existing["payload"] == payload
-                and self.store.next_aggregate_version(
+                and self._journal_operation(JournalStore.next_aggregate_version, 
                     "authority_state", "canonical"
                 ) - 1 == self._journal_version
             ):
@@ -1689,7 +1718,7 @@ class AuthorityService:
 
     def _restore_journal(self) -> None:
         assert self.store is not None
-        for event in self.store.load_events("authority_state", "canonical"):
+        for event in self._journal_operation(JournalStore.load_events, "authority_state", "canonical"):
             payload = event["payload"]
             event_type = event["event_type"]
             event_version = int(event["aggregate_version"])
@@ -1969,7 +1998,7 @@ class AuthorityService:
             raise AuthorityConflict(
                 "restored financial record is missing risk decision identity"
             )
-        risk_events = self.store.load_events(
+        risk_events = self._journal_operation(JournalStore.load_events, 
             "risk_decision", record.risk_decision_id
         )
         if (
@@ -2032,7 +2061,7 @@ class AuthorityService:
                 "historical financial retry policy identity is inconsistent"
             )
 
-        risk_events = self.store.load_events(
+        risk_events = self._journal_operation(JournalStore.load_events, 
             "risk_decision", record.risk_decision_id
         )
         if (
@@ -2210,7 +2239,7 @@ class AuthorityService:
                 environment=record.environment,
                 account_id=record.account_id,
             )
-            reservation_events = self.store.load_events(
+            reservation_events = self._journal_operation(JournalStore.load_events, 
                 "reservation_book",
                 reservation_book.scope_id,
             )
@@ -2253,7 +2282,7 @@ class AuthorityService:
                 availability_evidence.get("checkpoint_event_id"),
                 name="checkpoint_event_id",
             )
-            checkpoint = self.store.get_event(checkpoint_event_id)
+            checkpoint = self._journal_operation(JournalStore.get_event, checkpoint_event_id)
             if checkpoint is None:
                 raise AuthorityConflict(
                     "historical availability checkpoint is missing"
@@ -2391,7 +2420,7 @@ class AuthorityService:
                 "durable admitted record policy version is stale"
             )
 
-        risk_events = self.store.load_events(
+        risk_events = self._journal_operation(JournalStore.load_events, 
             "risk_decision", record.risk_decision_id
         )
         if len(risk_events) != 1 or risk_events[0]["event_type"] != "RiskDecisionRecorded":
@@ -2557,7 +2586,7 @@ class AuthorityService:
                 "durable reservation intent does not match admission"
             )
 
-        reservation_events = self.store.load_events(
+        reservation_events = self._journal_operation(JournalStore.load_events, 
             "reservation_book", reservation_book.scope_id
         )
         matching_reservations = [
@@ -2720,7 +2749,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "durable latest reconciliation journal sequence is invalid"
                 )
-            scope_checkpoint = self.store.get_event(scope_latest_event_id)
+            scope_checkpoint = self._journal_operation(JournalStore.get_event, scope_latest_event_id)
             if (
                 scope_checkpoint is None
                 or scope_checkpoint.get("journal_sequence")
@@ -3042,7 +3071,7 @@ class AuthorityService:
             "AuthorityNewExposureBlocked",
             event_key,
         )
-        existing = self.store.get_event(event_id)
+        existing = self._journal_operation(JournalStore.get_event, event_id)
         if existing is not None:
             if (
                 existing["event_type"] != "AuthorityNewExposureBlocked"
@@ -3133,7 +3162,7 @@ class AuthorityService:
             "AuthorityNewExposureRestored",
             event_key,
         )
-        existing_event = self.store.get_event(event_id)
+        existing_event = self._journal_operation(JournalStore.get_event, event_id)
         if existing_event is not None:
             if (
                 existing_event["event_type"] != "AuthorityNewExposureRestored"
@@ -3421,7 +3450,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "existing allocation admission lacks durable risk evidence"
                 )
-            events = self.store.load_events(
+            events = self._journal_operation(JournalStore.load_events, 
                 "risk_decision",
                 existing.risk_decision_id,
             )
@@ -3924,7 +3953,7 @@ class AuthorityService:
             return existing
 
         if existing is None:
-            journal_sequence_cut = self.store.current_journal_sequence()
+            journal_sequence_cut = self._journal_operation(JournalStore.current_journal_sequence, )
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
             caller_valid_until = _text(
@@ -4071,7 +4100,7 @@ class AuthorityService:
             normalized_max_age = _canonical_decimal_text(max_age)
 
             if existing is not None:
-                durable_risk_events = self.store.load_events(
+                durable_risk_events = self._journal_operation(JournalStore.load_events, 
                     "risk_decision", existing.risk_decision_id
                 )
                 if (
@@ -4341,7 +4370,7 @@ class AuthorityService:
                 reconciliation_checkpoint_event_id=(
                     snapshot_checkpoint_event_id
                 ),
-                journal_sequence_cut=self.store.current_journal_sequence(),
+                journal_sequence_cut=self._journal_operation(JournalStore.current_journal_sequence, ),
                 reservation_version=reservation_book.version,
                 reservation_state_digest=reservation_book.state_digest,
                 authority_policy_id=policy.policy_id,
@@ -4574,7 +4603,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
-            durable_risk_events = self.store.load_events(
+            durable_risk_events = self._journal_operation(JournalStore.load_events, 
                 "risk_decision", existing.risk_decision_id
             )
             if (
@@ -4807,7 +4836,7 @@ class AuthorityService:
             ),
         }
         try:
-            self.store.commit_command(
+            self._journal_operation(JournalStore.commit_command, 
                 command_id=scoped_command_id,
                 actor="autotrade-financial-writer",
                 environment=env,
@@ -4874,7 +4903,7 @@ class AuthorityService:
             require_transaction_cut=True,
         )
 
-        risk_events = self.store.load_events(
+        risk_events = self._journal_operation(JournalStore.load_events, 
             "risk_decision",
             record.risk_decision_id,
         )
@@ -4955,7 +4984,7 @@ class AuthorityService:
                 )
 
         expected_payload = self._admission_payload(record)
-        authority_events = self.store.load_events(
+        authority_events = self._journal_operation(JournalStore.load_events, 
             "authority_state",
             "canonical",
         )
@@ -5032,7 +5061,7 @@ class AuthorityService:
         if self.store is None:
             return True
         durable_version = (
-            self.store.next_aggregate_version("authority_state", "canonical") - 1
+            self._journal_operation(JournalStore.next_aggregate_version, "authority_state", "canonical") - 1
         )
         return durable_version == self._journal_version
 
@@ -5128,7 +5157,7 @@ class AuthorityService:
                     account_id=record.account_id,
                 )
                 reservation = reservation_book.get(record.reservation_id)
-                risk_event = self.store.load_events(
+                risk_event = self._journal_operation(JournalStore.load_events, 
                     "risk_decision", record.risk_decision_id
                 )[0]
                 risk_payload = risk_event["payload"]

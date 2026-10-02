@@ -11,7 +11,9 @@ public sealed record HostProcessOptions(
     Uri Origin,
     string HostId,
     string AccountId,
-    string Environment)
+    string Environment,
+    string Provider,
+    string ProviderEnvironment)
 {
     public string ListenUrl => Origin.GetLeftPart(UriPartial.Authority);
 
@@ -25,14 +27,18 @@ public sealed record HostProcessOptions(
             Required(configuration["AUTOTRADE_HOST_URI"], "AUTOTRADE_HOST_URI"),
             Required(configuration["AUTOTRADE_HOST_ID"], "AUTOTRADE_HOST_ID"),
             Required(configuration["AUTOTRADE_HOST_ACCOUNT_ID"], "AUTOTRADE_HOST_ACCOUNT_ID"),
-            Required(configuration["AUTOTRADE_HOST_ENVIRONMENT"], "AUTOTRADE_HOST_ENVIRONMENT"));
+            Required(configuration["AUTOTRADE_HOST_ENVIRONMENT"], "AUTOTRADE_HOST_ENVIRONMENT"),
+            Required(configuration["AUTOTRADE_HOST_PROVIDER"], "AUTOTRADE_HOST_PROVIDER"),
+            Required(configuration["AUTOTRADE_HOST_PROVIDER_ENVIRONMENT"], "AUTOTRADE_HOST_PROVIDER_ENVIRONMENT"));
     }
 
     public static HostProcessOptions Create(
         string origin,
         string hostId,
         string accountId,
-        string environment)
+        string environment,
+        string provider,
+        string providerEnvironment)
     {
         if (!Uri.TryCreate(Required(origin, nameof(origin)), UriKind.Absolute, out Uri? uri))
         {
@@ -58,6 +64,8 @@ public sealed record HostProcessOptions(
         string canonicalHostId = Required(hostId, nameof(hostId));
         string canonicalAccountId = Required(accountId, nameof(accountId));
         string canonicalEnvironment = Required(environment, nameof(environment));
+        string canonicalProvider = Required(provider, nameof(provider));
+        string canonicalProviderEnvironment = Required(providerEnvironment, nameof(providerEnvironment));
         if (!CommonScalarContracts.IsValid("Environment", canonicalEnvironment))
         {
             throw new InvalidOperationException(
@@ -68,7 +76,9 @@ public sealed record HostProcessOptions(
             new Uri(uri.GetLeftPart(UriPartial.Authority) + "/", UriKind.Absolute),
             canonicalHostId,
             canonicalAccountId,
-            canonicalEnvironment);
+            canonicalEnvironment,
+            canonicalProvider,
+            canonicalProviderEnvironment);
     }
 
     public static string Route(string relativeRoute)

@@ -30,7 +30,9 @@ HostProcessOptions options = HostProcessOptions.Create(
     "http://127.0.0.1:8765/",
     "host-a",
     "paper-account",
-    "PAPER");
+    "PAPER",
+    "BYBIT",
+    "TESTNET");
 Require(options.ListenUrl == "http://127.0.0.1:8765", "canonical listen origin mismatch");
 Require(
     options.CredentialTarget == "AutoTrade.HostSession:http://127.0.0.1:8765",
@@ -60,7 +62,7 @@ foreach (string invalid in new[]
 })
 {
     ExpectInvalid(
-        () => _ = HostProcessOptions.Create(invalid, "host-a", "paper-account", "PAPER"),
+        () => _ = HostProcessOptions.Create(invalid, "host-a", "paper-account", "PAPER", "BYBIT", "TESTNET"),
         "unsafe host origin was admitted: " + invalid);
 }
 
@@ -69,6 +71,8 @@ ExpectInvalid(
         "http://127.0.0.1:8765/",
         "host-a",
         "paper-account",
+        "TESTNET",
+        "BYBIT",
         "TESTNET"),
     "non-canonical runtime environment was admitted");
 
@@ -176,7 +180,9 @@ try
         "http://127.0.0.1:8766/",
         "host-b",
         "paper-account",
-        "PAPER");
+        "PAPER",
+        "BYBIT",
+        "TESTNET");
     string scopeA = HostLifetimeExclusiveLease.ScopeIdFor(options);
     string scopeB = HostLifetimeExclusiveLease.ScopeIdFor(sameScopeOtherHost);
     Require(
@@ -185,6 +191,29 @@ try
     Require(
         !scopeA.Contains("paper-account", StringComparison.Ordinal),
         "lifetime fence filename identity must not expose raw account labels");
+
+
+    HostProcessOptions demoScope = HostProcessOptions.Create(
+        "http://127.0.0.1:8768/",
+        "host-demo",
+        "paper-account",
+        "PAPER",
+        "BYBIT",
+        "DEMO");
+    Require(
+        HostLifetimeExclusiveLease.ScopeIdFor(demoScope) != scopeA,
+        "provider environments must not alias one host lifetime fence");
+
+    HostProcessOptions otherProvider = HostProcessOptions.Create(
+        "http://127.0.0.1:8769/",
+        "host-kraken",
+        "paper-account",
+        "PAPER",
+        "KRAKEN",
+        "PAPER");
+    Require(
+        HostLifetimeExclusiveLease.ScopeIdFor(otherProvider) != scopeA,
+        "different providers must not alias one host lifetime fence");
 
     using (HostLifetimeExclusiveLease first =
         HostLifetimeExclusiveLease.Acquire(options, fenceRoot))
@@ -207,7 +236,9 @@ try
             "http://127.0.0.1:8767/",
             "host-c",
             "paper-account-2",
-            "PAPER");
+            "PAPER",
+            "BYBIT",
+            "TESTNET");
         using HostLifetimeExclusiveLease other =
             HostLifetimeExclusiveLease.Acquire(otherAccount, fenceRoot);
         Require(

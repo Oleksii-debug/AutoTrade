@@ -394,6 +394,14 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "0.000000000000000000123456789",
         )
 
+    def test_sealed_invalid_financial_payload_fails_closed_without_name_error(self):
+        reference = self.evidence(cash_settlement_amount="NaN")
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider lifecycle payload contains invalid financial values",
+        ):
+            self.authority.apply(reference)
+
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):
         with self.assertRaisesRegex(
             OptionLifecycleError,

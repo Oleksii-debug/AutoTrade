@@ -16,7 +16,7 @@ from uuid import UUID
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
-    require_trusted_authenticated_reader,
+    require_product_trusted_authenticated_reader,
 )
 from autotrade_runtime.strict_json import strict_json_loads
 from autotrade_runtime.resource_lock import ResourceLockError
@@ -304,10 +304,10 @@ def _verify_provider_settlement_evidence(
 
 def _settlement_evidence_reader(evidence_reader: object) -> _EvidenceReader:
     try:
-        return require_trusted_authenticated_reader(evidence_reader)
+        return require_product_trusted_authenticated_reader(evidence_reader)
     except (ArtifactIntegrityError, TypeError) as error:
         raise FuturesError(
-            "durable provider settlement requires issued trusted artifact reader"
+            "durable provider settlement requires product-issued trusted artifact reader"
         ) from error
 
 

@@ -150,6 +150,8 @@ class DurableReservationBookTests(unittest.TestCase):
             attempt_ids=(attempt_id,),
             environment="PAPER",
             account_id="paper-account",
+            provider_id="SIMULATED",
+            provider_environment="PAPER",
         )
         self.assertEqual(len(unknowns), 1)
         unknown = unknowns[0]

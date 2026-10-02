@@ -63,6 +63,10 @@ def book_external_provider_cash_activity(
         raise ValueError("provider activity evidence account_id mismatch")
     if activity.environment != scope:
         raise ValueError("provider activity evidence environment mismatch")
+    if activity.provider_environment != domain:
+        raise ValueError(
+            "provider activity evidence provider_environment mismatch"
+        )
     if activity.origin not in _impl._ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"

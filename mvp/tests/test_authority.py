@@ -3104,7 +3104,7 @@ class AuthorityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "durable risk arithmetic policy is missing or stale",
+                "historical financial request fingerprint is inconsistent",
             ):
                 authority_service(stripped_store)
 
@@ -3333,7 +3333,7 @@ class AuthorityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "historical financial request fingerprint is inconsistent",
+                "durable risk arithmetic policy is missing or stale",
             ):
                 authority_service(stripped_store)
 

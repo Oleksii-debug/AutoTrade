@@ -8,7 +8,7 @@ booleans or syntactically valid references are insufficient on their own.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -19,7 +19,11 @@ from uuid import UUID
 from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
@@ -85,9 +89,9 @@ def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if isinstance(value, Decimal) and type(value) is not Decimal:
         raise TypeError(f"{name} must use an exact built-in Decimal")
     try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} exceeds exact decimal authority") from error
     if not Decimal.is_finite(result):
         raise ValueError(f"{name} must be a finite decimal")
     if result < 0 or (result == 0 and not allow_zero):

@@ -1594,7 +1594,7 @@ class AuthorityService:
                                 "durable admitted record fingerprint is inconsistent"
                             )
                     else:
-                        self._validate_durable_financial_evidence(record, policy)
+                        self._validate_restored_financial_evidence(record, policy)
                 if record.confirmation_id is not None:
                     if record.confirmation_id not in self._confirmations:
                         raise AuthorityConflict(
@@ -1631,6 +1631,47 @@ class AuthorityService:
             else:
                 raise AuthorityConflict(f"unknown durable authority event: {event_type}")
             self._journal_version = event_version
+
+    def _validate_restored_financial_evidence(
+        self,
+        record: AdmissionRecord,
+        policy: AuthorityPolicy,
+    ) -> None:
+        """Validate one durable financial admission during journal reconstruction.
+
+        The immediately preceding durable schema did not bind the exact risk
+        arithmetic policy into RiskDecisionRecorded/request identity. Those
+        already-committed records remain readable and exactly replayable after
+        upgrade, but they do not acquire current dispatch authority: the send
+        boundary continues to call _validate_durable_financial_evidence(), which
+        requires the current arithmetic policy id.
+
+        A present policy id is never treated as legacy. It must satisfy the
+        current validator exactly; only the missing predecessor field selects
+        the historical compatibility path.
+        """
+
+        if self.store is None:
+            raise AuthorityConflict(
+                "restored financial evidence requires a JournalStore"
+            )
+        risk_events = self.store.load_events(
+            "risk_decision", record.risk_decision_id
+        )
+        if (
+            len(risk_events) != 1
+            or risk_events[0]["event_type"] != "RiskDecisionRecorded"
+            or type(risk_events[0].get("payload")) is not dict
+        ):
+            raise AuthorityConflict(
+                "restored admission references missing risk decision evidence"
+            )
+        risk_payload = risk_events[0]["payload"]
+        if risk_payload.get("arithmetic_policy_id") is None:
+            self._validate_historical_financial_retry_evidence(record, policy)
+            return
+        self._validate_durable_financial_evidence(record, policy)
+
 
     def _validate_historical_financial_retry_evidence(
         self,

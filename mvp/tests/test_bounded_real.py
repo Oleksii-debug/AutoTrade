@@ -15,6 +15,8 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
+from mvp.autotrade_mvp.exact_decimal import MAX_DECIMAL_TEXT_LENGTH
+
 from mvp.autotrade_mvp.bounded_real import (
     BoundedRealEnvelope,
     BoundedRealObservations,
@@ -759,6 +761,20 @@ class BoundedRealQualificationTests(unittest.TestCase):
     def test_bounded_real_rejects_values_outside_shared_exact_envelope(self):
         with self.assertRaisesRegex(ValueError, "exact decimal authority"):
             envelope(max_capital="1e300")
+
+    def test_bounded_real_preflights_oversized_decimal_presentations(self):
+        oversized_values = (
+            "1" + "0" * MAX_DECIMAL_TEXT_LENGTH,
+            "0e+" + "9" * MAX_DECIMAL_TEXT_LENGTH,
+        )
+        for value in oversized_values:
+            with self.subTest(value_length=len(value)):
+                with self.assertRaisesRegex(ValueError, "exact decimal authority"):
+                    envelope(max_capital=value)
+
+    def test_bounded_real_rejects_noncontract_decimal_tuple_input(self):
+        with self.assertRaisesRegex(ValueError, "exact decimal authority"):
+            envelope(max_capital=(0, (1, 0, 0, 0), 0))
 
     def test_single_notional_cannot_exceed_bounded_capital(self):
         with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):

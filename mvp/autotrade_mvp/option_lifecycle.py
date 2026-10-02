@@ -20,7 +20,12 @@ import re
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import JournalTransaction, posting, reverse_transaction
+from .accounting import (
+    AccountingConflict,
+    JournalTransaction,
+    posting,
+    reverse_transaction,
+)
 from .exact_decimal import ExactDecimalError, exact_abs, is_exact_decimal_multiple
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
@@ -32,8 +37,9 @@ from .options import (
     physical_exercise_obligation,
 )
 from .persistence import JournalStore, payload_digest
-from .provider_activity_accounting import DurableProviderEconomicBook
+from .provider_activity_accounting import DurableProviderEconomicBook, EconomicBookCut
 from .provider_core import ProviderResponseObservation, Surface
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -146,6 +152,7 @@ def _canonical_observation_from_sealed_response(
         provider_id=source.provider_id,
         account_id=source.account_id,
         environment=source.environment,
+        provider_environment=source.provider_environment,
         venue_id=_text(payload["venue_id"], "venue_id"),
         instrument_version=source.query_binding.instrument_version,
         external_event_id=_text(
@@ -239,6 +246,7 @@ class OptionLifecycleObservation:
     observed_at: datetime
     raw_evidence_digest: str
     provider_revision: str
+    provider_environment: str | None = None
     underlying_price: Decimal | None = None
     cash_settlement_amount: Decimal | None = None
     corrects_external_event_id: str | None = None
@@ -247,6 +255,16 @@ class OptionLifecycleObservation:
         provider = _text(self.provider_id, "provider_id").upper()
         account = _text(self.account_id, "account_id")
         environment = _text(self.environment, "environment").upper()
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise OptionLifecycleError(
+                "option lifecycle requires exact provider_environment"
+            ) from error
         venue = _text(self.venue_id, "venue_id")
         instrument_version = _text(self.instrument_version, "instrument_version")
         external_event_id = _text(self.external_event_id, "external_event_id")
@@ -289,6 +307,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(self, "venue_id", venue)
         object.__setattr__(self, "instrument_version", instrument_version)
         object.__setattr__(self, "external_event_id", external_event_id)
@@ -316,10 +335,11 @@ def canonical_option_lifecycle_observation(
     if not isinstance(observation, OptionLifecycleObservation):
         raise TypeError("observation must be OptionLifecycleObservation")
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
         "environment": observation.environment,
+        "provider_environment": observation.provider_environment,
         "venue_id": observation.venue_id,
         "instrument_version": observation.instrument_version,
         "external_event_id": observation.external_event_id,
@@ -450,6 +470,7 @@ def _economic_transaction(
         observation.provider_id,
         observation.account_id,
         observation.environment,
+        observation.provider_environment,
         observation.external_event_id,
     )
 
@@ -520,11 +541,11 @@ def _economic_transaction(
 
 def _project_position_after_reversal(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     instrument: str,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> Decimal:
-    projected = economic_book.position(instrument)
+    projected = economic_cut.position(instrument)
     for transaction in old_active_transactions:
         matching = [
             item
@@ -542,14 +563,14 @@ def _project_position_after_reversal(
 
 def _require_consumable_option_position(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     observation: OptionLifecycleObservation,
     version: InstrumentVersion,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> None:
     instrument = f"{version.instrument_id}@{version.version}"
     available = _project_position_after_reversal(
-        economic_book=economic_book,
+        economic_cut=economic_cut,
         instrument=instrument,
         old_active_transactions=old_active_transactions,
     )
@@ -605,12 +626,26 @@ class DurableOptionLifecycleAuthority:
         self.evidence_resolver = evidence_resolver
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
-        self.aggregate_id = _identity(
+        legacy_aggregate_id = _identity(
             "option-lifecycle-book",
             economic_book.provider_id,
             economic_book.account_id,
             economic_book.environment,
         )
+        self.aggregate_id = _identity(
+            "option-lifecycle-book",
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            economic_book.provider_environment,
+        )
+        if (
+            self.aggregate_id != legacy_aggregate_id
+            and self.store.load_events(self._AGGREGATE_TYPE, legacy_aggregate_id)
+        ):
+            raise OptionLifecycleConflict(
+                "ambiguous legacy option lifecycle journal requires explicit migration"
+            )
 
     def _events(self) -> list[dict[str, Any]]:
         return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
@@ -653,6 +688,7 @@ class DurableOptionLifecycleAuthority:
                 endpoint=endpoint,
                 account_id=self.economic_book.account_id,
                 environment=self.economic_book.environment,
+                provider_environment=self.economic_book.provider_environment,
             )
         except Exception as error:
             raise OptionLifecycleError(
@@ -670,6 +706,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id != source.provider_id
             or observation.account_id != source.account_id
             or observation.environment != source.environment
+            or observation.provider_environment != source.provider_environment
             or observation.instrument_version
             != source.query_binding.instrument_version
             or observation.raw_evidence_digest != source.response_sha256
@@ -691,6 +728,10 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError("account scope does not match economic book")
         if observation.environment != self.economic_book.environment:
             raise OptionLifecycleError("environment scope does not match economic book")
+        if observation.provider_environment != self.economic_book.provider_environment:
+            raise OptionLifecycleError(
+                "provider_environment scope does not match economic book"
+            )
 
         version = _bind_version(self.registry, observation)
         observation_payload = canonical_option_lifecycle_observation(observation)
@@ -706,6 +747,7 @@ class DurableOptionLifecycleAuthority:
                 provider_evidence.query_binding.capability_snapshot_id
             ),
             "instrument_version": provider_evidence.query_binding.instrument_version,
+            "provider_environment": provider_evidence.provider_environment,
             "observed_at": provider_evidence.observed_at,
             "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
             "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
@@ -745,6 +787,15 @@ class DurableOptionLifecycleAuthority:
                 corrected_external_event_id=saved.get(
                     "corrects_external_event_id"
                 ),
+            )
+
+        economic_cut = self.economic_book.read_cut()
+        if (
+            economic_cut.provider_environment
+            != observation.provider_environment
+        ):
+            raise OptionLifecycleConflict(
+                "economic read cut provider environment does not match lifecycle evidence"
             )
 
         prior_event: Mapping[str, Any] | None = None
@@ -805,7 +856,7 @@ class DurableOptionLifecycleAuthority:
                 or prior_payload.get("external_event_id")
             )
             active_ids = tuple(prior_payload.get("active_transaction_ids", ()))
-            by_id = {item.transaction_id: item for item in self.economic_book.transactions}
+            by_id = {item.transaction_id: item for item in economic_cut.transactions}
             missing = [transaction_id for transaction_id in active_ids if transaction_id not in by_id]
             if missing:
                 raise OptionLifecycleConflict(
@@ -818,7 +869,7 @@ class DurableOptionLifecycleAuthority:
                 )
 
         _require_consumable_option_position(
-            economic_book=self.economic_book,
+            economic_cut=economic_cut,
             observation=observation,
             version=version,
             old_active_transactions=old_active_transactions,
@@ -829,6 +880,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id,
             observation.account_id,
             observation.environment,
+            observation.provider_environment,
             observation.external_event_id,
         )
 
@@ -844,6 +896,7 @@ class DurableOptionLifecycleAuthority:
                         observation.provider_id,
                         observation.account_id,
                         observation.environment,
+                        observation.provider_environment,
                         observation.external_event_id,
                         original.transaction_id,
                     ),
@@ -875,14 +928,23 @@ class DurableOptionLifecycleAuthority:
         )
         economic_transactions = tuple(reversal_transactions + [replacement])
 
-        plan = (
-            self.economic_book.prepare_batch_mutation(
-                economic_transactions,
-                committed_at=_utc_text(observation.observed_at),
+        try:
+            plan = (
+                self.economic_book.prepare_batch_mutation(
+                    economic_transactions,
+                    committed_at=_utc_text(observation.observed_at),
+                    expected_previous_book_digest=economic_cut.book_digest,
+                )
+                if economic_transactions
+                else None
             )
-            if economic_transactions
-            else None
-        )
+        except AccountingConflict as error:
+            self.economic_book.refresh()
+            if str(error) == "economic book changed after validated read cut":
+                raise OptionLifecycleConflict(
+                    "canonical economic book changed after lifecycle position validation"
+                ) from error
+            raise
         if plan is not None and plan.already_committed:
             raise OptionLifecycleConflict(
                 "fresh lifecycle identity maps to economics already committed elsewhere"
@@ -894,10 +956,11 @@ class DurableOptionLifecycleAuthority:
             item.transaction_id for item in reversal_transactions
         )
         lifecycle_payload = {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "provider_id": observation.provider_id,
             "account_id": observation.account_id,
             "environment": observation.environment,
+            "provider_environment": observation.provider_environment,
             "venue_id": observation.venue_id,
             "instrument_version": observation.instrument_version,
             "instrument_digest": instrument_digest,
@@ -955,6 +1018,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id,
             observation.account_id,
             observation.environment,
+            observation.provider_environment,
             observation.external_event_id,
         )
         _, inserted, _ = self.store.commit_command(

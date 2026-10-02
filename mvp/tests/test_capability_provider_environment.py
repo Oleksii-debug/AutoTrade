@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from mvp.autotrade_mvp.capabilities import (
     artifact_store_evidence_verifier,
     derive_capability_snapshot,
 )
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 NOW = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
@@ -162,57 +164,59 @@ class CapabilityProviderEnvironmentTests(unittest.TestCase):
             payload=payload,
         )
         evidence_ref = item.evidence_ref
-
-        class Store:
-            def __init__(self, provider_environment: str):
-                self.provider_environment = provider_environment
-
-            def load_manifest(self, artifact_id):
-                return {
-                    "artifact_id": artifact_id,
-                    "sha256": evidence_ref["sha256"],
-                    "metadata": {
-                        "artifact_kind": "CAPABILITY_EVIDENCE",
-                        "schema_version": 1,
-                        "capability_source": "DOCUMENTED",
-                        "producer_type": "PROVIDER_DOCUMENTATION",
-                        "provider_id": "BYBIT",
-                        "account_id": "paper-account",
-                        "entity_id": "entity-1",
-                        "environment": "PAPER",
-                        "provider_environment": self.provider_environment,
-                        "instrument_version": "instrument-v1",
-                        "observed_at": evidence_ref["observed_at"],
-                        "producer_id": "fixture",
-                        "evidence_version": "1",
-                        "issuer_ref": evidence_ref["issuer_ref"],
-                        "issuer_sha256": evidence_ref["issuer_sha256"],
-                    },
-                    "source_refs": [],
-                    "rights": {},
-                }
-
-            def read_bytes(self, _artifact_id):
-                return payload
-
         issuers = {
             "DOCUMENTED": (
                 lambda _claim, _issuer_ref, _issuer_sha256:
                 EvidenceVerification(valid=True)
             )
         }
-        valid = artifact_store_evidence_verifier(
-            Store("TESTNET"),
-            issuer_verifiers=issuers,
-        )(item)
-        self.assertTrue(valid.valid)
 
-        wrong_domain = artifact_store_evidence_verifier(
-            Store("DEMO"),
-            issuer_verifiers=issuers,
-        )(item)
-        self.assertFalse(wrong_domain.valid)
-        self.assertTrue(wrong_domain.conflicted)
+        def publish(directory, provider_environment):
+            store = ArtifactStore(directory)
+            store.publish_bytes(
+                artifact_id=evidence_ref["artifact_id"],
+                data=payload,
+                media_type="application/octet-stream",
+                rights={},
+                source_refs=[],
+                metadata={
+                    "artifact_kind": "CAPABILITY_EVIDENCE",
+                    "schema_version": 1,
+                    "capability_source": "DOCUMENTED",
+                    "producer_type": "PROVIDER_DOCUMENTATION",
+                    "provider_id": "BYBIT",
+                    "account_id": "paper-account",
+                    "entity_id": "entity-1",
+                    "environment": "PAPER",
+                    "provider_environment": provider_environment,
+                    "instrument_version": "instrument-v1",
+                    "observed_at": evidence_ref["observed_at"],
+                    "producer_id": "fixture",
+                    "evidence_version": "1",
+                    "issuer_ref": evidence_ref["issuer_ref"],
+                    "issuer_sha256": evidence_ref["issuer_sha256"],
+                },
+            )
+            return store
+
+        with TemporaryDirectory() as directory:
+            store = publish(directory, "TESTNET")
+            valid = artifact_store_evidence_verifier(
+                evidence_root=directory,
+                publication_store=store,
+                issuer_verifiers=issuers,
+            )(item)
+            self.assertTrue(valid.valid)
+
+        with TemporaryDirectory() as directory:
+            store = publish(directory, "DEMO")
+            wrong_domain = artifact_store_evidence_verifier(
+                evidence_root=directory,
+                publication_store=store,
+                issuer_verifiers=issuers,
+            )(item)
+            self.assertFalse(wrong_domain.valid)
+            self.assertTrue(wrong_domain.conflicted)
 
 
     def test_claim_subclass_is_rejected_before_evidence_callback(self):
@@ -317,9 +321,14 @@ class CapabilityProviderEnvironmentTests(unittest.TestCase):
             def read_bytes(self, _artifact_id):
                 raise AssertionError("store must not be reached")
 
-        verifier = artifact_store_evidence_verifier(Store())
-        with self.assertRaisesRegex(TypeError, "exact CapabilityClaim"):
-            verifier(impostor)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            verifier = artifact_store_evidence_verifier(
+                evidence_root=directory,
+                publication_store=store,
+            )
+            with self.assertRaisesRegex(TypeError, "exact CapabilityClaim"):
+                verifier(impostor)
 
 
 if __name__ == "__main__":

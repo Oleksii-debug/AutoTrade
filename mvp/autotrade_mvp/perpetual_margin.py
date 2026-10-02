@@ -24,6 +24,7 @@ from .exact_decimal import (
     canonical_decimal_text,
     parse_bounded_exact_decimal,
 )
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 class PerpetualMarginError(ValueError):
@@ -220,6 +221,7 @@ class PerpetualMarginEvidence:
     collateral_fx_observed_at: str
     margin_tiers_observed_at: str
     margin_tiers: tuple[MarginTier, ...]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -258,6 +260,19 @@ class PerpetualMarginEvidence:
             self,
             "environment",
             _text(self.environment, name="environment").upper(),
+        )
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise PerpetualMarginError(str(error)) from error
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
         )
         object.__setattr__(
             self,
@@ -306,12 +321,13 @@ class PerpetualMarginEvidence:
         object.__setattr__(self, "margin_tiers", tiers)
 
     @property
-    def capability_identity(self) -> tuple[str, str, str, str, str]:
+    def capability_identity(self) -> tuple[str, str, str, str, str, str]:
         return (
             self.provider_id,
             self.account_id,
             self.entity_id,
             self.environment,
+            self.provider_environment,
             self.instrument_version,
         )
 
@@ -361,6 +377,7 @@ class PerpetualMarginEvidence:
             "account_id": self.account_id,
             "entity_id": self.entity_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "instrument_version": self.instrument_version,
             "capability_snapshot_id": self.capability_snapshot_id,
             "position_mode": self.position_mode,

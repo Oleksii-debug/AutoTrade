@@ -74,6 +74,19 @@
       "lock_file": "src/AutoTrade.Desktop/packages.lock.json",
       "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
       "version": 1
+    },
+    {
+      "dependencies": {
+        "net10.0": {
+          "autotrade.contracts": {
+            "type": "Project"
+          }
+        }
+      },
+      "lock_blob_sha": "5fa1eb212bc4f34bc65bad13ea973ffa89399d66",
+      "lock_file": "src/AutoTrade.Host/packages.lock.json",
+      "project": "src/AutoTrade.Host/AutoTrade.Host.csproj",
+      "version": 1
     }
   ],
   "dotnet_package_dependencies": [
@@ -197,7 +210,8 @@
     "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
     "dotnet_lock_blob_shas": {
       "src/AutoTrade.Contracts/packages.lock.json": "b9dcfe10e383ea12f3e6db7629982cf0a533c7ea",
-      "src/AutoTrade.Desktop/packages.lock.json": "b1e7d7b540398b95d24dd9c1b134884ed4a197e0"
+      "src/AutoTrade.Desktop/packages.lock.json": "b1e7d7b540398b95d24dd9c1b134884ed4a197e0",
+      "src/AutoTrade.Host/packages.lock.json": "5fa1eb212bc4f34bc65bad13ea973ffa89399d66"
     },
     "dotnet_tools_manifest_blob_sha": "a0cdcefda64586736bbe19aea74ce700aac40894",
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",

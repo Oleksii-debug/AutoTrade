@@ -14,11 +14,16 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 
+if __package__:
+    from .dotnet_lock import dotnet_lock_content_blockers
+else:
+    from dotnet_lock import dotnet_lock_content_blockers
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_PYTHON = re.compile(r"^[A-Za-z0-9_.-]+==[^=<>!~\s]+$")
 EXACT_DOTNET_SDK = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
-EXACT_NUGET = re.compile(r"^\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$")
+EXACT_NUGET = re.compile(r"^\[[0-9][A-Za-z0-9.+-]*\]$")
 
 
 @dataclass(frozen=True)
@@ -193,11 +198,7 @@ def _dotnet_dependency_lock_blockers(
 
     blockers: list[str] = []
     for project in projects:
-        if not (project.parent / "packages.lock.json").is_file():
-            blockers.append(
-                "DOTNET_PROJECT_LOCK_MISSING:"
-                f"{project.relative_to(root).as_posix()}"
-            )
+        blockers.extend(dotnet_lock_content_blockers(root, project))
 
     workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
     if not workflow.is_file():

@@ -885,6 +885,8 @@ class DispatchTests(unittest.TestCase):
                 submission_scope_hash="sha256:" + "2" * 64,
                 response_bytes=b'{"ok":true}',
                 response_sha256="sha256:" + "3" * 64,
+                terminal_state="SENT",
+                response_encoding="utf-8-json",
             )
 
     def test_unserializable_provider_response_after_send_becomes_unknown(self):
@@ -1133,7 +1135,7 @@ class DispatchTests(unittest.TestCase):
                         transport_send=transport,
                     )
                     self.assertEqual(result.status, "BLOCKED")
-                self.assertEqual(result.reason, "sender_fence_required")
+                self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
                 self.assertEqual(outbound, 0)
                 events = store.load_events(
                     "submission_attempt",

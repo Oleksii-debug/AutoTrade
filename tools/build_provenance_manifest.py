@@ -13,6 +13,11 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+if __package__:
+    from .dotnet_lock import normalized_dotnet_lock
+else:
+    from dotnet_lock import normalized_dotnet_lock
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
@@ -745,81 +750,8 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
 
 
 def _normalized_dotnet_lock(path: Path) -> dict[str, object]:
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"NuGet lock is unreadable: {path}") from error
-    if type(document) is not dict or document.get("version") != 1:
-        raise ValueError(f"NuGet lock must use schema version 1: {path}")
-    dependencies = document.get("dependencies")
-    if type(dependencies) is not dict:
-        raise ValueError(f"NuGet lock dependencies must be an object: {path}")
+    return normalized_dotnet_lock(path)
 
-    normalized_targets: dict[str, dict[str, object]] = {}
-    for target, raw_entries in sorted(dependencies.items()):
-        if not isinstance(target, str) or not target or type(raw_entries) is not dict:
-            raise ValueError(f"NuGet lock target is invalid: {path}")
-        normalized_entries: dict[str, object] = {}
-        for name, raw_entry in sorted(raw_entries.items(), key=lambda item: item[0].casefold()):
-            if not isinstance(name, str) or not name or type(raw_entry) is not dict:
-                raise ValueError(f"NuGet lock dependency entry is invalid: {path}")
-            dependency_type = raw_entry.get("type")
-            if dependency_type not in {"Direct", "Transitive", "Project"}:
-                raise ValueError(f"NuGet lock dependency type is invalid: {path}:{name}")
-
-            entry: dict[str, object] = {"type": dependency_type}
-            requested = raw_entry.get("requested")
-            if requested is not None:
-                if not isinstance(requested, str) or not requested:
-                    raise ValueError(f"NuGet lock requested range is invalid: {path}:{name}")
-                entry["requested"] = requested
-
-            resolved = raw_entry.get("resolved")
-            content_hash = raw_entry.get("contentHash")
-            if dependency_type != "Project":
-                if not isinstance(resolved, str) or not resolved:
-                    raise ValueError(f"NuGet lock resolved version is missing: {path}:{name}")
-                if not isinstance(content_hash, str) or not content_hash:
-                    raise ValueError(f"NuGet lock contentHash is missing: {path}:{name}")
-                entry["resolved"] = resolved
-                entry["contentHash"] = content_hash
-            elif resolved is not None or content_hash is not None:
-                raise ValueError(f"NuGet project lock entry has package bytes: {path}:{name}")
-
-            child_dependencies = raw_entry.get("dependencies")
-            if child_dependencies is not None:
-                if type(child_dependencies) is not dict or not all(
-                    isinstance(child_name, str)
-                    and child_name
-                    and isinstance(child_range, str)
-                    and child_range
-                    for child_name, child_range in child_dependencies.items()
-                ):
-                    raise ValueError(f"NuGet lock child dependencies are invalid: {path}:{name}")
-                entry["dependencies"] = {
-                    child_name: child_dependencies[child_name]
-                    for child_name in sorted(child_dependencies, key=str.casefold)
-                }
-
-            unexpected = set(raw_entry) - {
-                "type",
-                "requested",
-                "resolved",
-                "contentHash",
-                "dependencies",
-            }
-            if unexpected:
-                raise ValueError(
-                    f"NuGet lock dependency entry has unexpected fields: {path}:{name}: "
-                    + ", ".join(sorted(unexpected))
-                )
-            normalized_entries[name] = entry
-        normalized_targets[target] = normalized_entries
-
-    return {
-        "version": 1,
-        "dependencies": normalized_targets,
-    }
 
 def dotnet_lock_graph() -> list[dict[str, object]]:
     records: list[dict[str, object]] = []

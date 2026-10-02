@@ -168,7 +168,11 @@ def _rehydrate(payload: dict[str, Any]) -> CapabilitySnapshot | None:
     )
     if set(raw) != required:
         raise CapabilityError("durable capability snapshot fields are malformed")
-    if schema_version == "1.0.0" and raw.get("provider_id") == "BYBIT":
+    if (
+        schema_version == "1.0.0"
+        and type(raw.get("provider_id")) is str
+        and raw["provider_id"].upper() == "BYBIT"
+    ):
         _validate_ambiguous_legacy_bybit(raw, sources)
         return None
     try:

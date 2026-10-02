@@ -47,6 +47,7 @@ from .exact_decimal import (
     exact_subtract,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
 
@@ -68,6 +69,26 @@ def _environment(value: str) -> str:
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
     return environment
+
+
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    scope = _environment(environment)
+    try:
+        return normalize_provider_environment(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise AccountingConflict(
+            "provider economic authority requires an exact provider_environment"
+        ) from error
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -118,26 +139,117 @@ def _activity_identity(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str,
     activity_id: str,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     activity = _text(activity_id, name="activity_id")
+    if domain == scope:
+        return _scoped_identity(
+            "provider-activity",
+            provider,
+            account,
+            scope,
+            activity,
+        )
     return _scoped_identity(
-        "provider-activity",
+        "provider-activity-v2",
         provider,
         account,
         scope,
+        domain,
         activity,
     )
 
 
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
+def _legacy_book_id(*, provider_id: str, account_id: str, environment: str) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
     return _scoped_identity("economic-book", provider, account, scope)
+
+
+def _book_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    if domain == scope:
+        return _legacy_book_id(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+        )
+    return _scoped_identity(
+        "economic-book-v2",
+        provider,
+        account,
+        scope,
+        domain,
+    )
+
+
+def _scope_fields(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str,
+) -> dict[str, str]:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    payload = {
+        "provider_id": provider,
+        "account_id": account,
+        "environment": scope,
+    }
+    if domain != scope:
+        payload["provider_environment"] = domain
+    return payload
+
+
+def _scope_payload(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_environment: str,
+) -> dict[str, str]:
+    fields = _scope_fields(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
+    scope = fields["environment"]
+    domain = fields.get("provider_environment", scope)
+    return {
+        "schema_version": "1.1.0" if domain != scope else "1.0.0",
+        **fields,
+    }
 
 
 def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
@@ -222,13 +334,16 @@ def _economic_batch_digest(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str,
     transactions: Iterable[JournalTransaction],
 ) -> str:
-    material = {
-        "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
+    material: dict[str, Any] = {
+        **_scope_payload(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        ),
         "transactions": [_transaction_payload(item) for item in transactions],
     }
     return payload_digest(material)
@@ -245,6 +360,33 @@ class PreparedEconomicBatch:
     result: dict[str, Any]
     aggregate_version: int
     already_committed: bool = False
+
+
+@dataclass(frozen=True)
+class EconomicBookCut:
+    """Read-only canonical economic projection from one durable journal cut.
+
+    This value is descriptive, not an independent write authority. Mutation
+    preparation must revalidate book_digest against the same provider-domain
+    durable book before constructing an envelope; JournalStore aggregate-version
+    fencing still protects the later atomic commit.
+    """
+
+    provider_id: str
+    account_id: str
+    environment: str
+    provider_environment: str
+    transactions: tuple[JournalTransaction, ...]
+    book_digest: str
+    aggregate_version: int
+
+    def position(self, instrument: str) -> Decimal:
+        projection = ScopedEconomicBook(
+            environment=self.environment,
+            account_id=self.account_id,
+            transactions=self.transactions,
+        )
+        return projection.position(instrument)
 
 
 _PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"
@@ -1209,17 +1351,34 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         super().__init__(environment=environment, account_id=account_id)
+        self.provider_environment = _provider_environment(
+            provider_id=self.provider_id,
+            environment=self.environment,
+            provider_environment=provider_environment,
+        )
         self.book_id = _book_id(
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
         )
+        if self.provider_environment != self.environment:
+            legacy_id = _legacy_book_id(
+                provider_id=self.provider_id,
+                account_id=self.account_id,
+                environment=self.environment,
+            )
+            if self.store.load_events("economic_book", legacy_id):
+                raise AccountingConflict(
+                    "ambiguous legacy provider economic book requires explicit migration"
+                )
         self._reload()
 
     def _events(self) -> list[dict[str, Any]]:
@@ -1256,6 +1415,19 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 raise AccountingConflict(
                     "economic durable event scope does not match provider book"
                 )
+            payload_provider_environment = payload.get("provider_environment")
+            if self.provider_environment == self.environment:
+                if payload_provider_environment not in {
+                    None,
+                    self.provider_environment,
+                }:
+                    raise AccountingConflict(
+                        "economic durable event provider_environment is invalid"
+                    )
+            elif payload_provider_environment != self.provider_environment:
+                raise AccountingConflict(
+                    "economic durable event provider_environment does not match provider book"
+                )
 
             if event_type == self._SINGLE_EVENT:
                 transactions = (
@@ -1275,6 +1447,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 provider_id=self.provider_id,
                 account_id=self.account_id,
                 environment=self.environment,
+                provider_environment=self.provider_environment,
                 transactions=transactions,
             )
             if payload.get("batch_digest") != batch_digest:
@@ -1294,11 +1467,29 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         candidate = self._replay(self._events())
         self._book = candidate._book
 
+    def read_cut(self) -> EconomicBookCut:
+        """Replay and return the exact current durable economic-book cut."""
+
+        events = self._events()
+        current = self._replay(events)
+        return EconomicBookCut(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            provider_environment=self.provider_environment,
+            transactions=current.transactions,
+            book_digest=current.audit_digest(),
+            aggregate_version=(
+                0 if not events else int(events[-1]["aggregate_version"])
+            ),
+        )
+
     def prepare_batch_mutation(
         self,
         transactions: Iterable[JournalTransaction],
         *,
         committed_at: str | None = None,
+        expected_previous_book_digest: str | None = None,
     ) -> PreparedEconomicBatch:
         """Prepare one economic batch without mutating durable state.
 
@@ -1317,6 +1508,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
 
         events = self._events()
         current = self._replay(events)
+        previous_digest = current.audit_digest()
+        if (
+            expected_previous_book_digest is not None
+            and previous_digest != expected_previous_book_digest
+        ):
+            raise AccountingConflict(
+                "economic book changed after validated read cut"
+            )
         candidate = ScopedEconomicBook(
             environment=self.environment,
             account_id=self.account_id,
@@ -1328,13 +1527,16 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             provider_id=self.provider_id,
             account_id=self.account_id,
             environment=self.environment,
+            provider_environment=self.provider_environment,
             transactions=batch,
         )
         request = {
-            "schema_version": "1.0.0",
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
+            **_scope_payload(
+                provider_id=self.provider_id,
+                account_id=self.account_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
             "batch_digest": batch_digest,
             "transactions": transaction_payloads,
         }
@@ -1377,7 +1579,6 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 already_committed=True,
             )
 
-        previous_digest = current.audit_digest()
         resulting_digest = candidate.audit_digest()
         next_version = (
             1 if not events else int(events[-1]["aggregate_version"]) + 1
@@ -1396,15 +1597,22 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                     self.provider_id,
                     self.account_id,
                     self.environment,
+                    *(
+                        ()
+                        if self.provider_environment == self.environment
+                        else (self.provider_environment,)
+                    ),
                     batch_digest,
                 ),
             )
         )
         payload = {
-            "schema_version": "1.0.0",
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
+            **_scope_payload(
+                provider_id=self.provider_id,
+                account_id=self.account_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
             "batch_digest": batch_digest,
             "previous_book_digest": previous_digest,
             "resulting_book_digest": resulting_digest,
@@ -1459,6 +1667,11 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                     self.provider_id,
                     self.account_id,
                     self.environment,
+                    *(
+                        ()
+                        if self.provider_environment == self.environment
+                        else (self.provider_environment,)
+                    ),
                     plan.batch_digest,
                 ),
             )
@@ -2300,6 +2513,7 @@ def book_external_provider_cash_activity(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     activity: ProviderActivityEvidence,
     observed_at: str,
 ) -> tuple[JournalTransaction, bool]:
@@ -2319,6 +2533,11 @@ def book_external_provider_cash_activity(
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     if activity.provider_id != provider:
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
@@ -2372,13 +2591,25 @@ def book_external_provider_cash_activity(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=domain,
         activity_id=activity.activity_id,
     )
     book_id = _book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
+        provider_environment=domain,
     )
+    if domain != scope:
+        legacy_id = _legacy_book_id(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+        )
+        if store.load_events("economic_book", legacy_id):
+            raise AccountingConflict(
+                "ambiguous legacy provider economic book requires explicit migration"
+            )
     cause_event_id = f"provider-activity:{identity}"
     transaction_id = str(
         uuid5(
@@ -2395,9 +2626,12 @@ def book_external_provider_cash_activity(
     amount_text = _decimal_text(value)
 
     request = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "activity": {
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
@@ -2412,9 +2646,12 @@ def book_external_provider_cash_activity(
         "amount": amount_text,
     }
     result = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "activity_id": activity.activity_id,
         "transaction_id": transaction_id,
         "amount": amount_text,
@@ -2499,6 +2736,10 @@ def book_external_provider_cash_activity(
             or economic_payload.get("provider_id") != provider
             or economic_payload.get("account_id") != account
             or economic_payload.get("environment") != scope
+            or (
+                economic_payload.get("provider_environment")
+                != (domain if domain != scope else None)
+            )
             or economic_payload.get("source_activity_identity") != identity
             or economic_payload.get("transaction")
             != _transaction_payload(transaction)
@@ -2570,9 +2811,12 @@ def book_external_provider_cash_activity(
     }
 
     economic_payload = {
-        "provider_id": provider,
-        "account_id": account,
-        "environment": scope,
+        **_scope_fields(
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        ),
         "source_activity_identity": identity,
         "observed_at": observed_text,
         "transaction": _transaction_payload(transaction),
@@ -2617,6 +2861,7 @@ def book_external_provider_cash_activity(
             provider_id=provider,
             account_id=account,
             environment=scope,
+            provider_environment=domain,
             activity=activity,
             observed_at=observed_at,
         )
@@ -2634,6 +2879,7 @@ def load_provider_account_economic_book(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> EconomicBook:
     """Rebuild canonical economics from the one durable provider/account journal."""
 
@@ -2642,5 +2888,6 @@ def load_provider_account_economic_book(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return EconomicBook(durable.transactions)

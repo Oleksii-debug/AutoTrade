@@ -41,6 +41,7 @@ def capability(**overrides):
         account_id="account-A",
         entity_id="perpetual-account",
         environment="PAPER",
+        provider_environment="PAPER",
         instrument_version="BTC-PERP@v4",
         observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
         expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
@@ -88,6 +89,7 @@ def evidence(**overrides):
         account_id="account-A",
         entity_id="perpetual-account",
         environment="PAPER",
+        provider_environment="PAPER",
         instrument_version="BTC-PERP@v4",
         capability_snapshot_id=SNAPSHOT_ID,
         position_mode="ONE_WAY",
@@ -120,6 +122,7 @@ class EvidenceArtifactStore:
             "account_id": value.account_id,
             "entity_id": value.entity_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "instrument_version": value.instrument_version,
             "capability_snapshot_id": value.capability_snapshot_id,
             "position_mode": value.position_mode,
@@ -186,6 +189,7 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         "account_id": value.account_id,
         "entity_id": value.entity_id,
         "environment": value.environment,
+        "provider_environment": value.provider_environment,
         "instrument_version": value.instrument_version,
         "capability_snapshot_id": value.capability_snapshot_id,
         "position_mode": value.position_mode,
@@ -392,10 +396,12 @@ class PerpetualMarginTests(unittest.TestCase):
     def test_capability_identity_case_is_preserved_not_reinterpreted(self):
         lower = capability(
             provider_id="bybit",
+            provider_environment="TESTNET",
             position_mode="one_way",
         )
         matching = evidence(
             provider_id="bybit",
+            provider_environment="TESTNET",
             position_mode="one_way",
         )
         decision = evaluate(
@@ -412,9 +418,22 @@ class PerpetualMarginTests(unittest.TestCase):
                 capability=lower,
                 evidence=evidence(
                     provider_id="BYBIT",
+                    provider_environment="TESTNET",
                     position_mode="ONE_WAY",
                 ),
             )
+
+    def test_provider_environment_is_exact_capability_scope(self):
+        exact = capability(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        mismatched = evidence(
+            provider_id="BYBIT",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
+            evaluate(capability=exact, evidence=mismatched)
 
     def test_paper_evidence_cannot_be_reused_for_live_scope(self):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):

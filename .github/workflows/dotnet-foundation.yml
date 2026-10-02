@@ -14,6 +14,7 @@ on:
       - "tests/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
+      - "tests/Host.Process/**"
       - "contracts/**"
       - ".github/workflows/dotnet-foundation.yml"
   pull_request:
@@ -27,6 +28,7 @@ on:
       - "tests/**/packages.lock.json"
       - "src/**/*.xaml"
       - "tests/Desktop.Client/**"
+      - "tests/Host.Process/**"
       - "contracts/**"
       - ".github/workflows/dotnet-foundation.yml"
 
@@ -65,11 +67,21 @@ jobs:
         shell: pwsh
         run: Get-Content -Raw src/AutoTrade.Contracts/packages.lock.json
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
+      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj --use-lock-file --locked-mode
+      - name: Emit generated Host NuGet lock
+        shell: pwsh
+        run: Get-Content -Raw src/AutoTrade.Host/packages.lock.json
+      - run: dotnet build src/AutoTrade.Host/AutoTrade.Host.csproj --configuration Release --no-restore
+      - run: dotnet restore tests/Host.Process/Host.Process.csproj --use-lock-file --locked-mode
+      - name: Emit generated Host.Process NuGet lock
+        shell: pwsh
+        run: Get-Content -Raw tests/Host.Process/packages.lock.json
+      - run: dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release --no-restore
       - name: Write exact-head .NET foundation evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite dotnet-foundation
-          --command "dotnet restore/build AutoTrade.Contracts"
+          --command "dotnet restore/build AutoTrade.Contracts + AutoTrade.Host + Host.Process contracts"
           --output "artifacts/dotnet-foundation-${{ runner.os }}.json"
       - name: Upload exact-head .NET foundation evidence
         uses: actions/upload-artifact@v4

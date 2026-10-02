@@ -17,6 +17,11 @@ from research.autotrade_research.artifacts.durable_publish import (
     atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,
 )
+from autotrade_foundation.windows_namespace import (
+    retain_windows_directory_namespace,
+    retain_windows_relative_directory_namespace,
+    retain_windows_regular_file,
+)
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
@@ -61,6 +66,8 @@ WINDOWS_RESERVED_STEMS = frozenset(
     | {f"lpt{index}" for index in range(1, 10)}
 )
 
+WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
 
 class BundleError(ValueError):
     pass
@@ -98,6 +105,96 @@ def _windows_path_key(relative: str) -> str:
             )
         normalized.append(part.casefold())
     return "/".join(normalized)
+
+
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Return whether a no-follow Windows stat identifies a reparse point."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise BundleError("Windows file attributes are invalid")
+    return bool(attributes & WINDOWS_REPARSE_POINT)
+
+
+def _reject_windows_reparse(path: Path, observed: os.stat_result) -> None:
+    if _has_windows_reparse_point(observed):
+        raise BundleError(f"Windows reparse points are forbidden in bundles: {path}")
+
+
+def _assert_windows_path_chain_is_not_reparse(path: Path) -> None:
+    """Reject every existing component in one absolute Windows path chain."""
+
+    absolute = path.absolute()
+    anchor = Path(absolute.anchor)
+    current = anchor
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _assert_staging_components_are_not_reparse(
+    path: Path,
+    *,
+    staging: Path,
+) -> None:
+    """Reject root/ancestor/final reparse aliases for one staged path."""
+
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        relative = path.relative_to(staging)
+    except ValueError as error:
+        raise BundleError(f"staged path escaped staging directory: {path}") from error
+    current = staging
+    for part in relative.parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _walk_staging(staging: Path) -> list[Path]:
+    """Enumerate staging without descending through symlink/reparse directories."""
+
+    files: list[Path] = []
+    pending = [staging]
+    while pending:
+        directory = pending.pop()
+        _assert_windows_path_chain_is_not_reparse(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, observed)
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            if stat.S_ISDIR(observed.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            files.append(path)
+    return sorted(files, key=lambda item: item.as_posix())
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -164,8 +261,11 @@ def _assert_staged_file_identity(
         raise BundleError(f"staged file identity cannot be verified: {path}") from error
 
     for observed in (opened, current, resolved_current):
+        _reject_windows_reparse(path, observed)
         if not stat.S_ISREG(observed.st_mode):
             raise BundleError(f"staged entry must remain a regular file: {path}")
+    _assert_windows_path_chain_is_not_reparse(path.parent)
+    _reject_windows_reparse(path, current)
 
     try:
         resolved_path.relative_to(staging_resolved)
@@ -221,19 +321,150 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
+def _read_retained_windows_regular_file(
+    authority,
+    *,
+    target_name: str,
+    path: Path,
+) -> bytes:
+    """Read one staged Windows file through the retained parent HANDLE."""
+
+    try:
+        with retain_windows_regular_file(
+            authority,
+            target_name=target_name,
+            subject="Windows bundle staged file",
+        ) as descriptor:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise BundleError(f"staged entry must remain a regular file: {path}")
+            chunks = bytearray()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+            after = os.fstat(descriptor)
+    except BundleError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+        or len(chunks) != after.st_size
+    ):
+        raise BundleError(f"staged file changed while being read: {path}")
+    return bytes(chunks)
+
+
+def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
+    """Snapshot staging while retaining each traversed Windows namespace generation."""
+
+    snapshots: list[tuple[Path, bytes]] = []
+
+    def visit(authority, directory: Path) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, observed)
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+
+            if stat.S_ISDIR(observed.st_mode):
+                try:
+                    with retain_windows_relative_directory_namespace(
+                        authority,
+                        (entry.name,),
+                        create=False,
+                    ) as child_authority:
+                        visit(child_authority, path)
+                except BundleError:
+                    raise
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    raise BundleError(
+                        f"staged Windows directory authority cannot be retained: {path}"
+                    ) from error
+                continue
+
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            snapshots.append(
+                (
+                    path,
+                    _read_retained_windows_regular_file(
+                        authority,
+                        target_name=entry.name,
+                        path=path,
+                    ),
+                )
+            )
+
+    try:
+        with retain_windows_directory_namespace(
+            staging,
+            create=False,
+        ) as staging_authority:
+            visit(staging_authority, staging)
+    except BundleError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"Windows staging namespace authority cannot be retained: {staging}"
+        ) from error
+
+    return sorted(snapshots, key=lambda item: item[0].as_posix())
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
-    if not staging.is_dir():
+    staging = staging.absolute()
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        staging_stat = os.stat(staging, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError("staging must be an existing directory") from error
+    _reject_windows_reparse(staging, staging_stat)
+    if not stat.S_ISDIR(staging_stat.st_mode):
         raise BundleError("staging must be an existing directory")
     staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
-    for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise BundleError(f"symlinks are forbidden in bundles: {path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise BundleError(f"unsupported filesystem entry: {path}")
+    if sys.platform == "win32":
+        snapshots = _walk_staging_windows_retained(staging)
+    else:
+        snapshots = []
+        for path in _walk_staging(staging):
+            _assert_staging_components_are_not_reparse(
+                path,
+                staging=staging,
+            )
+            snapshots.append(
+                (
+                    path,
+                    _read_staged_regular_file(
+                        path,
+                        staging_resolved=staging_resolved,
+                    ),
+                )
+            )
+
+    for path, data in snapshots:
         relative = _safe_relative(path, staging)
         windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
@@ -245,10 +476,6 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        data = _read_staged_regular_file(
-            path,
-            staging_resolved=staging_resolved,
-        )
         _reject_sensitive_content(relative, data)
         collected.append((relative, path, data))
     if not collected:

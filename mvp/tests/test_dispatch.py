@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
+from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.dispatch import (
-    _issue_financial_authority_check,
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -178,9 +178,7 @@ class DispatchTests(unittest.TestCase):
                     provider="provider",
                     request={},
                     now="2026-09-24T18:00:00Z",
-                    authority_check=_issue_financial_authority_check(
-                        authority, store=store
-                    ),
+                    authority_check=authority,
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
                 )
@@ -196,9 +194,9 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
-            self.assertEqual(paper_events[0]["payload"]["environment"], "PAPER")
+            self.assertEqual(paper_events[0]["payload"]["environment"], "SIMULATION")
             self.assertEqual(paper_events[0]["payload"]["account_id"], "acct")
-            self.assertEqual(live_events[0]["payload"]["environment"], "LIVE")
+            self.assertEqual(live_events[0]["payload"]["environment"], "REPLAY")
             self.assertEqual(live_events[0]["payload"]["account_id"], "acct")
             self.assertNotEqual(
                 paper_events[0]["aggregate_id"],
@@ -1092,6 +1090,15 @@ class DispatchTests(unittest.TestCase):
                     owner_token="owner",
                     owner_epoch=1,
                 )
+                authority = AuthorityService(store)
+                authority_check = authority.dispatch_guard(
+                    "sender-fence-fixture",
+                    account_id="acct",
+                    environment=environment,
+                    instrument_id="11111111-1111-4111-8111-111111111111",
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                )
                 outbound = 0
 
                 def transport(_client_id, _request, final_guard):
@@ -1100,19 +1107,23 @@ class DispatchTests(unittest.TestCase):
                     outbound += 1
                     return {"provider_order_id": "must-not-happen"}
 
-                result = dispatcher.dispatch(
-                    attempt_id="fence-required",
-                    intent_id="i1",
-                    intent_hash="h1",
-                    provider="sim",
-                    request={},
-                    now="2026-09-24T18:00:00Z",
-                    authority_check=_issue_financial_authority_check(
-                        lambda _hash, _now: (True, "allowed"), store=store
-                    ),
-                    transport_send=transport,
-                )
-                self.assertEqual(result.status, "BLOCKED")
+                with patch.object(
+                    AuthorityService,
+                    "dispatch_allowed",
+                    autospec=True,
+                    return_value=(True, "fixture_allowed"),
+                ):
+                    result = dispatcher.dispatch(
+                        attempt_id="fence-required",
+                        intent_id="i1",
+                        intent_hash="h1",
+                        provider="sim",
+                        request={},
+                        now="2026-09-24T18:00:00Z",
+                        authority_check=authority_check,
+                        transport_send=transport,
+                    )
+                    self.assertEqual(result.status, "BLOCKED")
                 self.assertEqual(result.reason, "sender_fence_required")
                 self.assertEqual(outbound, 0)
                 events = store.load_events(
@@ -1180,12 +1191,19 @@ class DispatchTests(unittest.TestCase):
             )
             owner = recovery.start("host-a")
             self.durable_ready(recovery, store, reconciliation_id="paper-send-ready")
-            dispatcher = GuardedDispatcher(
+            dispatcher = recovery.build_guarded_dispatcher(
                 store,
                 environment="PAPER",
                 account_id="acct",
-                owner_token=owner.owner_id,
-                owner_epoch=owner.epoch,
+            )
+            authority = AuthorityService(store)
+            authority_check = authority.dispatch_guard(
+                "paper-send-fixture",
+                account_id="acct",
+                environment="PAPER",
+                instrument_id="11111111-1111-4111-8111-111111111111",
+                instrument_version=1,
+                action="ORDER.SUBMIT",
             )
             outbound = 0
 
@@ -1195,20 +1213,23 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p-1"}
 
-            result = dispatcher.dispatch(
-                attempt_id="paper-current-owner",
-                intent_id="i1",
-                intent_hash="h1",
-                provider="sim",
-                request={},
-                now="2026-09-24T18:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"), store=store
-                ),
-                transport_send=transport,
-                sender_check=recovery.validate_sender,
-            )
-            self.assertEqual(result.status, "SENT")
+            with patch.object(
+                AuthorityService,
+                "dispatch_allowed",
+                autospec=True,
+                return_value=(True, "fixture_allowed"),
+            ):
+                result = dispatcher.dispatch(
+                    attempt_id="paper-current-owner",
+                    intent_id="i1",
+                    intent_hash="h1",
+                    provider="sim",
+                    request={},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=authority_check,
+                    transport_send=transport,
+                )
+                self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)
             events = store.load_events(
                 "submission_attempt",

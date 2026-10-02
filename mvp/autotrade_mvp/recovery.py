@@ -189,6 +189,7 @@ class RecoveryController:
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
+        self.runtime_overloaded = False
 
     @staticmethod
     def _now() -> str:
@@ -1310,6 +1311,18 @@ class RecoveryController:
             self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
+    def set_runtime_overloaded(self, overloaded: bool) -> None:
+        """Fail closed on runtime load pressure without minting send authority."""
+
+        if type(overloaded) is not bool:
+            raise TypeError("overloaded must be a boolean")
+        self.runtime_overloaded = overloaded
+        if overloaded:
+            self.reason_codes.add("runtime_overload")
+        else:
+            self.reason_codes.discard("runtime_overload")
+        self._recompute_state()
+
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:
         if not isinstance(attempt, OutboundAttempt):
             raise TypeError("attempt must be an OutboundAttempt")
@@ -1534,6 +1547,7 @@ class RecoveryController:
         self.state = HostState.STOPPED
         self.owner = None
         self.provider_reconciled = False
+        self.runtime_overloaded = False
         self.reason_codes = {"stopped"}
         self.unresolved_attempts.clear()
         self._unresolved_send_attempts.clear()
@@ -1554,6 +1568,9 @@ class RecoveryController:
             self.state = HostState.DEGRADED
             return
         if "lease_expired_no_failover" in self.reason_codes:
+            self.state = HostState.DEGRADED
+            return
+        if self.runtime_overloaded:
             self.state = HostState.DEGRADED
             return
         if self.provider_reconciled and "startup_reconciliation_required" not in self.reason_codes:

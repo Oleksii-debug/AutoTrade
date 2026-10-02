@@ -679,12 +679,16 @@ class HistoricalVintageRegistry:
                     ).hexdigest(),
                 }
             )
+        # The causal-population fingerprint deliberately excludes the full
+        # source_content_digest. The complete raw population is authenticated
+        # against the immutable manifest before selection, while later/future
+        # revisions outside this cutoff must not rewrite the identity of the
+        # information that was actually knowable at this cut.
         material = {
             "schema_version": "1.0.0",
             "dataset_id": canonical_id,
             "version": canonical_version,
             "manifest_digest": actual_manifest_digest,
-            "source_content_digest": source_content_digest,
             "cutoff": _utc_text(point),
             "selected_events": selected_identities,
         }

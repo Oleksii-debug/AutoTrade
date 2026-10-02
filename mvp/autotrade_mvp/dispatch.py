@@ -489,13 +489,13 @@ def _identity_digest(*parts: str) -> str:
     return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
 
 
-def provider_domain_submission_attempt_key(
+def _provider_domain_submission_attempt_identity(
     *,
     attempt_id: str,
     provider_id: str,
     environment: str,
     provider_environment: str | None,
-) -> str:
+) -> tuple[str, str, str, str]:
     if not isinstance(attempt_id, str) or not attempt_id.strip():
         raise ValueError("attempt_id is required")
     provider = provider_id.strip().upper() if isinstance(provider_id, str) else ""
@@ -514,10 +514,71 @@ def provider_domain_submission_attempt_key(
         raise ValueError(
             "submission attempt requires exact provider_environment"
         ) from error
-    logical = attempt_id.strip()
-    if domain == runtime:
-        return logical
-    return logical + ":provider-domain:" + _identity_digest(provider, runtime, domain)
+    return attempt_id.strip(), provider, runtime, domain
+
+
+def provider_domain_submission_attempt_key(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Return the collision-resistant v2 durable key for one provider attempt.
+
+    The logical attempt-id namespace is caller controlled.  Never concatenate a
+    derived provider suffix onto that namespace: another caller could choose the
+    resulting text as its logical id.  Every provider/domain tuple is instead
+    placed in one typed, SHA-bound internal namespace.
+    """
+
+    logical, provider, runtime, domain = _provider_domain_submission_attempt_identity(
+        attempt_id=attempt_id,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
+    return "provider-domain-attempt:v2:" + _identity_digest(
+        logical,
+        provider,
+        runtime,
+        domain,
+    )
+
+
+def provider_domain_submission_attempt_keys(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> tuple[str, ...]:
+    """Return current then legacy durable keys for restart-safe migration.
+
+    New writes use the first key only.  Readers may inspect the legacy key to
+    recover pre-v2 state, but must fail closed if both identities exist.
+    """
+
+    logical, provider, runtime, domain = _provider_domain_submission_attempt_identity(
+        attempt_id=attempt_id,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
+    current = "provider-domain-attempt:v2:" + _identity_digest(
+        logical,
+        provider,
+        runtime,
+        domain,
+    )
+    legacy = (
+        logical
+        if domain == runtime
+        else logical
+        + ":provider-domain:"
+        + _identity_digest(provider, runtime, domain)
+    )
+    return (current,) if legacy == current else (current, legacy)
 
 
 def submission_attempt_aggregate_id(
@@ -594,26 +655,43 @@ def load_submission_response_binding(
     # Full product-selected store capability/recovery composition remains owned
     # by the canonical WP-48/WP-49 lineage.
     _canonical_journal_authority_snapshot(store)
-    durable_attempt_id = attempt_id
+    durable_attempt_ids = (attempt_id,)
     if provider_id is not None or provider_environment is not None:
         if provider_id is None:
             raise ValueError("provider_id is required with provider_environment")
-        durable_attempt_id = provider_domain_submission_attempt_key(
+        durable_attempt_ids = provider_domain_submission_attempt_keys(
             attempt_id=attempt_id,
             provider_id=provider_id,
             environment=environment,
             provider_environment=provider_environment,
         )
-    aggregate_id = submission_attempt_aggregate_id(
-        environment=environment,
-        account_id=account_id,
-        attempt_id=durable_attempt_id,
-    )
     # Resolve the method from the canonical class after rejecting all instance
-    # shadow state; never dispatch through a caller-attached load_events.
-    events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
-    if not events:
+    # shadow state; never dispatch through a caller-attached load_events.  The
+    # legacy identity is read-only migration authority: dual presence is
+    # ambiguous financial state and must never be resolved by preference.
+    located: list[tuple[str, str, list[dict[str, Any]]]] = []
+    for durable_attempt_id in durable_attempt_ids:
+        candidate_aggregate_id = submission_attempt_aggregate_id(
+            environment=environment,
+            account_id=account_id,
+            attempt_id=durable_attempt_id,
+        )
+        candidate_events = JournalStore.load_events(
+            store,
+            "submission_attempt",
+            candidate_aggregate_id,
+        )
+        if candidate_events:
+            located.append(
+                (durable_attempt_id, candidate_aggregate_id, candidate_events)
+            )
+    if not located:
         raise ValueError("durable submission attempt was not found")
+    if len(located) != 1:
+        raise ValueError(
+            "durable submission attempt exists under multiple identity versions"
+        )
+    durable_attempt_id, aggregate_id, events = located[0]
     event_types = [event.get("event_type") for event in events]
     if (
         len(event_types) != 3
@@ -1196,6 +1274,7 @@ class GuardedDispatcher:
             raise TypeError("request must be a mapping")
         provider_environment: str | None = None
         logical_attempt_id = attempt_id
+        durable_attempt_candidates = (attempt_id,)
         if self.environment in {"PAPER", "LIVE"}:
             _issued_callback, issued_store = _issued_financial_authority_binding(
                 authority_check
@@ -1217,12 +1296,13 @@ class GuardedDispatcher:
                     "PAPER/LIVE provider scope differs from financial authority"
                 )
             provider_environment = binding.provider_environment
-            attempt_id = provider_domain_submission_attempt_key(
+            durable_attempt_candidates = provider_domain_submission_attempt_keys(
                 attempt_id=logical_attempt_id,
                 provider_id=normalized_provider,
                 environment=self.environment,
                 provider_environment=provider_environment,
             )
+            attempt_id = durable_attempt_candidates[0]
             if _issued_sender_check(self) is None:
                 raise PermissionError(
                     "PAPER/LIVE sender authority must be issued by RecoveryController"
@@ -1253,8 +1333,17 @@ class GuardedDispatcher:
             client_id_format=client_id_format,
         )
 
-        existing = self._events(attempt_id)
-        if existing:
+        located_attempts = [
+            (candidate, candidate_events)
+            for candidate in durable_attempt_candidates
+            if (candidate_events := self._events(candidate))
+        ]
+        if len(located_attempts) > 1:
+            raise ValueError(
+                "attempt_id exists under multiple provider-domain identity versions"
+            )
+        if located_attempts:
+            attempt_id, existing = located_attempts[0]
             prepared = existing[0]["payload"]
             expected = {
                 "attempt_id": logical_attempt_id,

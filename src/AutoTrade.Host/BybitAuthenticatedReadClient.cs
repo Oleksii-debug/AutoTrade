@@ -32,6 +32,17 @@ internal sealed class ProviderAuthenticatedReadEvidence
                 "authenticated read evidence requires exact non-empty response bytes");
         }
 
+        ProviderIssuerVerifier.RequireValidReadReceipt(
+            preparedEvidence.IssuerSession,
+            preparedEvidence.Attempt,
+            receipt,
+            responseBytes,
+            preparedEvidence.IssuerSession.SessionIdentity,
+            preparedEvidence.IssuerSession.PublicKeySha256);
+        ProviderAuthenticatedReadDurabilityVerifier.RequireMatches(
+            preparedEvidence,
+            durabilityReceipt);
+
         PreparedEvidence = preparedEvidence;
         IssuerSession = preparedEvidence.IssuerSession;
         Attempt = preparedEvidence.Attempt;

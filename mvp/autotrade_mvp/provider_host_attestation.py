@@ -721,8 +721,15 @@ def verify_host_prepared_attestation(
     *,
     expected_session_identity: str,
     expected_public_key_sha256: str,
+    expected_query: object,
 ) -> VerifiedHostPreparedAttestation:
-    """Verify one signed Host Prepared envelope against independent pins."""
+    """Verify one signed Host Prepared envelope against independent pins.
+
+    The v1 Host attempt signs the prepared-read binding digest, not the serialized
+    query object itself.  The exact query therefore needs an independent pin at
+    this verification boundary; otherwise a post-serialization substitution
+    could be returned as if it were Host-verified material.
+    """
 
     expected_session = _exact_text(
         expected_session_identity,
@@ -741,6 +748,12 @@ def verify_host_prepared_attestation(
         raise HostProviderAttestationError(
             "Host Prepared envelope schema is invalid"
         )
+    query = _exact_query(raw["query"])
+    pinned_query = _exact_query(expected_query)
+    if query != pinned_query:
+        raise HostProviderAttestationError(
+            "Host authenticated-read query does not match independently pinned query"
+        )
     session = _parse_session(raw["issuer_session"])
     if (
         session.session_identity != expected_session
@@ -750,7 +763,6 @@ def verify_host_prepared_attestation(
             "Host issuer session does not match independently pinned authority"
         )
     attempt = _parse_attempt(raw["attempt"], session=session)
-    query = _exact_query(raw["query"])
     return VerifiedHostPreparedAttestation(
         issuer_session=session,
         attempt=attempt,
@@ -869,6 +881,7 @@ def verify_host_observed_attestation(
     *,
     expected_session_identity: str,
     expected_public_key_sha256: str,
+    expected_query: object,
 ) -> VerifiedHostObservedAttestation:
     """Verify exact Host Prepared + provider response receipt + response bytes."""
 
@@ -886,6 +899,7 @@ def verify_host_observed_attestation(
         },
         expected_session_identity=expected_session_identity,
         expected_public_key_sha256=expected_public_key_sha256,
+        expected_query=expected_query,
     )
     response_bytes = _canonical_base64(
         raw["response_base64"],

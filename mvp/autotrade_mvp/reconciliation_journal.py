@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .dispatch import (
-    provider_domain_submission_attempt_key,
+    provider_domain_submission_attempt_keys,
     submission_attempt_aggregate_id,
 )
 from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
@@ -87,14 +87,33 @@ def _reconciliation_aggregate_id(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> str:
+    """Return the durable reconciliation identity for one provider domain.
+
+    Runtime-only identity is retained when the provider has no narrower domain
+    so existing non-BYBIT journals remain byte-compatible. A narrower domain is
+    an authority-bearing identity component and must never share one aggregate
+    with another provider domain.
+    """
+
     rid = _text(reconciliation_id, name="reconciliation_id")
     provider, account, scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
     )
-    scoped_identity = canonical_json([provider, account, scope, rid])
+    identity_parts = [provider, account, scope]
+    if provider_environment is not None:
+        domain = _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+        if domain != scope:
+            identity_parts.append(domain)
+    identity_parts.append(rid)
+    scoped_identity = canonical_json(identity_parts)
     return "account-reconciliation:" + str(
         uuid5(
             NAMESPACE_URL,
@@ -358,8 +377,33 @@ def record_reconciliation_checkpoint(
         provider_id=result.provider_id,
         account_id=result.account_id,
         environment=result.environment,
+        provider_environment=result.provider_environment,
     )
     existing = store.load_events("account_reconciliation", aggregate_id)
+    if not existing:
+        legacy_aggregate_id = _reconciliation_aggregate_id(
+            reconciliation_id=rid,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+        if legacy_aggregate_id != aggregate_id:
+            legacy_events = store.load_events(
+                "account_reconciliation",
+                legacy_aggregate_id,
+            )
+            exact_legacy_matches = [
+                event
+                for event in legacy_events
+                if event.get("payload") == payload
+            ]
+            if len(exact_legacy_matches) > 1:
+                raise ValueError(
+                    "legacy reconciliation retry identity is ambiguous"
+                )
+            if exact_legacy_matches:
+                return exact_legacy_matches[0]
+
     if existing:
         if existing[-1]["payload"] == payload:
             return existing[-1]
@@ -437,19 +481,54 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
-    )
-    events = store.load_events("account_reconciliation", aggregate_id)
-    if not events:
-        return None
-    event = events[-1]
-    _require_checkpoint_scope(
-        event,
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
         provider_environment=provider_environment,
     )
-    return event
+    events = store.load_events("account_reconciliation", aggregate_id)
+    if events:
+        event = events[-1]
+        _require_checkpoint_scope(
+            event,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+        return event
+
+    # Narrow-domain journals written before provider_environment became part of
+    # aggregate identity remain readable, but only when exactly one legacy event
+    # validates against the requested provider domain.
+    if provider_environment is not None:
+        legacy_aggregate_id = _reconciliation_aggregate_id(
+            reconciliation_id=rid,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
+        if legacy_aggregate_id != aggregate_id:
+            legacy_matches: list[dict[str, Any]] = []
+            for event in store.load_events(
+                "account_reconciliation",
+                legacy_aggregate_id,
+            ):
+                try:
+                    _require_checkpoint_scope(
+                        event,
+                        provider_id=provider_id,
+                        account_id=account_id,
+                        environment=environment,
+                        provider_environment=provider_environment,
+                    )
+                except ValueError:
+                    continue
+                legacy_matches.append(event)
+            if len(legacy_matches) > 1:
+                raise ValueError(
+                    "legacy reconciliation checkpoint identity is ambiguous"
+                )
+            if legacy_matches:
+                return legacy_matches[0]
+    return None
 
 
 def load_latest_reconciliation_checkpoint_for_scope(
@@ -1365,7 +1444,7 @@ def unknown_submissions_from_dispatch(
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
 
-    durable_ids: dict[str, str] = {}
+    durable_ids: dict[str, tuple[str, ...]] = {}
     scoped_lookup = environment is not None or account_id is not None
     if scoped_lookup:
         if environment is None or account_id is None:
@@ -1383,18 +1462,21 @@ def unknown_submissions_from_dispatch(
                 "provider_id and provider_environment must be supplied together"
             )
         for attempt_key in normalized:
-            durable_attempt_key = attempt_key
+            durable_attempt_keys = (attempt_key,)
             if provider_id is not None:
-                durable_attempt_key = provider_domain_submission_attempt_key(
+                durable_attempt_keys = provider_domain_submission_attempt_keys(
                     attempt_id=attempt_key,
                     provider_id=provider_id,
                     environment=lookup_environment,
                     provider_environment=provider_environment,
                 )
-            durable_ids[attempt_key] = submission_attempt_aggregate_id(
-                environment=lookup_environment,
-                account_id=lookup_account,
-                attempt_id=durable_attempt_key,
+            durable_ids[attempt_key] = tuple(
+                submission_attempt_aggregate_id(
+                    environment=lookup_environment,
+                    account_id=lookup_account,
+                    attempt_id=durable_attempt_key,
+                )
+                for durable_attempt_key in durable_attempt_keys
             )
     elif aggregate_ids is not None:
         if not isinstance(aggregate_ids, Mapping):
@@ -1402,19 +1484,29 @@ def unknown_submissions_from_dispatch(
         for raw_attempt_id, raw_aggregate_id in aggregate_ids.items():
             attempt_key = _text(raw_attempt_id, name="aggregate_ids attempt_id")
             aggregate_id = _text(raw_aggregate_id, name="aggregate_id")
-            if attempt_key in durable_ids and durable_ids[attempt_key] != aggregate_id:
+            candidate = (aggregate_id,)
+            if attempt_key in durable_ids and durable_ids[attempt_key] != candidate:
                 raise ValueError("aggregate_ids contains conflicting attempt identity")
-            durable_ids[attempt_key] = aggregate_id
+            durable_ids[attempt_key] = candidate
         extra = set(durable_ids) - set(normalized)
         if extra:
             raise ValueError("aggregate_ids contains identities outside attempt_ids")
 
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
-        aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = store.load_events("submission_attempt", aggregate_id)
-        if not events:
+        aggregate_candidates = durable_ids.get(attempt_id, (attempt_id,))
+        located = [
+            (aggregate_id, events)
+            for aggregate_id in aggregate_candidates
+            if (events := store.load_events("submission_attempt", aggregate_id))
+        ]
+        if not located:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
+        if len(located) != 1:
+            raise ValueError(
+                "submission attempt exists under multiple durable identity versions"
+            )
+        aggregate_id, events = located[0]
         first = events[0]
         if first["event_type"] != "SubmissionPrepared":
             raise ValueError(

@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import (
+    load_latest_reconciliation_checkpoint,
     load_latest_reconciliation_checkpoint_for_scope,
     load_submission_resolution_evidence,
     record_reconciliation_checkpoint,
@@ -186,6 +187,38 @@ class ProviderEnvironmentReconciliationAuthorityTests(unittest.TestCase):
             latest_demo["payload"]["provider_environment"],
             "DEMO",
         )
+        self.assertNotEqual(testnet["aggregate_id"], demo["aggregate_id"])
+
+        # A retry of the earlier domain must resolve to its original event,
+        # even after another provider domain has committed the same logical id.
+        testnet_retry = record_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id="same-runtime-scope",
+            result=reconciliation("TESTNET"),
+            observed_at=END,
+            host_id="host-1",
+            owner_epoch="epoch-1",
+        )
+        self.assertEqual(testnet_retry["event_id"], testnet["event_id"])
+
+        exact_testnet = load_latest_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id="same-runtime-scope",
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_environment="TESTNET",
+        )
+        exact_demo = load_latest_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id="same-runtime-scope",
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_environment="DEMO",
+        )
+        self.assertEqual(exact_testnet["event_id"], testnet["event_id"])
+        self.assertEqual(exact_demo["event_id"], demo["event_id"])
 
     def test_submission_resolution_evidence_carries_checkpoint_domain(self):
         unknown = UnknownSubmission.create(

@@ -232,6 +232,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 prepared,
                 expected_session_identity=session_id,
                 expected_public_key_sha256="sha256:" + "f" * 64,
+                expected_query=prepared["query"],
             )
 
     def test_attempt_binding_tamper_fails_before_platform_crypto(self):
@@ -246,6 +247,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 changed,
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
             )
 
     def test_noncanonical_or_extra_fields_are_rejected(self):
@@ -260,6 +262,22 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 changed,
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
+            )
+
+    def test_serialized_query_cannot_replace_independently_pinned_query(self):
+        prepared, _observed, session_id, key_sha, _response = _fixture()
+        changed = deepcopy(prepared)
+        changed["query"]["symbol"] = "ETHUSDT"
+        with self.assertRaisesRegex(
+            HostProviderAttestationError,
+            "independently pinned query",
+        ):
+            verify_host_prepared_attestation(
+                changed,
+                expected_session_identity=session_id,
+                expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
             )
 
     @unittest.skipIf(sys.platform == "win32", "non-Windows fail-closed contract")
@@ -273,6 +291,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 prepared,
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
             )
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")
@@ -282,6 +301,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             prepared,
             expected_session_identity=session_id,
             expected_public_key_sha256=key_sha,
+            expected_query=prepared["query"],
         )
         self.assertEqual(verified_prepared.attempt.subject.provider_id, "BYBIT")
         self.assertEqual(verified_prepared.attempt.subject.credential_generation, 7)
@@ -294,6 +314,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             observed,
             expected_session_identity=session_id,
             expected_public_key_sha256=key_sha,
+            expected_query=observed["query"],
         )
         self.assertEqual(verified_observed.response_bytes, response)
         self.assertEqual(verified_observed.receipt.http_status, 200)
@@ -317,6 +338,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 changed,
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
+                expected_query=prepared["query"],
             )
 
 

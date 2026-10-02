@@ -94,6 +94,35 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
                 response,
                 new DateTimeOffset(
                     2026, 10, 2, 12, 0, 0, 300, TimeSpan.Zero));
+        ProviderAuthenticatedReadReceipt tamperedReceipt = receipt with
+        {
+            HttpStatus = 201,
+        };
+        ExpectFailure(
+            () => _ = new ProviderAuthenticatedReadEvidence(
+                prepared,
+                tamperedReceipt,
+                durable,
+                response),
+            "authenticated-read evidence accepted a tampered signed receipt");
+
+        ProviderAuthenticatedReadDurabilityReceipt wrongDurable = new(
+            issuer.Session.SessionIdentity,
+            attempt.ReadAttemptId,
+            attempt.BindingSha256,
+            attempt.Subject.QueryDigest,
+            "sha256:" + new string('4', 64),
+            "different-prepared-event",
+            1,
+            "2026-10-02T12:00:00.2000000Z");
+        ExpectFailure(
+            () => _ = new ProviderAuthenticatedReadEvidence(
+                prepared,
+                receipt,
+                wrongDurable,
+                response),
+            "authenticated-read evidence accepted a mismatched durability receipt");
+
         ProviderAuthenticatedReadEvidence observed = new(
             prepared,
             receipt,
@@ -144,6 +173,19 @@ internal static class ProviderAuthenticatedReadEnvelopeContractTests
         value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
+
+    private static void ExpectFailure(Action action, string message)
+    {
+        try
+        {
+            action();
+        }
+        catch (ProviderIssuerAuthorityException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
 
     private static void Check(bool condition, string message)
     {

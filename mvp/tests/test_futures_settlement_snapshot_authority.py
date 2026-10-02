@@ -4,12 +4,15 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
+)
+from autotrade_runtime.artifacts._root_authority import (
+    _product_trusted_authenticated_reader,
 )
 from autotrade_runtime.resource_lock import ResourceLockError
 from mvp.autotrade_mvp.futures import (
@@ -27,6 +30,10 @@ from mvp.autotrade_mvp.persistence import canonical_json
 
 
 NOW = datetime(2026, 9, 25, tzinfo=timezone.utc)
+
+
+def product_reader(store: ArtifactStore):
+    return _product_trusted_authenticated_reader(store.root)
 
 
 def settlement() -> FuturesSettlementEvidence:
@@ -73,32 +80,28 @@ def bind(store: ArtifactStore, evidence: FuturesSettlementEvidence):
 
 
 class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
-    def test_artifact_store_subclass_is_rejected_before_reader_issuance(self):
-        class ForgedArtifactStore(ArtifactStore):
-            snapshot_called = False
-
-            def read_authenticated_snapshot(self, artifact_id):
-                self.snapshot_called = True
-                raise AssertionError("subclass snapshot override must not be invoked")
-
+    def test_public_general_reader_is_not_terminal_product_authority(self):
         with TemporaryDirectory() as directory:
-            forged = ForgedArtifactStore(Path(directory) / "artifacts")
+            store = ArtifactStore(Path(directory) / "caller-selected")
+            general_reader = trusted_authenticated_reader(
+                store.root,
+                publication_store=store,
+            )
             with self.assertRaisesRegex(
                 FuturesError,
-                "canonical ArtifactStore publication input",
+                "product-issued trusted artifact reader",
             ):
-                _settlement_evidence_reader(forged.root, forged)
-            self.assertFalse(forged.snapshot_called)
+                _settlement_evidence_reader(general_reader)
 
-    def test_foreign_publication_store_cannot_match_selected_root(self):
+    def test_general_reader_issuer_rejects_foreign_publication_generation(self):
         with TemporaryDirectory() as directory:
             authoritative = ArtifactStore(Path(directory) / "authoritative")
             foreign = ArtifactStore(Path(directory) / "foreign")
-            with self.assertRaisesRegex(
-                FuturesError,
-                "root authority is invalid",
-            ):
-                _settlement_evidence_reader(authoritative.root, foreign)
+            with self.assertRaises(ArtifactIntegrityError):
+                trusted_authenticated_reader(
+                    authoritative.root,
+                    publication_store=foreign,
+                )
 
     def test_settlement_evidence_subclass_is_rejected_before_virtual_dispatch(self):
         class ForgedSettlement(FuturesSettlementEvidence):
@@ -147,7 +150,7 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "artifacts")
             evidence, artifact_id = bind(store, settlement())
-            reader = _settlement_evidence_reader(store.root, store)
+            reader = _settlement_evidence_reader(product_reader(store))
 
             def forbidden(*_args, **_kwargs):
                 raise AssertionError("publication store must not regain read authority")
@@ -167,7 +170,7 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "artifacts")
             evidence, artifact_id = bind(store, settlement())
-            reader = _settlement_evidence_reader(store.root, store)
+            reader = _settlement_evidence_reader(product_reader(store))
             calls: list[str] = []
 
             def counted(requested_artifact_id: str):
@@ -200,24 +203,18 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
                 ):
                     _verify_provider_settlement_evidence(evidence, failing)
 
-    def test_reader_issuance_resource_lock_failure_is_normalized(self):
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "artifacts")
-            with patch(
-                "mvp.autotrade_mvp.futures_journal.trusted_authenticated_reader",
-                side_effect=ResourceLockError("simulated authority lock failure"),
-            ):
-                with self.assertRaisesRegex(
-                    FuturesError,
-                    "root authority is invalid",
-                ):
-                    _settlement_evidence_reader(store.root, store)
+    def test_unissued_reader_is_rejected_before_artifact_access(self):
+        with self.assertRaisesRegex(
+            FuturesError,
+            "product-issued trusted artifact reader",
+        ):
+            _settlement_evidence_reader(object())
 
     def test_held_snapshot_bytes_are_independently_rehashed(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "artifacts")
             evidence, artifact_id = bind(store, settlement())
-            reader = _settlement_evidence_reader(store.root, store)
+            reader = _settlement_evidence_reader(product_reader(store))
             manifest, raw = reader(artifact_id)
 
             def corrupted(_artifact_id):

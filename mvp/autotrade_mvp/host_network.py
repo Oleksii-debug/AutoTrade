@@ -131,6 +131,20 @@ SnapshotProvider = Callable[
 ]
 
 
+def _require_canonical_security_boundary(value: object) -> SecurityBoundary:
+    """Admit only the canonical host authentication authority at use time."""
+
+    if type(value) is not SecurityBoundary:
+        raise TypeError("security_boundary must be exact SecurityBoundary")
+    state = vars(value)
+    for method_name in ("validate_session", "validate_host_session"):
+        if method_name in state:
+            raise TypeError(
+                "security_boundary canonical validation methods must not be shadowed"
+            )
+    return value
+
+
 def header_principal_resolver(
     headers: Mapping[str, str],
     origin: str,
@@ -233,8 +247,7 @@ class AuthenticatedHostApplication:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
-        if not isinstance(security_boundary, SecurityBoundary):
-            raise TypeError("security_boundary must be SecurityBoundary")
+        security_boundary = _require_canonical_security_boundary(security_boundary)
         if not isinstance(host_id, str) or not host_id.strip():
             raise ValueError("host_id is required")
         if not callable(principal_resolver):
@@ -313,7 +326,11 @@ class AuthenticatedHostApplication:
             or session_reference != expected_reference
         ):
             return False
-        return self.security_boundary.validate_host_session(
+        security_boundary = _require_canonical_security_boundary(
+            self.security_boundary
+        )
+        return SecurityBoundary.validate_host_session(
+            security_boundary,
             bearer,
             actor,
             origin,
@@ -324,7 +341,11 @@ class AuthenticatedHostApplication:
         principal = self._principal_resolver(headers, self.public_origin)
         if not isinstance(principal, HostPrincipal):
             raise TypeError("principal_resolver must return HostPrincipal")
-        session = self.security_boundary.validate_session(
+        security_boundary = _require_canonical_security_boundary(
+            self.security_boundary
+        )
+        session = SecurityBoundary.validate_session(
+            security_boundary,
             principal.token,
             origin=self.public_origin,
         )

@@ -33,6 +33,17 @@ from mvp.autotrade_mvp.provider_core import (
 )
 
 
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal as_tuple dispatch")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile Decimal equality dispatch")
+
+
 OPTION_ID = "11111111-1111-1111-1111-111111111111"
 UNDERLYING_ID = "22222222-2222-2222-2222-222222222222"
 LIFECYCLE_ENDPOINT = "/v5/account/option-lifecycle"
@@ -308,6 +319,36 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             raw_evidence_digest="sha256:" + "f" * 64,
             provider_revision="forged-r1",
         )
+
+    def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
+        base = {
+            "provider_id": "BYBIT",
+            "account_id": "paper-1",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "venue_id": "OPTIONS",
+            "instrument_version": f"{OPTION_ID}@1",
+            "external_event_id": "hostile-life",
+            "event_kind": "EXERCISE",
+            "signed_contracts": Decimal("1"),
+            "effective_at": utc(12, 18, 19),
+            "observed_at": utc(12, 18, 19, 1),
+            "raw_evidence_digest": "sha256:" + "e" * 64,
+            "provider_revision": "hostile-r1",
+        }
+        for field in (
+            "signed_contracts",
+            "underlying_price",
+            "cash_settlement_amount",
+        ):
+            with self.subTest(field=field):
+                values = dict(base)
+                values[field] = HostileDecimal("1.25")
+                with self.assertRaisesRegex(
+                    OptionLifecycleError,
+                    "bounded exact decimal input",
+                ):
+                    OptionLifecycleObservation(**values)
 
     def test_lifecycle_decimal_identity_is_context_independent(self):
         observation = OptionLifecycleObservation(

@@ -1,4 +1,6 @@
+from html.parser import HTMLParser
 from pathlib import Path
+import re
 import unittest
 
 
@@ -6,6 +8,15 @@ ROOT = Path(__file__).resolve().parents[2]
 INDEX = ROOT / "web" / "src" / "index.html"
 APP = ROOT / "web" / "src" / "app.js"
 CSS = ROOT / "web" / "src" / "styles.css"
+
+
+class _ElementParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.elements = []
+
+    def handle_starttag(self, tag, attrs):
+        self.elements.append((tag, dict(attrs)))
 
 
 class SemanticWebClientContractTests(unittest.TestCase):
@@ -355,8 +366,68 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("function parseCommandResult(value, expectedCommandId)", js)
         self.assertIn('["ACCEPTED", "REJECTED", "CONFLICT"]', js)
         self.assertIn("CommandResult command_id does not match", js)
-        self.assertIn("field_errors must be an array", js)
+        self.assertIn("field_errors must be an array of objects", js)
+        self.assertIn('result.field_errors.some((item) =>', js)
+        self.assertIn(
+            '!item || typeof item !== "object" || Array.isArray(item)',
+            js,
+        )
         self.assertIn("response.status !== 200 && response.status !== 409", js)
+
+    def test_command_field_validation_details_are_semantic_and_never_silently_dropped(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'id="command-result" tabindex="-1" aria-describedby="command-validation-details"',
+            html,
+        )
+        self.assertIn(
+            'id="command-validation-details" role="region" aria-labelledby="command-validation-heading"',
+            html,
+        )
+        self.assertIn(
+            '<h3 id="command-validation-heading">Command validation details</h3>',
+            html,
+        )
+        self.assertIn('id="command-validation-list"', html)
+        self.assertIn(
+            'function renderCommandValidationDetails(fieldErrors, stateName)',
+            js,
+        )
+        self.assertIn('appendMessage(projectionText(error))', js)
+        self.assertIn(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            js,
+        )
+        self.assertIn(
+            'renderCommandValidationDetails([], "pending")',
+            js,
+        )
+        self.assertIn(
+            'renderCommandValidationDetails([], "unavailable")',
+            js,
+        )
+        self.assertIn(
+            "No field-specific validation errors reported by the host.",
+            js,
+        )
+        self.assertEqual(js.count("innerHTML"), 0)
+
+        submit = js.index("async function submitCommand(event)")
+        pending = js.index('renderCommandValidationDetails([], "pending")', submit)
+        network = js.index("await submitCanonicalCommand(payload)", submit)
+        confirmed = js.index(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            network,
+        )
+        status_branch = js.index('if (result.status === "ACCEPTED")', confirmed)
+        unavailable = js.index(
+            'renderCommandValidationDetails([], "unavailable")',
+            status_branch,
+        )
+        self.assertLess(pending, network)
+        self.assertLess(confirmed, status_branch)
+        self.assertGreater(unavailable, status_branch)
 
     def test_operation_identity_is_canonical_uuid_before_route_use(self):
         js = APP.read_text(encoding="utf-8")
@@ -736,6 +807,117 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+
+
+    def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-filter-status"', html)
+        self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
+        self.assertIn("function copyVisibleTableRows(tool)", js)
+        self.assertIn("function bindTableTools()", js)
+        self.assertIn("bindTableTools();", js)
+
+    def test_projection_filter_is_local_text_only_and_reapplied_after_live_updates(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('row.dataset.filterableRow = "true"', js)
+        self.assertIn("tableSearchText(row).includes(query)", js)
+        self.assertIn("row.hidden = !matches", js)
+        self.assertIn('reapplyTableFilter("jobs-body")', js)
+        self.assertIn('reapplyTableFilter("event-history-body")', js)
+        self.assertIn("reapplyTableFilter(bodyId)", js)
+        scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
+        self.assertNotIn("fetch(", scope)
+        self.assertNotIn("submitCanonicalCommand", scope)
+        self.assertNotIn("innerHTML", scope)
+
+    def test_projection_filter_case_normalization_is_locale_deterministic(self):
+        js = APP.read_text(encoding="utf-8")
+        scope = js[js.index("function normalizedTableQuery"):js.index("function reapplyTableFilter")]
+        self.assertIn("toLowerCase()", scope)
+        self.assertNotIn("toLocaleLowerCase()", scope)
+
+    def test_passive_live_refresh_updates_filter_status_without_announcing(self):
+        js = APP.read_text(encoding="utf-8")
+        apply_scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
+        self.assertIn("text(tool.statusId, statusMessage);", apply_scope)
+        self.assertIn("if (announce) queuePoliteAnnouncement(statusMessage);", apply_scope)
+        reapply = js[js.index("function reapplyTableFilter"):js.index("function resetTableFiltersForScopeChange")]
+        self.assertIn("applyTableFilter(tool, {announce: false})", reapply)
+
+    def test_scope_transition_clears_filters_before_new_scope_render_and_announces_once(self):
+        js = APP.read_text(encoding="utf-8")
+        reset = js[js.index("function resetTableFiltersForScopeChange"):js.index("function visibleTableRows")]
+        self.assertIn("for (const tool of TABLE_TOOLS)", reset)
+        self.assertIn('filter.value = ""', reset)
+        self.assertEqual(reset.count("queuePoliteAnnouncement("), 1)
+        snapshot = js[js.index("function renderSnapshot(snapshot"):js.index("async function refreshSnapshot")]
+        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index("resetEventHistoryForScope();"))
+        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index('renderProjection(\n      "portfolio-body"'))
+
+    def test_copy_visible_rows_uses_only_rendered_text_and_accessible_fallback(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("filterableRows(body).filter((row) => !row.hidden)", js)
+        self.assertIn('cell.textContent.replace(/\\s+/g, " ").trim()', js)
+        self.assertIn("await navigator.clipboard.writeText(payload)", js)
+        self.assertIn("Clipboard access is unavailable. Use normal text selection and copy.", js)
+        self.assertIn("Clipboard copy was not permitted. Use normal text selection and copy.", js)
+        self.assertNotIn("document.execCommand", js)
+
+    def test_table_tools_use_one_polite_live_region_not_five_status_live_regions(self):
+        html = INDEX.read_text(encoding="utf-8")
+        parser = _ElementParser()
+        parser.feed(html)
+        by_id = {attrs["id"]: (tag, attrs) for tag, attrs in parser.elements if "id" in attrs}
+        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+            status_id = f"{prefix}-filter-status"
+            tag, attrs = by_id[status_id]
+            self.assertEqual(tag, "p", status_id)
+            self.assertNotIn("role", attrs, status_id)
+            self.assertNotIn("aria-live", attrs, status_id)
+            tag, attrs = by_id[f"{prefix}-filter"]
+            self.assertEqual(tag, "input", prefix)
+            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
+        # Native output is implicitly a polite status region even without ARIA.
+        # Snapshot metadata must remain readable without announcing every poll.
+        live_ids = [
+            attrs.get("id") for tag, attrs in parser.elements
+            if tag == "output" or attrs.get("role") in {"status", "alert", "log"}
+            or attrs.get("aria-live", "off") != "off"
+        ]
+        self.assertEqual(
+            live_ids, ["polite-status", "urgent-status"],
+        )
+
+    def test_table_tool_focus_targets_survive_browser_page_restore(self):
+        js = APP.read_text(encoding="utf-8")
+        for target in (
+            "strategy-filter", "strategy-copy", "portfolio-filter", "portfolio-copy",
+            "risk-filter", "risk-copy", "jobs-filter", "jobs-copy",
+            "event-history-filter", "event-history-copy",
+        ):
+            self.assertIn(f'"{target}"', js)
+
+    def test_table_tools_reflow_without_horizontal_viewport_locking(self):
+        css = CSS.read_text(encoding="utf-8")
+        self.assertIn(".table-tools {", css)
+        self.assertIn("flex-wrap: wrap", css)
+        self.assertIn("max-inline-size: 100%", css)
+        self.assertIn("overflow-wrap: anywhere", css)
+        self.assertNotIn("overflow-x: hidden", css.lower())
+
+    def test_table_ui_feedback_uses_speech_queue_not_material_notification_history(self):
+        js = APP.read_text(encoding="utf-8")
+        queue = js[js.index("function queuePoliteAnnouncement"):js.index("function announce(message")]
+        self.assertIn("state.pendingAnnouncements.push(message)", queue)
+        self.assertIn('announceLiveText("polite-status", pending.join(" "))', queue)
+        self.assertNotIn("notification-history", queue)
+        copy = js[js.index("async function copyVisibleTableRows"):js.index("function bindTableTools")]
+        self.assertNotIn("announce(message", copy)
 
 
 if __name__ == "__main__":

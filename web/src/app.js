@@ -27,6 +27,14 @@
     REVOKE_AUTHORITY: new Set(["OWNER"])
   });
 
+  const TABLE_TOOLS = Object.freeze([
+    Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", statusId: "strategy-filter-status", label: "strategy and decision"}),
+    Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", statusId: "risk-filter-status", label: "risk and authority"}),
+    Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", statusId: "jobs-filter-status", label: "research and replay jobs"}),
+    Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", statusId: "event-history-filter-status", label: "received host events"})
+  ]);
+
   const state = {
     cursor: 0n,
     version: 0n,
@@ -54,6 +62,16 @@
     "risk-region",
     "jobs-region",
     "event-history-region",
+    "strategy-filter",
+    "strategy-copy",
+    "portfolio-filter",
+    "portfolio-copy",
+    "risk-filter",
+    "risk-copy",
+    "jobs-filter",
+    "jobs-copy",
+    "event-history-filter",
+    "event-history-copy",
     "host-action",
     "submit-command",
     "refresh-state",
@@ -273,8 +291,10 @@
     if (!["ACCEPTED", "REJECTED", "CONFLICT"].includes(result.status)) {
       throw new Error("CommandResult status is not canonical");
     }
-    if (!Array.isArray(result.field_errors)) {
-      throw new Error("field_errors must be an array");
+    if (!Array.isArray(result.field_errors) ||
+        result.field_errors.some((item) =>
+          !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error("field_errors must be an array of objects");
     }
     const operationId = result.operation_id === undefined
       ? null
@@ -423,6 +443,39 @@
     return String(value);
   }
 
+  function renderCommandValidationDetails(fieldErrors, stateName) {
+    const list = byId("command-validation-list");
+    if (!list) return;
+    list.replaceChildren();
+
+    const appendMessage = (message) => {
+      const item = document.createElement("li");
+      item.textContent = message;
+      list.appendChild(item);
+    };
+
+    if (stateName === "pending") {
+      appendMessage(
+        "No confirmed host field-validation details are available for this command attempt yet.");
+      return;
+    }
+    if (stateName === "unavailable") {
+      appendMessage(
+        "Field-specific validation details are unavailable because the command response could not be confirmed.");
+      return;
+    }
+    if (stateName !== "confirmed" || !Array.isArray(fieldErrors)) {
+      throw new Error("command validation detail state is invalid");
+    }
+    if (fieldErrors.length === 0) {
+      appendMessage("No field-specific validation errors reported by the host.");
+      return;
+    }
+    for (const error of fieldErrors) {
+      appendMessage(projectionText(error));
+    }
+  }
+
   function flattenProjectionRows(record) {
     const rows = [];
 
@@ -459,6 +512,7 @@
 
   function appendProjectionRow(body, label, value) {
     const row = document.createElement("tr");
+    row.dataset.filterableRow = "true";
     const header = document.createElement("th");
     header.scope = "row";
     header.textContent = label;
@@ -480,11 +534,13 @@
       cell.textContent = emptyMessage;
       row.appendChild(cell);
       body.appendChild(row);
+      reapplyTableFilter(bodyId);
       return;
     }
     for (const [key, value] of entries) {
       appendProjectionRow(body, key, value);
     }
+    reapplyTableFilter(bodyId);
   }
 
   function renderPermissionSummary(permissionSummary) {
@@ -516,10 +572,12 @@
       cell.textContent = "No background jobs reported by the host snapshot.";
       row.appendChild(cell);
       body.appendChild(row);
+      reapplyTableFilter("jobs-body");
       return;
     }
     jobs.forEach((job, index) => {
       const row = document.createElement("tr");
+      row.dataset.filterableRow = "true";
       const header = document.createElement("th");
       header.scope = "row";
       header.textContent = "Job " + String(index + 1);
@@ -528,6 +586,115 @@
       row.append(header, cell);
       body.appendChild(row);
     });
+    reapplyTableFilter("jobs-body");
+  }
+
+  function normalizedTableQuery(value) {
+    return String(value ?? "").trim().toLowerCase();
+  }
+
+  function tableSearchText(row) {
+    return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function toolForBody(bodyId) {
+    return TABLE_TOOLS.find((tool) => tool.bodyId === bodyId) || null;
+  }
+
+  function filterableRows(body) {
+    return [...body.querySelectorAll('tr[data-filterable-row="true"]')];
+  }
+
+  function applyTableFilter(tool, {announce = true} = {}) {
+    const body = byId(tool.bodyId);
+    const filter = byId(tool.filterId);
+    if (!body || !filter) return;
+    const rows = filterableRows(body);
+    const query = normalizedTableQuery(filter.value);
+    let visible = 0;
+    for (const row of rows) {
+      const matches = query === "" || tableSearchText(row).includes(query);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    }
+    let statusMessage;
+    if (rows.length === 0) {
+      statusMessage = "No host rows are available to filter.";
+    } else if (query === "") {
+      statusMessage = String(rows.length) + " rows shown.";
+    } else {
+      statusMessage = String(visible) + " of " + String(rows.length) +
+        " rows match the current filter.";
+    }
+    text(tool.statusId, statusMessage);
+    if (announce) queuePoliteAnnouncement(statusMessage);
+  }
+
+  function reapplyTableFilter(bodyId) {
+    const tool = toolForBody(bodyId);
+    if (tool !== null) applyTableFilter(tool, {announce: false});
+  }
+
+  function resetTableFiltersForScopeChange() {
+    for (const tool of TABLE_TOOLS) {
+      const filter = byId(tool.filterId);
+      if (filter) filter.value = "";
+      text(tool.statusId, "Filter cleared for new account/environment scope.");
+    }
+    queuePoliteAnnouncement("Table filters cleared for new account/environment scope.");
+  }
+
+  function visibleTableRows(tool) {
+    const body = byId(tool.bodyId);
+    if (!body) return [];
+    return filterableRows(body).filter((row) => !row.hidden);
+  }
+
+  function tabSeparatedRowText(row) {
+    return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join("\t");
+  }
+
+  async function copyVisibleTableRows(tool) {
+    const rows = visibleTableRows(tool);
+    if (rows.length === 0) {
+      const message = "No visible " + tool.label + " rows are available to copy.";
+      text(tool.statusId, message);
+      queuePoliteAnnouncement(message);
+      return;
+    }
+    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+      const message = "Clipboard access is unavailable. Use normal text selection and copy.";
+      text(tool.statusId, message);
+      queuePoliteAnnouncement(message);
+      return;
+    }
+    const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
+    try {
+      await navigator.clipboard.writeText(payload);
+      const message = String(rows.length) + " visible " + tool.label + " rows copied.";
+      text(tool.statusId, message);
+      queuePoliteAnnouncement(message);
+    } catch {
+      const message = "Clipboard copy was not permitted. Use normal text selection and copy.";
+      text(tool.statusId, message);
+      queuePoliteAnnouncement(message);
+    }
+  }
+
+  function bindTableTools() {
+    for (const tool of TABLE_TOOLS) {
+      const filter = byId(tool.filterId);
+      const copy = byId(tool.copyId);
+      if (!filter || !copy) continue;
+      filter.addEventListener("input", () => applyTableFilter(tool));
+      copy.addEventListener("click", () => { void copyVisibleTableRows(tool); });
+      applyTableFilter(tool, {announce: false});
+    }
   }
 
   function announceLiveText(id, message) {
@@ -539,6 +706,19 @@
     window.setTimeout(() => {
       element.textContent = message;
     }, 0);
+  }
+
+  function queuePoliteAnnouncement(message) {
+    if (!message) return;
+    state.pendingAnnouncements.push(message);
+    if (state.announcementTimer !== null) return;
+    state.announcementTimer = window.setTimeout(() => {
+      const pending = state.pendingAnnouncements;
+      state.pendingAnnouncements = [];
+      state.announcementTimer = null;
+      // Preserve repeated independent feedback while using one polite live region.
+      announceLiveText("polite-status", pending.join(" "));
+    }, 750);
   }
 
   function announce(message, urgent = false) {
@@ -571,16 +751,7 @@
       return;
     }
 
-    state.pendingAnnouncements.push(message);
-    if (state.announcementTimer !== null) return;
-    state.announcementTimer = window.setTimeout(() => {
-      const pending = state.pendingAnnouncements;
-      state.pendingAnnouncements = [];
-      state.announcementTimer = null;
-      // Do not deduplicate identical messages inside the aggregation window:
-      // two matching material events are still two independent events.
-      announceLiveText("polite-status", pending.join(" "));
-    }, 750);
+    queuePoliteAnnouncement(message);
   }
 
   async function jsonFetch(url, options = {}) {
@@ -652,6 +823,7 @@
 
     const row = document.createElement("tr");
     row.dataset.hostEventCursor = cursor.toString();
+    row.dataset.filterableRow = "true";
     for (let index = 0; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
@@ -664,6 +836,7 @@
     while (body.children.length > 100) {
       body.lastElementChild.remove();
     }
+    reapplyTableFilter("event-history-body");
   }
 
   function resetEventHistoryForScope() {
@@ -676,6 +849,7 @@
     cell.textContent = "No canonical host events received in this account/environment session.";
     row.appendChild(cell);
     body.appendChild(row);
+    reapplyTableFilter("event-history-body");
   }
 
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
@@ -686,6 +860,7 @@
     if (scopeChanged) {
       state.cursor = 0n;
       state.version = 0n;
+      resetTableFiltersForScopeChange();
       resetEventHistoryForScope();
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
@@ -896,6 +1071,7 @@
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('button[type="submit"]');
+    renderCommandValidationDetails([], "pending");
 
     if (!state.snapshotReady || state.sessionIdentity === null) {
       setCommandAvailability(false);
@@ -948,6 +1124,7 @@
     try {
       const result = await submitCanonicalCommand(payload);
       clearConfirmedCommand(payload);
+      renderCommandValidationDetails(result.fieldErrors, "confirmed");
       if (result.status === "ACCEPTED") {
         let acceptedMessage =
           "Command " + commandId +
@@ -1003,6 +1180,7 @@
         "command-result",
         "Command " + commandId +
           " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      renderCommandValidationDetails([], "unavailable");
       byId("command-result").focus();
     } finally {
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
@@ -1029,6 +1207,7 @@
   }
 
   async function start() {
+    bindTableTools();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);

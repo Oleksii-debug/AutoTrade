@@ -138,6 +138,29 @@ class SimulationOperatorTests(unittest.TestCase):
                 event["aggregate_type"] = "unrelated_submission"
         self._invalid_journal(alter)
 
+    def test_fill_completion_requires_canonical_submission_envelope_owner(self):
+        for key, value in (("host_id", "another-host"), ("owner_epoch", "2")):
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "SubmissionSending":
+                        event[key] = value
+                self._invalid_journal(alter)
+
+    def test_fill_completion_requires_canonical_dispatch_owner_identity(self):
+        cases = (
+            ("SubmissionPrepared", "owner_token", "another-owner"),
+            ("SubmissionPrepared", "owner_epoch", 2),
+            ("SubmissionSending", "owner_token", "another-owner"),
+            ("SubmissionSending", "owner_epoch", 2),
+            ("SubmissionSending", "reason", "other-barrier"),
+        )
+        for event_type, key, value in cases:
+            with self.subTest(event_type=event_type, key=key):
+                def alter(event):
+                    if event["event_type"] == event_type:
+                        event["payload"][key] = value
+                self._invalid_journal(alter)
+
     def test_submission_client_order_is_consistent_through_the_send(self):
         def alter(event):
             if event["event_type"] == "SubmissionSent":

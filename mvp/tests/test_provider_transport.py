@@ -11,6 +11,7 @@ import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
+from contextlib import contextmanager
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -90,6 +91,42 @@ class FakeSecretResolver:
         self.calls = []
         self.on_resolve = on_resolve
         self.credential_plaintext = credential_plaintext
+        self.lease_active = False
+        self.lease_enters = 0
+        self.lease_exits = 0
+
+    @contextmanager
+    def lease_for_execution(
+        self,
+        token,
+        *,
+        origin,
+        handle,
+        execution_identity,
+        account_id,
+        provider,
+        environment,
+        purpose,
+    ):
+        if self.lease_active:
+            raise AssertionError("credential lease must not be re-entered")
+        plaintext = self.resolve_for_execution(
+            token,
+            origin=origin,
+            handle=handle,
+            execution_identity=execution_identity,
+            account_id=account_id,
+            provider=provider,
+            environment=environment,
+            purpose=purpose,
+        )
+        self.lease_active = True
+        self.lease_enters += 1
+        try:
+            yield plaintext
+        finally:
+            self.lease_active = False
+            self.lease_exits += 1
 
     def resolve_for_execution(
         self,
@@ -156,6 +193,19 @@ class RecordingWire:
             http_status=self.http_status,
             body=self.response,
         )
+
+
+
+class LeaseAssertingWire(RecordingWire):
+    def __init__(self, events, resolver, **kwargs):
+        super().__init__(events, **kwargs)
+        self.resolver = resolver
+
+    def send(self, request):
+        if not self.resolver.lease_active:
+            raise AssertionError("wire send escaped credential generation lease")
+        self.events.append("wire-lease-active")
+        return super().send(request)
 
 
 def trade_handle(*, environment="PAPER", account_id="acct-1"):
@@ -2624,6 +2674,52 @@ class ProviderTransportTests(unittest.TestCase):
             wire.requests[0].body,
         )
 
+    def test_trade_credential_generation_lease_covers_final_guard_and_wire(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(events, resolver)
+        transport = BinanceSpotHttpTransport(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id="cap-1",
+            secret_resolver=resolver,
+            credential_handle=trade_handle(),
+            session_token="session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            quota_gate=None,
+            wire_client=wire,
+        )
+        client_id = "at-lease-trade"
+
+        def final_guard():
+            self.assertTrue(
+                resolver.lease_active,
+                "final guard must execute inside exact credential generation lease",
+            )
+            events.append("guard-lease-active")
+
+        response = transport(
+            client_id,
+            prepared_request(client_id),
+            final_guard,
+        )
+
+        self.assertEqual(response.http_status, 200)
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(
+            events,
+            [
+                "resolve",
+                "guard-lease-active",
+                "wire-lease-active",
+                "wire",
+            ],
+        )
+
     def test_capability_mismatch_rejects_before_secret_guard_or_wire(self):
         events = []
         wire = RecordingWire(events)
@@ -3122,6 +3218,28 @@ class ProviderTransportTests(unittest.TestCase):
 
 
 
+    def test_trade_transport_rejects_legacy_resolve_only_secret_resolver(self):
+        class ResolveOnlySecretResolver:
+            def resolve_for_execution(self, *_args, **_kwargs):
+                return '{"api_key":"legacy","api_secret":"legacy"}'
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "secret_resolver must implement lease_for_execution",
+        ):
+            BinanceSpotHttpTransport(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-1",
+                capability_snapshot_id="cap-1",
+                secret_resolver=ResolveOnlySecretResolver(),
+                credential_handle=trade_handle(),
+                session_token="session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                wire_client=RecordingWire([]),
+            )
+
 
 class AuthenticatedReadTransportTests(unittest.TestCase):
     def make_read_transport(
@@ -3207,6 +3325,72 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
         self.assertNotIn("SECRET", observation.evidence_ref)
+
+    def test_read_credential_generation_lease_covers_final_currentness_and_wire(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(
+            events,
+            resolver,
+            response=b'{"balances":[{"asset":"USD"}]}',
+        )
+        transport, _ = self.make_read_transport(
+            events=events,
+            wire=wire,
+            secret_resolver=resolver,
+        )
+
+        observation = transport(authenticated_read_binding())
+
+        self.assertEqual(observation.provider_id, "BINANCE")
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(
+            events,
+            [
+                "capability",
+                "resolve",
+                "capability",
+                "wire-lease-active",
+                "wire",
+            ],
+        )
+
+    def test_credential_generation_lease_releases_after_wire_failure(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(
+            events,
+            resolver,
+            error=OSError("synthetic post-barrier failure"),
+        )
+        transport = BinanceSpotHttpTransport(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id="cap-1",
+            secret_resolver=resolver,
+            credential_handle=trade_handle(),
+            session_token="session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            quota_gate=None,
+            wire_client=wire,
+        )
+        client_id = "at-lease-failure"
+
+        with self.assertRaisesRegex(OSError, "synthetic post-barrier failure"):
+            transport(
+                client_id,
+                prepared_request(client_id),
+                lambda: None,
+            )
+
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(events[-1], "wire")
 
     def test_my_trades_activity_transport_flows_into_fill_parser(self):
         events = []

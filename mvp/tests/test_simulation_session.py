@@ -1,28 +1,102 @@
 """Product entrypoint checks for the canonical network-free simulation session."""
 
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import json
 import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.pipeline import MovingAverageStrategy, _money
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import (
     ACCOUNT, ENVIRONMENT, INSTRUMENT, PROVIDER, run_canonical_simulation,
 )
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 NOW = "2026-09-30T12:00:00Z"
 BUY = ["100", "101", "103"]
 HOLD = ["100", "101"]
+ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+
+
+class HostileDecimal(Decimal):
+    """Decimal subclass whose virtual methods must never become strategy authority."""
+
+    def is_finite(self):
+        raise AssertionError("hostile Decimal.is_finite() was virtual-dispatched")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal.as_tuple() was virtual-dispatched")
 
 
 class CanonicalSimulationSessionTests(unittest.TestCase):
+    def test_strategy_keeps_valid_wide_intermediate_sums_rational(self):
+        low = Decimal("9" * 255 + "7")
+        middle = Decimal("9" * 255 + "8")
+        high = Decimal("9" * 256)
+        with localcontext() as context:
+            context.prec = 1
+            context.traps[Inexact] = True
+            context.traps[Rounded] = True
+            for prices, expected in (
+                ([low, middle, high], "BUY"),
+                ([high, middle, low], "SELL"),
+                ([high, high, high], "HOLD"),
+            ):
+                with self.subTest(expected=expected):
+                    self.assertEqual(MovingAverageStrategy().decide(prices, Decimal("1")).side, expected)
+
+    def test_money_step_uses_explicit_half_even_without_ambient_context(self):
+        for precision in (1, 80):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        context.traps[Inexact] = True
+                        context.traps[Rounded] = True
+                        self.assertEqual(_money("1.000000015"), Decimal("1.00000002"))
+                        self.assertEqual(_money("1.000000005"), Decimal("1"))
+                        self.assertEqual(_money("-1.000000015"), Decimal("-1.00000002"))
+
+    def test_hostile_price_text_is_rejected_before_decimal_construction_or_state(self):
+        for price in ("9" * 257, "1e256", "1e-257", "1e999999999", "NaN", "1" * 10000):
+            with self.subTest(price_length=len(price)), TemporaryDirectory() as parent:
+                state_dir = Path(parent) / "session"
+                with patch("autotrade_numeric.exact_decimal.Decimal", side_effect=AssertionError("preflight must precede Decimal construction")), patch("mvp.autotrade_mvp.simulation_session.Decimal", side_effect=AssertionError("local Decimal construction must not bypass preflight")):
+                    with self.assertRaises(ExactDecimalError):
+                        run_canonical_simulation([price], state_dir, episode_id="invalid", now=NOW)
+                self.assertFalse(state_dir.exists())
+
+    def test_fee_inclusive_resource_failure_precedes_bootstrap(self):
+        with TemporaryDirectory() as parent:
+            state_dir = Path(parent) / "session"
+            with self.assertRaises(ExactDecimalError):
+                run_canonical_simulation(
+                    ["9" * 255 + "7", "9" * 255 + "8", "9" * 256],
+                    state_dir, episode_id="fee-envelope", now=NOW,
+                )
+            self.assertFalse(state_dir.exists())
+
+    def test_user_price_presentation_keeps_existing_lexical_input_hash(self):
+        with TemporaryDirectory() as directory:
+            prices = [" +00100.00 ", "1.0100e2"]
+            result = run_canonical_simulation(prices, directory, episode_id="presentation", now=NOW)
+            self.assertEqual(result["status"], "HOLD")
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            started = store.load_events("canonical_simulation_session", "single-episode")[0]
+            self.assertEqual(started["payload"]["input_hash"], payload_digest({
+                "episode_id": "presentation", "prices": ["100.00", "101.00"],
+            }))
+
     def test_orphaned_bootstrap_state_cannot_start_another_send(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -130,6 +204,200 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 reopened.load_events_by_aggregate_type("submission_attempt"),
                 submission,
             )
+
+    def test_strategy_exact_boundary_precedes_every_result_path(self):
+        strategy = MovingAverageStrategy()
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([HostileDecimal("100")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([Decimal("100")], HostileDecimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum scale"):
+            strategy.decide([Decimal("1e-257")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum integer digits"):
+            strategy.decide([Decimal("100")], Decimal("1e256"))
+        with self.assertRaisesRegex(ValueError, "At least one price"):
+            strategy.decide([], Decimal("1"))
+
+    def test_strategy_detaches_consumed_values_and_ignores_unused_prefix(self):
+        strategy = MovingAverageStrategy()
+        decision = strategy.decide(
+            [
+                HostileDecimal("999"),
+                Decimal("100.0"),
+                Decimal("101.00"),
+                Decimal("103.000"),
+            ],
+            Decimal("1.000"),
+        )
+        self.assertEqual(decision.side, "BUY")
+        self.assertIs(type(decision.quantity), Decimal)
+        self.assertIs(type(decision.price), Decimal)
+        self.assertEqual(decision.quantity, Decimal("1"))
+        self.assertEqual(decision.price, Decimal("103"))
+
+        hold = strategy.decide(
+            [HostileDecimal("999"), Decimal("100.0")], Decimal("1.000")
+        )
+        self.assertEqual(hold.side, "HOLD")
+        self.assertIs(type(hold.price), Decimal)
+        self.assertEqual(hold.price, Decimal("100"))
+
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide(
+                [Decimal("100"), HostileDecimal("101"), Decimal("103")],
+                Decimal("1"),
+            )
+        with self.assertRaisesRegex(ExactDecimalError, "maximum integer digits"):
+            strategy.decide(
+                [Decimal("100"), Decimal("101"), Decimal("1e256")],
+                Decimal("1"),
+            )
+
+    def test_canonical_session_preserves_pre_protocol_input_hash_spelling(self):
+        episode_id = "legacy-spelling"
+        with TemporaryDirectory() as directory:
+            first = run_canonical_simulation(
+                ["100.0", "101.0"], directory,
+                episode_id=episode_id, now=NOW,
+            )
+            self.assertEqual(first["status"], "HOLD")
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            started = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )[0]
+            self.assertEqual(
+                started["payload"]["input_hash"],
+                payload_digest({
+                    "episode_id": episode_id,
+                    "prices": ["100.0", "101.0"],
+                }),
+            )
+            again = run_canonical_simulation(
+                ["100.0", "101.0"], directory, episode_id=episode_id
+            )
+            self.assertTrue(again["resumed"])
+            with self.assertRaisesRegex(ValueError, "another simulation input"):
+                run_canonical_simulation(
+                    ["100", "101"], directory, episode_id=episode_id
+                )
+
+    def test_strategy_decisions_are_identical_across_hostile_decimal_contexts(self):
+        cases = (
+            (["100", "101", "103"], "BUY"),
+            (["1", "1.0000000001", "1.00000000010001"], "BUY"),
+            (["103", "101", "100"], "SELL"),
+            (["100", "100", "100"], "HOLD"),
+        )
+        for precision in (1, 2, 6, 10, 28, 80):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        for raw_prices, expected in cases:
+                            decision = MovingAverageStrategy().decide(
+                                [Decimal(value) for value in raw_prices], Decimal("1")
+                            )
+                            self.assertEqual(decision.side, expected)
+
+    def test_buy_durable_identity_and_economics_are_context_independent(self):
+        expected_signature = None
+        for precision in (6, 10, 28, 80):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            result = run_canonical_simulation(
+                                BUY, directory, episode_id="context-buy", now=NOW
+                            )
+                        store = JournalStore(Path(directory) / "journal.sqlite3")
+                        authority_events = store.load_events("authority_state", "canonical")
+                        admission = next(
+                            event for event in authority_events
+                            if event["event_type"] == "AuthorityAdmissionRecorded"
+                        )
+                        reservation = next(
+                            event for event in store.load_events_by_aggregate_type("reservation_book")
+                            if event["payload"]["operation"] == "RESERVE"
+                        )
+                        submission = store.load_events_by_aggregate_type("submission_attempt")
+                        sessions = store.load_events(
+                            "canonical_simulation_session", "single-episode"
+                        )
+                        self.assertEqual(admission["payload"]["notional"], "103")
+                        self.assertEqual(admission["payload"]["outcome"], "ADMITTED")
+                        self.assertEqual(
+                            reservation["payload"]["request"]["requirements"]["CASH:USD"],
+                            "103.103",
+                        )
+                        self.assertEqual(result["cash"], "896.897")
+                        self.assertEqual(result["position"], "1")
+                        self.assertEqual(result["new_outbound_requests"], 1)
+                        signature = (
+                            result["status"],
+                            result["cash"],
+                            result["position"],
+                            result["new_outbound_requests"],
+                            admission["event_id"],
+                            admission["payload"]["intent_hash"],
+                            admission["payload"]["notional"],
+                            admission["payload"]["outcome"],
+                            reservation["payload_hash"],
+                            tuple(
+                                (event["event_type"], event["event_id"], event["payload_hash"])
+                                for event in submission
+                            ),
+                            tuple(
+                                (event["event_type"], event["event_id"], event["payload_hash"])
+                                for event in sessions
+                            ),
+                        )
+                        if expected_signature is None:
+                            expected_signature = signature
+                        else:
+                            self.assertEqual(signature, expected_signature)
+
+    def test_low_precision_buy_keeps_exact_notional_and_active_reservation(self):
+        for precision in (1, 2):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            result = run_canonical_simulation(
+                                BUY, directory, episode_id="low-precision",
+                                now=NOW, fault_after_send=True,
+                            )
+                        store = JournalStore(Path(directory) / "journal.sqlite3")
+                        admission = next(
+                            event for event in store.load_events("authority_state", "canonical")
+                            if event["event_type"] == "AuthorityAdmissionRecorded"
+                        )
+                        reservation = next(
+                            event for event in store.load_events_by_aggregate_type("reservation_book")
+                            if event["payload"]["operation"] == "RESERVE"
+                        )
+                        self.assertEqual(admission["payload"]["notional"], "103")
+                        self.assertEqual(admission["payload"]["outcome"], "ADMITTED")
+                        self.assertEqual(
+                            reservation["payload"]["request"]["requirements"]["CASH:USD"],
+                            "103.103",
+                        )
+                        self.assertEqual(result["status"], "UNKNOWN")
+                        self.assertEqual(result["new_outbound_requests"], 1)
+
+    def test_exact_resource_failure_precedes_session_mutation(self):
+        with TemporaryDirectory() as parent:
+            state_dir = Path(parent) / "session"
+            with self.assertRaises(ExactDecimalError):
+                run_canonical_simulation(
+                    ["1", "1", "1e256"], state_dir,
+                    episode_id="resource-envelope", now=NOW,
+                )
+            self.assertFalse(state_dir.exists())
 
     def test_cli_runs_canonical_session_and_returns_json(self):
         with TemporaryDirectory() as directory:

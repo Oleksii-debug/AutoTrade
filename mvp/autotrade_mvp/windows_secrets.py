@@ -16,6 +16,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import stat
+import sys
 from typing import Protocol
 from uuid import uuid4
 
@@ -63,26 +65,105 @@ def _scope_entropy(
     ).digest()
 
 
+def _freeze_vault_path(path: str | Path) -> Path:
+    """Freeze one canonical credential namespace before deriving its lock."""
+    if sys.platform == "win32":
+        from autotrade_foundation.local_filesystem import (
+            freeze_local_filesystem_path,
+            require_qualified_local_filesystem_path,
+        )
+
+        frozen = Path(freeze_local_filesystem_path(path))
+        require_qualified_local_filesystem_path(frozen)
+        return frozen
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    return candidate.resolve(strict=False)
+
+
+def _require_vault_leaf(path: Path) -> None:
+    """Reject ambiguous final vault leaves before trusting their contents."""
+    if not path.exists():
+        return
+    if sys.platform == "win32":
+        from autotrade_foundation.windows_namespace import (
+            close_windows_handle,
+            open_windows_regular_file,
+            windows_handle_information,
+        )
+
+        handle = open_windows_regular_file(
+            path,
+            create=False,
+            subject="credential vault",
+        )
+        try:
+            information = windows_handle_information(
+                handle,
+                subject="credential vault",
+            )
+            if information.number_of_links != 1:
+                raise SecretVaultError(
+                    "credential vault must not have hard-link aliases"
+                )
+        finally:
+            close_windows_handle(handle)
+        return
+
+    observed = os.lstat(path)
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+        raise SecretVaultError("credential vault must be an ordinary regular file")
+    if int(observed.st_nlink) != 1:
+        raise SecretVaultError("credential vault must not have hard-link aliases")
+
+
 @contextmanager
-def _exclusive_file_lock(path: Path):
-    """Serialize vault mutations across processes sharing one credential file."""
+def _exclusive_file_lock(path: Path, *, vault_path: Path):
+    """Serialize one canonical vault namespace across cooperating processes."""
+    if path.parent != vault_path.parent:
+        raise SecretVaultError("credential vault lock must share the vault parent")
+
+    if sys.platform == "win32":
+        from autotrade_foundation.windows_namespace import (
+            retain_windows_parent_namespace,
+            serialize_windows_directory_publication,
+        )
+
+        with retain_windows_parent_namespace(vault_path, create=True) as authority:
+            with serialize_windows_directory_publication(
+                authority,
+                lock_name=path.name,
+            ):
+                yield
+        return
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as stream:
-        if stream.tell() == 0:
-            stream.write(b"\\0")
-            stream.flush()
-        stream.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise SecretVaultError(
+            "credential vault lock must be an ordinary local file"
+        ) from error
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or int(observed.st_nlink) != 1:
+            raise SecretVaultError(
+                "credential vault lock must have one ordinary pathname"
+            )
+        with os.fdopen(descriptor, "a+b", closefd=False) as stream:
+            if stream.tell() == 0:
+                stream.write(b"\\0")
+                stream.flush()
+                os.fsync(stream.fileno())
+            stream.seek(0)
             import fcntl
 
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
@@ -90,6 +171,8 @@ def _exclusive_file_lock(path: Path):
                 yield
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 class DpapiCurrentUserProtector:
@@ -246,19 +329,21 @@ class ProtectedCredentialVault:
     ALLOWED_ENVIRONMENTS = _ALLOWED_ENVIRONMENTS
 
     def __init__(self, path: str | Path, *, protector: SecretProtector) -> None:
-        self.path = Path(path)
+        self.path = _freeze_vault_path(path)
         if not hasattr(protector, "protect") or not hasattr(protector, "unprotect"):
             raise TypeError("protector must implement protect and unprotect")
         self._protector = protector
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
-        with _exclusive_file_lock(self.lock_path):
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             if not self.path.exists():
                 self._write({"version": self.FORMAT_VERSION, "records": {}})
             else:
                 self._load()
 
     def _load(self) -> dict[str, object]:
+        _require_vault_leaf(self.path)
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -338,6 +423,7 @@ class ProtectedCredentialVault:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temp_name, self.path)
+            _require_vault_leaf(self.path)
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -401,7 +487,7 @@ class ProtectedCredentialVault:
             if handle_id is not None
             else "cred_" + uuid4().hex
         )
-        with _exclusive_file_lock(self.lock_path):
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()
             records = state["records"]
             if hid in records:
@@ -461,7 +547,7 @@ class ProtectedCredentialVault:
         explicit secret reattachment and normal capability requalification.
         """
 
-        with _exclusive_file_lock(self.lock_path):
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()
             records = state["records"]
             exported = []
@@ -624,44 +710,121 @@ class ProtectedCredentialVault:
             environment=environment,
             purpose=purpose,
         )
-        state = self._load()
-        record = state["records"].get(handle.handle_id)
-        if record is None or record["active"] is not True:
-            raise PermissionError("Credential is unavailable")
-        current = self._handle(record)
-        if current != handle:
-            raise PermissionError("Credential handle generation is stale")
-        if record["owner_identity"] != owner:
-            raise PermissionError("Execution identity cannot decrypt this credential")
-        if (
-            current.account_id != account
-            or current.provider != normalized_provider
-            or current.environment != normalized_environment
-        ):
-            raise PermissionError("Credential scope mismatch")
-        if current.purpose != normalized_purpose:
-            raise PermissionError("Credential purpose mismatch")
-        entropy = _scope_entropy(
-            handle_id=current.handle_id,
-            owner_identity=owner,
-            account_id=current.account_id,
-            provider=current.provider,
-            environment=current.environment,
-            purpose=current.purpose,
-            generation=current.generation,
-        )
-        try:
-            plaintext = self._protector.unprotect(
-                b64decode(record["ciphertext"], validate=True),
-                entropy=entropy,
+        # Resolve participates in the same inter-process critical section as
+        # rotate/revoke.  The lock covers the active-generation check through
+        # decryption and return, so a mutation cannot commit after we snapshot
+        # an active record but before plaintext escapes to the caller.
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Execution identity cannot decrypt this credential")
+            if (
+                current.account_id != account
+                or current.provider != normalized_provider
+                or current.environment != normalized_environment
+            ):
+                raise PermissionError("Credential scope mismatch")
+            if current.purpose != normalized_purpose:
+                raise PermissionError("Credential purpose mismatch")
+            entropy = _scope_entropy(
+                handle_id=current.handle_id,
+                owner_identity=owner,
+                account_id=current.account_id,
+                provider=current.provider,
+                environment=current.environment,
+                purpose=current.purpose,
+                generation=current.generation,
             )
-            if not isinstance(plaintext, bytes) or not plaintext:
-                raise OSError("protector returned invalid plaintext")
-            return plaintext.decode("utf-8")
-        except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
-            raise PermissionError(
-                "Credential cannot be decrypted in this identity"
-            ) from error
+            try:
+                plaintext = self._protector.unprotect(
+                    b64decode(record["ciphertext"], validate=True),
+                    entropy=entropy,
+                )
+                if not isinstance(plaintext, bytes) or not plaintext:
+                    raise OSError("protector returned invalid plaintext")
+                return plaintext.decode("utf-8")
+            except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
+                raise PermissionError(
+                    "Credential cannot be decrypted in this identity"
+                ) from error
+
+
+    @contextmanager
+    def lease(
+        self,
+        handle: PersistentCredentialHandle,
+        *,
+        execution_identity: str,
+        account_id: str,
+        provider: str,
+        environment: str,
+        purpose: str,
+    ):
+        """Hold the credential generation lock for the full caller-owned use window.
+
+        The yielded plaintext is valid only while this context is active. rotate()
+        and revoke() use the same inter-process lock, so neither can commit after
+        the generation/scope check and before the caller exits the lease.
+        """
+        if not isinstance(handle, PersistentCredentialHandle):
+            raise TypeError("handle must be a PersistentCredentialHandle")
+        owner, account, normalized_provider, normalized_environment, normalized_purpose = self._normalize_scope(
+            owner_identity=execution_identity,
+            account_id=account_id,
+            provider=provider,
+            environment=environment,
+            purpose=purpose,
+        )
+        plaintext = None
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Execution identity cannot decrypt this credential")
+            if (
+                current.account_id != account
+                or current.provider != normalized_provider
+                or current.environment != normalized_environment
+            ):
+                raise PermissionError("Credential scope mismatch")
+            if current.purpose != normalized_purpose:
+                raise PermissionError("Credential purpose mismatch")
+            entropy = _scope_entropy(
+                handle_id=current.handle_id,
+                owner_identity=owner,
+                account_id=current.account_id,
+                provider=current.provider,
+                environment=current.environment,
+                purpose=current.purpose,
+                generation=current.generation,
+            )
+            try:
+                raw = self._protector.unprotect(
+                    b64decode(record["ciphertext"], validate=True),
+                    entropy=entropy,
+                )
+                if not isinstance(raw, bytes) or not raw:
+                    raise OSError("protector returned invalid plaintext")
+                plaintext = raw.decode("utf-8")
+            except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
+                raise PermissionError(
+                    "Credential cannot be decrypted in this identity"
+                ) from error
+            try:
+                yield plaintext
+            finally:
+                plaintext = None
 
     def rotate(
         self,
@@ -675,7 +838,7 @@ class ProtectedCredentialVault:
         if not isinstance(new_secret_value, str) or not new_secret_value:
             raise SecretVaultError("new_secret_value must not be empty")
         owner = _text(execution_identity, name="execution_identity")
-        with _exclusive_file_lock(self.lock_path):
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()
             record = state["records"].get(handle.handle_id)
             if record is None or record["active"] is not True:
@@ -730,7 +893,7 @@ class ProtectedCredentialVault:
         if not isinstance(handle, PersistentCredentialHandle):
             raise TypeError("handle must be a PersistentCredentialHandle")
         owner = _text(execution_identity, name="execution_identity")
-        with _exclusive_file_lock(self.lock_path):
+        with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()
             record = state["records"].get(handle.handle_id)
             if record is None or record["active"] is not True:

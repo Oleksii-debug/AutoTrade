@@ -17,6 +17,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from hashlib import sha256
 import json
 import re
+import zlib
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import ProviderResponseObservation, ProviderSubmissionObservation, Surface
@@ -33,6 +34,265 @@ KRAKEN_SPOT_DOCS = MappingProxyType(
         "authentication": "https://docs.kraken.com/exchange/guides/rest/authentication",
     }
 )
+KRAKEN_SPOT_BOOK_CHECKSUM_V2_DOC = (
+    "https://docs.kraken.com/exchange/guides/websockets/book-checksum-v2"
+)
+
+_KRAKEN_SPOT_BOOK_CHECKSUM_POLICY_ID = "KRAKEN_SPOT_WS_V2_BOOK_CRC32_TOP10_V1"
+_KRAKEN_SPOT_BOOK_CHECKSUM_TOKEN = object()
+_BOOK_DECIMAL_TEXT = re.compile(r"^\d+(?:\.\d+)?$")
+
+
+def _checksum_decimal_text(value: object, *, name: str, positive: bool = True) -> str:
+    """Retain exact provider decimal text used by Kraken's CRC32 algorithm."""
+
+    if type(value) is not str or not value:
+        raise KrakenSpotAdapterError(f"{name} must be exact non-empty decimal text")
+    if value != value.strip() or _BOOK_DECIMAL_TEXT.fullmatch(value) is None:
+        raise KrakenSpotAdapterError(
+            f"{name} must use plain exact decimal text without whitespace or exponent"
+        )
+    try:
+        numeric = Decimal(value)
+    except InvalidOperation as error:
+        raise KrakenSpotAdapterError(f"{name} must be finite decimal text") from error
+    if not numeric.is_finite() or (positive and numeric <= 0):
+        raise KrakenSpotAdapterError(
+            f"{name} must be {'positive' if positive else 'non-negative'}"
+        )
+    if not positive and numeric < 0:
+        raise KrakenSpotAdapterError(f"{name} must be non-negative")
+    return value
+
+
+def _checksum_component(value: str) -> str:
+    rendered = value.replace(".", "").lstrip("0")
+    if not rendered:
+        raise KrakenSpotAdapterError(
+            "Kraken book checksum component must contain a non-zero digit"
+        )
+    return rendered
+
+
+def _checksum_levels(
+    values: object,
+    *,
+    side: str,
+) -> tuple[tuple[str, str], ...]:
+    if type(values) is not tuple:
+        raise KrakenSpotAdapterError(
+            f"Kraken {side} checksum levels must be an exact tuple"
+        )
+    if len(values) > 10_000:
+        raise KrakenSpotAdapterError(
+            f"Kraken {side} checksum levels exceed the supported resource envelope"
+        )
+    admitted: list[tuple[str, str]] = []
+    seen_prices: set[Decimal] = set()
+    for index, level in enumerate(values):
+        if type(level) is not tuple or len(level) != 2:
+            raise KrakenSpotAdapterError(
+                f"Kraken {side} checksum level {index} must be an exact (price, qty) tuple"
+            )
+        price_text = _checksum_decimal_text(
+            level[0],
+            name=f"Kraken {side} checksum level {index} price",
+        )
+        qty_text = _checksum_decimal_text(
+            level[1],
+            name=f"Kraken {side} checksum level {index} qty",
+        )
+        numeric_price = Decimal(price_text)
+        if numeric_price in seen_prices:
+            raise KrakenSpotAdapterError(
+                f"Kraken {side} checksum levels contain duplicate prices"
+            )
+        seen_prices.add(numeric_price)
+        admitted.append((price_text, qty_text))
+    reverse = side == "bids"
+    admitted.sort(key=lambda item: Decimal(item[0]), reverse=reverse)
+    return tuple(admitted)
+
+
+@dataclass(frozen=True)
+class KrakenSpotBookChecksumEvidence:
+    """Immutable proof that exact provider text matches Kraken WS v2 CRC32."""
+
+    policy_id: str
+    expected_checksum: int
+    computed_checksum: int
+    checksum_input_sha256: str
+    provider_book_sha256: str
+    candidate_book_sha256: str
+    event_id: str
+    top_ask_count: int
+    top_bid_count: int
+    _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _KRAKEN_SPOT_BOOK_CHECKSUM_TOKEN:
+            raise KrakenSpotAdapterError(
+                "KrakenSpotBookChecksumEvidence must come from canonical verification"
+            )
+        if self.policy_id != _KRAKEN_SPOT_BOOK_CHECKSUM_POLICY_ID:
+            raise KrakenSpotAdapterError("Kraken checksum policy id is invalid")
+        for name, value in (
+            ("expected_checksum", self.expected_checksum),
+            ("computed_checksum", self.computed_checksum),
+        ):
+            if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+                raise KrakenSpotAdapterError(
+                    f"{name} must be an unsigned 32-bit integer"
+                )
+        if self.expected_checksum != self.computed_checksum:
+            raise KrakenSpotAdapterError("Kraken checksum evidence must represent a match")
+        for name, digest in (
+            ("checksum_input_sha256", self.checksum_input_sha256),
+            ("provider_book_sha256", self.provider_book_sha256),
+            ("candidate_book_sha256", self.candidate_book_sha256),
+        ):
+            if (
+                type(digest) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            ):
+                raise KrakenSpotAdapterError(f"{name} is invalid")
+        event_id = _text(self.event_id, name="event_id")
+        try:
+            parsed_event_id = UUID(event_id)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise KrakenSpotAdapterError("event_id must be a UUID") from error
+        if str(parsed_event_id) != event_id.lower():
+            raise KrakenSpotAdapterError("event_id must be canonical UUID text")
+        for name, value in (
+            ("top_ask_count", self.top_ask_count),
+            ("top_bid_count", self.top_bid_count),
+        ):
+            if type(value) is not int or not 0 <= value <= 10:
+                raise KrakenSpotAdapterError(f"{name} must be between zero and ten")
+
+
+def _checksum_candidate_side(
+    candidate_book: Mapping[str, object],
+    *,
+    side: str,
+) -> tuple[tuple[Decimal, Decimal], ...]:
+    values = candidate_book.get(side)
+    if type(values) is not list:
+        raise KrakenSpotAdapterError(
+            f"candidate book {side} must be the detached canonical list"
+        )
+    admitted: list[tuple[Decimal, Decimal]] = []
+    seen: set[Decimal] = set()
+    for index, level in enumerate(values):
+        if type(level) is not dict or set(level) != {"price", "quantity"}:
+            raise KrakenSpotAdapterError(
+                f"candidate book {side}[{index}] shape is not canonical"
+            )
+        price = _decimal(level["price"], name=f"candidate {side} price", positive=True)
+        quantity = _decimal(
+            level["quantity"],
+            name=f"candidate {side} quantity",
+            positive=True,
+        )
+        if price in seen:
+            raise KrakenSpotAdapterError(f"candidate book {side} has duplicate prices")
+        seen.add(price)
+        admitted.append((price, quantity))
+    reverse = side == "bids"
+    admitted.sort(key=lambda item: item[0], reverse=reverse)
+    return tuple(admitted)
+
+
+def _provider_numeric_side(
+    values: tuple[tuple[str, str], ...],
+    *,
+    side: str,
+) -> tuple[tuple[Decimal, Decimal], ...]:
+    admitted = _checksum_levels(values, side=side)
+    return tuple((Decimal(price), Decimal(qty)) for price, qty in admitted)
+
+
+def verify_kraken_spot_v2_book_checksum(
+    *,
+    event_id: str,
+    candidate_book: Mapping[str, object],
+    asks: tuple[tuple[str, str], ...],
+    bids: tuple[tuple[str, str], ...],
+    expected_checksum: int,
+) -> KrakenSpotBookChecksumEvidence:
+    """Verify Kraken Spot WebSocket v2 CRC32 over exact provider decimal text.
+
+    This proves provider-specific checksum semantics only. It does not prove
+    provider origin and does not authorize a generic AutoTrade book as READY.
+    """
+
+    normalized_event_id = _text(event_id, name="event_id")
+    try:
+        parsed_event_id = UUID(normalized_event_id)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise KrakenSpotAdapterError("event_id must be a UUID") from error
+    if str(parsed_event_id) != normalized_event_id.lower():
+        raise KrakenSpotAdapterError("event_id must be canonical UUID text")
+    if not isinstance(candidate_book, Mapping):
+        raise KrakenSpotAdapterError("candidate_book must be a mapping")
+    admitted_asks = _checksum_levels(asks, side="asks")
+    admitted_bids = _checksum_levels(bids, side="bids")
+    if _provider_numeric_side(admitted_asks, side="asks") != _checksum_candidate_side(
+        candidate_book,
+        side="asks",
+    ):
+        raise KrakenSpotAdapterError(
+            "Kraken provider asks do not match the coordinator candidate book"
+        )
+    if _provider_numeric_side(admitted_bids, side="bids") != _checksum_candidate_side(
+        candidate_book,
+        side="bids",
+    ):
+        raise KrakenSpotAdapterError(
+            "Kraken provider bids do not match the coordinator candidate book"
+        )
+    if type(expected_checksum) is not int or not 0 <= expected_checksum <= 0xFFFFFFFF:
+        raise KrakenSpotAdapterError(
+            "expected_checksum must be an exact unsigned 32-bit integer"
+        )
+    top_asks = admitted_asks[:10]
+    top_bids = admitted_bids[:10]
+    checksum_input = "".join(
+        _checksum_component(price) + _checksum_component(qty)
+        for price, qty in (*top_asks, *top_bids)
+    )
+    encoded = checksum_input.encode("ascii")
+    provider_book_json = json.dumps(
+        {"asks": admitted_asks, "bids": admitted_bids},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    candidate_book_json = json.dumps(
+        candidate_book,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    computed = zlib.crc32(encoded) & 0xFFFFFFFF
+    if computed != expected_checksum:
+        raise KrakenSpotAdapterError(
+            "Kraken Spot book checksum mismatch; local book must be rebuilt"
+        )
+    return KrakenSpotBookChecksumEvidence(
+        policy_id=_KRAKEN_SPOT_BOOK_CHECKSUM_POLICY_ID,
+        expected_checksum=expected_checksum,
+        computed_checksum=computed,
+        checksum_input_sha256="sha256:" + sha256(encoded).hexdigest(),
+        provider_book_sha256="sha256:" + sha256(provider_book_json).hexdigest(),
+        candidate_book_sha256="sha256:" + sha256(candidate_book_json).hexdigest(),
+        event_id=normalized_event_id,
+        top_ask_count=len(top_asks),
+        top_bid_count=len(top_bids),
+        _factory_token=_KRAKEN_SPOT_BOOK_CHECKSUM_TOKEN,
+    )
+
 
 _FREE_CLIENT_ID = re.compile(r"^[\x21-\x7e]{1,18}$")
 _ORDER_TYPES = frozenset({"MARKET", "LIMIT"})

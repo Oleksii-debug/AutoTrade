@@ -99,8 +99,118 @@ class JournalStore(_JournalStoreImpl):
         )
         return identity
 
-    def load_command_event_batch(
-        self,
+    def claim_first_event(self, envelope: dict[str, Any]) -> _impl.AppendResult:
+        """Atomically establish the first whole-store durable business authority.
+
+        The claim succeeds only when the event journal, outbox, command dedupe,
+        and both projection-checkpoint stores are empty in the same
+        BEGIN IMMEDIATE transaction that writes global journal sequence 1.
+        Schema metadata is excluded because migrations describe storage shape,
+        not prior business authority.
+        """
+
+        identity = require_exact_journal_store_authority(
+            self,
+            subject="first-event claim store",
+        )
+        if type(envelope) is not dict:
+            raise TypeError("envelope must be an exact object")
+
+        event_id = JournalStore._require_text(self, envelope.get("event_id"), "event_id")
+        event_type = JournalStore._require_text(
+            self, envelope.get("event_type"), "event_type"
+        )
+        aggregate_type = JournalStore._require_text(
+            self, envelope.get("aggregate_type"), "aggregate_type"
+        )
+        aggregate_id = JournalStore._require_text(
+            self, envelope.get("aggregate_id"), "aggregate_id"
+        )
+        try:
+            raw_aggregate_version = envelope["aggregate_version"]
+        except KeyError as error:
+            raise ValueError(
+                "aggregate_version must be a positive canonical integer sequence string"
+            ) from error
+        aggregate_version = _impl._sequence(
+            raw_aggregate_version,
+            name="aggregate_version",
+            positive=True,
+        )
+        if aggregate_version != 1:
+            raise ValueError("first-event claim requires aggregate_version 1")
+
+        payload = envelope.get("payload")
+        expected_payload_hash = _impl.payload_digest(payload)
+        if envelope.get("payload_hash") != expected_payload_hash:
+            raise ValueError("payload_hash does not match payload")
+        payload_json = _impl.canonical_json(payload)
+        envelope_json = _impl.canonical_json(envelope)
+        envelope_hash = _impl._event_envelope_digest(envelope_json)
+        committed_at = JournalStore._require_text(
+            self, envelope.get("committed_at"), "committed_at"
+        )
+
+        with journal_store_authority_scope(self, identity):
+            with JournalStore._connect(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    if JournalStore._journal_sequence_value(self, connection) != 0:
+                        raise ValueError(
+                            "journal store already contains durable business state"
+                        )
+                    for table in (
+                        "outbox",
+                        "command_dedupe",
+                        "projection_checkpoints",
+                        "global_projection_checkpoints",
+                    ):
+                        row = connection.execute(
+                            f"SELECT COUNT(*) AS row_count FROM {table}"
+                        ).fetchone()
+                        if row is None or type(row["row_count"]) is not int:
+                            raise RuntimeError(
+                                f"whole-store authority count failed for {table}"
+                            )
+                        if row["row_count"] != 0:
+                            raise ValueError(
+                                "journal store already contains durable business state"
+                            )
+                    if JournalStore._aggregate_version_value(
+                        self, connection, aggregate_type, aggregate_id
+                    ) != 0:
+                        raise ValueError(
+                            "journal store already contains durable business state"
+                        )
+
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash, committed_at,
+                            envelope_json, envelope_hash, journal_sequence
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            expected_payload_hash,
+                            committed_at,
+                            envelope_json,
+                            envelope_hash,
+                        ),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        return _impl.AppendResult(event_id, 1, True)
+
+    def load_command_event_batch(        self,
         *,
         command_id: str,
         actor: str,

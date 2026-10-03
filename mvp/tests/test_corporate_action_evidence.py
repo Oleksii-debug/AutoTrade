@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.corporate_action_evidence import (
     CorporateActionEvidenceConflict,
@@ -755,6 +756,15 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     second_aggregate_id,
                 ),
                 [],
+            )
+
+    def test_durable_scope_binding_exposes_no_erasable_weakref_callback(self):
+        with TemporaryDirectory() as directory:
+            _, durable = self._store(f"{directory}/journal.sqlite3")
+            registry_refs = weakref.getweakrefs(durable)
+            self.assertTrue(registry_refs)
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in registry_refs)
             )
 
     def test_explicit_reinit_cannot_retarget_durable_evidence_scope(self):

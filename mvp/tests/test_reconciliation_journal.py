@@ -273,6 +273,156 @@ class ReconciliationJournalTests(unittest.TestCase):
                     require_latest_scope=True,
                 )
 
+    def test_settlement_freshness_is_isolated_by_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-settlement-domain-account"
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-domain-settlement",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-before-domain-settlement",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            def append_settlement(event_id, aggregate_id, provider_environment):
+                payload = {
+                    "schema_version": "1.0.0",
+                    "scope": {
+                        "provider_id": "BYBIT",
+                        "account_id": account_id,
+                        "environment": "PAPER",
+                        "provider_environment": provider_environment,
+                    },
+                    "obligations": [{"obligation_id": event_id}],
+                }
+                store.append_event(
+                    {
+                        "event_id": event_id,
+                        "event_type": "SettlementObligationsRegistered",
+                        "aggregate_type": "settlement_book",
+                        "aggregate_id": aggregate_id,
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-24T19:00:10Z",
+                    }
+                )
+
+            append_settlement(
+                "demo-settlement-after-testnet-snapshot",
+                "bybit-demo-settlement-domain-test",
+                "DEMO",
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="BYBIT",
+                account_id=account_id,
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+                require_latest_scope=True,
+            )
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+
+            append_settlement(
+                "testnet-settlement-after-testnet-snapshot",
+                "bybit-testnet-settlement-domain-test",
+                "TESTNET",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates settlement financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
+
+    def test_legacy_bybit_settlement_freshness_is_ambiguous_and_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-legacy-settlement-account"
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-legacy-settlement",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-before-legacy-settlement",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            payload = {
+                "schema_version": "1.0.0",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "account_id": account_id,
+                    "environment": "PAPER",
+                },
+                "obligations": [{"obligation_id": "legacy-ambiguous"}],
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-ambiguous-bybit-settlement",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": "legacy-bybit-paper-settlement",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "BYBIT requires explicit provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
+
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

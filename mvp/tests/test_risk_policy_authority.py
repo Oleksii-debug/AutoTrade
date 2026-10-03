@@ -178,6 +178,47 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
             ):
                 authority.require_registry_issued_resolved_policy(issued)
 
+    def test_resolved_policy_cannot_reseal_mutated_content_after_issuance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(max_gross_leverage="2"),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+
+            forged_policy = policy(max_gross_leverage="9")
+            forged_identity = RiskPolicyIdentity(
+                policy_id=issued.identity.policy_id,
+                version=issued.identity.version,
+                content_digest=risk_policy_digest(forged_policy),
+                scope=issued.identity.scope,
+            )
+            object.__setattr__(issued, "policy", forged_policy)
+            object.__setattr__(issued, "identity", forged_identity)
+            object.__setattr__(
+                issued,
+                "_authority_digest",
+                authority._resolved_policy_authority_digest(issued),
+            )
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
     def test_resolved_policy_use_time_seal_rejects_identity_raw_state_poisoning(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

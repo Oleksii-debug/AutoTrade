@@ -1158,6 +1158,50 @@ def load_account_resource_availability_evidence(
                 raise ValueError(
                     "resource availability snapshot predates option lifecycle financial truth"
                 )
+
+        # Current admission/dispatch also joins provider cash with the current
+        # DurableProviderEconomicBook.  A newer local cash fact must therefore
+        # never gain reservation authority from an older provider snapshot.  This
+        # check is limited to current-scope authorization: historical replay keeps
+        # validating the exact durable witness that was accepted at its own cut,
+        # while every fresh admission/dispatch passes require_latest_scope=True.
+        if require_latest_scope:
+            for economic_event in store.load_events_by_aggregate_type(
+                "economic_book"
+            ):
+                economic_sequence = economic_event.get("journal_sequence")
+                economic_payload = economic_event.get("payload")
+                if (
+                    type(economic_sequence) is not int
+                    or not isinstance(economic_payload, Mapping)
+                ):
+                    continue
+                if (
+                    economic_payload.get("provider_id") != provider
+                    or economic_payload.get("account_id") != account
+                    or economic_payload.get("environment") != scope
+                ):
+                    continue
+                economic_domain = economic_payload.get("provider_environment")
+                if economic_domain is None:
+                    if provider == "BYBIT" or domain != scope:
+                        continue
+                elif economic_domain != domain:
+                    continue
+                if economic_sequence >= checkpoint_sequence:
+                    raise ValueError(
+                        "availability checkpoint predates economic financial truth"
+                    )
+                economic_committed = datetime.fromisoformat(
+                    _instant(
+                        economic_event.get("committed_at"),
+                        name="economic_book.committed_at",
+                    ).replace("Z", "+00:00")
+                )
+                if resource_started <= economic_committed:
+                    raise ValueError(
+                        "resource availability snapshot predates economic financial truth"
+                    )
     if "ACCOUNT" in blocking_resources or any(
         resource in blocking_resources for resource in requested
     ):

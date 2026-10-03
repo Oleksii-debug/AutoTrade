@@ -156,7 +156,7 @@ class FifoLotBook:
         )
 
     def snapshot(self) -> BasisSnapshot:
-        return self._snapshot_for(self._lots, self._realized)
+        return FifoLotBook._snapshot_for(self._lots, self._realized)
 
     def buy(
         self,
@@ -176,7 +176,7 @@ class FifoLotBook:
         )
         candidate = Lot(qty, total_cost)
         candidate_lots = [*self._lots, candidate]
-        next_snapshot = self._snapshot_for(candidate_lots, self._realized)
+        next_snapshot = FifoLotBook._snapshot_for(candidate_lots, self._realized)
         self._lots = candidate_lots
         return next_snapshot
 
@@ -193,7 +193,10 @@ class FifoLotBook:
         if qty <= 0 or px <= 0 or sell_fee < 0:
             raise ValueError("Sell quantity and price must be positive and fee non-negative")
 
-        available = self.snapshot().position
+        available = FifoLotBook._snapshot_for(
+            self._lots,
+            self._realized,
+        ).position
         if qty > available:
             raise ValueError("Cannot sell more than the available long position")
 
@@ -227,7 +230,7 @@ class FifoLotBook:
             _fraction_subtract(net_proceeds, removed_basis),
         )
 
-        next_snapshot = self._snapshot_for(working_lots, new_realized)
+        next_snapshot = FifoLotBook._snapshot_for(working_lots, new_realized)
         self._lots = working_lots
         self._realized = new_realized
         return next_snapshot
@@ -239,7 +242,14 @@ class FifoLotBook:
         px = _decimal(price)
         if px <= 0:
             raise ValueError("Mark price must be positive")
-        market_value = _fraction(_exact_decimal_multiply(self.snapshot().position, px))
+        position = FifoLotBook._snapshot_for(
+            self._lots,
+            self._realized,
+        ).position
+        market_value = _fraction(_exact_decimal_multiply(position, px))
         return _public_exact(
-            _fraction_subtract(market_value, self._open_basis_fraction())
+            _fraction_subtract(
+                market_value,
+                FifoLotBook._open_basis_fraction(self),
+            )
         )

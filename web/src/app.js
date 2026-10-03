@@ -24,7 +24,8 @@
   ]);
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
-    REVOKE_AUTHORITY: new Set(["OWNER"])
+    REVOKE_AUTHORITY: new Set(["OWNER"]),
+    SET_AUTHORITY: new Set(["OWNER"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -84,6 +85,15 @@
     "event-history-filter",
     "event-history-copy",
     "host-action",
+    "authority-policy-id",
+    "authority-instrument-id",
+    "authority-instrument-version",
+    "authority-actions",
+    "authority-max-notional",
+    "authority-valid-from",
+    "authority-expires-at",
+    "authority-policy-version",
+    "authority-policy-confirm",
     "submit-command",
     "refresh-state",
     "command-result"
@@ -255,6 +265,12 @@
     return allowedRoles instanceof Set && allowedRoles.has(role);
   }
 
+  function actionCanSubmitInCurrentScope(role, action) {
+    if (!roleCanSubmitAction(role, action)) return false;
+    if (action === "SET_AUTHORITY" && state.environment === "REPLAY") return false;
+    return true;
+  }
+
   function pendingCommandMatchesCurrentContext() {
     return state.pendingCommand === null || (
       state.pendingCommandHostId === state.renderedHostId &&
@@ -266,12 +282,107 @@
     );
   }
 
+  const AUTHORITY_POLICY_REQUIRED_FIELD_IDS = Object.freeze([
+    "authority-policy-id",
+    "authority-instrument-id",
+    "authority-instrument-version",
+    "authority-actions",
+    "authority-max-notional",
+    "authority-valid-from",
+    "authority-expires-at",
+    "authority-policy-version"
+  ]);
+
+  function authorityReviewScopeKey() {
+    const actor = state.sessionIdentity === null ? "" : state.sessionIdentity.actor;
+    const session = state.sessionIdentity === null ? "" : state.sessionIdentity.session;
+    return [
+      String(state.renderedHostId ?? ""),
+      actor,
+      session,
+      String(state.accountId ?? ""),
+      String(state.environment ?? "")
+    ].join("\n");
+  }
+
+  function invalidateAuthorityPolicyReview() {
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation) return;
+    confirmation.checked = false;
+    delete confirmation.dataset.reviewStateVersion;
+    delete confirmation.dataset.reviewScope;
+    delete confirmation.dataset.reviewCommandId;
+  }
+
+  function bindAuthorityPolicyReviewInvalidation() {
+    for (const id of [
+      ...AUTHORITY_POLICY_REQUIRED_FIELD_IDS,
+      "authority-autonomous",
+      "authority-protection-only"
+    ]) {
+      const input = byId(id);
+      if (!input) continue;
+      input.addEventListener("input", invalidateAuthorityPolicyReview);
+      input.addEventListener("change", invalidateAuthorityPolicyReview);
+    }
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation) return;
+    confirmation.addEventListener("change", () => {
+      if (!confirmation.checked || !state.snapshotReady) {
+        invalidateAuthorityPolicyReview();
+        return;
+      }
+      confirmation.dataset.reviewStateVersion = state.version.toString();
+      confirmation.dataset.reviewScope = authorityReviewScopeKey();
+      confirmation.dataset.reviewCommandId =
+        state.pendingCommand !== null &&
+        state.pendingCommand.action === "SET_AUTHORITY"
+          ? state.pendingCommand.command_id
+          : "";
+    });
+  }
+
+  function syncAuthorityPolicyFields(action) {
+    const container = byId("authority-policy-fields");
+    if (!container) return;
+    const active = action === "SET_AUTHORITY";
+    const lockedForRetry = active &&
+      state.pendingCommand !== null &&
+      state.pendingCommand.action === "SET_AUTHORITY";
+    const scopeKey = active ? authorityReviewScopeKey() : "";
+    const priorScopeKey = container.dataset.authorityScopeKey || "";
+    if (!active || (priorScopeKey !== "" && priorScopeKey !== scopeKey)) {
+      invalidateAuthorityPolicyReview();
+    }
+    container.dataset.authorityScopeKey = scopeKey;
+    container.hidden = !active;
+    for (const id of AUTHORITY_POLICY_REQUIRED_FIELD_IDS) {
+      const input = byId(id);
+      if (!input) continue;
+      input.required = active;
+      input.disabled = !active || lockedForRetry;
+    }
+    for (const id of [
+      "authority-autonomous",
+      "authority-protection-only",
+      "authority-policy-confirm"
+    ]) {
+      const input = byId(id);
+      if (!input) continue;
+      input.disabled = !active || (lockedForRetry && id !== "authority-policy-confirm");
+      input.required = active && id === "authority-policy-confirm";
+    }
+    text("authority-policy-host", active ? state.renderedHostId : null);
+    text("authority-policy-account", active ? state.accountId : null);
+    text("authority-policy-environment", active ? state.environment : null);
+  }
+
   function syncHostActionOptions(role) {
     const select = byId("host-action");
     if (!select) return false;
     let firstAllowed = null;
     for (const option of select.options) {
-      const allowed = roleCanSubmitAction(role, option.value);
+      const allowed = actionCanSubmitInCurrentScope(role, option.value);
       option.disabled = !allowed;
       if (allowed && firstAllowed === null) firstAllowed = option.value;
     }
@@ -280,11 +391,55 @@
       select.disabled = true;
     } else {
       select.disabled = false;
-      if (!roleCanSubmitAction(role, select.value) && firstAllowed !== null) {
+      if (!actionCanSubmitInCurrentScope(role, select.value) && firstAllowed !== null) {
         select.value = firstAllowed;
       }
     }
+    syncAuthorityPolicyFields(select.value);
     return firstAllowed !== null;
+  }
+
+  function renderPendingAuthorityPolicyForRetry() {
+    if (state.pendingCommand === null ||
+        state.pendingCommand.action !== "SET_AUTHORITY") {
+      return;
+    }
+    const confirmation = byId("authority-policy-confirm");
+    if (confirmation && (
+        confirmation.dataset.reviewCommandId !== state.pendingCommand.command_id ||
+        confirmation.dataset.reviewStateVersion !== state.version.toString() ||
+        confirmation.dataset.reviewScope !== authorityReviewScopeKey())) {
+      invalidateAuthorityPolicyReview();
+    }
+    const policy = requiredObject(
+      state.pendingCommand.payload, "pending SET_AUTHORITY payload");
+    if (!Array.isArray(policy.environments) ||
+        policy.environments.length !== 1 ||
+        policy.environments[0] !== state.pendingCommand.environment) {
+      throw new Error("pending authority policy environment is not canonical");
+    }
+    if (!Array.isArray(policy.instruments) || policy.instruments.length !== 1) {
+      throw new Error("pending authority policy must contain exactly one instrument");
+    }
+    const instrument = requiredObject(
+      policy.instruments[0], "pending authority instrument");
+    if (!Array.isArray(policy.actions) || policy.actions.length === 0) {
+      throw new Error("pending authority policy actions are unavailable");
+    }
+
+    byId("authority-policy-id").value = String(policy.policy_id);
+    byId("authority-instrument-id").value = String(instrument.instrument_id);
+    byId("authority-instrument-version").value = String(instrument.version);
+    byId("authority-actions").value = policy.actions.join(",");
+    byId("authority-max-notional").value = String(policy.max_notional);
+    byId("authority-valid-from").value = String(policy.valid_from);
+    byId("authority-expires-at").value = String(policy.expires_at);
+    byId("authority-policy-version").value = String(policy.version);
+    byId("authority-autonomous").checked = policy.autonomous === true;
+    byId("authority-protection-only").checked = policy.protection_only === true;
+    text("authority-policy-host", state.pendingCommandHostId);
+    text("authority-policy-account", state.pendingCommand.account_id);
+    text("authority-policy-environment", state.pendingCommand.environment);
   }
 
   function parseCanonicalSnapshot(value) {
@@ -428,7 +583,7 @@
       : (action === null ? null : action.value);
     const roleAllowed = state.sessionIdentity !== null &&
       effectiveAction !== null &&
-      roleCanSubmitAction(state.sessionIdentity.role, effectiveAction);
+      actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction);
     const pendingContextMatches = pendingCommandMatchesCurrentContext();
     if (button) {
       button.disabled = !enabled || !roleAllowed || !pendingContextMatches;
@@ -1124,6 +1279,7 @@
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);
+    renderPendingAuthorityPolicyForRetry();
     const canSubmit = parsed.sessionIdentity !== null && hasAllowedAction;
     setCommandAvailability(canSubmit);
     if (!canSubmit) {
@@ -1308,6 +1464,118 @@
     }
   }
 
+  function requiredPolicyInput(id, name) {
+    const input = byId(id);
+    if (!input) throw new Error(name + " input is unavailable");
+    const value = requiredText(input.value, name);
+    if (value !== value.trim()) {
+      throw new Error(name + " must not contain surrounding whitespace");
+    }
+    return value;
+  }
+
+  function positiveSafeIntegerPolicyInput(id, name) {
+    const token = requiredPolicyInput(id, name);
+    if (!/^[1-9][0-9]*$/.test(token)) {
+      throw new Error(name + " must be a positive integer");
+    }
+    const value = Number(token);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(name + " exceeds the exact browser integer range");
+    }
+    return value;
+  }
+
+  function positiveDecimalPolicyInput(id, name) {
+    const token = requiredPolicyInput(id, name);
+    if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(token) ||
+        !/[1-9]/.test(token.replace(".", ""))) {
+      throw new Error(name + " must be a positive canonical decimal");
+    }
+    return token;
+  }
+
+  function authorityPolicyActions() {
+    const raw = requiredPolicyInput("authority-actions", "allowed actions");
+    const actions = raw.split(",");
+    if (actions.some((item) => item === "" || item !== item.trim())) {
+      throw new Error("allowed actions must be comma-separated canonical names without surrounding whitespace or empty entries");
+    }
+    if (new Set(actions).size !== actions.length) {
+      throw new Error("allowed actions must be unique");
+    }
+    if (actions.some((item) => item !== item.toUpperCase())) {
+      throw new Error("allowed actions must use canonical uppercase names");
+    }
+    return actions;
+  }
+
+  function authorityPolicyPayload() {
+    if (state.environment === "REPLAY") {
+      throw new Error("authority policy activation is unavailable in REPLAY");
+    }
+    if (!["SIMULATION", "PAPER", "LIVE"].includes(state.environment)) {
+      throw new Error("authority policy activation requires a canonical trading environment");
+    }
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation || !confirmation.checked) {
+      throw new Error("review confirmation is required before authority policy submission");
+    }
+    const reviewCommandId =
+      state.pendingCommand !== null &&
+      state.pendingCommand.action === "SET_AUTHORITY"
+        ? state.pendingCommand.command_id
+        : "";
+    if (
+      confirmation.dataset.reviewStateVersion !== state.version.toString() ||
+      confirmation.dataset.reviewScope !== authorityReviewScopeKey() ||
+      confirmation.dataset.reviewCommandId !== reviewCommandId
+    ) {
+      throw new Error(
+        "review confirmation must be renewed after host state or policy scope changes");
+    }
+    const instrumentId = requiredPolicyInput(
+      "authority-instrument-id", "instrument ID");
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+      instrumentId)) {
+      throw new Error("instrument ID must be a canonical UUID");
+    }
+    const validFrom = requiredPolicyInput("authority-valid-from", "valid from");
+    const expiresAt = requiredPolicyInput("authority-expires-at", "expires at");
+    utcInstant(validFrom, "valid from");
+    utcInstant(expiresAt, "expires at");
+    if (compareCanonicalUtcInstants(
+        expiresAt,
+        validFrom,
+        "expires at",
+        "valid from") <= 0) {
+      throw new Error("authority policy expiry must be after valid from");
+    }
+    return Object.freeze({
+      policy_id: requiredPolicyInput("authority-policy-id", "policy ID"),
+      environments: Object.freeze([state.environment]),
+      instruments: Object.freeze([Object.freeze({
+        instrument_id: instrumentId.toLowerCase(),
+        version: positiveSafeIntegerPolicyInput(
+          "authority-instrument-version", "instrument version")
+      })]),
+      actions: Object.freeze(authorityPolicyActions()),
+      max_notional: positiveDecimalPolicyInput(
+        "authority-max-notional", "maximum notional"),
+      expires_at: expiresAt,
+      autonomous: byId("authority-autonomous").checked,
+      valid_from: validFrom,
+      protection_only: byId("authority-protection-only").checked,
+      version: positiveSafeIntegerPolicyInput(
+        "authority-policy-version", "policy version")
+    });
+  }
+
+  function commandActionPayload(action) {
+    if (action === "SET_AUTHORITY") return authorityPolicyPayload();
+    return Object.freeze({});
+  }
+
   function newCommandPayload(action) {
     const commandId = crypto.randomUUID();
     return Object.freeze({
@@ -1319,7 +1587,7 @@
       account_id: state.accountId,
       environment: state.environment,
       action,
-      payload: Object.freeze({})
+      payload: commandActionPayload(action)
     });
   }
 
@@ -1381,7 +1649,7 @@
       byId("command-result").focus();
       return;
     }
-    if (recovering && !roleCanSubmitAction(
+    if (recovering && !actionCanSubmitInCurrentScope(
         state.sessionIdentity.role,
         state.pendingCommand.action)) {
       setCommandAvailability(false);
@@ -1392,9 +1660,31 @@
       byId("command-result").focus();
       return;
     }
-    const payload = commandForSubmission(action);
-    const submittedHostId = state.pendingCommandHostId;
+    let payload;
+    try {
+      if (recovering && state.pendingCommand.action === "SET_AUTHORITY") {
+        const reviewedPolicy = authorityPolicyPayload();
+        if (JSON.stringify(reviewedPolicy) !==
+            JSON.stringify(state.pendingCommand.payload)) {
+          throw new Error(
+            "reviewed authority policy does not exactly match the unresolved command payload");
+        }
+      }
+      payload = commandForSubmission(action);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid authority command";
+      text("command-result", "Command was not submitted: " + message + ".");
+      renderCommandValidationDetails([], "pending");
+      byId("command-result").focus();
+      setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
+      return;
+    }
+    // Freeze the visible action/policy controls immediately after the exact
+    // command payload is retained. The operator must never see editable values
+    // that differ from the in-flight request.
     syncHostActionOptions(state.sessionIdentity.role);
+    renderPendingAuthorityPolicyForRetry();
+    const submittedHostId = state.pendingCommandHostId;
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
@@ -1407,6 +1697,7 @@
         ? "Retrying unresolved command " + commandId +
           " with its original idempotency identity. No new command is being created."
         : "Submitting host command " + commandId + ".");
+    byId("command-result").focus();
     try {
       const result = await submitCanonicalCommand(payload);
       const responseScopeCurrent = commandContextMatchesCurrentSnapshot(payload, submittedHostId);
@@ -1537,8 +1828,10 @@
 
   async function start() {
     bindTableTools();
+    bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
+      syncAuthorityPolicyFields(byId("host-action").value);
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
     });
     byId("refresh-state").addEventListener("click", refreshStateFromUser);

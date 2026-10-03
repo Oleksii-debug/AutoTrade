@@ -1,7 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+import threading
 import unittest
 
 from mvp.autotrade_mvp.host_api import HostCommandStore
@@ -331,6 +333,152 @@ class SecurityBoundaryTests(unittest.TestCase):
                 required_roles={"OPERATOR"},
                 origin=session.origin,
             )
+
+    def test_refresh_cannot_revive_a_concurrently_revoked_session(self):
+        entered = threading.Event()
+        release = threading.Event()
+        block_refresh = [False]
+
+        def authorize(subject, role, origin):
+            if block_refresh[0]:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh-revoke",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        block_refresh[0] = True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                session.token,
+                origin=session.origin,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.revoke_session(session.token)
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "Unknown session"):
+                refresh.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+
+    def test_session_creation_cannot_cross_concurrent_origin_unpair(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def authorize(subject, role, origin):
+            if subject == "blocked-operator":
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired.autotrade.invalid",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            create = executor.submit(
+                boundary.create_session,
+                subject="blocked-operator",
+                role="OPERATOR",
+                origin=paired,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "no longer paired"):
+                create.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "not paired"):
+            boundary.create_session(
+                subject="operator-after-unpair",
+                role="OPERATOR",
+                origin=paired,
+            )
+
+    def test_refresh_cannot_cross_concurrent_origin_unpair(self):
+        entered = threading.Event()
+        release = threading.Event()
+        blocked_subject = [""]
+
+        def authorize(subject, role, origin):
+            if subject == blocked_subject[0]:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired-refresh.autotrade.invalid",
+        )
+        operator = boundary.create_session(
+            subject="operator-unpair-refresh",
+            role="OPERATOR",
+            origin=paired,
+        )
+        blocked_subject[0] = operator.subject
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                operator.token,
+                origin=operator.origin,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "Unknown session"):
+                refresh.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(operator.token, origin=operator.origin)
 
     def test_origin_binding_blocks_browser_replay(self):
         handle = self._credential()

@@ -1,10 +1,10 @@
-"""Terminal binding guard for WP-65 raw target-host measurement evidence.
+"""Terminal binding facade for WP-65 raw target-host measurement evidence.
 
-The underlying :mod:`runtime_target_host_measurement` module owns canonical raw
-measurement mechanics. This module adds only the external/frozen authority facts
-that the raw artifact cannot self-assert: the exact delivered artifact UUID and
-campaign-window observation boundary. It does not create another evaluator,
-measurement collector, signer, release authority, or trading authority.
+The underlying :mod:`runtime_target_host_measurement` evidence-minting function
+owns the mandatory external delivered-artifact UUID and campaign-window guards.
+This module keeps the explicit terminal-facing facade and performs the same
+checks before delegation as defense in depth. It does not create another
+evaluator, measurement collector, signer, release authority, or trading authority.
 """
 
 from __future__ import annotations
@@ -96,5 +96,6 @@ def collect_release_bound_target_host_evidence(
         plan=plan,
         cut=cut,
         measurement=measurement,
+        expected_release_artifact_id=frozen_release_artifact_id,
         max_events=max_events,
     )

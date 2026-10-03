@@ -18,6 +18,9 @@ from mvp.autotrade_mvp.runtime_target_host_measurement import (
 )
 
 
+RELEASE_ARTIFACT_ID = "40000000-0000-4000-8000-000000000001"
+
+
 class RuntimeTargetHostExactTerminalCutTests(unittest.TestCase):
     def test_sub_microsecond_post_cut_resource_sample_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
@@ -63,7 +66,7 @@ class RuntimeTargetHostExactTerminalCutTests(unittest.TestCase):
             )
             measurement = TargetHostMeasurementArtifact(
                 source_sha=spec.release_sha,
-                release_artifact_id="40000000-0000-4000-8000-000000000001",
+                release_artifact_id=RELEASE_ARTIFACT_ID,
                 release_artifact_sha256=plan.release_artifact_sha256,
                 scenario_id=spec.scenario_id,
                 spec_digest=spec.digest,
@@ -123,6 +126,7 @@ class RuntimeTargetHostExactTerminalCutTests(unittest.TestCase):
                     plan=plan,
                     cut=cut,
                     measurement=measurement,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
 

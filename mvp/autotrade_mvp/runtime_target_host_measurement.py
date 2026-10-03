@@ -42,6 +42,7 @@ class RuntimeTargetHostMeasurementError(ValueError):
 SCHEMA_VERSION = "1.0.0"
 MEASUREMENT_METHOD_ID = "wp65-target-host-monotonic-v1"
 MEASUREMENT_METHOD_VERSION = "1.0.0"
+MONOTONIC_CLOCK_ID = "python-time.monotonic_ns"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -453,12 +454,20 @@ class TargetHostMeasurementArtifact:
             )
         for field in (
             "scenario_id",
-            "monotonic_clock_id",
             "staleness_basis",
             "research_interference_basis",
         ):
             object.__setattr__(
                 self, field, _text(getattr(self, field), name=field)
+            )
+        object.__setattr__(
+            self,
+            "monotonic_clock_id",
+            _text(self.monotonic_clock_id, name="monotonic_clock_id"),
+        )
+        if self.monotonic_clock_id != MONOTONIC_CLOCK_ID:
+            raise RuntimeTargetHostMeasurementError(
+                "monotonic_clock_id must match canonical campaign time.monotonic_ns authority"
             )
         start = _non_negative_int(
             self.start_journal_sequence, name="start_journal_sequence"
@@ -804,21 +813,35 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     plan: RuntimeCampaignPlan,
     cut: RuntimeCampaignCut,
     measurement: TargetHostMeasurementArtifact,
+    expected_release_artifact_id: str,
     max_events: int = 100_000,
 ) -> RuntimeCampaignEvidence:
-    """Derive existing RuntimeCampaignEvidence from one retained raw artifact.
+    """Derive campaign evidence from raw measurement under external release authority.
 
-    The artifact is snapshotted through canonical bytes before use. The existing
-    campaign collector still owns JournalStore conservation/backlog/end-cut and
-    duration authority. After collection, the exact durable event identities and
-    frozen end cut must match the retained measurement artifact or the operation
-    fails closed.
+    The expected delivered-artifact UUID is mandatory at the sole evidence-minting
+    path; trusting the measurement's self-asserted UUID is insufficient. Caller-owned
+    measurement state is snapshotted through canonical bytes before the external
+    binding and campaign-window checks. The existing collector still owns durable
+    JournalStore conservation/backlog/end-cut authority.
     """
 
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
     measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    frozen_release_artifact_id = _uuid(
+        expected_release_artifact_id,
+        name="expected_release_artifact_id",
+    )
+    if measurement.release_artifact_id != frozen_release_artifact_id:
+        raise RuntimeTargetHostMeasurementError(
+            "target-host measurement belongs to another delivered release artifact"
+        )
     measurement.require_campaign_binding(spec=spec, plan=plan, cut=cut)
+    for sample in measurement.financial_samples:
+        if sample.staleness_observed_monotonic_ns < cut.started_monotonic_ns:
+            raise RuntimeTargetHostMeasurementError(
+                "financial staleness observation occurs before campaign monotonic cut"
+            )
 
     evidence = collect_runtime_campaign_evidence(
         journal=journal,
@@ -835,6 +858,10 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     measurement.require_evidence_match(evidence)
 
     campaign_end_ns = evidence.ended_monotonic_ns
+    if campaign_end_ns < cut.started_monotonic_ns:
+        raise RuntimeTargetHostMeasurementError(
+            "campaign terminal monotonic cut precedes campaign start"
+        )
     for sample in measurement.financial_samples:
         if sample.latency_start_monotonic_ns < cut.started_monotonic_ns:
             raise RuntimeTargetHostMeasurementError(

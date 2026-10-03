@@ -141,6 +141,10 @@ def _observed_source_sha() -> str:
 
 def _require_clean_checkout() -> None:
     status = _git(
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
         "status",
         "--porcelain=v1",
         "--untracked-files=all",

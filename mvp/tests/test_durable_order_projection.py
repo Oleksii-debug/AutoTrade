@@ -825,6 +825,53 @@ class DurableOrderProjectionTests(unittest.TestCase):
                         evidence_refs=[ref],
                     )
 
+    def test_provider_evidence_io_failure_is_domain_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-evidence-io",
+                client_order_id="evidence-io",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "evidence-io",
+                "provider_order_id": "provider-evidence-io",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("simulated evidence I/O failure"),
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "not resolvable and intact",
+                ):
+                    book.acknowledge(
+                        event_key="ack-evidence-io",
+                        client_order_id="evidence-io",
+                        provider_order_id="provider-evidence-io",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+
     def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

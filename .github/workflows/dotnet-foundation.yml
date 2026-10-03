@@ -76,7 +76,20 @@ jobs:
       - name: Emit generated Host.Process NuGet lock
         shell: pwsh
         run: Get-Content -Raw tests/Host.Process/packages.lock.json
-      - run: dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release --no-restore
+      - name: Run Host.Process contracts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          dotnet run --project tests/Host.Process/Host.Process.csproj --configuration Release --no-restore 2>&1 | Tee-Object -FilePath "artifacts/host-process-${{ runner.os }}.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Host.Process diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-process-log-${{ runner.os }}
+          path: artifacts/host-process-${{ runner.os }}.log
+          if-no-files-found: warn
+          retention-days: 1
       - name: Write exact-head .NET foundation evidence
         run: >-
           python tools/write_ci_evidence.py

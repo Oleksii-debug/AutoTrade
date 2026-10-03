@@ -154,6 +154,30 @@ class RuntimeTargetHostCampaignTests(unittest.TestCase):
         ):
             ParsedRuntimeTargetHostCampaign.parse(duplicate)
 
+    def test_campaign_document_size_is_bounded_before_semantic_acceptance(self) -> None:
+        oversized = _raw() + (b" " * 1_000_001)
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCampaignError,
+            "not valid UTF-8 JSON",
+        ):
+            ParsedRuntimeTargetHostCampaign.parse(oversized)
+
+    def test_campaign_nesting_is_bounded_before_recursive_decode(self) -> None:
+        deeply_nested = b'{"x":' + (b"[" * 129) + b"0" + (b"]" * 129) + b"}"
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCampaignError,
+            "not valid UTF-8 JSON",
+        ):
+            ParsedRuntimeTargetHostCampaign.parse(deeply_nested)
+
+    def test_campaign_integer_domain_is_bounded(self) -> None:
+        huge_integer = b'{"x":' + (b"9" * 641) + b"}"
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCampaignError,
+            "not valid UTF-8 JSON",
+        ):
+            ParsedRuntimeTargetHostCampaign.parse(huge_integer)
+
 
 if __name__ == "__main__":
     unittest.main()

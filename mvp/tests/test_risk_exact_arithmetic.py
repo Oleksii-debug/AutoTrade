@@ -110,6 +110,137 @@ class RiskExactArithmeticTests(unittest.TestCase):
             )
         self.assertEqual(HostileInt.comparisons, 0)
 
+    def test_context_rejects_mapping_subclass_before_truthiness_or_items(self):
+        touched = []
+
+        class HostileDict(dict):
+            def __bool__(self):
+                touched.append("bool")
+                raise AssertionError("hostile mapping truthiness")
+
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping items")
+
+        hostile = HostileDict({"ABC": "1"})
+        touched.clear()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "reserved_position_delta must be an exact dict",
+        ):
+            RiskContext.create(
+                state_version=7,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                reserved_position_delta=hostile,
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                stress_scenarios=({"ABC": "0"},),
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_context_rejects_sequence_subclass_before_iteration(self):
+        touched = []
+
+        class HostileList(list):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile sequence iteration")
+
+        hostile = HostileList([{"ABC": "0"}])
+        touched.clear()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "stress_scenarios must be an exact list or tuple",
+        ):
+            RiskContext.create(
+                state_version=7,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                reserved_position_delta={},
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                stress_scenarios=hostile,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_direct_policy_reseal_rejects_hostile_digest_tuple_before_iteration(self):
+        touched = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile policy digest iteration")
+
+        configured = policy()
+        hostile_pairs = HostileTuple(
+            (("base", "sha256:" + "0" * 64),)
+        )
+        forged = RiskPolicy(
+            **{
+                **vars(configured),
+                "required_stress_scenario_labels": ("base",),
+                "required_stress_scenario_digests": hostile_pairs,
+            }
+        )
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        touched.clear()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "required_stress_scenario_digests must be a canonical exact tuple",
+        ):
+            evaluate_risk(intent, exact_context(), forged)
+
+        self.assertEqual(touched, [])
+
+    def test_exact_list_inputs_are_snapshotted_without_relaxing_container_boundary(self):
+        context = RiskContext.create(
+            state_version=7,
+            equity="1000",
+            positions={},
+            marks={"ABC": "1"},
+            reserved_position_delta={},
+            daily_pnl="0",
+            drawdown_fraction="0",
+            market_data_age_seconds="0",
+            fx_age_seconds={},
+            margin_headroom="1",
+            capability_allowed=True,
+            borrow_available=True,
+            stress_scenarios=[{"ABC": "0"}],
+            stress_scenario_labels=["base"],
+            tail_scenarios=[{"ABC": "0"}],
+        )
+        configured = policy(allowed_actions=["TRADE", "HEDGE"])
+
+        self.assertEqual(context.stress_scenarios, ({"ABC": Decimal("0")},))
+        self.assertEqual(context.stress_scenario_labels, ("base",))
+        self.assertEqual(context.tail_scenarios, ({"ABC": Decimal("0")},))
+        self.assertEqual(configured.allowed_actions, ("TRADE", "HEDGE"))
+
     def test_hostile_text_scalar_is_rejected_before_normalization(self):
         class HostileText(str):
             calls = 0

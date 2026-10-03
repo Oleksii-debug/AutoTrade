@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
@@ -34,9 +35,6 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
             )
 
             with patch.object(
-                installer_manifest,
-                "_assert_windows_path_chain_is_not_reparse",
-            ), patch.object(
                 installer_manifest.os,
                 "fstat",
                 return_value=reparse,
@@ -56,35 +54,98 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
 
             parser.assert_not_called()
 
-    def test_reparse_ancestor_is_rejected_before_open_or_zip_parser(self) -> None:
+    def test_windows_retained_namespace_is_held_through_zip_and_final_identity(self) -> None:
         with TemporaryDirectory() as directory:
-            bundle = Path(directory) / "nested" / "release.zip"
-            bundle.parent.mkdir()
+            bundle = (Path(directory) / "release.zip").absolute()
             bundle.write_bytes(b"data")
-            reparse_parent = bundle.parent.absolute()
+            active = {"parent": False, "leaf": False}
 
-            def observed(path, *, follow_symlinks=False):
-                attributes = (
-                    installer_manifest._WINDOWS_REPARSE_POINT
-                    if Path(path) == reparse_parent
-                    else 0
-                )
-                return SimpleNamespace(st_file_attributes=attributes)
+            @contextmanager
+            def retained_parent(path, *, create=False):
+                self.assertEqual(Path(path), bundle)
+                self.assertFalse(create)
+                active["parent"] = True
+                try:
+                    yield object()
+                finally:
+                    active["parent"] = False
+
+            @contextmanager
+            def retained_leaf(authority, *, target_name, subject):
+                self.assertTrue(active["parent"])
+                self.assertEqual(target_name, bundle.name)
+                self.assertEqual(subject, "release bundle")
+                descriptor = os.open(bundle, os.O_RDONLY)
+                active["leaf"] = True
+                try:
+                    yield descriptor
+                finally:
+                    active["leaf"] = False
+                    os.close(descriptor)
+
+            def parser(stream, digest):
+                self.assertTrue(active["parent"])
+                self.assertTrue(active["leaf"])
+                self.assertTrue(digest.startswith("sha256:"))
+                return {"verified": True}
 
             with patch.object(
-                installer_manifest.os,
-                "stat",
-                side_effect=observed,
+                installer_manifest.sys,
+                "platform",
+                "win32",
             ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=retained_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+                side_effect=retained_leaf,
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+                side_effect=parser,
+            ):
+                self.assertEqual(
+                    installer_manifest.verify_release_bundle(bundle),
+                    {"verified": True},
+                )
+
+            self.assertFalse(active["parent"])
+            self.assertFalse(active["leaf"])
+
+    def test_windows_parent_namespace_rejection_prevents_leaf_open_and_zip_parse(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = (Path(directory) / "release.zip").absolute()
+            bundle.write_bytes(b"data")
+
+            @contextmanager
+            def rejected_parent(path, *, create=False):
+                raise RuntimeError("ancestor is a reparse point")
+                yield  # pragma: no cover
+
+            with patch.object(
+                installer_manifest.sys,
+                "platform",
+                "win32",
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=rejected_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+            ) as retained_leaf, patch.object(
                 installer_manifest,
                 "_verify_release_bundle_stream",
             ) as parser:
                 with self.assertRaisesRegex(
                     installer_manifest.InstallerManifestError,
-                    "path must not contain a Windows reparse point",
+                    "retained Windows namespace authority failed",
                 ):
                     installer_manifest.verify_release_bundle(bundle)
 
+            retained_leaf.assert_not_called()
             parser.assert_not_called()
 
 

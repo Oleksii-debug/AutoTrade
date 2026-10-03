@@ -125,7 +125,7 @@ RISK_INSTRUMENT_TYPES = frozenset(
 def _decimal(value, *, name: str) -> Decimal:
     if type(value) not in {Decimal, str, int}:
         raise TypeError(
-            f"{name} must use exact built-in Decimal, string or integer input"
+            f"{name} must use Decimal, string or integer input"
         )
     try:
         return parse_bounded_exact_decimal(value)

@@ -1058,6 +1058,48 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("must-hide-by-key", rendered)
         self.assertIn("[REDACTED]", rendered)
 
+    def test_diagnostic_redaction_scrubs_embedded_secret_mapping_keys(self):
+        redacted = self.boundary.redact(
+            {
+                "Authorization: Bearer bearer-key-secret": "bearer-value",
+                "https://user:url-password@provider.invalid/path": "url-value",
+                "api_key=first-key-secret": "first-value",
+                "api_key=second-key-secret": "second-value",
+                "safe": "visible",
+            }
+        )
+
+        rendered = repr(redacted)
+        for secret in (
+            "bearer-key-secret",
+            "url-password",
+            "first-key-secret",
+            "second-key-secret",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("Authorization: [REDACTED]", redacted)
+        self.assertIn("https://[REDACTED]@provider.invalid/path", redacted)
+        self.assertIn("api_key=[REDACTED]", redacted)
+        self.assertIn("api_key=[REDACTED] [2]", redacted)
+        self.assertEqual(redacted["safe"], "visible")
+
+    def test_diagnostic_redaction_preserves_synthetic_key_collisions(self):
+        class HostileKey:
+            def __hash__(self):
+                return 11
+
+        redacted = self.boundary.redact(
+            {
+                "[UNSUPPORTED_KEY_1]": "safe-visible",
+                HostileKey(): "must-never-surface",
+            }
+        )
+        self.assertEqual(redacted["[UNSUPPORTED_KEY_1]"], "safe-visible")
+        self.assertEqual(
+            redacted["[UNSUPPORTED_KEY_1] [2]"],
+            "[REDACTED]",
+        )
+
     def test_diagnostic_redaction_never_executes_hostile_key_or_value_hooks(self):
         class HostileKey:
             def __hash__(self):

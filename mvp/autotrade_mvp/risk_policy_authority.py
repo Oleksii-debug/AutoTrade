@@ -1272,6 +1272,14 @@ class DurableRiskPolicyRegistry:
         with journal_store_authority_scope(store, expected_store_identity):
             current = JournalStore.current_journal_sequence(store)
         cut = current if journal_sequence_cut is None else journal_sequence_cut
+        if type(cut) is not int or cut < 0:
+            raise RiskPolicyAuthorityError(
+                "journal_sequence_cut must be a non-negative integer"
+            )
+        if cut > current:
+            raise RiskPolicyAuthorityError(
+                "journal_sequence_cut cannot be newer than the durable journal"
+            )
         state = DurableRiskPolicyRegistry._replay(self, scope, journal_sequence_cut=cut)
         if (
             state.active_key is None

@@ -1272,6 +1272,7 @@ def _risk_input_fingerprint(
     policy: RiskPolicy,
 ) -> str:
     payload = {
+        "arithmetic_policy_id": RISK_ARITHMETIC_POLICY_ID,
         "intent": _fingerprint_value(vars(intent)),
         "context": _fingerprint_value(vars(context)),
         "policy": _fingerprint_value(vars(policy)),

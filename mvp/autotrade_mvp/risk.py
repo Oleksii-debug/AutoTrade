@@ -1561,11 +1561,11 @@ def evaluate_risk(
     evidence_store: object | None = None,
 ) -> RiskDecision:
     if type(intent) is not RiskIntent:
-        raise TypeError("intent must be exact RiskIntent")
+        raise TypeError("intent must be RiskIntent; exact RiskIntent type required")
     if type(context) is not RiskContext:
-        raise TypeError("context must be exact RiskContext")
+        raise TypeError("context must be RiskContext; exact RiskContext type required")
     if type(policy) is not RiskPolicy:
-        raise TypeError("policy must be exact RiskPolicy")
+        raise TypeError("policy must be RiskPolicy; exact RiskPolicy type required")
 
     intent = RiskIntent.create(
         symbol=intent.symbol,

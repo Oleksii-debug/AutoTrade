@@ -9,6 +9,7 @@ CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
@@ -20,6 +21,19 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("<UseWPF>true</UseWPF>", text)
         self.assertNotIn("<PackageReference", text)
         self.assertEqual(project.tag, "Project")
+
+    def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
+        text = WEB_POLICY.read_text(encoding="utf-8")
+        self.assertIn("AuthenticatedEmergencyHostClient.ValidateBaseUri", text)
+        self.assertIn('private const string CanonicalApiRoot = "/api/v1";', text)
+        self.assertIn("IsSameHostOrigin(target)", text)
+        self.assertIn('path.StartsWith(CanonicalApiRoot + "/"', text)
+        self.assertIn("AllowsWebMessageCommandAuthority => false", text)
+        self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsDownloads => false", text)
+        self.assertIn("AllowsNewWindow(Uri target) => false", text)
+        self.assertNotIn("Authorization", text)
+        self.assertNotIn("AutoTrade-Session", text)
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")

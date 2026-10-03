@@ -100,12 +100,13 @@ def target_measurement(
     latency_end_ns=1_100_100_000,
     monotonic_clock_id=TARGET_HOST_SHARED_CLOCK_ID,
     journal_store_identity_digest=None,
+    scenario_id=None,
 ):
     return TargetHostMeasurementArtifact(
         source_sha=SOURCE,
         release_artifact_id=RELEASE_ID,
         release_artifact_sha256=RELEASE_SHA,
-        scenario_id=current_plan.scenario_id,
+        scenario_id=current_plan.scenario_id if scenario_id is None else scenario_id,
         spec_digest=current_spec.digest,
         configuration_hash=CONFIG,
         host_fingerprint=HOST,
@@ -412,6 +413,32 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
                 measurement=measurement,
             )
 
+        load_plan.assert_not_called()
+
+    def test_measurement_scenario_must_match_budget_scenario(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+            scenario_id="other-runtime-scenario",
+        )
+        with self._python_313(), patch.object(
+            durable_financial_module,
+            "load_declared_runtime_event_plan",
+        ) as load_plan, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "scenario conflicts with runtime budget",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
         load_plan.assert_not_called()
 
     def test_target_latency_endpoint_substitution_is_rejected(self):

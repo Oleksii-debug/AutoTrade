@@ -94,6 +94,7 @@ def _canonical_entitlement_position_proof(
     accepted: AuthoritativeCorporateAction,
     *,
     activation_cut: datetime,
+    source_journal_sequence: int,
 ) -> dict[str, object]:
     """Prove dividend quantity from causal durable position history.
 
@@ -122,6 +123,13 @@ def _canonical_entitlement_position_proof(
         or activation_cut.utcoffset() is None
     ):
         raise TypeError("activation_cut must be timezone-aware")
+    if (
+        type(source_journal_sequence) is not int
+        or source_journal_sequence < 0
+    ):
+        raise TypeError(
+            "source_journal_sequence must be a non-negative integer"
+        )
     observed_cut = activation_cut.astimezone(timezone.utc)
     symbol = version.provider_symbol
     position_account = f"POSITION:{symbol}"
@@ -174,7 +182,8 @@ def _canonical_entitlement_position_proof(
         )
 
     proof: dict[str, object] = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
+        "source_journal_sequence": source_journal_sequence,
         "instrument_version": (
             f"{version.instrument_id}@{version.version}"
         ),
@@ -517,15 +526,61 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
+    evidence_plan = evidence_store.prepare_record_mutation(accepted)
+    candidate, transition = _candidate_book(corporate_book, accepted)
+    activation_text = activation_cut.isoformat().replace("+00:00", "Z")
+
+    # A fully committed exact retry authorizes no new financial mutation.  Verify
+    # its retained economics without relabelling historical proof with today's
+    # unrelated journal tail.
+    if evidence_plan.already_committed:
+        retry_transactions = _economic_transactions(
+            economic_book,
+            accepted,
+            transition,
+            exact_retry=True,
+            transaction_observed_at=activation_text,
+        )
+        retry_economic_plan = (
+            economic_book.prepare_batch_mutation(
+                retry_transactions,
+                committed_at=activation_text,
+            )
+            if retry_transactions
+            else None
+        )
+        retry_economic_committed = (
+            retry_economic_plan is None
+            or retry_economic_plan.already_committed
+        )
+        if retry_economic_committed:
+            return CorporateActionFinancialResult(
+                inserted=False,
+                source_event_id=evidence_plan.event_id,
+                accepted_event=accepted.event,
+                transition=transition,
+                next_state=candidate.state,
+                transaction_ids=tuple(
+                    item.transaction_id for item in retry_transactions
+                ),
+                economically_active=True,
+            )
+
+    # Fresh economic authority must be derived from one durable global journal
+    # cut and CAS that exact cut at commit.
+    source_journal_sequence = store.current_journal_sequence()
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
         accepted,
         activation_cut=activation_cut,
+        source_journal_sequence=source_journal_sequence,
     )
+
+    # Re-prepare after the captured cut so every mutable plan is derived from
+    # the same attempted journal state.  Any later advance is rejected by CAS.
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
     candidate, transition = _candidate_book(corporate_book, accepted)
-    activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     transactions = _economic_transactions(
         economic_book,
         accepted,
@@ -545,16 +600,6 @@ def commit_authoritative_corporate_action(
     economic_committed = (
         economic_plan is None or economic_plan.already_committed
     )
-    if evidence_plan.already_committed and economic_committed:
-        return CorporateActionFinancialResult(
-            inserted=False,
-            source_event_id=evidence_plan.event_id,
-            accepted_event=accepted.event,
-            transition=transition,
-            next_state=candidate.state,
-            transaction_ids=tuple(item.transaction_id for item in transactions),
-            economically_active=True,
-        )
     if (
         not evidence_plan.already_committed
         and economic_plan is not None
@@ -598,6 +643,7 @@ def commit_authoritative_corporate_action(
             None if economic_plan is None else economic_plan.request
         ),
         "activation_at": activation_text,
+        "source_journal_sequence": source_journal_sequence,
         "evidence_previously_retained": evidence_plan.already_committed,
         "entitlement_position": entitlement_position,
     }
@@ -607,6 +653,7 @@ def commit_authoritative_corporate_action(
         "provenance_digest": accepted.provenance_digest,
         "transaction_ids": [item.transaction_id for item in transactions],
         "activation_at": activation_text,
+        "source_journal_sequence": source_journal_sequence,
         "entitlement_position_digest": entitlement_position["digest"],
         "next_state_digest": payload_digest(
             {
@@ -655,6 +702,7 @@ def commit_authoritative_corporate_action(
                 0 if economic_plan is None else economic_plan.aggregate_version,
             ),
             events=events,
+            expected_journal_sequence=source_journal_sequence,
         )
     except Exception:
         economic_book.refresh()

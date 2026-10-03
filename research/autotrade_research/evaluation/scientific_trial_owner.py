@@ -108,13 +108,14 @@ class ScientificTrialOwnerEvidence:
     trial_evidence: TrialCompletenessEvidence
     population_matches_gate_evidence: bool
     completion_matches_gate_evidence: bool
+    complete_required: bool
 
     @property
     def authoritative(self) -> bool:
         return (
             self.population_matches_gate_evidence
             and self.completion_matches_gate_evidence
-            and self.trial_evidence.complete
+            and (not self.complete_required or self.trial_evidence.complete)
         )
 
     @property
@@ -125,6 +126,7 @@ class ScientificTrialOwnerEvidence:
                 "trial_completeness_digest": self.trial_evidence.digest,
                 "population_matches_gate_evidence": self.population_matches_gate_evidence,
                 "completion_matches_gate_evidence": self.completion_matches_gate_evidence,
+                "complete_required": self.complete_required,
                 "authoritative": self.authoritative,
             }
         )
@@ -271,6 +273,7 @@ def resolve_scientific_trial_owner(
         trial_evidence=trial_evidence,
         population_matches_gate_evidence=population_matches,
         completion_matches_gate_evidence=completion_matches,
+        complete_required=profile.require_complete_trials,
     )
 
 
@@ -331,11 +334,15 @@ def evaluate_gates_with_scientific_trial_owner(
                 "gate trial_log_complete does not match registry-owned completeness"
             )
             status = "FAIL"
-        elif profile.require_complete_trials and not owner.trial_evidence.complete:
+        elif owner.complete_required and not owner.trial_evidence.complete:
             checks["scientific_trial_owner"] = "FAIL"
             reasons.append(
                 "bound scientific protocol has not exhausted its immutable trial budget"
             )
+            status = "FAIL"
+        elif not owner.authoritative:
+            checks["scientific_trial_owner"] = "FAIL"
+            reasons.append("scientific trial owner evidence is not authoritative")
             status = "FAIL"
         else:
             checks["scientific_trial_owner"] = "PASS"

@@ -13,6 +13,10 @@ from mvp.autotrade_mvp.runtime_load_plan import declare_runtime_event_plan
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
 )
+from mvp.autotrade_mvp.runtime_target_host_measurement import (
+    ResourceTargetHostSample,
+    TargetHostMeasurementArtifact,
+)
 from mvp.tests.test_runtime_target_host_chronology_bound_qualification import (
     RuntimeTargetHostChronologyBoundTests,
 )
@@ -29,17 +33,23 @@ def _qualification():
     accepted = retained.qualification
     evidence_kinds = sorted(plan_bound._REQUIRED_ACCEPTED_EVIDENCE_KINDS)
     provenance_kinds = sorted(plan_bound._PROVENANCE_ACCEPTED_KINDS)
-    projection_kinds = sorted(plan_bound._PROJECTION_ACCEPTED_KINDS)
+
+    spare_evidence_chars = iter("56789")
+    evidence_digests = {}
+    for kind in evidence_kinds:
+        if kind == plan_bound.BINDING_EVIDENCE_KIND:
+            evidence_digests[kind] = accepted.binding_sha256
+        else:
+            evidence_digests[kind] = "sha256:" + next(spare_evidence_chars) * 64
+    payload_chars = iter("abef0")
+    payload_digests = {
+        kind: "sha256:" + next(payload_chars) * 64 for kind in provenance_kinds
+    }
 
     object.__setattr__(
         accepted,
         "evidence_sha256_by_kind",
-        MappingProxyType(
-            {
-                kind: "sha256:" + format(index + 5, "x") * 64
-                for index, kind in enumerate(evidence_kinds)
-            }
-        ),
+        MappingProxyType(evidence_digests),
     )
     object.__setattr__(
         accepted,
@@ -54,12 +64,7 @@ def _qualification():
     object.__setattr__(
         accepted,
         "payload_sha256_by_kind",
-        MappingProxyType(
-            {
-                kind: "sha256:" + format(index + 10, "x")[-1] * 64
-                for index, kind in enumerate(provenance_kinds)
-            }
-        ),
+        MappingProxyType(payload_digests),
     )
     object.__setattr__(
         accepted,
@@ -73,11 +78,61 @@ def _qualification():
         "projection_sha256_by_kind",
         MappingProxyType(
             {
-                kind: "sha256:" + format(index + 12, "x")[-1] * 64
-                for index, kind in enumerate(projection_kinds)
+                kind: payload_digests[kind]
+                for kind in sorted(plan_bound._PROJECTION_ACCEPTED_KINDS)
             }
         ),
     )
+    return retained
+
+
+def _measurement(spec, *, workload_profile_hash: str) -> TargetHostMeasurementArtifact:
+    return TargetHostMeasurementArtifact(
+        source_sha=spec.release_sha,
+        release_artifact_id=RELEASE_ID,
+        release_artifact_sha256=RELEASE_SHA,
+        scenario_id=spec.scenario_id,
+        spec_digest=spec.digest,
+        configuration_hash=spec.configuration_hash,
+        host_fingerprint=spec.host_fingerprint,
+        workload_profile_hash=workload_profile_hash,
+        plan_digest=workload_profile_hash,
+        journal_taxonomy_digest="sha256:" + "1" * 64,
+        journal_store_identity_digest="sha256:" + "e" * 64,
+        start_journal_sequence=0,
+        end_journal_sequence=0,
+        monotonic_clock_id="python-time.monotonic_ns",
+        staleness_basis="same-host-monotonic",
+        research_interference_basis="same-host-monotonic",
+        financial_samples=(),
+        research_samples=(),
+        resource_samples=(
+            ResourceTargetHostSample(
+                sample_id="snapshot-resource-1",
+                monotonic_ns=0,
+                phase="qualification",
+                metrics={"rss_bytes": 1},
+            ),
+        ),
+    )
+
+
+def _qualification_for_authority(spec, measurement):
+    retained = _qualification()
+    accepted = retained.qualification
+    for field in (
+        "source_sha",
+        "scenario_id",
+        "spec_digest",
+        "configuration_hash",
+        "host_fingerprint",
+        "workload_profile_hash",
+        "journal_store_identity_digest",
+        "release_artifact_id",
+        "release_artifact_sha256",
+    ):
+        object.__setattr__(accepted, field, getattr(measurement, field))
+    object.__setattr__(retained, "target_host_measurement_digest", measurement.digest)
     return retained
 
 
@@ -254,6 +309,175 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
             "key set changed after canonical verification",
         ):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
+    def test_binding_validator_accepts_captured_authority_relationships(self) -> None:
+        spec = _spec()
+        workload = "sha256:" + "4" * 64
+        measurement = _measurement(spec, workload_profile_hash=workload)
+        detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(
+            _qualification_for_authority(spec, measurement)
+        )
+
+        result = plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
+            detached,
+            spec=spec,
+            durable_plan_digest=workload,
+            measurement=measurement,
+            expected_release_artifact_id=RELEASE_ID,
+            expected_release_artifact_sha256=RELEASE_SHA,
+        )
+
+        self.assertIs(result, detached)
+
+    def test_binding_validator_rejects_validly_formatted_identity_rebinding(self) -> None:
+        spec = _spec()
+        workload = "sha256:" + "4" * 64
+        measurement = _measurement(spec, workload_profile_hash=workload)
+        detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(
+            _qualification_for_authority(spec, measurement)
+        )
+        object.__setattr__(detached.qualification, "scenario_id", "forged-scenario")
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "scenario id differs from captured authority",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
+                detached,
+                spec=spec,
+                durable_plan_digest=workload,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+    def test_binding_validator_rejects_projection_payload_rebinding(self) -> None:
+        spec = _spec()
+        workload = "sha256:" + "4" * 64
+        measurement = _measurement(spec, workload_profile_hash=workload)
+        retained = _qualification_for_authority(spec, measurement)
+        projections = dict(retained.projection_sha256_by_kind)
+        selected = sorted(plan_bound._PROJECTION_ACCEPTED_KINDS)[0]
+        projections[selected] = "sha256:" + "3" * 64
+        object.__setattr__(
+            retained,
+            "projection_sha256_by_kind",
+            MappingProxyType(projections),
+        )
+        detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "projection differs from retained payload",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
+                detached,
+                spec=spec,
+                durable_plan_digest=workload,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+    def test_binding_validator_rejects_binding_evidence_digest_rebinding(self) -> None:
+        spec = _spec()
+        workload = "sha256:" + "4" * 64
+        measurement = _measurement(spec, workload_profile_hash=workload)
+        retained = _qualification_for_authority(spec, measurement)
+        evidence = dict(retained.qualification.evidence_sha256_by_kind)
+        evidence[plan_bound.BINDING_EVIDENCE_KIND] = "sha256:" + "3" * 64
+        object.__setattr__(
+            retained.qualification,
+            "evidence_sha256_by_kind",
+            MappingProxyType(evidence),
+        )
+        detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "binding digest differs from accepted evidence map",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
+                detached,
+                spec=spec,
+                durable_plan_digest=workload,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+    def test_binding_validator_rejects_duplicate_payload_digest_authority(self) -> None:
+        spec = _spec()
+        workload = "sha256:" + "4" * 64
+        measurement = _measurement(spec, workload_profile_hash=workload)
+        retained = _qualification_for_authority(spec, measurement)
+        payload = dict(retained.qualification.payload_sha256_by_kind)
+        non_projection = sorted(
+            plan_bound._PROVENANCE_ACCEPTED_KINDS - plan_bound._PROJECTION_ACCEPTED_KINDS
+        )
+        payload[non_projection[1]] = payload[non_projection[0]]
+        object.__setattr__(
+            retained.qualification,
+            "payload_sha256_by_kind",
+            MappingProxyType(payload),
+        )
+        detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "payload digests are not independent",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
+                detached,
+                spec=spec,
+                durable_plan_digest=workload,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+    def test_production_builder_snapshots_measurement_before_composed_callback(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="measurement-snapshot-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            measurement = _measurement(spec, workload_profile_hash=plan.digest)
+            retained = _qualification_for_authority(spec, measurement)
+
+            def mutate_caller_measurement(*_args, **kwargs):
+                self.assertIsNot(kwargs["measurement"], measurement)
+                object.__setattr__(measurement, "scenario_id", "forged-after-snapshot")
+                return retained
+
+            verifier = plan_bound._build_chronology_free_verifier(
+                verify_composed=mutate_caller_measurement,
+                snapshot_measurement=plan_bound.snapshot_target_host_measurement,
+                acceptance_snapshotter=plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+                acceptance_binding_validator=(
+                    plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR
+                ),
+            )
+            result = verifier(
+                object(),
+                evidence_store=object(),
+                evidence_root=directory,
+                journal_store=store,
+                plan_id=plan.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=object(),
+                campaign_cut=object(),
+                measurement=measurement,
+            )
+
+        self.assertEqual(result.qualification.scenario_id, spec.scenario_id)
+        self.assertEqual(measurement.scenario_id, "forged-after-snapshot")
 
 
 if __name__ == "__main__":

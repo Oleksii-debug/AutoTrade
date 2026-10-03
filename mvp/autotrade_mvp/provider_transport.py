@@ -85,6 +85,7 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str | None = None,
     ) -> ContextManager[str]: ...
 
 
@@ -3468,6 +3469,7 @@ class BybitV5HttpTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -3737,6 +3739,7 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
+            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5Signer.sign(
@@ -3891,6 +3894,7 @@ class BybitV5AuthenticatedReadTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -4029,6 +4033,7 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
+            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5AuthenticatedReadSigner.sign(

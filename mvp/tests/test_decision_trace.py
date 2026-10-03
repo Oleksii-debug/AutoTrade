@@ -19,6 +19,8 @@ def trace(trace_id: str, *, decision: str = "BUY") -> dict:
         "order_id": "intent-1" if decision == "BUY" else None,
         "fill_id": "fill-1" if decision == "BUY" else None,
         "evidence_refs": ["evidence-1"],
+        "evidence_digests": {"evidence-1": "a" * 64},
+        "event_digests": {},
     }
 
 
@@ -403,6 +405,19 @@ class DecisionTraceStoreTests(unittest.TestCase):
             )
 
 
+    def test_digest_maps_must_match_linked_identities(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            bad_keys = trace("trace-bad-digest-keys")
+            bad_keys["evidence_digests"] = {"other": "a" * 64}
+            with self.assertRaisesRegex(ValueError, "keys must exactly match"):
+                store.append(bad_keys)
+
+            bad_digest = trace("trace-bad-digest")
+            bad_digest["evidence_digests"] = {"evidence-1": "A" * 64}
+            with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                store.append(bad_digest)
+
     def test_source_and_build_identity_validation_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
@@ -424,8 +439,8 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "trace-exact",
                 expected_source_sha="1" * 40,
                 expected_build_id="autotrade-test-build-1",
-                available_event_ids=[],
-                available_evidence_ids=["evidence-1"],
+                available_event_digests={},
+                available_evidence_digests={"evidence-1": "a" * 64},
             )
             self.assertEqual(exact["source_sha"], "1" * 40)
             self.assertEqual(exact["build_id"], "autotrade-test-build-1")
@@ -435,16 +450,25 @@ class DecisionTraceStoreTests(unittest.TestCase):
                     "trace-exact",
                     expected_source_sha="2" * 40,
                     expected_build_id="autotrade-test-build-1",
-                    available_event_ids=[],
-                    available_evidence_ids=["evidence-1"],
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
                 )
             with self.assertRaisesRegex(ValueError, "build identity mismatch"):
                 store.reconstruct_exact(
                     "trace-exact",
                     expected_source_sha="1" * 40,
                     expected_build_id="autotrade-test-build-2",
-                    available_event_ids=[],
-                    available_evidence_ids=["evidence-1"],
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+
+            with self.assertRaisesRegex(ValueError, "evidence digest mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "b" * 64},
                 )
 
 

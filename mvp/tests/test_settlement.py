@@ -835,6 +835,30 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
             rule_binding=rule or self.rule(),
         )
 
+    def test_unbound_trading_cash_cannot_be_inferred_as_opening_capital(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-unbound", side="SELL")
+        book.append(sold)
+        self.assertEqual(book.cash("USD"), Decimal("1100"))
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "active trading cash leg lacks settlement obligation",
+        ):
+            SettlementBook.from_economic_book(
+                economic_book=book,
+                obligations=(),
+            )
+
+        # Typed external/opening cash remains valid opening capital; the fence
+        # distinguishes it from trade-date cash by canonical posting shape.
+        opening_only = self.funded_book()
+        rebuilt = SettlementBook.from_economic_book(
+            economic_book=opening_only,
+            obligations=(),
+        )
+        self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
+
     def test_sell_is_economic_cash_but_not_available_before_settlement(self):
         book = self.funded_book()
         sold = self.fill(transaction_id="sell-1", side="SELL")

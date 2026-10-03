@@ -44,6 +44,7 @@ from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 from mvp.autotrade_mvp.reservations import InsufficientAvailable
 from mvp.autotrade_mvp.settlement import (
     SettlementAccountScope,
+    SettlementConflict,
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
 )
@@ -383,6 +384,67 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_unbound_trade_cash_fails_closed_before_reservation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifact_store, economic, settlements = _settlement_authorities(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="unbound-opening-cash",
+                    cause_event_id="unbound-opening-cash-evidence",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            economic.append(
+                book_equity_fill(
+                    transaction_id="unbound-sale",
+                    cause_event_id="unbound-sale-execution",
+                    instrument="ABC",
+                    settlement_currency="USD",
+                    side="SELL",
+                    quantity="1",
+                    price="100",
+                    economic_effective_at="2026-09-24T17:55:00Z",
+                    economic_order_key="provider:TEST_PROVIDER:execution:unbound-sale",
+                    observed_at="2026-09-24T17:55:01Z",
+                )
+            )
+            self.assertEqual(economic.cash("USD"), Decimal("1100"))
+            self.assertEqual(settlements.obligations, ())
+
+            authority = AuthorityService(
+                store,
+                evidence_artifact_store=artifact_store,
+                settlement_book=settlements,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                cash="1100",
+                available_cash="1100",
+                snapshot_id="availability-unbound-sale",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "active trading cash leg lacks settlement obligation",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "1050"},
+                    reservation_available={"CASH:USD": "1100"},
+                )
+            self.assertEqual(reservations.version, 0)
+
     def test_pending_sale_proceeds_cannot_expand_reservable_cash(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

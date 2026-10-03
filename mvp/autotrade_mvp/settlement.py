@@ -767,6 +767,41 @@ class SettlementBook:
             active.append(obligation)
             active_source_currency.add(source_currency)
 
+        # Never infer active trading cash as already-settled opening capital.
+        # Explicit external cash flows are intentionally outside this fence;
+        # equity/FX trading legs require source-transaction settlement coverage
+        # before their cash can participate in a settlement projection.
+        for transaction in economic_book.transactions:
+            if (
+                transaction.transaction_id in reversed_ids
+                or transaction.reverses_transaction_id is not None
+            ):
+                continue
+            settlement_relevant = any(
+                posting.ledger_account.startswith("POSITION:")
+                or posting.ledger_account.startswith("FX_CLEARING:")
+                for posting in transaction.postings
+            )
+            if not settlement_relevant:
+                continue
+            transaction_cash: dict[str, Decimal] = {}
+            for posting in transaction.postings:
+                currency = posting.asset_or_currency
+                if posting.ledger_account == f"CASH:{currency}":
+                    transaction_cash[currency] = exact_add(
+                        transaction_cash.get(currency, Decimal("0")),
+                        posting.signed_amount,
+                    )
+            for currency, amount in transaction_cash.items():
+                if (
+                    amount != 0
+                    and (transaction.transaction_id, currency)
+                    not in active_source_currency
+                ):
+                    raise SettlementConflict(
+                        "active trading cash leg lacks settlement obligation"
+                    )
+
         active_ids = {item.obligation_id for item in active}
         active_evidence = {
             obligation_id: record

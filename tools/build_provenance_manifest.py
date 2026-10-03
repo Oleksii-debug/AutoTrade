@@ -263,8 +263,9 @@ def release_evidence_snapshot(
         return False, "missing_evidence_refs", None
 
     seen_artifact_ids: set[str] = set()
+    expected_ref_fields = frozenset({"artifact_id", "sha256", "observed_at"})
     for item in refs:
-        if type(item) is not dict:
+        if type(item) is not dict or frozenset(item) != expected_ref_fields:
             return False, "invalid_evidence_refs", None
         artifact_id = item.get("artifact_id")
         digest = item.get("sha256")

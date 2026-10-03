@@ -23,6 +23,7 @@ from .exact_decimal import (
     exact_add,
     exact_multiply,
     exact_subtract,
+    is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentVersion
@@ -50,14 +51,14 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise FuturesError(f"{name} is required")
+    if type(value) is not str or not value.strip():
+        raise FuturesError(f"{name} must be exact non-empty text")
     return value.strip()
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise FuturesError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or value.tzinfo is None:
+        raise FuturesError(f"{name} must be exact timezone-aware datetime")
     return value.astimezone(timezone.utc)
 
 
@@ -512,6 +513,24 @@ def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _require_contract_quantity(contract: FuturesContract, quantity: Decimal) -> None:
+    """Lifecycle contracts obey their instrument grid, without order-entry limits."""
+    version = contract.canonical_instrument
+    if version is None:
+        # Legacy unbound states remain diagnostic; settlement admission already
+        # rejects them before any economic transition. No grid can be invented.
+        return
+    if type(version) is not InstrumentVersion:
+        raise FuturesError("lifecycle quantity requires canonical InstrumentVersion binding")
+    quantum = _decimal(version.quantity_step, "quantity_step", positive=True)
+    try:
+        aligned = is_exact_decimal_multiple(quantity, quantum)
+    except ExactDecimalError as error:
+        raise FuturesError("lifecycle quantity exceeds exact numeric envelope") from error
+    if not aligned:
+        raise FuturesError("signed_contracts must be an exact multiple of instrument quantity_step")
+
+
 @dataclass(frozen=True)
 class InverseVariationMarginState:
     """Exact inverse-futures state between explicit settlement boundaries."""
@@ -531,6 +550,7 @@ class InverseVariationMarginState:
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,
@@ -567,6 +587,7 @@ class VariationMarginState:
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,

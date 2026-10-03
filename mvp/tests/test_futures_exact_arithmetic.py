@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import (
     Decimal,
@@ -13,6 +14,7 @@ import unittest
 
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
+    InverseVariationMarginState,
     FuturesError,
     FuturesSettlementEvidence,
     FuturesSettlementScope,
@@ -232,11 +234,37 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                     settlement=settlement,
                     amount=amount,
                 )
-                self.assertEqual(transaction.postings[0].amount, amount)
+                self.assertEqual(transaction.postings[0].signed_amount, amount)
                 self.assertEqual(
-                    transaction.postings[1].amount,
+                    transaction.postings[1].signed_amount,
                     exact_opposite,
                 )
+
+    def test_lifecycle_contract_quantity_obeys_grid_without_order_entry_min_max(self):
+        original = self._contract()
+        for precision, rounding in ((6, ROUND_FLOOR), (10, ROUND_CEILING), (80, ROUND_HALF_EVEN)):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                version = replace(original.canonical_instrument, quantity_step=Decimal("0.125"), minimum_quantity=Decimal("2"), maximum_quantity=Decimal("10"))
+                contract = FuturesContract.from_instrument_version(version)
+                for quantity in ("0.125", "-0.125", "100", "-100"):
+                    state = VariationMarginState(contract, Decimal(quantity), Decimal("100"), self._scope())
+                    self.assertEqual(state.signed_contracts, Decimal(quantity))
+                for quantity in ("0.1", "-0.1", "2.00000000000000000000000001"):
+                    with self.assertRaisesRegex(FuturesError, "quantity_step"):
+                        VariationMarginState(contract, Decimal(quantity), Decimal("100"), self._scope())
+
+    def test_inverse_lifecycle_quantity_obeys_bound_grid(self):
+        original = self._contract()
+        version = replace(original.canonical_instrument, payoff="INVERSE", base_currency="BTC", settlement_currency="BTC", quantity_step=Decimal("0.125"))
+        contract = FuturesContract.from_instrument_version(version)
+        for quantity in ("0.125", "-0.125", "100"):
+            state = InverseVariationMarginState(contract, Decimal(quantity), Decimal("100"), self._scope())
+            self.assertEqual(state.signed_contracts, Decimal(quantity))
+        for quantity in ("0.1", "-0.1"):
+            with self.assertRaisesRegex(FuturesError, "quantity_step"):
+                InverseVariationMarginState(contract, Decimal(quantity), Decimal("100"), self._scope())
 
     def test_settlement_quantum_final_multiplication_is_context_independent(self):
         exact = Fraction(123456789012345678901234567890123, 10**30)

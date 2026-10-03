@@ -245,8 +245,11 @@ def _snapshot_operations(
         raise RuntimeTargetHostRunnerError(
             "operations must be an exact dict keyed by durable planned event_id"
         )
+    operation_keys = tuple(operations)
+    if any(type(key) is not str for key in operation_keys):
+        raise RuntimeTargetHostRunnerError("operation keys must be exact strings")
     expected_ids = plan.expected_event_ids
-    if set(operations) != set(expected_ids):
+    if set(operation_keys) != set(expected_ids):
         raise RuntimeTargetHostRunnerError(
             "operation key set must exactly match the durable pre-run event plan"
         )

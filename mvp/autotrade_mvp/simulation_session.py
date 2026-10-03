@@ -1,64 +1,132 @@
+"""One network-free, journal-backed canonical simulation episode.
+
+This deliberately runs one episode per directory. A durable send without a
+completed reconciliation cannot be reconstructed from a fresh simulated
+provider instance, so restart leaves it UNKNOWN instead of sending again.
+"""
+
 from __future__ import annotations
 
-import argparse
-import json
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.io import ResourceLock
-
-from .accounting import FillAccountingAuthority, economic_state_from_journal
-from .authority import (
-    AuthorityContext,
-    EquityOrderAdmission,
-    RiskAuthority,
-    RiskLimits,
-    RiskSnapshot,
+from .accounting import book_external_cash_flow
+from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
+from .dispatch import GuardedDispatcher, stable_client_order_id
+from .fill_accounting import ProjectedFillEvidence
+from .durable_reservations import DurableReservationBook
+from .exact_decimal import (
+    canonical_decimal_text, exact_add, exact_multiply,
+    parse_bounded_exact_decimal,
 )
-from .provider_economic import DurableProviderEconomicBook
 from .persistence import JournalStore, payload_digest
+from .pipeline import MovingAverageStrategy
+from .provider_activity_accounting import (
+    DurableProviderEconomicBook,
+    commit_provider_fill_with_reservation_consumption,
+)
 from .reconciliation import (
     ProviderFillEvidence,
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
-from .reservations import ReservationLedger
-from .simulation import (
-    FEE_RATE,
-    INITIAL_CASH,
-    MovingAverageStrategy,
-    SimulatedProvider,
-    canonical_decimal_text,
-    exact_add,
-    exact_multiply,
-)
+from .reconciliation_journal import record_reconciliation_checkpoint
+from .risk import RiskContext, RiskIntent, RiskPolicy
+from .simulated_provider import SimulatedProvider
+from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.store import ArtifactStore
 
-PROVIDER = "SIMULATED"
-ACCOUNT = "simulated-account"
+
+ACCOUNT = "canonical-sim-account"
+INSTRUMENT = "CANONICAL-SIM@1"
+INSTRUMENT_ID = "f752464b-1f5d-41c3-b55c-4af4c123a3db"
 ENVIRONMENT = "SIMULATION"
-INSTRUMENT = "SIM:XYZ:SPOT"
+PROVIDER = "SIMULATED"
+INITIAL_CASH = Decimal("1000")
+FEE_RATE = Decimal("0.001")
+_AGGREGATE = "single-episode"
+
+
+def _uuid(kind: str, episode_id: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"autotrade-canonical-simulation:{kind}:{episode_id}"))
+
+
+def _now(value: str | None) -> str:
+    if value is None:
+        point = datetime.now(timezone.utc)
+    else:
+        try:
+            point = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as error:
+            raise ValueError("now must be an ISO timestamp with timezone") from error
+        if point.tzinfo is None:
+            raise ValueError("now must include timezone")
+    return point.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _prices(values: list[str]) -> list[Decimal]:
-    if not isinstance(values, list) or not values:
-        raise ValueError("prices must be a non-empty list")
-    result: list[Decimal] = []
-    for value in values:
-        if type(value) is not str or not value.strip():
-            raise TypeError("prices must contain canonical decimal strings")
-        result.append(Decimal(value))
-    return result
+    if not values:
+        raise ValueError("at least one simulated price is required")
+    parsed = []
+    for raw in values:
+        if type(raw) is not str:
+            raise TypeError("prices must be decimal strings")
+        value = parse_bounded_exact_decimal(raw.strip())
+        if value <= 0:
+            raise ValueError("prices must be finite positive decimals")
+        parsed.append(value)
+    return parsed
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def _event(store: JournalStore, kind: str, episode_id: str, payload: dict, now: str) -> dict:
+    envelope = {
+        "event_id": _uuid(kind, episode_id),
+        "event_type": kind,
+        "schema_version": "1.0.0",
+        "aggregate_type": "canonical_simulation_session",
+        "aggregate_id": _AGGREGATE,
+        "aggregate_version": str(store.next_aggregate_version("canonical_simulation_session", _AGGREGATE)),
+        "host_id": "local-simulation",
+        "owner_epoch": "1",
+        "environment": ENVIRONMENT,
+        "occurred_at": now,
+        "observed_at": now,
+        "committed_at": now,
+        "correlation_id": _uuid("correlation", episode_id),
+        "causation_id": None,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "evidence_refs": [],
+    }
+    store.append_event(envelope)
+    return envelope
 
 
-def _risk_snapshot(price: Decimal) -> RiskSnapshot:
-    return RiskSnapshot(
+def _deliver_event(store: JournalStore, event_id: str) -> None:
+    for item in store.pending_outbox():
+        if item["event_id"] == event_id:
+            store.mark_outbox_delivered(
+                item["outbox_id"], expected_envelope_hash=item["envelope_hash"]
+            )
+            return
+    raise ValueError("expected simulator bootstrap outbox event is missing")
+
+
+def _risk_policy() -> RiskPolicy:
+    return RiskPolicy.create(
+        max_abs_position="10", max_single_notional="1000",
+        max_gross_leverage="2", max_net_leverage="2",
+        max_daily_loss="500", max_drawdown_fraction="0.20",
+        max_data_age_seconds="5", max_fx_age_seconds="60",
+        min_margin_headroom="0.20", max_stress_loss="500",
+    )
+
+
+def _risk_context(price: Decimal) -> RiskContext:
+    return RiskContext.create(
         state_version=1, equity=str(INITIAL_CASH), positions={},
         marks={INSTRUMENT: canonical_decimal_text(price)}, reserved_position_delta={},
         daily_pnl="0", drawdown_fraction="0", market_data_age_seconds="1",
@@ -141,181 +209,267 @@ def run_canonical_simulation(
         )
 
 
-def _run_locked(
-    root: Path,
-    *,
-    episode_id: str,
-    input_hash: str,
-    decision,
-    now: str | None,
-    fault_after_send: bool,
-    buy_requirements,
-) -> dict[str, object]:
-    timestamp = now or _utc_now()
-    journal = JournalStore(root / "journal.sqlite3")
-    provider = SimulatedProvider(root / "provider.sqlite3", starting_cash=INITIAL_CASH)
-    reservations = ReservationLedger(root / "reservations.sqlite3")
-    accounting = FillAccountingAuthority(journal)
+def _run_locked(root: Path, *, episode_id: str, input_hash: str,
+                decision, now: str | None, fault_after_send: bool,
+                buy_requirements: tuple[Decimal, Decimal] | None) -> dict[str, object]:
+    store = JournalStore(root / "journal.sqlite3")
+    prior = store.load_events("canonical_simulation_session", _AGGREGATE)
+    if prior:
+        started = prior[0]
+        if (started["event_type"] != "SimulationSessionStarted"
+                or started["payload"].get("input_hash") != input_hash):
+            raise ValueError("state directory belongs to another simulation input")
+        if len(prior) == 2 and prior[1]["event_type"] == "SimulationSessionCompleted":
+            result = dict(prior[1]["payload"])
+            economic = DurableProviderEconomicBook(
+                store, provider_id=PROVIDER, account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+            )
+            if (result["cash"] != str(economic.cash("USD"))
+                    or result["position"] != str(economic.position(INSTRUMENT))):
+                raise ValueError("completed simulation does not match durable economics")
+            result["resumed"] = True
+            result["new_outbound_requests"] = 0
+            return result
+        return {
+            "status": "UNKNOWN", "environment": ENVIRONMENT,
+            "episode_id": episode_id, "reason": "incomplete_send_requires_reconciliation",
+            "reconciled": False, "resumed": True, "new_outbound_requests": 0,
+        }
+
+    timestamp = _now(now)
+    future = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+              + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    provider = SimulatedProvider(
+        account_id=ACCOUNT, initial_cash=str(INITIAL_CASH), fee_rate=str(FEE_RATE),
+        transport_faults=({stable_client_order_id(
+            "simulated", _uuid("intent", episode_id),
+            environment=ENVIRONMENT, account_id=ACCOUNT,
+        ): "AFTER_ACCEPT_RESPONSE_LOST"}
+                          if fault_after_send else None),
+    )
     economic = DurableProviderEconomicBook(
-        journal=journal,
-        provider_id=PROVIDER,
-        account_id=ACCOUNT,
-        environment=ENVIRONMENT,
-        initial_cash={"USD": INITIAL_CASH},
+        store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
     )
-
-    started_event_id = f"simulation:{episode_id}:started"
-    if journal.event(started_event_id) is None:
-        payload = {
-            "episode_id": episode_id,
-            "input_hash": input_hash,
-            "decision_side": decision.side,
-            "decision_quantity": canonical_decimal_text(decision.quantity),
-            "decision_price": canonical_decimal_text(decision.price),
+    if store.load_events("economic_book", economic.book_id):
+        # A prior process may have died between bootstrap and the session marker.
+        # Its send state cannot be inferred from a fresh simulated provider.
+        return {
+            "status": "UNKNOWN", "environment": ENVIRONMENT,
+            "episode_id": episode_id, "reason": "orphaned_durable_state_requires_reconciliation",
+            "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
-        journal.append_event({
-            "event_id": started_event_id,
-            "event_type": "SimulationEpisodeStarted",
-            "aggregate_type": "simulation_episode",
-            "aggregate_id": episode_id,
-            "aggregate_version": 1,
-            "payload": payload,
-            "payload_hash": payload_digest(payload),
-            "committed_at": timestamp,
-        })
-    else:
-        existing = journal.event(started_event_id)
-        if existing is None or existing["payload"]["input_hash"] != input_hash:
-            raise ValueError("episode_id already exists with different inputs")
-
+    economic.append(book_external_cash_flow(
+        transaction_id=_uuid("seed-transaction", episode_id),
+        cause_event_id=_uuid("seed-cause", episode_id),
+        currency="USD", amount=str(INITIAL_CASH),
+    ))
+    bootstrap = store.load_events("economic_book", economic.book_id)
+    _deliver_event(store, bootstrap[-1]["event_id"])
+    admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
+    if not admission_reconciliation.complete or admission_reconciliation.blocks_new_risk:
+        raise ValueError("initial simulated provider reconciliation failed")
+    availability = record_reconciliation_checkpoint(
+        store, reconciliation_id="canonical-simulation-admission",
+        result=admission_reconciliation, observed_at=timestamp,
+        host_id="local-simulation", owner_epoch="1",
+    )
+    _deliver_event(store, availability["event_id"])
+    _event(store, "SimulationSessionStarted", episode_id, {
+        "input_hash": input_hash, "decision": decision.side,
+        "episode_id": episode_id, "environment": ENVIRONMENT,
+    }, timestamp)
     if decision.side == "HOLD":
-        admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
-        return {
-            "episode_id": episode_id,
-            "input_hash": input_hash,
-            "decision": asdict(decision),
-            "provider_snapshot": snapshot,
-            "reconciliation": asdict(admission_reconciliation),
-            "reservation": None,
-            "provider_execution": None,
-            "economic_state": economic_state_from_journal(journal),
+        result = {
+            "status": "HOLD", "decision": "HOLD", "environment": ENVIRONMENT,
+            "episode_id": episode_id, "cash": str(economic.cash("USD")),
+            "position": str(economic.position(INSTRUMENT)), "reconciled": True,
+            "order_id": None, "fill_id": None,
+            "reconciliation_event_id": availability["event_id"],
+            "new_outbound_requests": 0,
         }
+        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+        return {**result, "resumed": False}
 
+    policy = _risk_policy()
+    context = _risk_context(decision.price)
+    def resolve_risk(request):
+        return AuthoritativeRiskSnapshot(
+            context=context, risk_policy=policy,
+            account_id=request.account_id, environment=request.environment,
+            provider_id=request.provider_id,
+            instrument_version=request.instrument_version,
+            capability_snapshot_id=request.capability_snapshot_id,
+            reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,
+            journal_sequence_cut=request.journal_sequence_cut,
+            reservation_version=request.reservation_version,
+            reservation_state_digest=request.reservation_state_digest,
+            authority_policy_id=request.authority_policy_id,
+            authority_policy_version=request.authority_policy_version,
+            evaluated_at=request.evaluated_at, valid_until=future,
+            evidence_refs={name: f"simulated:{name.lower()}:{episode_id}" for name in (
+                "PORTFOLIO", "MARKET", "MARGIN", "POLICY", "RECONCILIATION",
+                "CAPABILITY", "BORROW", "STRESS", "FX", "FACTORS", "LIQUIDITY",
+                "LIQUIDATION", "SETTLEMENT", "OPTION_LIFECYCLE", "FUTURES_LIFECYCLE",
+            )},
+        )
+
+    authority = AuthorityService(store, risk_authority_resolver=resolve_risk)
+    policy_id = _uuid("policy", episode_id)
+    authority.register_policy(AuthorityPolicy.create(
+        policy_id=policy_id, account_id=ACCOUNT, environments={ENVIRONMENT},
+        instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
+        max_notional="1000", expires_at=future, autonomous=True,
+        protection_only=False, version=1,
+    ))
+    reservations = DurableReservationBook(
+        store, environment=ENVIRONMENT, account_id=ACCOUNT,
+        resolution_artifact_store=ArtifactStore(root / "artifacts"),
+        resolution_artifact_root=root / "artifacts",
+    )
     amount, required = buy_requirements
-    authority = RiskAuthority(
-        RiskLimits(
-            max_order_notional="1000000",
-            max_position_abs={INSTRUMENT: "1000000"},
-            max_gross_exposure="1000000",
-            max_net_exposure="1000000",
-            min_margin_headroom="0",
-            max_daily_loss="1000000",
-            max_drawdown_fraction="1",
-            max_market_data_age_seconds="60",
-            max_fx_age_seconds="60",
-            stress_max_loss="1000000",
-        ),
-        reservation_ledger=reservations,
-    )
-    snapshot = _risk_snapshot(decision.price)
+    quantity_text = canonical_decimal_text(decision.quantity)
+    price_text = canonical_decimal_text(decision.price)
+    amount_text = canonical_decimal_text(amount)
+    required_text = canonical_decimal_text(required)
+    intent_id = _uuid("intent", episode_id)
+    intent_hash = payload_digest({
+        "episode_id": episode_id, "side": "BUY", "quantity": quantity_text,
+        "price": price_text, "instrument": INSTRUMENT,
+    })
+    admission_id = _uuid("admission", episode_id)
     admission = authority.admit(
-        EquityOrderAdmission(
-            order_id=f"simulation:{episode_id}:order",
-            account_id=ACCOUNT,
-            instrument_version=INSTRUMENT,
-            side="BUY",
-            quantity=canonical_decimal_text(decision.quantity),
-            limit_price=canonical_decimal_text(decision.price),
-            currency="USD",
+        command_id=_uuid("financial-command", episode_id),
+        idempotency_key=_uuid("financial-command", episode_id),
+        admission_id=admission_id, policy_id=policy_id,
+        intent_id=intent_id, intent_hash=intent_hash, account_id=ACCOUNT,
+        environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
+        instrument_version=1, action="ORDER.SUBMIT", notional=amount_text,
+        capability_snapshot_id="simulated-capability-v1",
+        risk_intent=RiskIntent.create(
+            symbol=INSTRUMENT, side="BUY", quantity=quantity_text,
+            price=price_text, expected_state_version=1,
         ),
-        snapshot=snapshot,
-        context=AuthorityContext(
-            account_id=ACCOUNT,
-            environment=ENVIRONMENT,
-            provider_id=PROVIDER,
-        ),
+        risk_context=context, risk_policy=policy, risk_valid_until=future,
+        reservation_book=reservations,
+        reservation_id=_uuid("reservation", episode_id),
+        reservation_requirements={"CASH:USD": required_text},
+        reservation_available={"CASH:USD": snapshot["balances"][0]["available"]},
+        reservation_checkpoint_event_id=availability["event_id"],
+        reservation_provider_id=PROVIDER, reservation_max_age_seconds="60",
         now=timestamp,
-        available_cash={"USD": str(provider.available_cash("USD"))},
     )
-    reservation = reservations.get(admission.reservation_id)
-    if reservation is None:
-        raise RuntimeError("simulation reservation was not persisted")
-
-    provider_execution = provider.submit_market_buy(
-        client_order_id=admission.order_id,
-        instrument_version=INSTRUMENT,
-        quantity=decision.quantity,
-        price=decision.price,
-        now=timestamp,
-        fault_after_send=fault_after_send,
-    )
-    if fault_after_send:
-        return {
-            "episode_id": episode_id,
-            "input_hash": input_hash,
-            "decision": asdict(decision),
-            "provider_snapshot": provider.account_snapshot(now=timestamp),
-            "reconciliation": None,
-            "reservation": reservation,
-            "provider_execution": provider_execution,
-            "economic_state": economic_state_from_journal(journal),
+    if admission.outcome != "ADMITTED":
+        result = {
+            "status": "RISK_REJECTED", "decision": "BUY", "environment": ENVIRONMENT,
+            "episode_id": episode_id, "cash": str(economic.cash("USD")),
+            "position": str(economic.position(INSTRUMENT)), "reconciled": True,
+            "order_id": None, "fill_id": None,
+            "reconciliation_event_id": availability["event_id"],
+            "new_outbound_requests": 0,
         }
+        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+        return {**result, "resumed": False}
 
-    fill = provider.require_fill(provider_execution.provider_execution_id)
-    provider_fill = ProviderFillEvidence(
+    def final_check(candidate_hash, current_time):
+        return authority.dispatch_allowed(
+            admission_id, intent_hash=candidate_hash, account_id=ACCOUNT,
+            environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
+            instrument_version=1, action="ORDER.SUBMIT", now=current_time,
+            capability_snapshot_id="simulated-capability-v1",
+        )
+
+    attempt_id = _uuid("attempt", episode_id)
+    dispatch = GuardedDispatcher(
+        store, environment=ENVIRONMENT, account_id=ACCOUNT,
+        owner_token="canonical-simulation-owner",
+    ).dispatch(
+        attempt_id=attempt_id, intent_id=intent_id, intent_hash=intent_hash,
+        provider="simulated", request={
+            "attempt_id": attempt_id, "instrument_version": INSTRUMENT,
+            "side": "BUY", "quantity": quantity_text,
+            "price": price_text, "now": timestamp,
+        },
+        now=timestamp, authority_check=final_check,
+        transport_send=provider.transport_send,
+    )
+    if dispatch.status != "SENT":
+        return {
+            "status": "UNKNOWN" if dispatch.status == "UNKNOWN" else "BLOCKED",
+            "decision": "BUY", "environment": ENVIRONMENT,
+            "episode_id": episode_id, "reason": dispatch.reason,
+            "reconciled": False, "resumed": False,
+            "new_outbound_requests": provider.outbound_request_count,
+        }
+    if dispatch.response.get("outcome") != "ACKNOWLEDGED":
+        raise ValueError("simulated send did not acknowledge; reconciliation required")
+    fills = provider.activity_fills()
+    if len(fills) != 1:
+        raise ValueError("acknowledgement is not a fill; reconciliation required")
+    fill = fills[0]
+    fee = fill["fees"][0]
+    provider_fill = ProviderFillEvidence.create(
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
-        provider_execution_id=provider_execution.provider_execution_id,
-        client_order_id=admission.order_id,
-        instrument_version=INSTRUMENT,
-        side="BUY",
-        quantity=canonical_decimal_text(fill.quantity),
-        price=canonical_decimal_text(fill.price),
-        fee_currency="USD",
-        fee=canonical_decimal_text(fill.fee),
-        filled_at=fill.filled_at,
+        provider_execution_id=fill["provider_execution_id"],
+        client_order_id=dispatch.client_order_id,
+        instrument=fill["instrument_version"],
+        quantity=fill["last_quantity"]["value"],
+        price=fill["last_price"],
+        fee_amount=fee["amount"],
+        fee_currency=fee["currency"],
+        trade_time=fill["trade_time"],
+        side=fill["side"],
+        evidence_refs=(
+            f"simulated:provider-execution:{fill['provider_execution_id']}",
+        ),
     )
-    accounting.record_provider_fill(
+    projected_fill = ProjectedFillEvidence.create(
+        fill_id=_uuid("projected-fill", episode_id),
+        provider_execution_id=provider_fill.provider_execution_id,
+        intent_id=intent_id,
+        client_order_id=dispatch.client_order_id,
+        side=provider_fill.side,
+        quantity=provider_fill.quantity,
+        price=provider_fill.price,
+    )
+    commit_provider_fill_with_reservation_consumption(
+        economic,
+        reservations,
+        command_id=_uuid("financial-fill-command", episode_id),
+        idempotency_key=_uuid("financial-fill-command", episode_id),
+        reservation_id=_uuid("reservation", episode_id),
+        admission_id=admission_id,
+        projected_fill=projected_fill,
         provider_fill=provider_fill,
-        admission=admission,
-        reservation=reservation,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        observed_at=timestamp,
         committed_at=timestamp,
     )
-    economic.apply_fill(provider_fill, committed_at=timestamp)
-    admission_reconciliation, snapshot = _reconcile(
-        provider, economic, timestamp, provider_fill=provider_fill)
-    return {
-        "episode_id": episode_id,
-        "input_hash": input_hash,
-        "decision": asdict(decision),
-        "provider_snapshot": snapshot,
-        "reconciliation": asdict(admission_reconciliation),
-        "reservation": reservation,
-        "provider_execution": provider_execution,
-        "economic_state": economic_state_from_journal(journal),
-    }
-
-
-def _parse_cli() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="AutoTrade deterministic canonical simulation")
-    parser.add_argument("--state-dir", required=True)
-    parser.add_argument("--episode-id", required=True)
-    parser.add_argument("--prices", required=True)
-    parser.add_argument("--at")
-    parser.add_argument("--fault-after-send", action="store_true")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = _parse_cli()
-    result = run_canonical_simulation(
-        args.prices.split(","), args.state_dir,
-        episode_id=args.episode_id, now=args.at, fault_after_send=args.fault_after_send,
+    reconciled, _ = _reconcile(
+        provider,
+        economic,
+        timestamp,
+        provider_fill=provider_fill,
     )
-    print(json.dumps(result, sort_keys=True, default=str))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    if not reconciled.complete or reconciled.blocks_new_risk:
+        raise ValueError("simulated fill failed account reconciliation")
+    checkpoint = record_reconciliation_checkpoint(
+        store, reconciliation_id="canonical-simulation-fill",
+        result=reconciled, observed_at=timestamp,
+        host_id="local-simulation", owner_epoch="1",
+    )
+    result = {
+        "status": "FILL_RECONCILED_ORDER_UNCONFIRMED", "decision": "BUY",
+        "environment": ENVIRONMENT, "episode_id": episode_id,
+        "cash": str(economic.cash("USD")),
+        "position": str(economic.position(INSTRUMENT)),
+        "reconciled": True, "order_id": dispatch.client_order_id,
+        "fill_id": fill["provider_execution_id"],
+        "reconciliation_event_id": checkpoint["event_id"],
+        "new_outbound_requests": provider.outbound_request_count,
+    }
+    _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+    return {**result, "resumed": False}

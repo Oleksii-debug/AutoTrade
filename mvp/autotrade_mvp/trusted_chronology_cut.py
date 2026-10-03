@@ -213,7 +213,7 @@ def _build_impl_namespace_guard(
 
 
 def _build_external_function_graph_guard(*, root, label: str):
-    """Freeze one imported parser's reachable executable and direct module-attr graph."""
+    """Freeze one imported parser's reachable executable/class/module graph."""
 
     if type(root) is not FunctionType:
         raise TypeError("external parser root must be exact Python function")
@@ -228,6 +228,7 @@ def _build_external_function_graph_guard(*, root, label: str):
     class_bindings: list[tuple[type, str, object]] = []
     module_attribute_bindings: list[tuple[ModuleType, str, object]] = []
     module_attribute_function_states: list[tuple[FunctionType, object, object, object]] = []
+    external_type_states: list[tuple[object, ...]] = []
     seen_functions: set[int] = set()
     seen_classes: set[int] = set()
     seen_globals: set[tuple[int, str]] = set()
@@ -235,6 +236,48 @@ def _build_external_function_graph_guard(*, root, label: str):
     seen_class_bindings: set[tuple[int, str]] = set()
     seen_module_attributes: set[tuple[int, str]] = set()
     seen_module_attribute_functions: set[int] = set()
+    seen_external_types: set[int] = set()
+
+    def executable_members(raw: object) -> tuple[FunctionType, ...]:
+        if type(raw) is FunctionType:
+            return (raw,)
+        if isinstance(raw, staticmethod):
+            return (raw.__func__,)
+        if isinstance(raw, classmethod):
+            return (raw.__func__,)
+        if isinstance(raw, property):
+            return tuple(
+                function
+                for function in (raw.fget, raw.fset, raw.fdel)
+                if type(function) is FunctionType
+            )
+        return ()
+
+    def capture_external_type(cls: type) -> None:
+        identity = id(cls)
+        if identity in seen_external_types:
+            return
+        seen_external_types.add(identity)
+        namespace = cls.__dict__
+        names = frozenset(namespace)
+        members = tuple(namespace.items())
+        executable_states = []
+        for member_name, raw in members:
+            for function in executable_members(raw):
+                executable_states.append(
+                    (
+                        member_name,
+                        function,
+                        function.__code__,
+                        function.__defaults__,
+                        None
+                        if function.__kwdefaults__ is None
+                        else dict(function.__kwdefaults__),
+                    )
+                )
+        external_type_states.append(
+            (cls, names, members, tuple(executable_states))
+        )
 
     def capture_direct_module_attributes(function: FunctionType) -> None:
         namespace = function.__globals__
@@ -268,6 +311,8 @@ def _build_external_function_graph_guard(*, root, label: str):
                         else dict(expected.__kwdefaults__),
                     )
                 )
+            elif isinstance(expected, type):
+                capture_external_type(expected)
 
     def visit_function(function) -> None:
         if type(function) is not FunctionType or function.__module__ != module_name:
@@ -309,8 +354,11 @@ def _build_external_function_graph_guard(*, root, label: str):
                 global_bindings.append((namespace, name, expected))
             if type(expected) is FunctionType and expected.__module__ == module_name:
                 visit_function(expected)
-            elif isinstance(expected, type) and expected.__module__ == module_name:
-                visit_class(expected)
+            elif isinstance(expected, type):
+                if expected.__module__ == module_name:
+                    visit_class(expected)
+                else:
+                    capture_external_type(expected)
 
     def visit_class(cls: type) -> None:
         identity = id(cls)
@@ -318,20 +366,8 @@ def _build_external_function_graph_guard(*, root, label: str):
             return
         seen_classes.add(identity)
         for name, raw in cls.__dict__.items():
-            functions = ()
-            if type(raw) is FunctionType:
-                functions = (raw,)
-            elif isinstance(raw, staticmethod):
-                functions = (raw.__func__,)
-            elif isinstance(raw, classmethod):
-                functions = (raw.__func__,)
-            elif isinstance(raw, property):
-                functions = tuple(
-                    function
-                    for function in (raw.fget, raw.fset, raw.fdel)
-                    if function is not None
-                )
-            else:
+            functions = executable_members(raw)
+            if not functions:
                 continue
             key = (id(cls), name)
             if key not in seen_class_bindings:
@@ -347,6 +383,7 @@ def _build_external_function_graph_guard(*, root, label: str):
     frozen_class_bindings = tuple(class_bindings)
     frozen_module_attribute_bindings = tuple(module_attribute_bindings)
     frozen_module_attribute_function_states = tuple(module_attribute_function_states)
+    frozen_external_type_states = tuple(external_type_states)
 
     def require_external_graph_sealed() -> None:
         for function, code, defaults, kwdefaults in frozen_function_states:
@@ -393,6 +430,49 @@ def _build_external_function_graph_guard(*, root, label: str):
                     raise RuntimeError(label + " module function defaults changed")
             elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
                 raise RuntimeError(label + " module function defaults changed")
+        for cls, expected_names, expected_members, executable_states in frozen_external_type_states:
+            current_namespace = cls.__dict__
+            class_label = cls.__module__ + "." + cls.__name__
+            if frozenset(current_namespace) != expected_names:
+                raise RuntimeError(
+                    label + " external class namespace changed: " + class_label
+                )
+            for member_name, expected_member in expected_members:
+                if current_namespace.get(member_name, missing) is not expected_member:
+                    raise RuntimeError(
+                        label
+                        + " external class member changed: "
+                        + class_label
+                        + "."
+                        + member_name
+                    )
+            for member_name, function, code, defaults, kwdefaults in executable_states:
+                if function.__code__ is not code or function.__defaults__ is not defaults:
+                    raise RuntimeError(
+                        label
+                        + " external class executable changed: "
+                        + class_label
+                        + "."
+                        + member_name
+                    )
+                current_kwdefaults = function.__kwdefaults__
+                if kwdefaults is None:
+                    if current_kwdefaults is not None:
+                        raise RuntimeError(
+                            label
+                            + " external class defaults changed: "
+                            + class_label
+                            + "."
+                            + member_name
+                        )
+                elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                    raise RuntimeError(
+                        label
+                        + " external class defaults changed: "
+                        + class_label
+                        + "."
+                        + member_name
+                    )
 
     return require_external_graph_sealed
 

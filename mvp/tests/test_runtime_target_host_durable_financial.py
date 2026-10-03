@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import runtime_target_host_durable_financial as durable_financial_module
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.runtime_load_evidence import ExpectedJournalEvent
@@ -345,6 +346,72 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
                 declared_plan_id=declared.plan_id,
                 measurement=measurement,
             )
+        load_plan.assert_not_called()
+
+    def test_runtime_budget_spec_is_detached_before_journal_reads(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        original_load_plan = durable_financial_module.load_declared_runtime_event_plan
+        seen_specs = []
+
+        def load_plan_with_caller_mutation(current_store, *, plan_id, spec):
+            seen_specs.append(spec)
+            self.assertIsNot(spec, current_spec)
+            object.__setattr__(
+                current_spec,
+                "configuration_hash",
+                "sha256:" + "9" * 64,
+            )
+            return original_load_plan(
+                current_store,
+                plan_id=plan_id,
+                spec=spec,
+            )
+
+        with self._python_313(), patch.object(
+            durable_financial_module,
+            "load_declared_runtime_event_plan",
+            side_effect=load_plan_with_caller_mutation,
+        ):
+            binding = bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
+
+        self.assertEqual(len(seen_specs), 1)
+        self.assertEqual(binding.spec_digest, measurement.spec_digest)
+        self.assertNotEqual(current_spec.digest, measurement.spec_digest)
+
+    def test_executable_declared_plan_id_is_rejected_before_journal_read(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+
+        class ExecutablePlanId(str):
+            def strip(self):
+                raise AssertionError("executable plan id must never be evaluated")
+
+        with self._python_313(), patch.object(
+            durable_financial_module,
+            "load_declared_runtime_event_plan",
+        ) as load_plan, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "declared_plan_id must be canonical non-empty text",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=ExecutablePlanId(declared.plan_id),
+                measurement=measurement,
+            )
+
         load_plan.assert_not_called()
 
     def test_target_latency_endpoint_substitution_is_rejected(self):

@@ -699,5 +699,36 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             canonical_export_digest({"text": EncodeMustNotRun("safe")})
 
 
+    def test_evidence_and_metadata_text_share_utf8_resource_boundary(self):
+        invalid = "\ud800"
+        with self.assertRaisesRegex(ResearchBoundaryError, "valid UTF-8 text"):
+            ResearchEvidence(
+                evidence_id="invalid-utf8",
+                source_id="source",
+                source_revision="r1",
+                content=invalid,
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+            )
+
+        oversized = "x" * 1_048_577
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum text size"):
+            ResearchEvidence(
+                evidence_id="oversized-content",
+                source_id="source",
+                source_revision="r1",
+                content=oversized,
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum text size"):
+            ResearchToolRequest(
+                request_id="oversized-tool-name",
+                tool_name=oversized,
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

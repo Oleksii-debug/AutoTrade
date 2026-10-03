@@ -473,6 +473,11 @@
         "Field-specific validation details are unavailable because the command response could not be confirmed.");
       return;
     }
+    if (stateName === "scope_changed") {
+      appendMessage(
+        "Field-validation details from the previous account/environment scope are not shown in this scope.");
+      return;
+    }
     if (stateName !== "confirmed" || !Array.isArray(fieldErrors)) {
       throw new Error("command validation detail state is invalid");
     }
@@ -868,6 +873,47 @@
     reapplyTableFilter("event-history-body");
   }
 
+  function resetNotificationsForScope() {
+    if (state.announcementTimer !== null) {
+      window.clearTimeout(state.announcementTimer);
+      state.announcementTimer = null;
+    }
+    if (state.urgentAnnouncementTimer !== null) {
+      window.clearTimeout(state.urgentAnnouncementTimer);
+      state.urgentAnnouncementTimer = null;
+    }
+    state.pendingAnnouncements = [];
+    state.pendingUrgentAnnouncements = [];
+    text("polite-status", "", "");
+    text("urgent-status", "", "");
+
+    const history = byId("notification-history");
+    if (!history) return;
+    history.replaceChildren();
+    const item = document.createElement("li");
+    item.textContent =
+      "No material notifications recorded in this account/environment session.";
+    history.appendChild(item);
+  }
+
+  function resetCommandFeedbackForScope(accountId, environment) {
+    if (state.pendingCommand !== null) {
+      const belongsToNewScope =
+        state.pendingCommand.account_id === accountId &&
+        state.pendingCommand.environment === environment;
+      text(
+        "command-result",
+        belongsToNewScope
+          ? "An unresolved command for this account/environment is retained with its original identity. Review current host state before exact retry."
+          : "An unresolved command from a different account/environment scope is retained with its original identity and will not be retargeted.");
+    } else {
+      text(
+        "command-result",
+        "No host command has been submitted for this account/environment session.");
+    }
+    renderCommandValidationDetails([], "scope_changed");
+  }
+
   function resetOperationsForScope() {
     const body = byId("operations-body");
     if (!body) return;
@@ -906,9 +952,11 @@
       state.scopeEpoch += 1;
       state.cursor = 0n;
       state.version = 0n;
+      resetNotificationsForScope();
       resetTableFiltersForScopeChange();
       resetOperationsForScope();
       resetEventHistoryForScope();
+      resetCommandFeedbackForScope(parsed.accountId, parsed.environment);
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
@@ -970,8 +1018,14 @@
   }
 
   async function refreshSnapshot(options = {}) {
+    state.scopeEpoch += 1;
+    const refreshEpoch = state.scopeEpoch;
     const snapshot = await jsonFetch(HOST_API.route("getState"));
+    if (refreshEpoch !== state.scopeEpoch) {
+      return false;
+    }
     renderSnapshot(snapshot, options);
+    return true;
   }
 
   function eventMessage(event) {
@@ -1011,9 +1065,19 @@
       if (!state.snapshotReady) {
         await refreshSnapshot();
       }
+      const pollEpoch = state.scopeEpoch;
+      const renderedAccountId = state.renderedAccountId;
+      const renderedEnvironment = state.renderedEnvironment;
       const response = await jsonFetch(
         HOST_API.route("streamEvents") + "?after=" +
           encodeURIComponent(state.cursor.toString()));
+      if (
+        pollEpoch !== state.scopeEpoch ||
+        renderedAccountId !== state.renderedAccountId ||
+        renderedEnvironment !== state.renderedEnvironment
+      ) {
+        return;
+      }
       const events = Array.isArray(response) ? response : (response.events || []);
       let expectedCursor = state.cursor + 1n;
       for (const event of events) {

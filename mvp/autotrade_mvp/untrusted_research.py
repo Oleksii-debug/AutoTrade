@@ -191,9 +191,15 @@ class Redistribution(StrEnum):
 
 
 def _text(value: object, *, name: str) -> str:
-    if type(value) is not str or not value.strip():
+    if type(value) is not str:
         raise ResearchBoundaryError(f"{name} is required")
-    return value.strip()
+    value_size = _utf8_size(value, label=name)
+    if value_size > _MAX_STRING_UTF8_BYTES:
+        raise ResearchBoundaryError(f"{name} exceeds maximum text size")
+    normalized = value.strip()
+    if not normalized:
+        raise ResearchBoundaryError(f"{name} is required")
+    return normalized
 
 
 def _exact_collection(value: object, *, name: str) -> tuple[object, ...]:

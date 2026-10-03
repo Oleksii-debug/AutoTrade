@@ -154,7 +154,7 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
             )
         mechanics.assert_not_called()
 
-    def test_valid_external_authority_delegates_to_existing_mechanics(self):
+    def test_valid_external_authority_snapshots_then_delegates(self):
         temporary, journal, current_spec, current_plan, cut = self._context()
         self.addCleanup(temporary.cleanup)
         value = artifact(current_plan, cut)
@@ -174,14 +174,15 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
                 max_events=123,
             )
         self.assertIs(result, sentinel)
-        mechanics.assert_called_once_with(
-            journal=journal,
-            spec=current_spec,
-            plan=current_plan,
-            cut=cut,
-            measurement=value,
-            max_events=123,
-        )
+        mechanics.assert_called_once()
+        kwargs = mechanics.call_args.kwargs
+        self.assertIs(kwargs["journal"], journal)
+        self.assertIs(kwargs["spec"], current_spec)
+        self.assertIs(kwargs["plan"], current_plan)
+        self.assertIs(kwargs["cut"], cut)
+        self.assertEqual(kwargs["measurement"], value)
+        self.assertIsNot(kwargs["measurement"], value)
+        self.assertEqual(kwargs["max_events"], 123)
 
 
 if __name__ == "__main__":

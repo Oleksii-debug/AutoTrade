@@ -149,6 +149,22 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
         invalid_kind["kind"] = "CUSTOM"
         cases.append((invalid_kind, "kind is not canonical"))
 
+        padded_kind = _event(1, available_minutes=1, ingested_minutes=3)
+        padded_kind["kind"] = " BAR "
+        cases.append((padded_kind, "kind is not canonical"))
+
+        padded_event_id = _event(1, available_minutes=1, ingested_minutes=3)
+        padded_event_id["event_id"] = " " + padded_event_id["event_id"]
+        cases.append((padded_event_id, "canonical UUID text"))
+
+        padded_digest = _event(1, available_minutes=1, ingested_minutes=3)
+        padded_digest["raw_evidence_ref"]["sha256"] += " "
+        cases.append((padded_digest, "canonical digest text"))
+
+        padded_instant = _event(1, available_minutes=1, ingested_minutes=3)
+        padded_instant["source_event_at"] += " "
+        cases.append((padded_instant, "canonical UTC text"))
+
         invalid_payload = _event(1, available_minutes=1, ingested_minutes=3)
         invalid_payload["payload"] = []
         cases.append((invalid_payload, "payload must be an object"))

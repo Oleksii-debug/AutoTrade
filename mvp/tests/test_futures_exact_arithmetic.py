@@ -261,6 +261,73 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                 )
         self.assertEqual(outputs, [expected] * len(outputs))
 
+    def test_vm_containers_reject_polymorphic_retained_authorities(self):
+        contract_calls = []
+
+        class HostileContract(FuturesContract):
+            def __getattribute__(self, name):
+                if name in {"payoff", "multiplier", "canonical_instrument"}:
+                    contract_calls.append(name)
+                return super().__getattribute__(name)
+
+        base = self._contract()
+        hostile_contract = HostileContract(
+            instrument=base.instrument,
+            payoff=base.payoff,
+            multiplier=base.multiplier,
+            quote_currency=base.quote_currency,
+            settlement_currency=base.settlement_currency,
+            last_trade_at=base.last_trade_at,
+            delivery_cutoff=base.delivery_cutoff,
+            expiry=base.expiry,
+            settlement_method=base.settlement_method,
+            price_base_currency=base.price_base_currency,
+            canonical_instrument=base.canonical_instrument,
+        )
+        contract_calls.clear()
+        with self.assertRaisesRegex(FuturesError, "exact FuturesContract"):
+            VariationMarginState(
+                contract=hostile_contract,
+                signed_contracts=Decimal("1"),
+                last_settlement_price=Decimal("1"),
+                settlement_scope=self._scope(),
+            )
+        self.assertEqual(contract_calls, [])
+
+        scope_calls = []
+
+        class HostileScope(FuturesSettlementScope):
+            def __getattribute__(self, name):
+                if name in {"source_id", "provider_id", "account_id", "environment"}:
+                    scope_calls.append(name)
+                return super().__getattribute__(name)
+
+        scope = self._scope()
+        hostile_scope = HostileScope(
+            source_id=scope.source_id,
+            provider_id=scope.provider_id,
+            account_id=scope.account_id,
+            environment=scope.environment,
+        )
+        scope_calls.clear()
+        version = base.canonical_instrument
+        assert version is not None
+        with self.assertRaisesRegex(FuturesError, "exact FuturesSettlementScope"):
+            FuturesSettlementEvidence(
+                settlement_id="hostile-scope",
+                observation_id="hostile-scope:r0",
+                instrument_id=version.instrument_id,
+                instrument_version=version.version,
+                scope=hostile_scope,
+                effective_at=utc(25, 1),
+                sequence=1,
+                revision=0,
+                settlement_price=Decimal("2"),
+                price_currency="USD",
+                settlement_currency="USD",
+            )
+        self.assertEqual(scope_calls, [])
+
     def test_vm_authority_rejects_polymorphic_state_and_settlement_before_dispatch(self):
         contract = self._contract()
         settlement = self._settlement(

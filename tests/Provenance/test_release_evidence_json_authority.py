@@ -39,26 +39,46 @@ class ReleaseEvidenceJsonAuthorityTests(unittest.TestCase):
         path.write_bytes(raw)
         return path
 
-    def assert_invalid_json(self, raw: bytes) -> None:
-        qualified, reason, snapshot = release_evidence_snapshot(
+    def snapshot(self, raw: bytes) -> tuple[bool, str | None, dict[str, object] | None]:
+        return release_evidence_snapshot(
             self.write_raw(raw),
             label="release evidence",
         )
+
+    def assert_invalid_json(self, raw: bytes) -> None:
+        qualified, reason, snapshot = self.snapshot(raw)
         self.assertFalse(qualified)
         self.assertEqual(reason, "invalid_json")
         self.assertIsNone(snapshot)
 
+    def assert_unqualified(self, raw: bytes, expected_reason: str) -> None:
+        qualified, reason, snapshot = self.snapshot(raw)
+        self.assertFalse(qualified)
+        self.assertEqual(reason, expected_reason)
+        self.assertIsNone(snapshot)
+
     def test_valid_document_still_returns_the_exact_parsed_snapshot(self):
         raw = valid_evidence_json(extra='"metadata":{"nested":true}')
-        qualified, reason, snapshot = release_evidence_snapshot(
-            self.write_raw(raw),
-            label="release evidence",
-        )
+        qualified, reason, snapshot = self.snapshot(raw)
         self.assertTrue(qualified)
         self.assertIsNone(reason)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot["source_sha"], SOURCE_SHA)
         self.assertEqual(snapshot["metadata"], {"nested": True})
+
+    def test_future_schema_version_fails_closed(self):
+        raw = valid_evidence_json().replace(
+            b'"schema_version":"1.0.0"',
+            b'"schema_version":"2.0.0"',
+        )
+        self.assert_unqualified(raw, "unsupported_schema_version")
+
+    def test_noncanonical_schema_version_fails_closed(self):
+        raw = valid_evidence_json().replace(
+            b'"schema_version":"1.0.0"',
+            b'"schema_version":" 1.0.0 "',
+        )
+        self.assert_unqualified(raw, "unsupported_schema_version")
 
     def test_duplicate_top_level_authority_key_fails_closed(self):
         raw = (

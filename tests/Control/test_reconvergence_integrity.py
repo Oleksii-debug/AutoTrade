@@ -335,15 +335,18 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             (f"{path} (unauthorized trust-root modification)",),
         )
 
-    def test_exact_trusted_scope_can_authorize_guard_root_modification(self):
+    def test_exact_mutation_scope_cannot_authorize_guard_root_modification(self):
         path = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[path, "README.md"],
             changes=[Change(status="M", path=path)],
             allowed_scopes=(path,),
         )
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.protected_violations, ())
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
+        )
         self.assertEqual(result.scope_violations, ())
 
     def test_trust_root_approval_does_not_constrain_unrelated_changes(self):
@@ -376,6 +379,52 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             result.protected_violations,
         )
         self.assertEqual(result.scope_violations, ())
+
+    def test_change_and_path_authority_inputs_require_exact_builtin_types(self):
+        class HostileStr(str):
+            def split(self, *args, **kwargs):
+                raise AssertionError("virtual split must not run")
+
+        class HostileChange(Change):
+            pass
+
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=[HostileStr("README.md")],
+                changes=[],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(TypeError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[HostileChange(status="M", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(TypeError):
+            parse_name_status([HostileStr("M\tREADME.md")])
+        with self.assertRaises(ValueError):
+            parse_trusted_scope_approval(
+                HostileStr(
+                    "\n".join(
+                        (
+                            TRUSTED_SCOPE_APPROVAL_MARKER,
+                            f"head: {'a' * 40}",
+                            "path: tools/verify.py",
+                        )
+                    )
+                ),
+                expected_head_sha="a" * 40,
+            )
+
+    def test_base_tree_paths_fail_closed_when_noncanonical(self):
+        for path in ("../README.md", "/README.md", "dir//file.py", "dir\\file.py"):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=[path],
+                        changes=[],
+                        protected_sentinels=frozenset(),
+                    )
 
     def test_parser_rejects_unsupported_and_malformed_git_statuses(self):
         bad = (

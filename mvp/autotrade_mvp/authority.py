@@ -4623,6 +4623,20 @@ class AuthorityService:
         )
         return durable_version == self._journal_version
 
+    def historical_admission(self, admission_id: str) -> dict[str, Any]:
+        """Read the original validated outcome; grant no current send authority.
+
+        Canonical replay adapter consumed from #1341, not a second admission
+        authority. Current risk/dispatch eligibility is deliberately separate.
+        """
+        aid = _text(admission_id, name="admission_id")
+        record = self._admissions.get(aid)
+        if record is None:
+            raise AuthorityConflict("historical admission is not recorded")
+        policy = self._policies[record.policy_id]
+        self._validate_historical_financial_retry_evidence(record, policy)
+        return self._admission_payload(record)
+
     def dispatch_allowed(
         self,
         admission_id: str,

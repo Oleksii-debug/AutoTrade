@@ -396,6 +396,49 @@ class WhiteBitMarketRules:
     max_total: Decimal | None
     delisted_at: int | None
 
+    def __post_init__(self) -> None:
+        market = _text(self.market, name="market").upper()
+        market_type = _text(self.market_type, name="market_type").upper()
+        if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
+            raise WhiteBitAdapterError("unsupported WhiteBIT market type")
+        for field in ("is_tradfi_futures", "is_collateral", "trades_enabled"):
+            if type(getattr(self, field)) is not bool:
+                raise WhiteBitAdapterError(f"{field} must be boolean")
+        if (market_type == "TRADFIFUTURES") != self.is_tradfi_futures:
+            raise WhiteBitAdapterError(
+                "is_tradfi_futures must be true exactly for TRADFIFUTURES"
+            )
+        step = _decimal(self.step_size, name="step_size", positive=True)
+        tick = _decimal(self.tick_size, name="tick_size", positive=True)
+        min_amount = _decimal(self.min_amount, name="min_amount", positive=True)
+        min_total = _decimal(self.min_total, name="min_total", positive=True)
+        if self.max_total is None:
+            max_total = None
+        else:
+            max_value = _decimal(self.max_total, name="max_total")
+            max_total = None if max_value == 0 else max_value
+            if max_total is not None and max_total <= 0:
+                raise WhiteBitAdapterError(
+                    "max_total must be positive, zero, or null"
+                )
+        if max_total is not None and max_total < min_total:
+            raise WhiteBitAdapterError("max_total cannot be below min_total")
+        delisted = self.delisted_at
+        if delisted is not None and (
+            type(delisted) is not int or delisted < 0
+        ):
+            raise WhiteBitAdapterError(
+                "delisted_at must be a non-negative integer or null"
+            )
+
+        object.__setattr__(self, "market", market)
+        object.__setattr__(self, "market_type", market_type)
+        object.__setattr__(self, "step_size", step)
+        object.__setattr__(self, "tick_size", tick)
+        object.__setattr__(self, "min_amount", min_amount)
+        object.__setattr__(self, "min_total", min_total)
+        object.__setattr__(self, "max_total", max_total)
+
     @classmethod
     def from_provider(cls, payload: Mapping[str, object]) -> "WhiteBitMarketRules":
         if not isinstance(payload, Mapping):
@@ -558,10 +601,12 @@ def prepare_order_request(
     Signed payload bytes are never a reusable or durable send authority.
     """
 
-    if not isinstance(intent, WhiteBitOrderIntent):
-        raise TypeError("intent must be WhiteBitOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(intent) is not WhiteBitOrderIntent:
+        raise TypeError("intent must be exact WhiteBitOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(market_rules) is not WhiteBitMarketRules:
+        raise TypeError("market_rules must be exact WhiteBitMarketRules")
     point = _instant(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     account = _text(account_id, name="account_id")

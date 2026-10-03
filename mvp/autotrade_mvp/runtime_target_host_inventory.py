@@ -16,6 +16,7 @@ import json
 import re
 from types import MappingProxyType
 from typing import Mapping
+from uuid import UUID
 
 from autotrade_runtime.artifacts import ArtifactStore
 from .runtime_load_campaign import capture_runtime_host_identity
@@ -82,6 +83,21 @@ def _source_sha(value: object) -> str:
     if _GIT_SHA_RE.fullmatch(text) is None:
         raise RuntimeTargetHostInventoryError(
             "expected_source_sha must be a lowercase 40-character Git SHA"
+        )
+    return text
+
+
+def _artifact_id(value: object) -> str:
+    text = _text(value, name="artifact_id")
+    try:
+        canonical = str(UUID(text))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise RuntimeTargetHostInventoryError(
+            "artifact_id must be a canonical UUID"
+        ) from error
+    if canonical != text:
+        raise RuntimeTargetHostInventoryError(
+            "artifact_id must be a canonical UUID"
         )
     return text
 
@@ -282,13 +298,14 @@ def publish_runtime_target_host_inventory(
 
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")
+    normalized_artifact_id = _artifact_id(artifact_id)
     source_sha = _source_sha(expected_source_sha)
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=expected_host_fingerprint,
     )
     raw = inventory.canonical_bytes()
     manifest = evidence_store.publish_bytes(
-        artifact_id=artifact_id,
+        artifact_id=normalized_artifact_id,
         data=raw,
         media_type=JSON_MEDIA_TYPE,
         rights={"storage": True, "export": False},
@@ -300,7 +317,7 @@ def publish_runtime_target_host_inventory(
             "host_fingerprint": inventory.host_fingerprint,
         },
     )
-    if manifest.get("artifact_id") != artifact_id:
+    if manifest.get("artifact_id") != normalized_artifact_id:
         raise RuntimeTargetHostInventoryError(
             "retained inventory artifact identity changed during publication"
         )
@@ -313,7 +330,7 @@ def publish_runtime_target_host_inventory(
             "retained inventory media type changed during publication"
         )
     return PublishedRuntimeTargetHostInventory(
-        artifact_id=artifact_id,
+        artifact_id=normalized_artifact_id,
         payload_sha256=inventory.payload_sha256,
         host_fingerprint=inventory.host_fingerprint,
         collector_id=inventory.collector_id,

@@ -42,6 +42,7 @@ from .runtime_target_host_measurement import (
 SCHEMA_VERSION = "1.0.0"
 CLOCK_CONTRACT_ID = "python-perf-counter-equals-monotonic>=3.13"
 TARGET_HOST_SHARED_CLOCK_ID = "python-time.monotonic-perf-shared>=3.13"
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -55,6 +56,15 @@ def _text(value: object, *, name: str) -> str:
             f"{name} must be canonical non-empty text"
         )
     return value
+
+
+def _git_sha(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if _GIT_SHA.fullmatch(text) is None:
+        raise RuntimeTargetHostDurableFinancialError(
+            f"{name} must be a lowercase 40- or 64-character Git SHA"
+        )
+    return text
 
 
 def _digest(value: object, *, name: str) -> str:
@@ -193,7 +203,9 @@ class DurableTargetHostFinancialBinding:
             "target_host_measurement_digest",
             _digest(self.target_host_measurement_digest, name="target_host_measurement_digest"),
         )
-        object.__setattr__(self, "source_sha", _text(self.source_sha, name="source_sha"))
+        object.__setattr__(
+            self, "source_sha", _git_sha(self.source_sha, name="source_sha")
+        )
         object.__setattr__(self, "spec_digest", _digest(self.spec_digest, name="spec_digest"))
         object.__setattr__(
             self,
@@ -205,6 +217,8 @@ class DurableTargetHostFinancialBinding:
             "declared_plan_digest",
             _digest(self.declared_plan_digest, name="declared_plan_digest"),
         )
+        if type(self.bindings) is not tuple:
+            raise TypeError("bindings must be an exact tuple")
         snapshotted: list[DurableFinancialIdentityBinding] = []
         seen_events: set[str] = set()
         previous_sequence = 0

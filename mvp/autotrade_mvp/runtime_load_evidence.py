@@ -8,8 +8,8 @@ authority.
 
 The collector reads one contiguous authenticated journal tail and derives the
 recovered set only from exact predeclared journal bindings. Missing identities,
-wrong event/aggregate semantics, or reordered expected events therefore cannot
-be hidden behind caller-supplied integer counts.
+wrong event/aggregate semantics, reordered expected events, or undeclared
+financial activity therefore cannot be hidden behind caller-supplied summaries.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from .journal_taxonomy import JournalTaxonomyError, is_financial_for_qualification
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetSpec,
@@ -225,8 +226,9 @@ def collect_journal_conservation_evidence(
     ``start_journal_sequence`` is the pre-campaign cut. Only exact predeclared
     events committed after it can satisfy the workload. The tail reader verifies
     global contiguity and fails when a bounded read is incomplete. Expected event
-    order is also preserved: a matching set in the wrong durable order is not
-    accepted as conservation evidence.
+    order is also preserved. Every non-declared durable event is classified by
+    the canonical journal taxonomy; undeclared financial/control activity and
+    unknown aggregate families fail closed instead of disappearing from the cut.
     """
 
     scenario = _text(scenario_id, name="scenario_id")
@@ -263,6 +265,18 @@ def collect_journal_conservation_evidence(
         end = sequence
         event_id = event.get("event_id")
         if event_id not in expected_by_id:
+            try:
+                is_financial = is_financial_for_qualification(
+                    event.get("aggregate_type")
+                )
+            except JournalTaxonomyError as error:
+                raise RuntimeLoadEvidenceError(
+                    "journal qualification contains an unclassified durable aggregate"
+                ) from error
+            if is_financial:
+                raise RuntimeLoadEvidenceError(
+                    "journal qualification contains an undeclared financial event"
+                )
             continue
         if type(event_id) is not str:
             raise RuntimeLoadEvidenceError("recovered journal event_id is invalid")

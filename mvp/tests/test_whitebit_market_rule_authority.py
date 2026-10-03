@@ -105,6 +105,37 @@ class WhiteBitMarketRuleAuthorityTests(unittest.TestCase):
                 delisted_at=None,
             )
 
+    def test_direct_market_rules_reject_text_subclass_before_virtual_reads(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                return super().strip(*args, **kwargs)
+
+            def upper(self):
+                calls.append("upper")
+                return super().upper()
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "market must use exact text",
+        ):
+            WhiteBitMarketRules(
+                market=HostileText("BTC_USDT"),
+                market_type="SPOT",
+                is_tradfi_futures=False,
+                is_collateral=False,
+                trades_enabled=True,
+                step_size=Decimal("1"),
+                tick_size=Decimal("1"),
+                min_amount=Decimal("1"),
+                min_total=Decimal("1"),
+                max_total=Decimal("1000"),
+                delisted_at=None,
+            )
+        self.assertEqual(calls, [])
+
     def test_provider_market_rules_reject_mapping_subclass_before_virtual_reads(self):
         calls = []
 

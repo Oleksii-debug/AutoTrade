@@ -1,8 +1,9 @@
 import copy
+from hashlib import sha256
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-
 from research.autotrade_research.science.registry import (
     ProtocolConflict,
     ProtocolViolation,
@@ -46,6 +47,17 @@ def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30",
         "segment_end": end,
         "role": role,
     }
+
+
+def exhaust_trials(store, protocol_id):
+    state = store.completeness(protocol_id)
+    for index in range(state["remaining_trial_budget"]):
+        store.record_trial(
+            protocol_id,
+            status="COMPLETED",
+            payload={"trial_index": index, "result": "registered"},
+        )
+
 
 
 class ScientificRegistryTests(unittest.TestCase):
@@ -127,6 +139,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            exhaust_trials(store, registered.protocol_id)
             row = store.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-A",
@@ -141,41 +154,225 @@ class ScientificRegistryTests(unittest.TestCase):
             self.assertEqual(evidence.prior_access_count, 0)
             self.assertEqual(evidence.result, {"score": "0.1"})
 
-    def test_triggered_stopping_rule_requires_immutable_artifact_evidence(self):
+    def test_premature_locked_evaluation_does_not_burn_holdout(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "immutable artifact evidence",
+                "exact registered trial budget",
             ):
                 store.register_evaluation(
                     registered.protocol_id,
-                    holdout_id="holdout-invalid-stop",
+                    holdout_id="holdout-premature",
                     holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_evidence_ref": "ticket-123",
-                    },
+                    result={"score": "looks-good"},
                 )
 
+            self.assertEqual(
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-premature",
+                ),
+                0,
+            )
+            self.assertEqual(
+                store.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+            # The rejected attempt must roll back the holdout identity/alias too.
+            # Otherwise a pre-budget probe could poison the future legitimate
+            # locked evaluation even though no holdout access was recorded.
+            exhaust_trials(store, registered.protocol_id)
+            admitted = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-premature",
+                holdout_identity=holdout_identity(dataset_digit="b"),
+                result={"score": "0.1"},
+            )
+            self.assertEqual(admitted["prior_access_count"], 0)
+            self.assertEqual(admitted["untouched"], 1)
+
+    def test_all_caller_asserted_early_stop_forms_fail_before_holdout_access(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            rules_hash = store.completeness(
+                registered.protocol_id
+            )["stopping_rules_hash"]
             canonical_ref = (
                 "artifact:11111111-1111-4111-8111-111111111111@sha256:"
                 + "a" * 64
             )
-            row = store.register_evaluation(
-                registered.protocol_id,
-                holdout_id="holdout-valid-stop",
-                holdout_identity=holdout_identity(),
-                result={
+
+            variants = (
+                {"score": "0.1"},
+                {"stopping_rule_triggered": True},
+                {
                     "stopping_rule_triggered": True,
+                    "stopping_rules_hash": rules_hash,
+                    "stopping_evidence_ref": canonical_ref,
+                },
+                {
+                    "stopping_rule_triggered": True,
+                    "stopping_rules_hash": "sha256:" + "f" * 64,
                     "stopping_evidence_ref": canonical_ref,
                 },
             )
-            locked = store.locked_evaluation(row["evaluation_id"])
+            for index, result in enumerate(variants):
+                holdout_id = f"early-stop-disabled-{index}"
+                with self.subTest(result=result):
+                    with self.assertRaisesRegex(
+                        ProtocolViolation,
+                        "early stopping and oversized trial populations are not",
+                    ):
+                        store.register_evaluation(
+                            registered.protocol_id,
+                            holdout_id=holdout_id,
+                            holdout_identity=holdout_identity(),
+                            result=result,
+                        )
+                    self.assertEqual(
+                        store.holdout_access_count(
+                            registered.protocol_id,
+                            holdout_id,
+                        ),
+                        0,
+                    )
+                    self.assertEqual(
+                        store.completeness(
+                            registered.protocol_id
+                        )["recorded_trials"],
+                        0,
+                    )
+
+    def test_oversized_trial_population_cannot_unlock_holdout(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            store = ScientificRegistry(path)
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial_index": 0, "result": "registered"},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+
+            extra_payload = {"trial_index": 1, "result": "legacy-extra"}
+            extra_json = json.dumps(
+                extra_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            extra_hash = "sha256:" + sha256(extra_json.encode("utf-8")).hexdigest()
+            import sqlite3
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO trials("
+                    "trial_id,protocol_id,status,payload_hash,payload_json,created_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "22222222-2222-4222-8222-222222222222",
+                        registered.protocol_id,
+                        "COMPLETED",
+                        extra_hash,
+                        extra_json,
+                        "2026-09-28T12:00:00Z",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "exceeds preregistered trial budget",
+            ):
+                store.completeness(registered.protocol_id)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "exact registered trial budget",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-oversized-trials",
+                    holdout_identity=holdout_identity(),
+                    result={"score": "0.1"},
+                )
             self.assertEqual(
-                locked.result["stopping_evidence_ref"],
-                canonical_ref,
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-oversized-trials",
+                ),
+                0,
+            )
+
+    def test_corrupt_trial_population_cannot_unlock_holdout(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            store = ScientificRegistry(path)
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial_index": 0, "result": "registered"},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+
+            import sqlite3
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE trials SET payload_json=? WHERE trial_id=?",
+                    (
+                        '{"result":"tampered","trial_index":0}',
+                        "11111111-1111-4111-8111-111111111111",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial population integrity mismatch",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-corrupt-trials",
+                    holdout_identity=holdout_identity(),
+                    result={"score": "0.1"},
+                )
+
+            self.assertEqual(
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-corrupt-trials",
+                ),
+                0,
+            )
+
+    def test_full_trial_closure_allows_locked_evaluation_without_early_stop_authority(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            exhaust_trials(store, registered.protocol_id)
+            row = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="closed-budget-holdout",
+                holdout_identity=holdout_identity(),
+                result={"score": "0.1"},
+            )
+            self.assertEqual(row["prior_access_count"], 0)
+            self.assertEqual(row["untouched"], 1)
+            self.assertEqual(
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "closed-budget-holdout",
+                ),
+                1,
             )
 
     def test_failed_and_discarded_trials_are_preserved(self):
@@ -203,6 +400,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
+            exhaust_trials(store, p.protocol_id)
             first = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(first["untouched"], 1)
             second = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.2"})
@@ -214,6 +412,7 @@ class ScientificRegistryTests(unittest.TestCase):
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
             store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), purpose="manual inspection")
+            exhaust_trials(store, p.protocol_id)
             result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})
             self.assertEqual(result["untouched"], 0)
             self.assertEqual(result["prior_access_count"], 1)

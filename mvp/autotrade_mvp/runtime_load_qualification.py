@@ -48,14 +48,14 @@ _MAX_CAMPAIGN_EVENTS = 100000
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
+    if type(value) is not str or not value.strip() or value != value.strip():
         raise RuntimeBudgetError(f"{name} must be canonical non-empty text")
     return value
 
 
 def _sha256_identity(value: object, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
     ):
         raise RuntimeBudgetError(f"{name} must be canonical sha256:<64 hex>")
@@ -173,7 +173,7 @@ class RuntimeCampaignPlan:
             self, "spec_digest", _sha256_identity(self.spec_digest, name="spec_digest")
         )
         if (
-            not isinstance(self.release_sha, str)
+            type(self.release_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.release_sha) is None
         ):
             raise RuntimeBudgetError("release_sha must be a canonical Git object id")
@@ -382,7 +382,7 @@ class RuntimeCampaignEvidence:
             ),
         )
         if (
-            not isinstance(self.release_sha, str)
+            type(self.release_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.release_sha) is None
         ):
             raise RuntimeBudgetError("release_sha must be a canonical Git object id")
@@ -797,4 +797,16 @@ def evaluate_runtime_campaign(
         raise TypeError("evidence must be exact RuntimeCampaignEvidence")
     spec = replace(spec)
     evidence = replace(evidence, _token=_EVIDENCE_TOKEN)
-    return evaluate_runtime_budget(spec, evidence.to_observation(spec))
+    decision = evaluate_runtime_budget(spec, evidence.to_observation(spec))
+    if decision.status != "PASS":
+        return decision
+    # This compatibility evidence object still contains caller-supplied metric
+    # series and is not independently re-resolved from the durable WP-65
+    # measurement/provenance lineage. Preserve hard FAILs, but never promote an
+    # otherwise favorable diagnostic snapshot to terminal qualification.
+    return RuntimeBudgetDecision(
+        status="INCONCLUSIVE",
+        scenario_id=decision.scenario_id,
+        reasons=("unverified_runtime_measurement_provenance",),
+        metrics=decision.metrics,
+    )

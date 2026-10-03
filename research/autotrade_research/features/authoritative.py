@@ -94,6 +94,22 @@ def _replay_common_cut(value: object | None) -> str | None:
     return text
 
 
+def _optional_sequence(value: object | None, *, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a canonical non-negative integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{name} must be a canonical non-negative integer"
+        ) from error
+    if parsed < 0 or str(parsed) != str(value):
+        raise ValueError(f"{name} must be a canonical non-negative integer")
+    return parsed
+
+
 def _canonical_hash(material: Mapping[str, object]) -> str:
     return "sha256:" + sha256(
         json.dumps(
@@ -218,15 +234,61 @@ def authoritative_source_values(
                 available_at=_knowledge_time(row),
                 value=payload[spec.payload_value_field],
                 source_revision=str(revision_int),
+                source_identity=event_id,
+                source_sequence=_optional_sequence(
+                    row.get("source_sequence"),
+                    name="source_sequence",
+                ),
+                stream_generation=_optional_sequence(
+                    row.get("stream_generation"),
+                    name="stream_generation",
+                ),
             )
         )
     if not result:
         raise ValueError("authoritative population has no events for feature spec")
+
+    simultaneous: dict[
+        tuple[str, datetime],
+        dict[str, tuple[int | None, int | None]],
+    ] = {}
+    for item in result:
+        if item.source_identity is None:
+            raise ValueError("authoritative source identity is missing")
+        key = (item.symbol, item.event_time)
+        identities = simultaneous.setdefault(key, {})
+        order = (item.stream_generation, item.source_sequence)
+        previous = identities.get(item.source_identity)
+        if previous is not None and previous != order:
+            raise ValueError(
+                "source identity changed provider order across revisions"
+            )
+        identities[item.source_identity] = order
+
+    for identities in simultaneous.values():
+        if len(identities) < 2:
+            continue
+        if any(sequence is None for _generation, sequence in identities.values()):
+            raise ValueError(
+                "simultaneous distinct market events require source_sequence"
+            )
+        provider_orders = [
+            (0 if generation is None else generation, sequence)
+            for generation, sequence in identities.values()
+        ]
+        if len(provider_orders) != len(set(provider_orders)):
+            raise ValueError(
+                "simultaneous distinct market events require unique provider order"
+            )
+
     result.sort(
         key=lambda item: (
             item.available_at,
             item.event_time,
+            -1 if item.stream_generation is None else item.stream_generation,
+            -1 if item.source_sequence is None else item.source_sequence,
             item.symbol,
+            item.source_identity or item.observation_id,
             item.observation_id,
         )
     )

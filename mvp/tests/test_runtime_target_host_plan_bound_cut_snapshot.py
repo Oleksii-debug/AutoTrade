@@ -2,7 +2,7 @@ from copy import copy as real_copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -154,27 +154,26 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
             self.assertEqual(detached.started_monotonic_ns, original_started)
             return accepted
 
-        with patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-            side_effect=composed,
-        ) as verifier:
-            result = terminal_module.verify_declared_plan_runtime_target_host_qualification(
-                object(),
-                evidence_store=object(),
-                evidence_root=root,
-                journal_store=store,
-                plan_id=declared.plan_id,
-                spec=spec,
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=campaign_plan,
-                campaign_cut=cut,
-                measurement=object(),
-            )
+        composed_verifier = Mock(side_effect=composed)
+        verifier = terminal_module._build_chronology_free_verifier(
+            verify_composed=composed_verifier,
+        )
+        result = verifier(
+            object(),
+            evidence_store=object(),
+            evidence_root=root,
+            journal_store=store,
+            plan_id=declared.plan_id,
+            spec=spec,
+            expected_release_artifact_id=RELEASE_ID,
+            expected_release_artifact_sha256=RELEASE_SHA,
+            campaign_plan=campaign_plan,
+            campaign_cut=cut,
+            measurement=object(),
+        )
 
         self.assertIs(result, accepted)
-        verifier.assert_called_once()
+        composed_verifier.assert_called_once()
         self.assertNotEqual(cut.started_monotonic_ns, original_started)
 
     def test_cut_mutation_during_copy_is_validated_on_detached_snapshot(self):
@@ -189,18 +188,19 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
             object.__setattr__(cut, "started_monotonic_ns", hostile)
             return real_copy(value)
 
-        with patch.object(
-            terminal_module,
-            "copy",
-            side_effect=mutating_copy,
-        ), patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-        ) as verifier, self.assertRaisesRegex(
+        composed_verifier = Mock()
+        verifier = terminal_module._build_chronology_free_verifier(
+            snapshot_campaign_cut=lambda value: terminal_module._snapshot_campaign_cut(
+                value,
+                _copy=mutating_copy,
+            ),
+            verify_composed=composed_verifier,
+        )
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "started_monotonic_ns must remain a non-negative integer",
         ):
-            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+            verifier(
                 object(),
                 evidence_store=object(),
                 evidence_root=root,
@@ -213,7 +213,7 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 campaign_cut=cut,
                 measurement=object(),
             )
-        verifier.assert_not_called()
+        composed_verifier.assert_not_called()
 
     def test_post_issuance_executable_cut_field_fails_before_composed_dispatch(self):
         root, store, spec, declared, campaign_plan, cut = self._prepared()
@@ -223,14 +223,15 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 raise AssertionError("executable campaign cut field must not run")
 
         object.__setattr__(cut, "started_monotonic_ns", ExecutableStarted())
-        with patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-        ) as verifier, self.assertRaisesRegex(
+        composed_verifier = Mock()
+        verifier = terminal_module._build_chronology_free_verifier(
+            verify_composed=composed_verifier,
+        )
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "started_monotonic_ns must remain a non-negative integer",
         ):
-            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+            verifier(
                 object(),
                 evidence_store=object(),
                 evidence_root=root,
@@ -243,7 +244,7 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 campaign_cut=cut,
                 measurement=object(),
             )
-        verifier.assert_not_called()
+        composed_verifier.assert_not_called()
 
     def test_campaign_workload_substitution_fails_before_composed_dispatch(self):
         root, store, spec, declared, campaign_plan, cut = self._prepared()
@@ -256,14 +257,15 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
             financial_aggregate_types=campaign_plan.financial_aggregate_types,
             release_artifact_sha256=campaign_plan.release_artifact_sha256,
         )
-        with patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-        ) as verifier, self.assertRaisesRegex(
+        composed_verifier = Mock()
+        verifier = terminal_module._build_chronology_free_verifier(
+            verify_composed=composed_verifier,
+        )
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "campaign workload identity does not match durable pre-run plan",
         ):
-            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+            verifier(
                 object(),
                 evidence_store=object(),
                 evidence_root=root,
@@ -276,7 +278,7 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 campaign_cut=cut,
                 measurement=object(),
             )
-        verifier.assert_not_called()
+        composed_verifier.assert_not_called()
 
     def test_executable_campaign_workload_field_is_never_compared(self):
         root, store, spec, declared, campaign_plan, cut = self._prepared()
@@ -294,14 +296,15 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
 
         hostile = ExecutableHash()
         object.__setattr__(campaign_plan, "workload_profile_hash", hostile)
-        with patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-        ) as verifier, self.assertRaisesRegex(
+        composed_verifier = Mock()
+        verifier = terminal_module._build_chronology_free_verifier(
+            verify_composed=composed_verifier,
+        )
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "campaign workload identity must remain exact canonical sha256 text",
         ):
-            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+            verifier(
                 object(),
                 evidence_store=object(),
                 evidence_root=root,
@@ -315,7 +318,7 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 measurement=object(),
             )
         self.assertFalse(hostile.invoked)
-        verifier.assert_not_called()
+        composed_verifier.assert_not_called()
 
     def test_executable_measurement_workload_field_is_never_compared(self):
         root, store, spec, declared, campaign_plan, cut = self._prepared()
@@ -334,14 +337,15 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
 
         hostile = ExecutableHash()
         object.__setattr__(current_measurement, "workload_profile_hash", hostile)
-        with patch.object(
-            terminal_module,
-            "verify_composed_runtime_target_host_qualification",
-        ) as verifier, self.assertRaisesRegex(
+        composed_verifier = Mock()
+        verifier = terminal_module._build_chronology_free_verifier(
+            verify_composed=composed_verifier,
+        )
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "measurement workload identity must remain exact canonical sha256 text",
         ):
-            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+            verifier(
                 object(),
                 evidence_store=object(),
                 evidence_root=root,
@@ -355,7 +359,32 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 measurement=current_measurement,
             )
         self.assertFalse(hostile.invoked)
-        verifier.assert_not_called()
+        composed_verifier.assert_not_called()
+
+    def test_production_snapshot_helpers_ignore_rebound_globals(self):
+        _, _, spec, _, _, cut = self._prepared()
+        forged_copy = Mock(side_effect=AssertionError("rebound copy ran"))
+        forged_error = type("ForgedCompositionError", (Exception,), {})
+
+        with (
+            patch.object(terminal_module, "RuntimeBudgetSpec", object),
+            patch.object(terminal_module, "RuntimeCampaignCut", object),
+            patch.object(terminal_module, "RuntimeTargetHostCompositionError", forged_error),
+            patch.object(terminal_module, "copy", forged_copy),
+        ):
+            detached_spec = terminal_module._snapshot_budget_spec(spec)
+            detached_cut = terminal_module._snapshot_campaign_cut(cut)
+            with self.assertRaises(RuntimeTargetHostCompositionError):
+                terminal_module._canonical_sha256_text(
+                    "not-a-digest",
+                    name="test digest",
+                )
+
+        self.assertIs(type(detached_spec), RuntimeBudgetSpec)
+        self.assertEqual(detached_spec.digest, spec.digest)
+        self.assertIsNot(detached_cut, cut)
+        self.assertEqual(detached_cut.plan_digest, cut.plan_digest)
+        forged_copy.assert_not_called()
 
 
 if __name__ == "__main__":

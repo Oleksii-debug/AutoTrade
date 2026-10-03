@@ -266,9 +266,13 @@ class AblationValuePolicy:
     fx_valuation_ref: str | None
 
 
-def _ablation_value_policy(payload: Any, *, protocol_id: str, protocol_hash: str) -> AblationValuePolicy:
-    if not isinstance(payload, dict):
-        raise ProtocolViolation("ablation_value_policy must be an object")
+def _ablation_value_policy_fields(payload: Any) -> tuple[str, str, str, str | None]:
+    """Validate the untrusted policy graph before JSON/hash callbacks can observe it."""
+    if type(payload) is not dict:
+        raise ProtocolViolation("ablation_value_policy must be an exact object")
+    keys = tuple(payload.keys())
+    if any(type(key) is not str for key in keys):
+        raise ProtocolViolation("ablation_value_policy keys must be exact text")
     expected = {
         "schema_version",
         "value_unit",
@@ -276,33 +280,61 @@ def _ablation_value_policy(payload: Any, *, protocol_id: str, protocol_hash: str
         "cost_projection_ref",
         "fx_valuation_ref",
     }
-    if set(payload) != expected:
+    if set(keys) != expected:
         raise ProtocolViolation(
             "ablation_value_policy must contain exactly schema_version, value_unit, "
             "utility_projection_ref, cost_projection_ref and fx_valuation_ref"
         )
-    if payload.get("schema_version") != "1.0.0":
-        raise ProtocolViolation("ablation_value_policy.schema_version must be 1.0.0")
-    value_unit = _text(payload.get("value_unit"), "ablation_value_policy.value_unit")
-    if value_unit != value_unit.upper() or re.fullmatch(r"[A-Z0-9][A-Z0-9._:-]{0,63}", value_unit) is None:
+    schema_version = payload["schema_version"]
+    if type(schema_version) is not str or schema_version != "1.0.0":
         raise ProtocolViolation(
-            "ablation_value_policy.value_unit must be canonical uppercase unit text"
+            "ablation_value_policy.schema_version must be exact 1.0.0 text"
         )
-    utility_projection_ref = _immutable_artifact_ref(
-        payload.get("utility_projection_ref"),
-        "ablation_value_policy.utility_projection_ref",
-    )
-    cost_projection_ref = _immutable_artifact_ref(
-        payload.get("cost_projection_ref"),
-        "ablation_value_policy.cost_projection_ref",
-    )
-    raw_fx = payload.get("fx_valuation_ref")
+    value_unit = payload["value_unit"]
+    if (
+        type(value_unit) is not str
+        or not value_unit
+        or value_unit != value_unit.strip()
+        or value_unit != value_unit.upper()
+        or re.fullmatch(r"[A-Z0-9][A-Z0-9._:-]{0,63}", value_unit) is None
+    ):
+        raise ProtocolViolation(
+            "ablation_value_policy.value_unit must be canonical exact uppercase unit text"
+        )
+    exact_refs: list[str] = []
+    for field in ("utility_projection_ref", "cost_projection_ref"):
+        reference = payload[field]
+        if type(reference) is not str or not reference or reference != reference.strip():
+            raise ProtocolViolation(
+                f"ablation_value_policy.{field} must be canonical exact text"
+            )
+        exact_refs.append(
+            _immutable_artifact_ref(
+                reference,
+                f"ablation_value_policy.{field}",
+            )
+        )
+    raw_fx = payload["fx_valuation_ref"]
     fx_valuation_ref = None
     if raw_fx is not None:
+        if type(raw_fx) is not str or not raw_fx or raw_fx != raw_fx.strip():
+            raise ProtocolViolation(
+                "ablation_value_policy.fx_valuation_ref must be canonical exact text"
+            )
         fx_valuation_ref = _immutable_artifact_ref(
             raw_fx,
             "ablation_value_policy.fx_valuation_ref",
         )
+    return value_unit, exact_refs[0], exact_refs[1], fx_valuation_ref
+
+
+def _ablation_value_policy(payload: Any, *, protocol_id: str, protocol_hash: str) -> AblationValuePolicy:
+    (
+        value_unit,
+        utility_projection_ref,
+        cost_projection_ref,
+        fx_valuation_ref,
+    ) = _ablation_value_policy_fields(payload)
     return AblationValuePolicy(
         protocol_id=protocol_id,
         protocol_hash=protocol_hash,
@@ -312,7 +344,6 @@ def _ablation_value_policy(payload: Any, *, protocol_id: str, protocol_hash: str
         cost_projection_ref=cost_projection_ref,
         fx_valuation_ref=fx_valuation_ref,
     )
-
 
 @dataclass(frozen=True)
 class ProtocolRegistration:
@@ -487,14 +518,12 @@ class ScientificRegistry:
             raise ProtocolViolation("trial_budget must be a positive integer")
         _validate_causal_periods(payload)
         identifier = _id(protocol_id)
+        if "ablation_value_policy" in payload:
+            # Admit this untrusted nested graph before canonical JSON/hash
+            # traversal can invoke polymorphic container/scalar callbacks.
+            _ablation_value_policy_fields(payload["ablation_value_policy"])
         canonical = _canonical(payload)
         digest = _hash(payload)
-        if "ablation_value_policy" in payload:
-            _ablation_value_policy(
-                payload["ablation_value_policy"],
-                protocol_id=identifier,
-                protocol_hash=digest,
-            )
         created = _now()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")

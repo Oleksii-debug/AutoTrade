@@ -975,7 +975,7 @@ class CausalReplay:
             build_sha=build_sha,
             protocol_ref=protocol_ref,
         )
-        return CompositeReplayCheckpoint(
+        checkpoint = CompositeReplayCheckpoint(
             replay=replay_before,
             runtime_components=snapshot.runtime_components,
             runtime_cut_id=snapshot.cut_id,
@@ -985,6 +985,11 @@ class CausalReplay:
             build_sha=build_sha,
             protocol_ref=protocol_ref,
         )
+        RuntimeStateVerifier.verify_checkpoint_binding(
+            runtime_state_verifier,
+            checkpoint,
+        )
+        return checkpoint
 
 
 def resume_from_composite_checkpoint(
@@ -1005,11 +1010,16 @@ def resume_from_composite_checkpoint(
         raise TypeError(
             "runtime_state_authority must be the canonical RuntimeStateAuthority"
         )
-    _require_runtime_state_authority_issued(runtime_state_authority)
+    if type(runtime_state_verifier) is not RuntimeStateVerifier:
+        raise TypeError(
+            "runtime_state_verifier must be the canonical RuntimeStateVerifier"
+        )
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
-    RuntimeStateAuthority.verify_checkpoint_binding(
-        runtime_state_authority,
+    if runtime_state_verifier.authority_id != checkpoint.runtime_authority_id:
+        raise ReplayError("runtime state verifier authority differs from checkpoint")
+    RuntimeStateVerifier.verify_checkpoint_binding(
+        runtime_state_verifier,
         checkpoint,
     )
     snapshot = _resolve_runtime_snapshot(

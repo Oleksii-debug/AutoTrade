@@ -215,9 +215,10 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             self.assertTrue(inserted)
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
-                wraps=store.commit_command,
+                autospec=True,
+                side_effect=JournalStore.commit_command,
             ) as commit_command:
                 second, replay_inserted = book_paper_activity(
                     store,
@@ -276,12 +277,13 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 activity_id="dep-command-only",
             )
 
-            def command_without_effects(**kwargs):
+            def command_without_effects(_canonical_store, **kwargs):
                 return kwargs["result"], False, ()
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
+                autospec=True,
                 side_effect=command_without_effects,
             ):
                 with self.assertRaisesRegex(
@@ -308,7 +310,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             original_commit_command = store.commit_command
             calls = 0
 
-            def competing_exact_commit(**kwargs):
+            def competing_exact_commit(_canonical_store, **kwargs):
                 nonlocal calls
                 calls += 1
                 saved_result, inserted, topics = original_commit_command(**kwargs)
@@ -318,8 +320,9 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 return saved_result, inserted, topics
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
+                autospec=True,
                 side_effect=competing_exact_commit,
             ):
                 transaction, inserted = book_paper_activity(
@@ -386,8 +389,9 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             self.assertTrue(inserted)
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
+                autospec=True,
                 return_value=({"tampered": True}, False, ()),
             ):
                 with self.assertRaisesRegex(

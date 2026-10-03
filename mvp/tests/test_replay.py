@@ -387,6 +387,7 @@ class CausalReplayTests(unittest.TestCase):
         self.assertFalse(hasattr(attacker, "_secret"))
         self.assertFalse(hasattr(attacker, "_cut_resolver"))
         self.assertFalse(hasattr(attacker, "_authority_id"))
+        self.assertFalse(hasattr(attacker, "_seal"))
         with self.assertRaises(AttributeError):
             attacker.verify_snapshot = lambda snapshot: None
         with self.assertRaises(AttributeError):
@@ -419,6 +420,7 @@ class CausalReplayTests(unittest.TestCase):
         self.assertFalse(hasattr(authority, "_secret"))
         self.assertFalse(hasattr(authority, "_cut_resolver"))
         self.assertFalse(hasattr(authority, "_authority_id"))
+        self.assertFalse(hasattr(authority, "_seal"))
 
     def test_composite_checkpoint_subclass_cannot_override_verdict_identity(self):
         events = [event(1, "2026-09-24T10:00:00Z", 1)]

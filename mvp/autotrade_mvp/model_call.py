@@ -237,10 +237,10 @@ class PricingEvidenceSnapshot:
             "valid_until",
             _utc_text(self.valid_until, name="valid_until"),
         )
-        if datetime.fromisoformat(self.valid_until.replace("Z", "+00:00")) < datetime.fromisoformat(
+        if datetime.fromisoformat(self.valid_until.replace("Z", "+00:00")) <= datetime.fromisoformat(
             self.as_of.replace("Z", "+00:00")
         ):
-            raise ValueError("pricing evidence validity cannot precede as_of")
+            raise ValueError("pricing evidence valid_until must follow as_of")
         currency = _canonical_text(
             self.cost_currency, name="cost_currency"
         ).upper()
@@ -1241,7 +1241,7 @@ class DurableModelCallOrchestrator:
         expiry = datetime.fromisoformat(_utc_text(prepared.get("pricing_valid_until"), name="pricing_valid_until").replace("Z", "+00:00"))
         if now < as_of:
             return "clock_before_pricing_authority_at_call_boundary"
-        if now > expiry:
+        if now >= expiry:
             return "pricing_evidence_expired_before_call_boundary"
         if now >= request.deadline_utc:
             return "request_deadline_expired_before_call_boundary"

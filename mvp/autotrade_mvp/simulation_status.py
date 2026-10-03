@@ -237,7 +237,22 @@ def _require_provider_fill_financial_binding(
         or type(projected) is not dict
         or type(provider_fill) is not dict
         or request.get("financial_admission_digest") != payload_digest(financial_admission)
-        or financial_admission != admission["payload"]
+        or financial_admission.get("admission_id") != admission["payload"].get("admission_id")
+        or financial_admission.get("intent_id") != admission["payload"].get("intent_id")
+        or financial_admission.get("reservation_id") != admission["payload"].get("reservation_id")
+        or financial_admission.get("account_id") != admission["payload"].get("account_id")
+        or financial_admission.get("environment") != admission["payload"].get("environment")
+        or financial_admission.get("instrument") != admission["payload"].get("instrument")
+        or financial_admission.get("action") != admission["payload"].get("action")
+        or financial_admission.get("risk_decision_id") != admission["payload"].get("risk_decision_id")
+        or financial_admission.get("financial_command_id") != admission["payload"].get("financial_command_id")
+        or financial_admission.get("request_fingerprint") != admission["payload"].get("request_fingerprint")
+        or financial_admission.get("authority_event_id") != admission["event_id"]
+        or financial_admission.get("authority_event_payload_hash") != admission["payload_hash"]
+        or financial_admission.get("authority_aggregate_version") != admission["aggregate_version"]
+        or financial_admission.get("authority_journal_sequence") != admission["journal_sequence"]
+        or financial_admission.get("provider_id") != PROVIDER
+        or financial_admission.get("instrument_symbol") != INSTRUMENT
         or request.get("provider_id") != PROVIDER
         or request.get("account_id") != ACCOUNT
         or request.get("environment") != ENVIRONMENT

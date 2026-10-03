@@ -9,7 +9,7 @@ It deliberately does not keep a second plaintext credential store.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import math
 import re
 import secrets
@@ -416,18 +416,25 @@ class SecurityBoundary:
         purpose: str,
         secret_value: str,
     ) -> CredentialHandle:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
         normalized_purpose = _required_text(purpose, name="purpose").upper()
         if normalized_purpose not in self._CREDENTIAL_PURPOSES:
             raise PermissionError("Credential purpose is unsupported")
-        return self._credential_vault.register(
-            owner_identity=_required_text(owner_identity, name="owner_identity"),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=normalized_purpose,
-            secret_value=secret_value,
-        )
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            return self._credential_vault.register(
+                owner_identity=normalized_owner,
+                account_id=normalized_account,
+                provider=normalized_provider,
+                environment=normalized_environment,
+                purpose=normalized_purpose,
+                secret_value=secret_value,
+            )
 
     def _current_handle(self, handle_id: str) -> CredentialHandle:
         metadata = self._credential_vault.describe(
@@ -451,13 +458,16 @@ class SecurityBoundary:
         owner_identity: str,
         new_secret_value: str,
     ) -> CredentialHandle:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        current = self._current_handle(handle_id)
-        return self._credential_vault.rotate(
-            current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
-            new_secret_value=new_secret_value,
-        )
+        normalized_handle = _required_text(handle_id, name="handle_id")
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            current = self._current_handle(normalized_handle)
+            return self._credential_vault.rotate(
+                current,
+                execution_identity=normalized_owner,
+                new_secret_value=new_secret_value,
+            )
 
     def revoke_secret(
         self,
@@ -467,12 +477,15 @@ class SecurityBoundary:
         handle_id: str,
         owner_identity: str,
     ) -> None:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        current = self._current_handle(handle_id)
-        self._credential_vault.revoke(
-            current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
-        )
+        normalized_handle = _required_text(handle_id, name="handle_id")
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            current = self._current_handle(normalized_handle)
+            self._credential_vault.revoke(
+                current,
+                execution_identity=normalized_owner,
+            )
 
     def resolve_for_execution(
         self,
@@ -486,19 +499,31 @@ class SecurityBoundary:
         environment: str,
         purpose: str,
     ) -> str:
-        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        return self._credential_vault.resolve(
-            handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
-            ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
+        normalized_identity = _required_text(
+            execution_identity, name="execution_identity"
         )
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
+        normalized_purpose = _required_text(purpose, name="purpose").upper()
+        with self._state_lock:
+            self.validate_session(
+                token,
+                required_roles=self._EXECUTION_ROLES,
+                origin=origin,
+            )
+            return self._credential_vault.resolve(
+                handle,
+                execution_identity=normalized_identity,
+                account_id=normalized_account,
+                provider=normalized_provider,
+                environment=normalized_environment,
+                purpose=normalized_purpose,
+            )
 
 
     @contextmanager
@@ -515,19 +540,35 @@ class SecurityBoundary:
         purpose: str,
     ):
         """Authorize and hold one exact credential generation for terminal use."""
-        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        with self._credential_vault.lease(
-            handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
-            ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
-        ) as plaintext:
+        normalized_identity = _required_text(
+            execution_identity, name="execution_identity"
+        )
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
+        normalized_purpose = _required_text(purpose, name="purpose").upper()
+
+        with ExitStack() as stack:
+            with self._state_lock:
+                self.validate_session(
+                    token,
+                    required_roles=self._EXECUTION_ROLES,
+                    origin=origin,
+                )
+                plaintext = stack.enter_context(
+                    self._credential_vault.lease(
+                        handle,
+                        execution_identity=normalized_identity,
+                        account_id=normalized_account,
+                        provider=normalized_provider,
+                        environment=normalized_environment,
+                        purpose=normalized_purpose,
+                    )
+                )
             yield plaintext
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:

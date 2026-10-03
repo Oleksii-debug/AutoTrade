@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp import risk_policy_authority as authority
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -51,44 +52,72 @@ def _policy() -> RiskPolicy:
 
 
 class RiskPolicyIssuerUnforgeabilityTests(unittest.TestCase):
+    @staticmethod
+    def _issued(directory: str):
+        store = JournalStore(Path(directory) / "journal.sqlite3")
+        registry = DurableRiskPolicyRegistry(store)
+        scope = _scope()
+        registry.register(
+            scope=scope,
+            policy_id="core-risk",
+            version=1,
+            policy=_policy(),
+            committed_at=NOW,
+        )
+        registry.activate(
+            scope=scope,
+            policy_id="core-risk",
+            version=1,
+            committed_at=NOW + timedelta(seconds=1),
+        )
+        return registry.resolve_current(scope)
+
+    @staticmethod
+    def _forge_from(issued):
+        return authority.ResolvedRiskPolicy(
+            identity=issued.identity,
+            policy=issued.policy,
+            registration_event_id=issued.registration_event_id,
+            registration_journal_sequence=issued.registration_journal_sequence,
+            activation_event_id=issued.activation_event_id,
+            activation_journal_sequence=issued.activation_journal_sequence,
+            resolved_journal_sequence_cut=issued.resolved_journal_sequence_cut,
+            journal_store_identity_digest=issued.journal_store_identity_digest,
+            _authority_token=authority._RESOLVED_POLICY_AUTHORITY_TOKEN,
+        )
+
     def test_imported_module_token_cannot_mint_registry_accepted_policy(self):
         with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            registry = DurableRiskPolicyRegistry(store)
-            scope = _scope()
-            registry.register(
-                scope=scope,
-                policy_id="core-risk",
-                version=1,
-                policy=_policy(),
-                committed_at=NOW,
-            )
-            registry.activate(
-                scope=scope,
-                policy_id="core-risk",
-                version=1,
-                committed_at=NOW + timedelta(seconds=1),
-            )
-            issued = registry.resolve_current(scope)
+            issued = self._issued(directory)
 
             # The issuer capability must not be a caller-retrievable module global.
             # If a caller can import the exact token and pass it back into the
             # public dataclass constructor, issuance provenance is forgeable even
             # when every copied financial field is otherwise canonical.
-            forged = authority.ResolvedRiskPolicy(
-                identity=issued.identity,
-                policy=issued.policy,
-                registration_event_id=issued.registration_event_id,
-                registration_journal_sequence=issued.registration_journal_sequence,
-                activation_event_id=issued.activation_event_id,
-                activation_journal_sequence=issued.activation_journal_sequence,
-                resolved_journal_sequence_cut=issued.resolved_journal_sequence_cut,
-                journal_store_identity_digest=issued.journal_store_identity_digest,
-                _authority_token=authority._RESOLVED_POLICY_AUTHORITY_TOKEN,
-            )
+            forged = self._forge_from(issued)
 
             with self.assertRaises(RiskPolicyAuthorityError):
                 authority.require_registry_issued_resolved_policy(forged)
+
+    def test_imported_issuance_map_cannot_upgrade_caller_mint_to_registry_authority(self):
+        with TemporaryDirectory() as directory:
+            issued = self._issued(directory)
+            forged = self._forge_from(issued)
+            forged_digest = authority._resolved_policy_authority_digest(forged)
+
+            # Moving the seal to another importable mutable module global is not
+            # an issuer boundary. A caller that can mint with the exported token
+            # can also insert the exact weakref/digest tuple expected by the
+            # consumer unless issuance truth is held by an unforgeable owner.
+            authority._RESOLVED_POLICY_ISSUANCE_BINDINGS[id(forged)] = (
+                weakref.ref(forged),
+                forged_digest,
+            )
+            try:
+                with self.assertRaises(RiskPolicyAuthorityError):
+                    authority.require_registry_issued_resolved_policy(forged)
+            finally:
+                authority._RESOLVED_POLICY_ISSUANCE_BINDINGS.pop(id(forged), None)
 
 
 if __name__ == "__main__":

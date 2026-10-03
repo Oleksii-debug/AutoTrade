@@ -1,5 +1,11 @@
 from datetime import date
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -29,6 +35,14 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     commit_economic_batch_with_reservation_consumption,
     commit_provider_fill_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
+)
+from mvp.autotrade_mvp._provider_activity_accounting_impl import (
+    _cash_leg_totals,
+    _cash_outflow_usage,
+    _exact_usage_increase,
+    _projected_fill_binding_payload,
+    _provider_fill_binding_payload,
+    _usage_payload,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 from mvp.autotrade_mvp.reservations import ReservationConflict
@@ -604,6 +618,113 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             )
 
 
+class ExactFillFinancialArithmeticTests(unittest.TestCase):
+    _CONTEXTS = (
+        (6, ROUND_FLOOR),
+        (10, ROUND_CEILING),
+        (28, ROUND_HALF_EVEN),
+        (80, ROUND_HALF_EVEN),
+    )
+
+    def test_provider_fill_binding_payload_identity_ignores_ambient_context(self):
+        projected = ProjectedFillEvidence.create(
+            fill_id="exact-context-fill",
+            provider_execution_id="exact-context-execution",
+            intent_id="intent-1",
+            client_order_id="client-order-1",
+            side="BUY",
+            quantity="1000001",
+            price="1.000001",
+            provider_revision="revision-1",
+        )
+        provider = ProviderFillEvidence.create(
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_execution_id="exact-context-execution",
+            client_order_id="client-order-1",
+            instrument="ABC",
+            quantity="1000001",
+            price="1.000001",
+            fee_amount="0.0000001",
+            fee_currency="USD",
+            trade_time="2026-09-25T08:00:00Z",
+            side="BUY",
+            evidence_refs=("provider-fill:exact-context",),
+        )
+        observed = set()
+
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    projected_payload = _projected_fill_binding_payload(projected)
+                    provider_payload = _provider_fill_binding_payload(provider)
+                self.assertEqual(projected_payload["quantity"], "1000001")
+                self.assertEqual(projected_payload["price"], "1.000001")
+                self.assertEqual(provider_payload["quantity"], "1000001")
+                self.assertEqual(provider_payload["price"], "1.000001")
+                self.assertEqual(provider_payload["fee_amount"], "0.0000001")
+                observed.add(
+                    (
+                        canonical_json(projected_payload),
+                        canonical_json(provider_payload),
+                    )
+                )
+
+        self.assertEqual(len(observed), 1)
+
+    def test_cash_usage_high_water_and_settlement_aggregation_ignore_ambient_context(self):
+        transaction = book_equity_fill(
+            transaction_id="exact-context-fill",
+            cause_event_id="exact-context-execution",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100000",
+            fee="0.0000001",
+            fee_currency="USD",
+            economic_effective_at="2026-09-25T08:00:00Z",
+            economic_order_key="provider:PROVIDER-A:execution:exact-context-execution",
+            observed_at="2026-09-25T08:00:01Z",
+        )
+        expected_usage = Decimal("100000.0000001")
+        expected_cash_effect = Decimal("-100000.0000001")
+        observed = set()
+
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    usage = _cash_outflow_usage(transaction)
+                    cash_legs = _cash_leg_totals((transaction,))
+                    additional = _exact_usage_increase(
+                        expected_usage,
+                        Decimal("100000"),
+                    )
+                    payload = _usage_payload({"CASH:USD": expected_usage})
+                self.assertEqual(usage, {"CASH:USD": expected_usage})
+                self.assertEqual(
+                    cash_legs,
+                    {("exact-context-fill", "USD"): expected_cash_effect},
+                )
+                self.assertEqual(additional, Decimal("0.0000001"))
+                self.assertEqual(payload, {"CASH:USD": "100000.0000001"})
+                observed.add(
+                    (
+                        tuple(usage.items()),
+                        tuple(cash_legs.items()),
+                        additional,
+                        tuple(payload.items()),
+                    )
+                )
+
+        self.assertEqual(len(observed), 1)
+
+
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
     def projected_fill(
         self,
@@ -686,6 +807,55 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             observed_at="2026-09-25T09:00:01Z",
             committed_at="2026-09-25T09:00:02Z",
         )
+
+    def test_financial_plan_usage_and_digest_ignore_ambient_decimal_context(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            reservations.reserve(
+                command_id="reserve-exact-context",
+                idempotency_key="reserve-exact-context",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "100001"},
+                available={"CASH:USD": "200000"},
+            )
+            economics = economic_book(store)
+            projected = self.projected_fill(price="100000")
+            provider = self.provider_fill(
+                price="100000",
+                fee_amount="0.0000001",
+            )
+            snapshot = reservations.get("reservation-1")
+            results = set()
+
+            for precision, rounding in ExactFillFinancialArithmeticTests._CONTEXTS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        plan = build_provider_fill_financial_plan(
+                            book=economics,
+                            provider_id=PROVIDER,
+                            projected_fill=projected,
+                            provider_fill=provider,
+                            expected_instrument="ABC",
+                            settlement_currency="USD",
+                            reservation_snapshot=snapshot,
+                            observed_at="2026-09-25T09:00:01Z",
+                        )
+                    self.assertEqual(
+                        dict(plan.usage),
+                        {"CASH:USD": Decimal("100000.0000001")},
+                    )
+                    results.add(
+                        (
+                            plan.plan_digest,
+                            tuple(plan.usage_items),
+                        )
+                    )
+
+            self.assertEqual(len(results), 1)
 
     def test_usage_is_derived_from_provider_fill_not_caller_input(self):
         with TemporaryDirectory() as directory:
@@ -1756,6 +1926,121 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 "settlement_book"
             )
             self.assertEqual(len(settlement_events), 1)
+
+    def test_next_correction_cannot_retarget_prior_provider_evidence_lineage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-lineage-1",
+                provider_revision="provider-revision-lineage-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:lineage-1",),
+            )
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:30:01Z",
+                obligation_id="settlement-correction-lineage-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-lineage-1-command",
+                    idempotency_key="correction-lineage-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:30:01Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:30:02Z",
+                )
+            )
+
+            retargeted_prior_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:retargeted-prior",),
+            )
+            second_projected = self.projected_fill(
+                quantity="1.0",
+                fill_id="fill-correction-lineage-2",
+                provider_revision="provider-revision-lineage-2",
+                correction_of=first_projected.fill_id,
+            )
+            second_provider = self.provider_fill(
+                quantity="1.0",
+                evidence_refs=("provider-fill:lineage-2",),
+            )
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=first_projected,
+                original_provider=retargeted_prior_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:40:01Z",
+                obligation_id="settlement-correction-lineage-2",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "original evidence does not match active lineage",
+            ):
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-lineage-2-command",
+                    idempotency_key="correction-lineage-2-idempotency",
+                    original_projected_fill=first_projected,
+                    original_provider_fill=retargeted_prior_provider,
+                    corrected_projected_fill=second_projected,
+                    corrected_provider_fill=second_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:40:01Z",
+                    settlement_obligations=(second_obligation,),
+                    committed_at="2026-09-25T12:40:02Z",
+                )
+
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_reservation_correction_binding"
+                    )
+                ),
+                1,
+            )
 
     def test_correction_precommit_failure_leaves_all_financial_projections_unchanged(self):
         with TemporaryDirectory() as directory:

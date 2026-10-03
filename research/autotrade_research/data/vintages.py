@@ -50,6 +50,26 @@ def _sequence(value: Any, name: str) -> int:
     return parsed
 
 
+def _optional_non_negative_sequence(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise HistoricalDataError(
+            f"{name} must be a canonical non-negative integer"
+        )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise HistoricalDataError(
+            f"{name} must be a canonical non-negative integer"
+        ) from error
+    if parsed < 0 or str(parsed) != str(value):
+        raise HistoricalDataError(
+            f"{name} must be a canonical non-negative integer"
+        )
+    return parsed
+
+
 def _utc(value: Any, name: str) -> datetime:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -276,6 +296,15 @@ def causal_market_event_history(
         event = dict(raw)
         event_id = _uuid(event.get("event_id"), "event_id")
         instrument_version = _text(event.get("instrument_version"), "instrument_version")
+        event_kind = _text(event.get("kind"), "kind")
+        source_sequence = _optional_non_negative_sequence(
+            event.get("source_sequence"),
+            "source_sequence",
+        )
+        stream_generation = _optional_non_negative_sequence(
+            event.get("stream_generation"),
+            "stream_generation",
+        )
         revision = _sequence(event.get("revision"), "revision")
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
@@ -317,7 +346,22 @@ def causal_market_event_history(
             _,
             _other_event,
         ) in history.items():
-            if source_at != other_source_at or instrument_version != other_instrument_version:
+            other_kind = _text(_other_event.get("kind"), "kind")
+            other_source_sequence = _optional_non_negative_sequence(
+                _other_event.get("source_sequence"),
+                "source_sequence",
+            )
+            other_stream_generation = _optional_non_negative_sequence(
+                _other_event.get("stream_generation"),
+                "stream_generation",
+            )
+            if (
+                source_at != other_source_at
+                or instrument_version != other_instrument_version
+                or event_kind != other_kind
+                or source_sequence != other_source_sequence
+                or stream_generation != other_stream_generation
+            ):
                 raise HistoricalConflict("event revision changed source identity metadata")
             if revision > other_revision and available < other_available:
                 raise HistoricalConflict("higher event revision cannot backdate availability")

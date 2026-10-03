@@ -323,6 +323,8 @@ def artifact_store_evidence_verifier(
             normalized_issuers[normalized_source] = verifier
 
     def verify(claim: CapabilityClaim) -> EvidenceVerification:
+        if type(claim) is not CapabilityClaim:
+            raise TypeError("capability verifier accepts only exact CapabilityClaim values")
         artifact_id = str(claim.evidence_ref["artifact_id"])
         expected_digest = str(claim.evidence_ref["sha256"])
         try:
@@ -454,10 +456,8 @@ def artifact_store_evidence_verifier(
                 valid=False,
                 reason="trusted issuer provenance verification failed",
             )
-        if not isinstance(issuer_result, EvidenceVerification):
-            raise TypeError(
-                "issuer verifier must return EvidenceVerification"
-            )
+        if type(issuer_result) is not EvidenceVerification:
+            raise TypeError("issuer verifier must return exact EvidenceVerification")
         return issuer_result
 
     return verify
@@ -679,14 +679,14 @@ def derive_capability_snapshot(
         verified_results: list[EvidenceVerification] = []
         for claim in live:
             try:
-                result = evidence_verifier(claim)
+                result = evidence_verifier(_snapshot_capability_claim(claim))
             except Exception:
                 result = EvidenceVerification(
                     valid=False,
                     reason="immutable evidence verification failed",
                 )
-            if not isinstance(result, EvidenceVerification):
-                raise TypeError("evidence_verifier must return EvidenceVerification")
+            if type(result) is not EvidenceVerification:
+                raise TypeError("evidence_verifier must return exact EvidenceVerification")
             verified_results.append(result)
         evidence_results = tuple(verified_results)
 

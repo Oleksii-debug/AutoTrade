@@ -98,7 +98,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 challenge=challenge,
                 store=store,
                 recovery=recovery,
-            runtime_occurrence=occurrence,
+                runtime_occurrence=occurrence,
             )
 
     def test_broad_local_clock_recovery_cannot_reuse_pre_incident_challenge(self):
@@ -121,6 +121,65 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                     store=store,
                     recovery=recovery,
                 runtime_occurrence=occurrence,
+                )
+
+    def test_unresolved_durable_incident_cannot_be_overridden_in_process(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, occurrence = self._durable_controller(Path(directory))
+            recovery.set_clock_trusted(
+                False,
+                reason_code="clock-health-check-failed",
+                evidence_ref="clock-check:durable-open",
+            )
+
+            recovery.clock_trusted = True
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "durable clock incident is unresolved",
+            ):
+                prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    runtime_occurrence=occurrence,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.SOURCE_QUALIFICATION,
+                )
+
+    def test_current_challenge_rechecks_unresolved_durable_incident(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, occurrence = self._durable_controller(Path(directory))
+            recovery.set_clock_trusted(
+                False,
+                reason_code="clock-health-check-failed",
+                evidence_ref="clock-check:durable-open",
+            )
+            recovery.clock_trusted = True
+
+            from mvp.autotrade_mvp import trusted_chronology as chronology_module
+
+            with patch.object(
+                chronology_module,
+                "_durable_clock_state_at_cut",
+                return_value=(1, True),
+            ):
+                challenge = prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    runtime_occurrence=occurrence,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.SOURCE_QUALIFICATION,
+                )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "durable clock incident is unresolved",
+            ):
+                require_current_chronology_challenge(
+                    challenge=challenge,
+                    store=store,
+                    recovery=recovery,
+                    runtime_occurrence=occurrence,
                 )
 
     def test_source_scope_rejects_release_identity_and_release_scope_requires_it(self):

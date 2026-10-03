@@ -24,6 +24,7 @@ from .persistence import (
     require_exact_journal_store_authority,
 )
 from .recovery import RecoveryController
+from .recovery_clock_incident import load_clock_incident_chain
 from .production_host import (
     ProductionHostRuntimeOccurrence,
     require_current_production_host_runtime_occurrence,
@@ -243,6 +244,23 @@ def _current_journal_sequence(store: JournalStore) -> int:
         return JournalStore.current_journal_sequence(store)
 
 
+def _durable_clock_state_at_cut(
+    store: JournalStore,
+    *,
+    owner_scope: str,
+    journal_sequence_cut: int,
+) -> tuple[int, bool]:
+    incidents = load_clock_incident_chain(
+        store,
+        owner_scope=owner_scope,
+        journal_sequence_cut=journal_sequence_cut,
+    )
+    if not incidents:
+        return 0, True
+    current = incidents[-1]
+    return current.generation, current.restored
+
+
 def _require_exact_recovery(recovery: RecoveryController) -> RecoveryController:
     if type(recovery) is not RecoveryController:
         raise TypeError("recovery must be the canonical RecoveryController")
@@ -324,7 +342,13 @@ def prepare_chronology_challenge(
     owner_chain = recovery.durable_owner_chain()
     if not owner_chain or owner_chain[-1] != owner:
         raise PermissionError("recovery owner is not the current durable owner")
-    incident_generation = recovery.clock_incident_generation
+    incident_generation, durable_clock_trusted = _durable_clock_state_at_cut(
+        store,
+        owner_scope=owner_scope,
+        journal_sequence_cut=journal_sequence,
+    )
+    if not durable_clock_trusted:
+        raise PermissionError("durable clock incident is unresolved")
 
     # The durable sequence detects canonical journal writes, but RecoveryController
     # is still an in-process object.  Recheck every mutable selector used above
@@ -342,7 +366,14 @@ def prepare_chronology_challenge(
         raise PermissionError(
             "recovery owner scope changed during chronology frontier capture"
         )
-    if recovery.clock_incident_generation != incident_generation:
+    replayed_generation, replayed_clock_trusted = _durable_clock_state_at_cut(
+        store,
+        owner_scope=owner_scope,
+        journal_sequence_cut=journal_sequence,
+    )
+    if not replayed_clock_trusted:
+        raise PermissionError("durable clock incident is unresolved")
+    if replayed_generation != incident_generation:
         raise PermissionError(
             "clock incident generation changed during chronology frontier capture"
         )
@@ -490,10 +521,22 @@ def require_current_chronology_challenge(
         or recovery.owner_scope != challenge.owner_scope
     ):
         raise PermissionError("recovery owner generation changed")
-    if recovery.clock_incident_generation != challenge.clock_incident_generation:
-        raise PermissionError("clock incident generation changed")
-    if _current_journal_sequence(store) != challenge.journal_sequence:
+    current_sequence = _current_journal_sequence(store)
+    if current_sequence != challenge.journal_sequence:
         raise PermissionError("durable journal advanced after chronology challenge")
+    incident_generation, durable_clock_trusted = _durable_clock_state_at_cut(
+        store,
+        owner_scope=challenge.owner_scope,
+        journal_sequence_cut=current_sequence,
+    )
+    if not durable_clock_trusted:
+        raise PermissionError("durable clock incident is unresolved")
+    if incident_generation != challenge.clock_incident_generation:
+        raise PermissionError("clock incident generation changed")
+    if _current_journal_sequence(store) != current_sequence:
+        raise PermissionError(
+            "durable journal advanced during chronology currentness validation"
+        )
     # Catch caller-side rebinding that occurs inside the final durable read.
     # All durable generation changes advance the journal sequence; these
     # selectors cover the in-process RecoveryController surface itself.

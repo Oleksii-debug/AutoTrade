@@ -190,6 +190,60 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("Reserved CASH:USD", text)
         self.assertNotIn("Reserved POSITION:ABC", text)
 
+    def test_active_reservation_requires_text_resource_and_nonnegative_finite_text_amount(self):
+        malformed_cases = (
+            {True: "1"},
+            {"CASH:USD": True},
+            {"CASH:USD": -1},
+            {"CASH:USD": "-1"},
+            {"CASH:USD": "NaN"},
+            {"CASH:USD": "Infinity"},
+            {"": "1"},
+            {" CASH:USD": "1"},
+        )
+        for remaining in malformed_cases:
+            with self.subTest(remaining=remaining):
+                text = format_accessible_status(
+                    {
+                        "status": "running",
+                        "state_format": "canonical_journal",
+                        "symbol": "SIM",
+                        "initial_cash": "1000",
+                        "fills": {},
+                        "active_reservations": [
+                            {"state": "WORKING", "remaining": remaining}
+                        ],
+                    }
+                )
+                self.assertIn(
+                    "Active reservations: unavailable; one or more reservation entries are malformed",
+                    text,
+                )
+                self.assertIn("Structurally readable reservation entries: 0", text)
+                self.assertIn(
+                    "Reservation resource detail: unavailable; malformed value",
+                    text,
+                )
+                self.assertNotIn("Reserved CASH:USD: -1", text)
+                self.assertNotIn("Reserved CASH:USD: NaN", text)
+                self.assertNotIn("Reserved CASH:USD: Infinity", text)
+
+    def test_zero_remaining_reservation_amount_remains_readable(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {"state": "WORKING", "remaining": {"CASH:USD": "0"}}
+                ],
+            }
+        )
+        self.assertIn("Active reservations: 1", text)
+        self.assertIn("Reserved CASH:USD: 0; state: WORKING", text)
+
     def test_dict_subclass_reservation_does_not_execute_overridden_get(self):
         class HostileDict(dict):
             def get(self, *args, **kwargs):

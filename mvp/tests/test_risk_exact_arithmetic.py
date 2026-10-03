@@ -76,6 +76,40 @@ class RiskExactArithmeticTests(unittest.TestCase):
             evaluate_risk(hostile, exact_context(), policy())
         self.assertEqual(HostileRiskIntent.reads, 0)
 
+    def test_context_state_version_subclass_is_rejected_before_comparison(self):
+        class HostileInt(int):
+            comparisons = 0
+
+            def __lt__(self, other):
+                type(self).comparisons += 1
+                raise AssertionError("hostile state_version comparison")
+
+            def __eq__(self, other):
+                type(self).comparisons += 1
+                raise AssertionError("hostile state_version equality")
+
+        hostile = HostileInt(7)
+        with self.assertRaisesRegex(
+            ValueError,
+            "state_version must be a non-negative integer",
+        ):
+            RiskContext.create(
+                state_version=hostile,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                reserved_position_delta={},
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                stress_scenarios=({"ABC": "0"},),
+            )
+        self.assertEqual(HostileInt.comparisons, 0)
+
     def test_hostile_text_scalar_is_rejected_before_normalization(self):
         class HostileText(str):
             calls = 0

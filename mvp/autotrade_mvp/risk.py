@@ -908,7 +908,7 @@ class RiskContext:
         equivalent_exposure_per_unit: Mapping[str, object] | None = None,
         instrument_types: Mapping[str, str] | None = None,
     ) -> "RiskContext":
-        if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         normalized_positions = _normalize_mapping(
             positions,

@@ -25,6 +25,15 @@ class ZeroModelQualificationTests(unittest.TestCase):
             "zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}",
             workflow,
         )
+        self.assertIn("mvp.tests.test_zero_model_economics", workflow)
+        for path in (
+            "mvp/autotrade_mvp/allocation.py",
+            "mvp/autotrade_mvp/simulated_provider.py",
+            "research/autotrade_research/economics/after_cost.py",
+            "mvp/tests/test_zero_model_economics.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, workflow)
 
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()

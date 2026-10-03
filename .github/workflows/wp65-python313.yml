@@ -5,6 +5,7 @@ on:
     paths:
       - "mvp/autotrade_mvp/runtime_load_measurement.py"
       - "mvp/autotrade_mvp/runtime_target_host_runner.py"
+      - "mvp/tests/test_runtime_load_measurement_transitive_authority.py"
       - "mvp/tests/test_runtime_target_host_runner.py"
       - "mvp/tests/test_runtime_target_host_runner_resource_cut.py"
       - ".github/workflows/wp65-python313.yml"
@@ -33,16 +34,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.16"
-      - name: Run WP-65 target-host runner on required clock-contract runtime
+      - name: Run WP-65 target-host and transitive latency-authority suites
         run: >-
           python -m unittest -v
+          mvp.tests.test_runtime_load_measurement_transitive_authority
           mvp.tests.test_runtime_target_host_runner
           mvp.tests.test_runtime_target_host_runner_resource_cut
       - name: Write exact-head Python 3.13 target-host evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite wp65-target-host-python313
-          --command "python -m unittest -v mvp.tests.test_runtime_target_host_runner mvp.tests.test_runtime_target_host_runner_resource_cut"
+          --command "python -m unittest -v mvp.tests.test_runtime_load_measurement_transitive_authority mvp.tests.test_runtime_target_host_runner mvp.tests.test_runtime_target_host_runner_resource_cut"
           --output "artifacts/wp65-target-host-python313-${{ runner.os }}.json"
       - name: Upload exact-head Python 3.13 target-host evidence
         uses: actions/upload-artifact@v4

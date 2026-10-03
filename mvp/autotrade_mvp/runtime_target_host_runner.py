@@ -494,14 +494,26 @@ def run_declared_target_host_campaign(
 
     def capture_resource(phase: str) -> None:
         require_runner_callback_authority()
+        sample_sequence_before = end_sequence_reader(journal)
+        sample_monotonic_ns = monotonic_ns()
         metrics = capture_resource_metrics(journal, resource_probe)
-        # resource_probe is caller-controlled, so re-check all runner dispatch
-        # authority before materializing a sample from its result.
+        # The resource timestamp is authority-bearing evidence too. Bracket it
+        # with the same durable JournalStore generation/cut as the metrics so a
+        # write between clock sampling and metric sampling cannot create a
+        # mixed-time/mixed-journal resource observation.
         require_runner_callback_authority()
+        sample_sequence_after = end_sequence_reader(journal)
+        if (
+            sample_sequence_after != sample_sequence_before
+            or metrics.get("journal_sequence") != sample_sequence_before
+        ):
+            raise RuntimeTargetHostRunnerError(
+                "resource sample crossed a durable JournalStore cut"
+            )
         resource_samples.append(
             resource_sample_type(
                 sample_id=f"resource-{len(resource_samples) + 1}",
-                monotonic_ns=monotonic_ns(),
+                monotonic_ns=sample_monotonic_ns,
                 phase=phase,
                 metrics=metrics,
             )

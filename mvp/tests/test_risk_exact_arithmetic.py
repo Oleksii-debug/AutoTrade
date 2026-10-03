@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
+from mvp.autotrade_mvp import risk as risk_module
 from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskIntent,
@@ -51,6 +52,32 @@ def exact_context():
 
 
 class RiskExactArithmeticTests(unittest.TestCase):
+    def test_input_fingerprint_binds_arithmetic_policy_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        context = exact_context()
+        configured = policy()
+        baseline = evaluate_risk(intent, context, configured)
+        original_policy_id = risk_module.RISK_ARITHMETIC_POLICY_ID
+        alternate_policy_id = original_policy_id + "-TEST"
+        try:
+            risk_module.RISK_ARITHMETIC_POLICY_ID = alternate_policy_id
+            alternate = risk_module.evaluate_risk(intent, context, configured)
+        finally:
+            risk_module.RISK_ARITHMETIC_POLICY_ID = original_policy_id
+
+        self.assertEqual(baseline.arithmetic_policy_id, original_policy_id)
+        self.assertEqual(alternate.arithmetic_policy_id, alternate_policy_id)
+        self.assertNotEqual(
+            baseline.input_fingerprint,
+            alternate.input_fingerprint,
+        )
+
     def test_high_significance_financial_path_is_context_independent(self):
         intent = RiskIntent.create(
             symbol="ABC",

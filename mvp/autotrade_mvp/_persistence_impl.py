@@ -61,6 +61,35 @@ def _projection_checkpoint_digest(
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
+_EVENT_TYPE_RETIREMENT_REJECT_TRIGGER = "autotrade_reject_retired_event_type"
+_EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER = "autotrade_reject_retirement_update"
+_EVENT_TYPE_RETIREMENT_DELETE_TRIGGER = "autotrade_reject_retirement_delete"
+_EVENT_TYPE_RETIREMENT_REJECT_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retired_event_type
+BEFORE INSERT ON events
+WHEN EXISTS (
+    SELECT 1 FROM retired_event_types
+    WHERE event_type = NEW.event_type
+)
+BEGIN
+    SELECT RAISE(ABORT, 'event type is retired');
+END
+"""
+_EVENT_TYPE_RETIREMENT_UPDATE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_update
+BEFORE UPDATE ON retired_event_types
+BEGIN
+    SELECT RAISE(ABORT, 'event type retirement is immutable');
+END
+"""
+_EVENT_TYPE_RETIREMENT_DELETE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_delete
+BEFORE DELETE ON retired_event_types
+BEGIN
+    SELECT RAISE(ABORT, 'event type retirement is immutable');
+END
+"""
+
 
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
@@ -92,7 +121,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -254,6 +283,23 @@ class JournalStore:
                 "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
                 "WHERE effect_kind IS NULL",
             )
+        if version == 10:
+            # Event-type retirement is a durable cross-runtime writer fence.
+            # A process that initialized under an older schema still executes
+            # INSERT against this same events table; the database trigger, not
+            # process-local code, therefore blocks a retired writer after cutover.
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS retired_event_types (
+                    event_type TEXT PRIMARY KEY,
+                    retirement_id TEXT NOT NULL,
+                    retirement_hash TEXT NOT NULL
+                )
+                """,
+                _EVENT_TYPE_RETIREMENT_REJECT_SQL,
+                _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
+                _EVENT_TYPE_RETIREMENT_DELETE_SQL,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -290,6 +336,10 @@ class JournalStore:
             required["global_projection_checkpoints"] = frozenset({
                 "projection_name", "journal_sequence",
                 "state_json", "state_hash", "updated_at",
+            })
+        if cls.SCHEMA_VERSION >= 10:
+            required["retired_event_types"] = frozenset({
+                "event_type", "retirement_id", "retirement_hash",
             })
         return required
 
@@ -396,6 +446,12 @@ class JournalStore:
                 "state_hash": ("TEXT", True),
                 "updated_at": ("TEXT", True),
             }
+        if cls.SCHEMA_VERSION >= 10:
+            required["retired_event_types"] = {
+                "event_type": ("TEXT", False),
+                "retirement_id": ("TEXT", True),
+                "retirement_hash": ("TEXT", True),
+            }
         return required
 
     @classmethod
@@ -475,6 +531,8 @@ class JournalStore:
             expected_primary_keys["global_projection_checkpoints"] = (
                 "projection_name",
             )
+        if cls.SCHEMA_VERSION >= 10:
+            expected_primary_keys["retired_event_types"] = ("event_type",)
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
@@ -548,6 +606,55 @@ class JournalStore:
             raise ValueError(
                 "Journal schema table outbox is missing event ownership foreign key"
             )
+
+    @classmethod
+    def _validate_event_type_retirement_contract(cls, connection) -> None:
+        if cls.SCHEMA_VERSION < 10:
+            return
+        expected_triggers = {
+            _EVENT_TYPE_RETIREMENT_REJECT_TRIGGER: _EVENT_TYPE_RETIREMENT_REJECT_SQL,
+            _EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER: _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
+            _EVENT_TYPE_RETIREMENT_DELETE_TRIGGER: _EVENT_TYPE_RETIREMENT_DELETE_SQL,
+        }
+        for trigger_name, expected_sql in expected_triggers.items():
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                (trigger_name,),
+            ).fetchone()
+            if row is None or not isinstance(row["sql"], str):
+                raise ValueError(
+                    "Journal schema is missing event-type retirement trigger: "
+                    + trigger_name
+                )
+            actual = " ".join(str(row["sql"]).split())
+            expected = " ".join(expected_sql.replace("IF NOT EXISTS ", "").split())
+            if actual != expected:
+                raise ValueError(
+                    "Journal event-type retirement trigger contract mismatch: "
+                    + trigger_name
+                )
+
+        for row in connection.execute(
+            "SELECT event_type, retirement_id, retirement_hash "
+            "FROM retired_event_types ORDER BY event_type"
+        ):
+            event_type = row["event_type"]
+            retirement_id = row["retirement_id"]
+            retirement_hash = row["retirement_hash"]
+            if (
+                not isinstance(event_type, str)
+                or not event_type.strip()
+                or event_type != event_type.strip()
+                or not isinstance(retirement_id, str)
+                or not retirement_id.strip()
+                or retirement_id != retirement_id.strip()
+            ):
+                raise ValueError("event type retirement record is not canonical")
+            expected_hash = payload_digest(
+                {"event_type": event_type, "retirement_id": retirement_id}
+            )
+            if retirement_hash != expected_hash:
+                raise ValueError("event type retirement hash mismatch")
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -767,6 +874,8 @@ class JournalStore:
                     required_tables.add("projection_checkpoints")
                 if self.SCHEMA_VERSION >= 7:
                     required_tables.add("global_projection_checkpoints")
+                if self.SCHEMA_VERSION >= 10:
+                    required_tables.add("retired_event_types")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -801,6 +910,7 @@ class JournalStore:
                         )
                 self._validate_column_contracts(connection)
                 self._validate_key_contracts(connection)
+                self._validate_event_type_retirement_contract(connection)
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -812,6 +922,55 @@ class JournalStore:
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()
         return 0 if row is None or row[0] is None else int(row[0])
+
+    def retire_event_type(self, event_type: str, *, retirement_id: str) -> bool:
+        """Durably fence all future inserts of one legacy event type.
+
+        The fence lives in SQLite rather than process memory so an already-running
+        older runtime using the same events table is blocked after the retirement
+        transaction commits. Existing historical events remain readable. retirement_id is a deterministic
+        migration/generation identity, never a wall-clock attestation.
+        """
+
+        if self.SCHEMA_VERSION < 10:
+            raise RuntimeError("event type retirement requires journal schema v10")
+        event_type = self._require_text(event_type, "event_type")
+        retirement_id = self._require_text(retirement_id, "retirement_id")
+        retirement_hash = payload_digest(
+            {"event_type": event_type, "retirement_id": retirement_id}
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT retirement_id, retirement_hash "
+                    "FROM retired_event_types WHERE event_type = ?",
+                    (event_type,),
+                ).fetchone()
+                if existing is not None:
+                    exact = (
+                        existing["retirement_id"] == retirement_id
+                        and existing["retirement_hash"] == retirement_hash
+                    )
+                    if not exact:
+                        raise ValueError(
+                            "event type retirement conflicts with existing fence"
+                        )
+                    self._validate_event_type_retirement_contract(connection)
+                    connection.commit()
+                    return False
+                connection.execute(
+                    "INSERT INTO retired_event_types("
+                    "event_type, retirement_id, retirement_hash"
+                    ") VALUES (?, ?, ?)",
+                    (event_type, retirement_id, retirement_hash),
+                )
+                self._validate_event_type_retirement_contract(connection)
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def _now() -> str:
@@ -1045,8 +1204,14 @@ class JournalStore:
         after_sequence: int,
         *,
         limit: int = 10000,
+        allow_partial: bool = False,
     ) -> list[dict[str, Any]]:
-        """Load integrity-checked journal events strictly after a durable global cut."""
+        """Load an integrity-checked journal tail after one durable global cut.
+
+        Complete projection rebuild is the default authority. A bounded page is
+        returned only when callers explicitly opt into partial traversal and are
+        therefore responsible for advancing by the returned journal_sequence.
+        """
 
         if (
             type(after_sequence) is not int
@@ -1055,19 +1220,38 @@ class JournalStore:
             raise ValueError("after_sequence must be a non-negative integer")
         if type(limit) is not int or limit < 1 or limit > 100000:
             raise ValueError("limit must be between 1 and 100000")
+        if type(allow_partial) is not bool:
+            raise ValueError("allow_partial must be a boolean")
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT event_id, event_type, aggregate_type, aggregate_id,
-                       aggregate_version, payload_json, payload_hash, committed_at,
-                       envelope_json, envelope_hash, journal_sequence
-                FROM events
-                WHERE journal_sequence > ?
-                ORDER BY journal_sequence
-                LIMIT ?
-                """,
-                (after_sequence, limit),
-            ).fetchall()
+            connection.execute("BEGIN")
+            try:
+                current = self._journal_sequence_value(connection)
+                if after_sequence > current:
+                    raise ValueError(
+                        "after_sequence cannot outrun the authoritative journal sequence"
+                    )
+                rows = connection.execute(
+                    """
+                    SELECT event_id, event_type, aggregate_type, aggregate_id,
+                           aggregate_version, payload_json, payload_hash, committed_at,
+                           envelope_json, envelope_hash, journal_sequence
+                    FROM events
+                    WHERE journal_sequence > ?
+                    ORDER BY journal_sequence
+                    LIMIT ?
+                    """,
+                    (after_sequence, limit + 1),
+                ).fetchall()
+                if not allow_partial and len(rows) > limit:
+                    raise ValueError(
+                        "journal tail exceeds limit; complete projection rebuild "
+                        "requires a larger limit or explicit allow_partial paging"
+                    )
+                rows = rows[:limit]
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
         decoded = [self._decode_event_row(row) for row in rows]
         expected = after_sequence + 1
         for event in decoded:
@@ -1077,6 +1261,10 @@ class JournalStore:
                     "journal events after cut are not contiguous; qualification cannot infer conservation"
                 )
             expected += 1
+        if not allow_partial and expected != current + 1:
+            raise ValueError(
+                "journal tail is incomplete; qualification cannot infer conservation"
+            )
         return decoded
 
     def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:

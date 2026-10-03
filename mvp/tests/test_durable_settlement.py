@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
@@ -20,6 +21,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -33,7 +35,7 @@ from mvp.autotrade_mvp.settlement import (
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 
 PROVIDER = "PROVIDER-A"
@@ -241,6 +243,121 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_settlement_evidence_uses_one_authenticated_artifact_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            selected = artifact_store_for(store)
+
+            def legacy_split_read_forbidden(*_args, **_kwargs):
+                raise AssertionError("legacy split read must not be used")
+
+            selected.load_manifest = legacy_split_read_forbidden
+            selected.read_bytes = legacy_split_read_forbidden
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_store=selected,
+            )
+            item = obligation(store)
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="snapshot-rule",
+                    idempotency_key="snapshot-rule",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            self.assertTrue(
+                settlements.apply_settlement(
+                    evidence,
+                    as_of=date(2026, 9, 26),
+                    command_id="snapshot-completion",
+                    idempotency_key="snapshot-completion",
+                    committed_at="2026-09-26T15:00:01Z",
+                )
+            )
+
+    def test_artifact_store_subclass_cannot_mint_settlement_rule_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            item = obligation(store)
+
+            class HostileArtifactStore(ArtifactStore):
+                called = False
+
+                def read_authenticated_snapshot(self, artifact_id):
+                    type(self).called = True
+                    return super().read_authenticated_snapshot(artifact_id)
+
+            hostile = HostileArtifactStore(
+                Path(store.path).parent / "settlement-evidence"
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical ArtifactStore",
+            ):
+                DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_store=hostile,
+                )
+            self.assertFalse(HostileArtifactStore.called)
+
+    def test_snapshot_oserror_fails_before_rule_or_completion_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlements = durable(store)
+            item = obligation(store)
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("simulated snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.register_obligations(
+                        (item,),
+                        command_id="rule-oserror",
+                        idempotency_key="rule-oserror",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+            self.assertEqual(settlements.obligations, ())
+
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="rule-ok",
+                    idempotency_key="rule-ok",
+                    committed_at="2026-09-25T09:00:03Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("simulated completion snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.apply_settlement(
+                        evidence,
+                        as_of=date(2026, 9, 26),
+                        command_id="completion-oserror",
+                        idempotency_key="completion-oserror",
+                        committed_at="2026-09-26T15:00:01Z",
+                    )
+            self.assertEqual(settlements.settled_obligation_evidence, {})
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -486,7 +603,13 @@ class DurableSettlementBookTests(unittest.TestCase):
             def fail(**kwargs):
                 raise RuntimeError("injected settlement commit failure")
 
-            store.commit_command = fail
+            commit_patch = patch_journal_store_method(
+
+                store, "commit_command", side_effect=fail
+
+            )
+
+            commit_patch.start()
             try:
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     settlements.register_obligations(
@@ -496,7 +619,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                         committed_at="2026-09-25T09:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                commit_patch.stop()
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
 
@@ -731,7 +854,13 @@ class DurableSettlementBookTests(unittest.TestCase):
             def fail(**kwargs):
                 raise RuntimeError("injected correction commit failure")
 
-            store.commit_command = fail
+            commit_patch = patch_journal_store_method(
+
+                store, "commit_command", side_effect=fail
+
+            )
+
+            commit_patch.start()
             try:
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     commit_economic_correction_with_settlement_replacement(
@@ -745,7 +874,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                         committed_at="2026-09-25T10:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                commit_patch.stop()
 
             self.assertEqual(economic.audit_digest(), before_economic)
             self.assertEqual(settlements.obligations, before_obligations)
@@ -755,6 +884,70 @@ class DurableSettlementBookTests(unittest.TestCase):
             self.assertEqual(reopened_economic.audit_digest(), before_economic)
             self.assertEqual(reopened_settlements.obligations, before_obligations)
 
+
+    def test_journal_store_subclass_is_rejected_before_restore_dispatch(self):
+        class ForgedJournalStore(JournalStore):
+            def load_events(self, *_args, **_kwargs):
+                raise AssertionError("subclass journal dispatch must not run")
+
+        with TemporaryDirectory() as directory:
+            forged = ForgedJournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableSettlementBook(
+                    forged,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_store=artifact_store_for(forged),
+                )
+
+    def test_post_construction_journal_shadow_fails_before_durable_mutation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            settlements = durable(store)
+            bound = obligation(store, sell_transaction())
+
+            store.commit_command = lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("instance-shadowed commit must not run")
+            )
+            try:
+                with self.assertRaisesRegex(
+                    (TypeError, RuntimeError),
+                    "shadow|authority",
+                ):
+                    settlements.register_obligations(
+                        (bound,),
+                        command_id="shadowed-register",
+                        idempotency_key="shadowed-register",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+            finally:
+                del store.commit_command
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.load_events("settlement_book", settlements.scope_id),
+                [],
+            )
+
+    def test_settlement_evidence_subclass_is_rejected_before_virtual_fields(self):
+        class ForgedEvidence(SettlementEvidence):
+            def __getattribute__(self, name):
+                if name in {"obligation_id", "evidence_ref", "observed_at"}:
+                    raise AssertionError("evidence subclass fields must not be read")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlements = durable(store)
+            forged = object.__new__(ForgedEvidence)
+            with self.assertRaisesRegex(TypeError, "exact SettlementEvidence"):
+                settlements.prepare_settlement_mutation(
+                    forged,
+                    as_of=date(2026, 9, 26),
+                    committed_at="2026-09-26T12:00:00Z",
+                )
 
 if __name__ == "__main__":
     unittest.main()

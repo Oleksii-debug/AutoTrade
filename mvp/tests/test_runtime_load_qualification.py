@@ -1,6 +1,8 @@
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from mvp.autotrade_mvp.journal_taxonomy import taxonomy_digest
 from mvp.autotrade_mvp.performance_qualification import (
     RuntimeBudgetError,
     RuntimeBudgetSpec,
@@ -20,6 +22,8 @@ CONFIG = "sha256:" + ("b" * 64)
 HOST = "sha256:" + ("c" * 64)
 WORKLOAD = "sha256:" + ("d" * 64)
 RESOURCE = "sha256:" + ("e" * 64)
+FINANCIAL_AGGREGATE = "risk_decision"
+NON_FINANCIAL_AGGREGATE = "model_budget"
 
 
 def runtime_spec(*, samples: int = 2) -> RuntimeBudgetSpec:
@@ -40,7 +44,7 @@ def runtime_spec(*, samples: int = 2) -> RuntimeBudgetSpec:
 def envelope(
     event_id: str,
     *,
-    aggregate_type: str = "financial",
+    aggregate_type: str = FINANCIAL_AGGREGATE,
     aggregate_id: str | None = None,
 ) -> dict[str, object]:
     payload = {"event_id": event_id, "kind": aggregate_type}
@@ -62,7 +66,8 @@ def plan(spec: RuntimeBudgetSpec, *event_ids: str) -> RuntimeCampaignPlan:
         workload_profile_hash=WORKLOAD,
         declared_duration_ms=1000,
         expected_financial_event_ids=event_ids,
-        financial_aggregate_types=("financial",),
+        # Compatibility/assertion metadata only; it cannot select the cut.
+        financial_aggregate_types=(FINANCIAL_AGGREGATE,),
     )
 
 
@@ -71,19 +76,26 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             journal = JournalStore(path)
-            journal.append_event(envelope("pre-existing", aggregate_type="research"))
+            journal.append_event(
+                envelope("pre-existing", aggregate_type=NON_FINANCIAL_AGGREGATE)
+            )
 
             spec = runtime_spec()
             current_plan = plan(spec, "fin-1", "fin-2")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
 
             journal.append_event(envelope("fin-1"))
-            journal.append_event(envelope("research-1", aggregate_type="research"))
+            journal.append_event(
+                envelope("research-1", aggregate_type=NON_FINANCIAL_AGGREGATE)
+            )
             journal.append_event(envelope("fin-2"))
 
             kwargs = {
@@ -99,16 +111,29 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     "memory_peak_bytes": 1024,
                     "disk_fsync_p95_us": 200,
                 },
-                "monotonic_ns": lambda: 1_900_000_000,
             }
-            first = collect_runtime_campaign_evidence(journal=journal, **kwargs)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_900_000_000,
+            ):
+                first = collect_runtime_campaign_evidence(journal=journal, **kwargs)
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
+            self.assertEqual(first.journal_taxonomy_digest, taxonomy_digest())
+            decision = evaluate_runtime_campaign(spec, first)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(
+                decision.reasons,
+                ("unverified_runtime_measurement_provenance",),
+            )
 
             reopened = JournalStore(path)
-            second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_900_000_000,
+            ):
+                second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
             self.assertEqual(second.digest, first.digest)
             self.assertEqual(
                 second.recovered_financial_event_bindings,
@@ -120,26 +145,32 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             journal = JournalStore(f"{directory}/journal.sqlite3")
             spec = runtime_spec(samples=1)
             current_plan = plan(spec, "fin-1")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 10_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=10_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             journal.append_event(envelope("fin-1"))
 
-            evidence = collect_runtime_campaign_evidence(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                cut=cut,
-                financial_latency_us=(100,),
-                financial_staleness_us=(80,),
-                research_interference_us=(50,),
-                resource_evidence_hash=RESOURCE,
-                resource_metrics={"cpu_peak_millis": 500},
-                monotonic_ns=lambda: 11_100_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=11_100_000_000,
+            ):
+                evidence = collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                )
             self.assertEqual(evidence.declared_duration_us, 1_000_000)
             self.assertEqual(evidence.observed_duration_us, 1_100_000)
             decision = evaluate_runtime_campaign(spec, evidence)
@@ -151,14 +182,20 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             journal = JournalStore(f"{directory}/journal.sqlite3")
             spec = runtime_spec(samples=1)
             current_plan = plan(spec, "fin-1")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 2_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=2_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             journal.append_event(envelope("fin-1"))
-            with self.assertRaisesRegex(RuntimeBudgetError, "moved backwards"):
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_999,
+            ), self.assertRaisesRegex(RuntimeBudgetError, "moved backwards"):
                 collect_runtime_campaign_evidence(
                     journal=journal,
                     spec=spec,
@@ -169,7 +206,6 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     research_interference_us=(50,),
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 500},
-                    monotonic_ns=lambda: 1_999,
                 )
 
     def test_missing_expected_financial_event_is_a_budget_failure_not_a_caller_count(self):
@@ -247,6 +283,66 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     resource_metrics={"cpu_peak_millis": 500},
                 )
 
+    def test_caller_selected_type_cannot_hide_other_canonical_financial_family(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            self.assertEqual(
+                current_plan.financial_aggregate_types,
+                (FINANCIAL_AGGREGATE,),
+            )
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            # settlement_book is canonical qualification-financial even though
+            # the caller metadata names only risk_decision.
+            journal.append_event(
+                envelope("hidden-settlement", aggregate_type="settlement_book")
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "undeclared financial event identities.*hidden-settlement",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                )
+
+    def test_unknown_durable_aggregate_fails_qualification_instead_of_defaulting_nonfinancial(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            journal.append_event(
+                envelope("future-writer", aggregate_type="future_unclassified_writer")
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "unclassified durable aggregate",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                )
+
     def test_pending_outbox_keeps_reconnect_qualification_failed(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")
@@ -282,7 +378,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 journal.append_event(
                     envelope(
                         f"research-outbox-{index}",
-                        aggregate_type="research",
+                        aggregate_type=NON_FINANCIAL_AGGREGATE,
                     ),
                     outbox_topic="research.events",
                 )
@@ -311,7 +407,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 workload_profile_hash=WORKLOAD,
                 declared_duration_ms=1000,
                 expected_financial_event_ids="fin-1",
-                financial_aggregate_types=("financial",),
+                financial_aggregate_types=(FINANCIAL_AGGREGATE,),
             )
         with self.assertRaisesRegex(RuntimeBudgetError, "financial_aggregate_types"):
             RuntimeCampaignPlan.create(
@@ -319,7 +415,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 workload_profile_hash=WORKLOAD,
                 declared_duration_ms=1000,
                 expected_financial_event_ids=("fin-1",),
-                financial_aggregate_types="financial",
+                financial_aggregate_types=FINANCIAL_AGGREGATE,
             )
 
     def test_campaign_evidence_cannot_be_directly_self_asserted(self):

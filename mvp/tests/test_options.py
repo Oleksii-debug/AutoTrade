@@ -330,6 +330,99 @@ class OptionLifecycleTests(unittest.TestCase):
         with self.assertRaises(OptionError):
             intrinsic_value_per_unit(self._cash_call(), 101.0)
 
+    def test_expiry_exercise_and_reservation_ignore_ambient_decimal_context(self):
+        cash = OptionContract(
+            instrument="OPT:CONTEXT",
+            right="CALL",
+            strike=Decimal("12345678901234567890.123456789"),
+            multiplier=Decimal("1000000000.000000001"),
+            settlement_currency="USD",
+            settlement_method="CASH",
+            exercise_style="EUROPEAN",
+            exercise_cutoff=at(19),
+            expiry=at(20),
+        )
+        physical = OptionContract(
+            instrument="OPT:PHYSICAL-CONTEXT",
+            right="CALL",
+            strike=Decimal("1"),
+            multiplier=Decimal("1"),
+            settlement_currency="USD",
+            settlement_method="PHYSICAL",
+            exercise_style="AMERICAN",
+            exercise_cutoff=at(19),
+            expiry=at(20),
+            deliverable=(
+                DeliverableLeg(
+                    "SHARES:CONTEXT",
+                    Decimal("12345678901234567890.123456789"),
+                ),
+            ),
+            exercise_cash_per_contract=Decimal("98765432109876543210.987654321"),
+        )
+
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_CEILING
+            intrinsic = intrinsic_value_per_unit(
+                cash,
+                Decimal("12345678901234567891.123456790"),
+            )
+            settlement = expiration_cash_settlement(
+                cash,
+                signed_contracts=Decimal("2"),
+                underlying_price=Decimal("12345678901234567891.123456790"),
+            )
+            pnl = expiration_pnl_after_premium(
+                cash,
+                signed_contracts=Decimal("2"),
+                premium_per_unit=Decimal("0.000000001"),
+                underlying_price=Decimal("12345678901234567891.123456790"),
+            )
+            obligation = physical_exercise_obligation(
+                physical,
+                signed_contracts=Decimal("2"),
+            )
+            interim = interim_multi_leg_reservation(
+                (
+                    Decimal("12345678901234567890.123456789"),
+                    Decimal("0.000000001"),
+                ),
+                atomic_package_guaranteed=False,
+            )
+            transaction = book_cash_option_settlement(
+                transaction_id="context-option",
+                cause_event_id="context-expiry",
+                settlement_currency="USD",
+                amount=settlement,
+            )
+
+        self.assertEqual(intrinsic, Decimal("1.000000001"))
+        self.assertEqual(
+            settlement,
+            Decimal("2000000002.000000002000000002"),
+        )
+        self.assertEqual(
+            pnl,
+            Decimal("2000000000.000000002000000000"),
+        )
+        self.assertEqual(
+            obligation.asset_quantities,
+            (("SHARES:CONTEXT", Decimal("24691357802469135780.246913578")),),
+        )
+        self.assertEqual(
+            obligation.settlement_cash,
+            Decimal("-197530864219753086421.975308642"),
+        )
+        self.assertEqual(
+            interim,
+            Decimal("12345678901234567890.123456790"),
+        )
+        self.assertEqual(
+            transaction.postings[1].signed_amount,
+            Decimal("-2000000002.000000002000000002"),
+        )
+
 
 class OptionRiskEvidenceTests(unittest.TestCase):
     def test_adjusted_physical_contract_requires_explicit_exercise_cash(self):

@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime, timezone
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+if __package__:
+    from .dotnet_lock import normalized_dotnet_lock
+else:
+    from dotnet_lock import normalized_dotnet_lock
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
 PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^=\s]+)$")
+EXACT_NUGET_VERSION = re.compile(r"^\[([0-9][A-Za-z0-9.+-]*)\]$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -22,6 +30,143 @@ SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 UTC_EVIDENCE_TIME = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
+
+QUALIFICATION_TRUST_POLICY_COMPONENT_ID = "autotrade-qualification-trust-policy"
+QUALIFICATION_TRUST_POLICY_COMPONENT_KIND = "qualification-trust-policy"
+QUALIFICATION_TRUST_POLICY_COMPONENT_PATH = (
+    "mvp/autotrade_mvp/qualification_trust_policy.json"
+)
+QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION = "source-controlled"
+QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH = (
+    "mvp/autotrade_mvp/qualification_attestation.py"
+)
+
+
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
+
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git independently of caller PATH and source-checkout content."""
+
+    resolved_source_root = source_root.resolve(strict=True)
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(resolved_source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise ValueError("trusted Git executable must not originate from source_root")
+    raise ValueError("trusted Git executable is unavailable at an OS-managed location")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Run exact-object reads without caller-selected Git/process authority."""
+
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
+def _trusted_git(
+    *args: str,
+    source_root: Path,
+    text: bool = False,
+) -> bytes | str:
+    """Execute one bounded Git object query under the canonical clean process cut."""
+
+    source_root = source_root.resolve(strict=True)
+    executable = _trusted_git_executable(source_root=source_root)
+    try:
+        completed = subprocess.run(
+            [executable, *args],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            encoding="utf-8" if text else None,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError("exact Git source query is unavailable") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() if text else completed.stderr.decode(
+            "utf-8", errors="replace"
+        ).strip()
+        raise ValueError(
+            f"exact Git source query failed: {detail or args[0]}"
+        )
+    return completed.stdout
+
+
+def _exact_git_blob(
+    *,
+    source_root: Path,
+    source_sha: str,
+    relative_path: str,
+) -> tuple[bytes, str]:
+    """Read one exact blob and its object id from the selected source commit."""
+
+    if GIT_SHA.fullmatch(source_sha) is None:
+        raise ValueError("source_sha must be a canonical 40-hex commit SHA")
+    pure = PurePosixPath(relative_path)
+    if (
+        pure.is_absolute()
+        or not pure.parts
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or pure.as_posix() != relative_path
+    ):
+        raise ValueError("Git source path must be canonical and repository-relative")
+
+    top = _trusted_git("rev-parse", "--show-toplevel", source_root=source_root, text=True)
+    assert isinstance(top, str)
+    try:
+        top_path = Path(top.strip()).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("Git source root cannot be verified") from error
+    if top_path != source_root.resolve(strict=True):
+        raise ValueError("source_root must be the exact Git top-level")
+
+    _trusted_git("cat-file", "-e", f"{source_sha}^{{commit}}", source_root=source_root)
+    object_id_raw = _trusted_git(
+        "rev-parse",
+        f"{source_sha}:{relative_path}",
+        source_root=source_root,
+        text=True,
+    )
+    assert isinstance(object_id_raw, str)
+    object_id = object_id_raw.strip()
+    if GIT_OBJECT_ID.fullmatch(object_id) is None:
+        raise ValueError("exact Git source lookup returned noncanonical object id")
+    object_type = _trusted_git("cat-file", "-t", object_id, source_root=source_root, text=True)
+    assert isinstance(object_type, str)
+    if object_type.strip() != "blob":
+        raise ValueError("exact Git source object is not a blob")
+    raw = _trusted_git("cat-file", "blob", object_id, source_root=source_root)
+    assert isinstance(raw, bytes)
+    return raw, object_id
 
 
 def release_evidence_document(
@@ -84,6 +229,164 @@ def release_evidence_document(
     return True, None
 
 
+def qualification_trust_policy_digest_from_bytes(
+    raw: bytes,
+    *,
+    source_name: str = "qualification_attestation.py",
+) -> str | None:
+    """Parse the one literal packaged-policy pin without executing product code."""
+
+    if type(raw) is not bytes:
+        raise TypeError("qualification trust policy pin source must be exact bytes")
+    try:
+        source = raw.decode("utf-8", errors="strict")
+        module = ast.parse(source, filename=source_name)
+    except (UnicodeDecodeError, SyntaxError) as error:
+        raise ValueError(
+            "qualification trust policy pin source is unavailable or invalid"
+        ) from error
+
+    values: list[object] = []
+    invalid_binding = object()
+    target_name = "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256"
+    for statement in module.body:
+        stores = [
+            node
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Name)
+            and node.id == target_name
+            and isinstance(node.ctx, ast.Store)
+        ]
+        if not stores:
+            continue
+        if (
+            len(stores) == 1
+            and isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == target_name
+        ):
+            value = statement.value
+            values.append(
+                value.value if isinstance(value, ast.Constant) else invalid_binding
+            )
+            continue
+        if (
+            len(stores) == 1
+            and isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == target_name
+        ):
+            value = statement.value
+            values.append(
+                value.value if isinstance(value, ast.Constant) else invalid_binding
+            )
+            continue
+        values.append(invalid_binding)
+
+    if len(values) != 1 or values[0] is invalid_binding:
+        raise ValueError(
+            "qualification trust policy pin must have one literal source definition"
+        )
+    value = values[0]
+    if value is None:
+        return None
+    if not isinstance(value, str) or SHA256_ID.fullmatch(value) is None:
+        raise ValueError(
+            "qualification trust policy pin must be None or canonical SHA-256"
+        )
+    return value
+
+
+def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
+    """Parse a local source file for unit/source-checkout diagnostics only."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            "qualification trust policy pin source is unavailable or invalid"
+        ) from error
+    return qualification_trust_policy_digest_from_bytes(
+        raw,
+        source_name=str(path),
+    )
+
+
+def qualification_trust_policy_digest_from_git_source(
+    *,
+    source_root: Path,
+    source_sha: str,
+) -> tuple[str | None, str]:
+    """Load the pin from the exact release source object, never the working tree."""
+
+    raw, object_id = _exact_git_blob(
+        source_root=source_root,
+        source_sha=source_sha,
+        relative_path=QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH,
+    )
+    digest = qualification_trust_policy_digest_from_bytes(
+        raw,
+        source_name=f"{source_sha}:{QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH}",
+    )
+    return digest, object_id
+
+
+def qualification_trust_policy_composition(
+    document: object,
+    *,
+    expected_digest: str | None,
+) -> tuple[bool, str | None, str | None]:
+    """Validate the canonical qualification-policy component in release composition.
+
+    The composition may contain unrelated product components, but the
+    qualification policy has one canonical identity. Its digest comes from the
+    source-controlled product pin; release metadata cannot select or override it.
+    """
+
+    if expected_digest is None:
+        return False, "policy_pin_missing", None
+    if not isinstance(expected_digest, str) or SHA256_ID.fullmatch(expected_digest) is None:
+        raise ValueError(
+            "expected qualification trust policy digest must be canonical SHA-256"
+        )
+    if not isinstance(document, dict):
+        return False, "composition_not_object", None
+    components = document.get("components")
+    if not isinstance(components, list):
+        return False, "components_missing", None
+
+    matches: list[dict[str, object]] = []
+    for item in components:
+        if not isinstance(item, dict):
+            return False, "component_not_object", None
+        if (
+            item.get("component_id") == QUALIFICATION_TRUST_POLICY_COMPONENT_ID
+            or item.get("path") == QUALIFICATION_TRUST_POLICY_COMPONENT_PATH
+        ):
+            matches.append(item)
+
+    if not matches:
+        return False, "component_missing", None
+    if len(matches) != 1:
+        return False, "component_ambiguous", None
+
+    expected = {
+        "component_id": QUALIFICATION_TRUST_POLICY_COMPONENT_ID,
+        "kind": QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
+        "path": QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
+        "version": QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+        "sha256": expected_digest,
+    }
+    candidate = matches[0]
+    if frozenset(candidate) != frozenset(expected):
+        return False, "component_fields_mismatch", None
+    for key, value in expected.items():
+        if candidate.get(key) != value:
+            return False, f"{key}_mismatch", None
+    return True, None, expected_digest
+
+
 def dependency_advisory_evidence_document(
     path: Path,
     *,
@@ -104,6 +407,123 @@ def dependency_advisory_evidence_document(
         return False, "invalid_json"
     if value.get("dependency_graph") != expected_dependency_graph:
         return False, "dependency_graph_mismatch"
+    return True, None
+
+
+def dotnet_local_tools() -> list[dict[str, object]]:
+    """Return the exact repository-local .NET tool intent as release build input."""
+    path = ROOT / ".config" / "dotnet-tools.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("dotnet tool manifest is unreadable") from error
+    if type(document) is not dict or set(document) != {"version", "isRoot", "tools"}:
+        raise ValueError("dotnet tool manifest fields are not canonical")
+    if document.get("version") != 1 or document.get("isRoot") is not True:
+        raise ValueError("dotnet tool manifest must be a version-1 root manifest")
+    raw_tools = document.get("tools")
+    if type(raw_tools) is not dict:
+        raise ValueError("dotnet tool manifest tools must be an object")
+
+    result: list[dict[str, object]] = []
+    for package_id, raw in sorted(raw_tools.items(), key=lambda item: item[0].casefold()):
+        if (
+            not isinstance(package_id, str)
+            or not package_id
+            or PIN.fullmatch(f"{package_id}==0") is None
+            or type(raw) is not dict
+            or set(raw) != {"version", "commands"}
+        ):
+            raise ValueError("dotnet tool manifest entry is not canonical")
+        version = raw.get("version")
+        commands = raw.get("commands")
+        if (
+            not isinstance(version, str)
+            or not version
+            or version != version.strip()
+            or not re.fullmatch(r"[0-9][A-Za-z0-9.+-]*", version)
+            or type(commands) is not list
+            or not commands
+            or len(commands) != len(set(commands))
+            or any(
+                not isinstance(command, str)
+                or not command
+                or command != command.strip()
+                or re.fullmatch(r"[A-Za-z0-9_.-]+", command) is None
+                for command in commands
+            )
+        ):
+            raise ValueError(f"dotnet tool manifest entry is invalid: {package_id}")
+        result.append(
+            {
+                "package_id": package_id,
+                "version": version,
+                "commands": sorted(commands),
+            }
+        )
+    return result
+
+
+def dotnet_tool_qualification_evidence_document(
+    path: Path,
+    *,
+    expected_tools: list[dict[str, object]],
+    expected_tool_manifest_blob_sha: str,
+    expected_dotnet_sdk: str,
+    expected_source_sha: str | None = None,
+) -> tuple[bool, str | None]:
+    """Require byte-bound qualification of the actual local build tools."""
+    qualified, reason = release_evidence_document(
+        path,
+        label="dotnet local tool qualification",
+        expected_source_sha=expected_source_sha,
+    )
+    if not qualified:
+        return False, reason
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "invalid_json"
+    if value.get("tool_manifest_blob_sha") != expected_tool_manifest_blob_sha:
+        return False, "tool_manifest_blob_sha_mismatch"
+    if value.get("dotnet_sdk") != expected_dotnet_sdk:
+        return False, "dotnet_sdk_mismatch"
+    if value.get("local_tools") != expected_tools:
+        return False, "local_tools_mismatch"
+
+    package_evidence = value.get("tool_package_evidence")
+    if type(package_evidence) is not list or len(package_evidence) != len(expected_tools):
+        return False, "tool_package_evidence_mismatch"
+    expected_by_id = {
+        str(item["package_id"]): str(item["version"])
+        for item in expected_tools
+    }
+    seen: set[str] = set()
+    for raw in package_evidence:
+        if type(raw) is not dict or set(raw) != {
+            "package_id",
+            "version",
+            "package_sha256",
+            "entrypoint_sha256",
+        }:
+            return False, "invalid_tool_package_evidence"
+        package_id = raw.get("package_id")
+        version = raw.get("version")
+        package_digest = raw.get("package_sha256")
+        entrypoint_digest = raw.get("entrypoint_sha256")
+        if (
+            not isinstance(package_id, str)
+            or package_id in seen
+            or expected_by_id.get(package_id) != version
+            or not isinstance(package_digest, str)
+            or SHA256_ID.fullmatch(package_digest) is None
+            or not isinstance(entrypoint_digest, str)
+            or SHA256_ID.fullmatch(entrypoint_digest) is None
+        ):
+            return False, "invalid_tool_package_evidence"
+        seen.add(package_id)
+    if seen != set(expected_by_id):
+        return False, "tool_package_evidence_mismatch"
     return True, None
 
 
@@ -316,16 +736,41 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
                 raise ValueError(
                     f"PackageReference must have exact Include/Version in {project.relative_to(ROOT)}"
                 )
-            if any(token in version for token in ("*", "[", "]", "(", ")")):
+            match = EXACT_NUGET_VERSION.fullmatch(version)
+            if match is None:
                 raise ValueError(
-                    f"PackageReference is not an exact version in {project.relative_to(ROOT)}: {name} {version}"
+                    "PackageReference must use an exact NuGet range "
+                    f"in {project.relative_to(ROOT)}: {name} {version}"
                 )
-            packages.add((name, version))
+            packages.add((name, match.group(1)))
     return [
         {"name": name, "version": version}
         for name, version in sorted(packages, key=lambda item: item[0].lower())
     ]
 
+
+def _normalized_dotnet_lock(path: Path) -> dict[str, object]:
+    return normalized_dotnet_lock(path)
+
+
+def dotnet_lock_graph() -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for lock_path in sorted((ROOT / "src").rglob("packages.lock.json")):
+        projects = sorted(lock_path.parent.glob("*.csproj"))
+        if len(projects) != 1:
+            raise ValueError(
+                "Each release NuGet lock must have exactly one sibling project: "
+                f"{lock_path.relative_to(ROOT)}"
+            )
+        records.append(
+            {
+                "project": projects[0].relative_to(ROOT).as_posix(),
+                "lock_file": lock_path.relative_to(ROOT).as_posix(),
+                "lock_blob_sha": git_blob_sha(lock_path),
+                **_normalized_dotnet_lock(lock_path),
+            }
+        )
+    return records
 
 def dotnet_package_projects() -> list[Path]:
     projects: list[Path] = []
@@ -341,8 +786,11 @@ def build_manifest() -> dict[str, object]:
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
+    dotnet_tools_path = ROOT / ".config" / "dotnet-tools.json"
     components_doc = json.loads(components_path.read_text(encoding="utf-8"))
     global_doc = json.loads(global_path.read_text(encoding="utf-8"))
+    local_tools = dotnet_local_tools()
+    dotnet_tools_blob_sha = git_blob_sha(dotnet_tools_path)
 
     components, unresolved_first_party = normalize_inspected_components(
         components_doc
@@ -355,10 +803,49 @@ def build_manifest() -> dict[str, object]:
         label="release composition",
     )
     release_source_sha: str | None = None
+    release_policy_digest: str | None = None
+    release_policy_pin_blob_sha: str | None = None
     if composition_ok:
-        release_source_sha = json.loads(
+        composition_document = json.loads(
             composition.read_text(encoding="utf-8")
-        )["source_sha"]
+        )
+        release_source_sha = composition_document["source_sha"]
+
+        try:
+            (
+                expected_policy_digest,
+                release_policy_pin_blob_sha,
+            ) = qualification_trust_policy_digest_from_git_source(
+                source_root=ROOT,
+                source_sha=release_source_sha,
+            )
+        except ValueError:
+            policy_ok = False
+            policy_reason = "policy_pin_source_invalid"
+        else:
+            policy_ok, policy_reason, release_policy_digest = (
+                qualification_trust_policy_composition(
+                    composition_document,
+                    expected_digest=expected_policy_digest,
+                )
+            )
+        if not policy_ok:
+            blockers.append(
+                {
+                    "code": (
+                        "QUALIFICATION_TRUST_POLICY_PIN_MISSING"
+                        if policy_reason == "policy_pin_missing"
+                        else "QUALIFICATION_TRUST_POLICY_COMPONENT_MISSING"
+                        if policy_reason == "component_missing"
+                        else "QUALIFICATION_TRUST_POLICY_COMPONENT_UNQUALIFIED"
+                    ),
+                    "detail": (
+                        "Authenticated release composition does not bind the "
+                        "canonical qualification trust policy: "
+                        f"{policy_reason}."
+                    ),
+                }
+            )
     if not composition_ok:
         blockers.append(
             {
@@ -420,9 +907,12 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     dotnet_packages = dotnet_package_dependencies()
+    dotnet_locks = dotnet_lock_graph()
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
+        "dotnet_local_tools": local_tools,
         "inspected_components": components,
     }
 
@@ -444,6 +934,36 @@ def build_manifest() -> dict[str, object]:
                     "Exact release dependency graph has no qualified vulnerability/advisory review."
                     if advisories_reason == "missing"
                     else f"Dependency advisory evidence is not qualified: {advisories_reason}."
+                ),
+            }
+        )
+
+
+    tool_qualification = ROOT / "provenance" / "dotnet-tool-qualification.json"
+    tool_qualification_ok, tool_qualification_reason = (
+        dotnet_tool_qualification_evidence_document(
+            tool_qualification,
+            expected_tools=local_tools,
+            expected_tool_manifest_blob_sha=dotnet_tools_blob_sha,
+            expected_dotnet_sdk=str(global_doc["sdk"]["version"]),
+            expected_source_sha=release_source_sha,
+        )
+        if local_tools
+        else (True, None)
+    )
+    if not tool_qualification_ok:
+        blockers.append(
+            {
+                "code": (
+                    "DOTNET_LOCAL_TOOL_QUALIFICATION_MISSING"
+                    if tool_qualification_reason == "missing"
+                    else "DOTNET_LOCAL_TOOL_QUALIFICATION_UNQUALIFIED"
+                ),
+                "detail": (
+                    "Repository-local .NET build tools require exact package/executable qualification before release packaging."
+                    if tool_qualification_reason == "missing"
+                    else "Repository-local .NET build-tool qualification is not accepted: "
+                    f"{tool_qualification_reason}."
                 ),
             }
         )
@@ -519,17 +1039,37 @@ def build_manifest() -> dict[str, object]:
                     }
                 )
 
+    source_inventory = {
+        "components_blob_sha": git_blob_sha(components_path),
+        "requirements_dev_blob_sha": git_blob_sha(requirements_path),
+        "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
+        "global_json_blob_sha": git_blob_sha(global_path),
+        "dotnet_lock_blob_shas": {
+            record["lock_file"]: record["lock_blob_sha"]
+            for record in dotnet_locks
+        },
+        "dotnet_tools_manifest_blob_sha": dotnet_tools_blob_sha,
+    }
+    if release_policy_digest is not None:
+        if release_policy_pin_blob_sha is None:
+            raise RuntimeError(
+                "qualified release policy lacks exact-source pin blob identity"
+            )
+        source_inventory["qualification_attestation_blob_sha"] = (
+            release_policy_pin_blob_sha
+        )
+        source_inventory["qualification_trust_policy_sha256"] = (
+            release_policy_digest
+        )
+
     return {
         "schema_version": "1.0.0",
-        "source_inventory": {
-            "components_blob_sha": git_blob_sha(components_path),
-            "requirements_dev_blob_sha": git_blob_sha(requirements_path),
-            "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
-            "global_json_blob_sha": git_blob_sha(global_path),
-        },
+        "source_inventory": source_inventory,
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
+        "dotnet_local_tools": local_tools,
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
         "inspected_components": components,
         "blocking_issues": blockers,
         "release_eligible": not blockers,

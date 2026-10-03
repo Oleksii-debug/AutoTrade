@@ -27,8 +27,10 @@ from .exact_decimal import (
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():

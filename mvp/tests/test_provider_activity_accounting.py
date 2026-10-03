@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -5,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     AccountingConflict,
@@ -21,6 +23,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -36,6 +39,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -49,12 +53,24 @@ def activity(
     )
 
 
+def _paper_provider_environment(provider_id):
+    return "TESTNET" if str(provider_id).upper() == "BYBIT" else "PAPER"
+
+
 def paper_activity_identity(**kwargs):
-    return _activity_identity(environment="PAPER", **kwargs)
+    return _activity_identity(
+        environment="PAPER",
+        provider_environment=_paper_provider_environment(kwargs.get("provider_id")),
+        **kwargs,
+    )
 
 
 def paper_book_id(**kwargs):
-    return _book_id(environment="PAPER", **kwargs)
+    return _book_id(
+        environment="PAPER",
+        provider_environment=_paper_provider_environment(kwargs.get("provider_id")),
+        **kwargs,
+    )
 
 
 def book_paper_activity(store, **kwargs):
@@ -66,6 +82,10 @@ def book_paper_activity(store, **kwargs):
         if evidence is None:
             raise AssertionError("activity test evidence is required")
         kwargs["activity"] = replace(evidence, signed_amount=amount)
+    kwargs.setdefault(
+        "provider_environment",
+        _paper_provider_environment(kwargs.get("provider_id")),
+    )
     return book_external_provider_cash_activity(
         store,
         environment="PAPER",
@@ -74,6 +94,10 @@ def book_paper_activity(store, **kwargs):
 
 
 def load_paper_book(store, **kwargs):
+    kwargs.setdefault(
+        "provider_environment",
+        _paper_provider_environment(kwargs.get("provider_id")),
+    )
     return load_provider_account_economic_book(
         store,
         environment="PAPER",
@@ -82,6 +106,60 @@ def load_paper_book(store, **kwargs):
 
 
 class ProviderActivityAccountingTests(unittest.TestCase):
+    def test_provider_cash_rejects_polymorphic_and_shadowed_authorities_before_dispatch(self):
+        class ForgedStore(JournalStore):
+            pass
+
+        class ForgedActivity(ProviderActivityEvidence):
+            def __getattribute__(self, name):
+                if name == "provider_id":
+                    raise AssertionError("activity subclass virtual dispatch must not run")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            forged_store = ForgedStore(Path(directory) / "forged.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                book_external_provider_cash_activity(
+                    forged_store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=activity(signed_amount="1"),
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            base = activity(signed_amount="1")
+            forged_activity = object.__new__(ForgedActivity)
+            with self.assertRaisesRegex(TypeError, "canonical ProviderActivityEvidence"):
+                book_external_provider_cash_activity(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=forged_activity,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+
+            called = False
+
+            def hostile_batch(*_args, **_kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("shadowed JournalStore method must not run")
+
+            store.load_command_event_batch = hostile_batch
+            with self.assertRaisesRegex(TypeError, "shadowed"):
+                book_external_provider_cash_activity(
+                    store,
+                    provider_id="ALPACA",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    activity=base,
+                    observed_at="2026-09-24T18:01:00Z",
+                )
+            self.assertFalse(called)
+
     def test_environment_is_part_of_durable_provider_activity_identity(self):
         paper = paper_activity_identity(
             provider_id="ALPACA",
@@ -92,6 +170,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             provider_id="ALPACA",
             account_id="shared-account",
             environment="LIVE",
+            provider_environment="LIVE",
             activity_id="shared-id",
         )
         self.assertNotEqual(paper, live)
@@ -101,6 +180,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 provider_id="ALPACA",
                 account_id="shared-account",
                 environment="LIVE",
+                provider_environment="LIVE",
             ),
         )
 
@@ -214,7 +294,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 wraps=store.commit_command,
@@ -279,7 +359,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             def command_without_effects(**kwargs):
                 return kwargs["result"], False, ()
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 side_effect=command_without_effects,
@@ -317,7 +397,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     return saved_result, False, ()
                 return saved_result, inserted, topics
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 side_effect=competing_exact_commit,
@@ -385,7 +465,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            with patch.object(
+            with patch_journal_store_method(
                 store,
                 "commit_command",
                 return_value=({"tampered": True}, False, ()),
@@ -536,6 +616,129 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 (),
             )
 
+    def test_narrow_provider_domain_is_bound_into_durable_activity_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                provider_environment="TESTNET",
+                activity_id="bybit-domain-deposit",
+                signed_amount="10",
+            )
+            _transaction, inserted = book_external_provider_cash_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity=evidence,
+                observed_at="2026-09-24T18:03:00Z",
+            )
+            self.assertTrue(inserted)
+            activity_identity = _activity_identity(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity_id="bybit-domain-deposit",
+            )
+            imported = store.load_events("provider_activity", activity_identity)
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0]["payload"]["provider_environment"], "TESTNET")
+            self.assertEqual(
+                imported[0]["payload"]["activity"]["provider_environment"],
+                "TESTNET",
+            )
+
+    def test_narrow_domain_historical_nested_omission_replays_after_upgrade(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                provider_environment="TESTNET",
+                activity_id="bybit-legacy-domain-deposit",
+                signed_amount="10",
+            )
+            original_commit = store.commit_command
+
+            def commit_historical_facade_shape(**kwargs):
+                legacy_request = deepcopy(kwargs["request"])
+                legacy_request["activity"].pop("provider_environment", None)
+                legacy_events = []
+                for envelope, topic in kwargs["events"]:
+                    historical = deepcopy(envelope)
+                    if historical.get("event_type") == "ProviderActivityImported":
+                        historical["payload"]["activity"].pop(
+                            "provider_environment",
+                            None,
+                        )
+                        historical["payload_hash"] = payload_digest(
+                            historical["payload"]
+                        )
+                    legacy_events.append((historical, topic))
+                kwargs["request"] = legacy_request
+                kwargs["events"] = legacy_events
+                return original_commit(**kwargs)
+
+            with patch_journal_store_method(
+                store,
+                "commit_command",
+                side_effect=commit_historical_facade_shape,
+            ):
+                first, inserted = book_external_provider_cash_activity(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="paper-legacy",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    activity=evidence,
+                    observed_at="2026-09-24T18:03:00Z",
+                )
+            self.assertTrue(inserted)
+
+            reopened = JournalStore(path)
+            second, replay_inserted = book_external_provider_cash_activity(
+                reopened,
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity=evidence,
+                observed_at="2026-09-24T18:03:00Z",
+            )
+            self.assertFalse(replay_inserted)
+            self.assertEqual(first, second)
+
+            activity_identity = _activity_identity(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity_id="bybit-legacy-domain-deposit",
+            )
+            imported = reopened.load_events("provider_activity", activity_identity)
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0]["payload"]["provider_environment"], "TESTNET")
+            self.assertNotIn(
+                "provider_environment",
+                imported[0]["payload"]["activity"],
+            )
+            book_identity = _book_id(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            economics = reopened.load_events("economic_book", book_identity)
+            self.assertEqual(len(economics), 1)
+            self.assertEqual(
+                economics[0]["payload"]["provider_environment"],
+                "TESTNET",
+            )
+
     def test_withdrawal_requires_negative_amount_and_books_exactly(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -647,8 +850,8 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             for candidate in (
-                activity(provider_id="BYBIT", account_id="acct", activity_id="unknown", origin="UNKNOWN"),
-                activity(provider_id="BYBIT", account_id="acct", activity_id="auto", origin="AUTOTRADE"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="unknown", origin="UNKNOWN"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="auto", origin="AUTOTRADE"),
             ):
                 with self.assertRaisesRegex(ValueError, "MANUAL or EXTERNAL"):
                     book_paper_activity(
@@ -668,6 +871,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     activity=activity(
                         provider_id="BYBIT",
                         account_id="acct",
+                        provider_environment="TESTNET",
                         activity_id="adjustment",
                         activity_type="CASH_ADJUSTMENT",
                     ),
@@ -723,7 +927,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         self.assertNotEqual(first_activity, second_activity)
 
         first_book = paper_book_id(provider_id="ALPACA", account_id="a/b")
-        second_book = paper_book_id(provider_id="ALPACA/A", account_id="b")
+        second_book = paper_book_id(provider_id="ALPACA_A", account_id="b")
         self.assertNotEqual(first_book, second_book)
 
     def test_provider_activity_evidence_cannot_cross_account_or_provider(self):

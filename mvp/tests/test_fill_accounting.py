@@ -68,6 +68,70 @@ def matched_fill(
 
 
 class FillAccountingTests(unittest.TestCase):
+    def test_admitted_fill_requires_provider_client_order_identity(self):
+        projected, provider = matched_fill()
+        book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
+        without_client_order = ProviderFillEvidence.create(
+            provider_id=provider.provider_id,
+            account_id=provider.account_id,
+            environment=provider.environment,
+            provider_execution_id=provider.provider_execution_id,
+            client_order_id=None,
+            instrument=provider.instrument,
+            side=provider.side,
+            position_side=provider.position_side,
+            position_effect=provider.position_effect,
+            quantity=provider.quantity,
+            price=provider.price,
+            fee_amount=provider.fee_amount,
+            fee_currency=provider.fee_currency,
+            trade_time=provider.trade_time,
+            evidence_refs=provider.evidence_refs,
+            provider_environment=provider.provider_environment,
+        )
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "requires exact client order identity",
+        ):
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=projected,
+                provider_fill=without_client_order,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        unbound_projection = ProjectedFillEvidence.create(
+            fill_id=projected.fill_id,
+            provider_execution_id=projected.provider_execution_id,
+            intent_id=projected.intent_id,
+            client_order_id=None,
+            side=projected.side,
+            quantity=projected.quantity,
+            price=projected.price,
+            position_side=projected.position_side,
+            position_effect=projected.position_effect,
+            provider_revision=projected.provider_revision,
+        )
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "requires exact client order identity",
+        ):
+            book_provider_fill(
+                book=book,
+                provider_id="provider-a",
+                projected_fill=unbound_projection,
+                provider_fill=without_client_order,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        self.assertEqual(book.transactions, ())
+        self.assertEqual(book.cash("USD"), Decimal("0"))
+        self.assertEqual(book.position("ABC"), Decimal("0"))
+
     def test_only_matched_fill_evidence_books_economics(self):
         observed, provider = matched_fill()
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
@@ -1423,6 +1487,64 @@ class FillAccountingTests(unittest.TestCase):
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
 
+
+    def test_unexpected_derivative_position_identity_fails_closed_before_mutation(self):
+        cases = (
+            (None, "OPEN"),
+            (None, "REDUCE"),
+            ("BOTH", None),
+            ("BOTH", "OPEN"),
+        )
+        for position_side, position_effect in cases:
+            with (
+                self.subTest(
+                    position_side=position_side,
+                    position_effect=position_effect,
+                ),
+                TemporaryDirectory() as directory,
+            ):
+                store = JournalStore(directory + "/journal.sqlite3")
+                fill = self._unexpected_fill(
+                    position_side=position_side,
+                    position_effect=position_effect,
+                )
+                checkpoint_event_id = self._record_unexpected_checkpoint(
+                    store,
+                    fill=fill,
+                )
+                book = DurableProviderEconomicBook(
+                    store,
+                    provider_id="PROVIDER-A",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+                before_transactions = book.transactions
+                before_digest = book.audit_digest()
+
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "leg-aware economic accounting",
+                ):
+                    book_unexpected_provider_fill(
+                        store=store,
+                        checkpoint_event_id=checkpoint_event_id,
+                        book=book,
+                        provider_fill=fill,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+
+                self.assertEqual(book.transactions, before_transactions)
+                self.assertEqual(book.audit_digest(), before_digest)
+                restarted = DurableProviderEconomicBook(
+                    JournalStore(directory + "/journal.sqlite3"),
+                    provider_id="PROVIDER-A",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+                self.assertEqual(restarted.transactions, ())
+                self.assertEqual(restarted.audit_digest(), before_digest)
+
     def test_unexpected_provider_fill_must_match_checkpoint_bound_identity_before_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(directory + "/journal.sqlite3")
@@ -1528,6 +1650,68 @@ class FillAccountingTests(unittest.TestCase):
 
 
 
+
+
+class HostileFillDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal as_tuple dispatch")
+
+    def __str__(self):
+        raise AssertionError("hostile Decimal string dispatch")
+
+
+class FillAccountingExactIngressTests(unittest.TestCase):
+    def test_projected_fill_rejects_decimal_subclass_before_virtual_dispatch(self):
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-hostile",
+                provider_execution_id="exec-hostile",
+                intent_id="intent-hostile",
+                client_order_id="client-hostile",
+                side="BUY",
+                quantity=HostileFillDecimal("2"),
+                price="100",
+            )
+        with self.assertRaisesRegex(TypeError, "Decimal, string or integer"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-hostile",
+                provider_execution_id="exec-hostile",
+                intent_id="intent-hostile",
+                client_order_id="client-hostile",
+                side="BUY",
+                quantity="2",
+                price=HostileFillDecimal("100"),
+            )
+
+    def test_projected_fill_rejects_oversized_exact_presentation(self):
+        with self.assertRaisesRegex(ValueError, "bounded exact decimal"):
+            ProjectedFillEvidence.create(
+                fill_id="fill-oversized",
+                provider_execution_id="exec-oversized",
+                intent_id="intent-oversized",
+                client_order_id="client-oversized",
+                side="BUY",
+                quantity="1" * 10000,
+                price="100",
+            )
+
+    def test_projected_fill_builtin_decimal_identity_is_preserved(self):
+        quantity = Decimal("2.000")
+        price = Decimal("100.2500")
+        observed = ProjectedFillEvidence.create(
+            fill_id="fill-decimal",
+            provider_execution_id="exec-decimal",
+            intent_id="intent-decimal",
+            client_order_id="client-decimal",
+            side="BUY",
+            quantity=quantity,
+            price=price,
+        )
+        self.assertIs(observed.quantity, quantity)
+        self.assertIs(observed.price, price)
 
 
 if __name__ == "__main__":

@@ -29,11 +29,18 @@ from mvp.autotrade_mvp.futures_journal import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_runtime.artifacts._root_authority import (
+    _product_trusted_authenticated_reader,
+)
 
 
 def utc(day: int, hour: int = 0):
     return datetime(2026, 9, day, hour, tzinfo=timezone.utc)
+
+
+def _trusted_reader(artifacts: ArtifactStore):
+    return _product_trusted_authenticated_reader(artifacts.root)
 
 
 class DurableFuturesVariationMarginTests(unittest.TestCase):
@@ -178,7 +185,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 store,
                 opening,
                 settlement,
-                evidence_artifact_store=artifacts,
+                evidence_reader=_trusted_reader(artifacts),
             )
             self.assertTrue(inserted)
             self.assertEqual(delta, Decimal("100"))
@@ -194,7 +201,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             rebuilt = restore_linear_variation_margin(
                 reopened,
                 opening,
-                evidence_artifact_store=artifacts,
+                evidence_reader=_trusted_reader(artifacts),
             )
             self.assertEqual(rebuilt, state)
 
@@ -203,7 +210,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     reopened,
                     opening,
                     settlement,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 )
             )
             self.assertFalse(retry_inserted)
@@ -235,7 +242,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     reopened,
                     opening,
                     correction,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 )
             )
             self.assertTrue(correction_inserted)
@@ -250,14 +257,14 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 restore_linear_variation_margin(
                     final_store,
                     opening,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 ),
                 corrected,
             )
             rebuilt_book = rebuild_variation_margin_book(
                 final_store,
                 opening,
-                evidence_artifact_store=artifacts,
+                evidence_reader=_trusted_reader(artifacts),
             )
             self.assertEqual(rebuilt_book.cash("USD"), Decimal("120"))
             self.assertEqual(
@@ -299,7 +306,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 store,
                 opening,
                 first,
-                evidence_artifact_store=artifacts,
+                evidence_reader=_trusted_reader(artifacts),
             )
             aggregate_id = variation_margin_aggregate_id(opening)
             with self.assertRaisesRegex(FuturesError, "conflicts"):
@@ -307,7 +314,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     conflicting,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 )
             self.assertEqual(
                 len(store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id)),
@@ -317,7 +324,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 restore_linear_variation_margin(
                     store,
                     opening,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 ).last_settlement_price,
                 Decimal("105"),
             )
@@ -342,7 +349,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     first,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -354,7 +361,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 restore_inverse_variation_margin(
                     JournalStore(path),
                     opening,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 ),
                 state,
             )
@@ -364,7 +371,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     JournalStore(path),
                     opening,
                     first,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -389,7 +396,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     JournalStore(path),
                     opening,
                     correction,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -418,14 +425,14 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 restore_inverse_variation_margin(
                     final_store,
                     opening,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 ),
                 corrected,
             )
             rebuilt_book = rebuild_variation_margin_book(
                 final_store,
                 opening,
-                evidence_artifact_store=artifacts,
+                evidence_reader=_trusted_reader(artifacts),
             )
             self.assertEqual(
                 rebuilt_book.cash("BTC"),
@@ -467,7 +474,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     altered,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 )
 
             self.assertEqual(
@@ -521,7 +528,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     settlement,
-                    evidence_artifact_store=artifacts,
+                    evidence_reader=_trusted_reader(artifacts),
                 )
 
             aggregate_id = variation_margin_aggregate_id(opening)

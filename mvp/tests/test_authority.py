@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -16,8 +17,13 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
     RiskAuthorityRequest,
 )
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    _issue_financial_authority_check,
+    _issued_financial_authority_binding,
+)
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
@@ -25,13 +31,19 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.autotrade_mvp.risk_policy_authority import (
+    DurableRiskPolicyRegistry,
+    RiskPolicyScope,
+)
 from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskDecision,
     RiskIntent,
     RiskPolicy,
     RiskRuleResult,
+    RISK_ARITHMETIC_POLICY_ID,
     bind_risk_decision,
+    risk_decision_fingerprint,
 )
 
 
@@ -89,6 +101,7 @@ def bound_risk_decision(
                 reason="fixture",
             ),
         ),
+        arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
     )
     return bind_risk_decision(
         raw,
@@ -255,6 +268,7 @@ def public_authoritative_risk_snapshot(
     *,
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
+    resolved_risk_policy=None,
     valid_until: str = PUBLIC_RISK_VALID_UNTIL,
     evidence_suffix: str = "canonical",
 ) -> AuthoritativeRiskSnapshot:
@@ -302,6 +316,7 @@ def public_authoritative_risk_snapshot(
         evaluated_at=request.evaluated_at,
         valid_until=valid_until,
         evidence_refs=refs,
+        resolved_risk_policy=resolved_risk_policy,
     )
 
 
@@ -311,18 +326,34 @@ def authority_service(
     risk_context: RiskContext | None = None,
     risk_policy: RiskPolicy | None = None,
     resolver=None,
+    risk_policy_registry: DurableRiskPolicyRegistry | None = None,
+    risk_policy_scope: RiskPolicyScope | None = None,
 ) -> AuthorityService:
     selected_resolver = resolver
     if selected_resolver is None:
         def selected_resolver(request):
+            resolved = None
+            selected_policy = risk_policy
+            if risk_policy_registry is not None:
+                if risk_policy_scope is None:
+                    raise AssertionError(
+                        "test risk policy registry requires an exact scope"
+                    )
+                resolved = risk_policy_registry.resolve_current(
+                    risk_policy_scope,
+                    journal_sequence_cut=request.journal_sequence_cut,
+                )
+                selected_policy = resolved.policy
             return public_authoritative_risk_snapshot(
                 request,
                 risk_context=risk_context,
-                risk_policy=risk_policy,
+                risk_policy=selected_policy,
+                resolved_risk_policy=resolved,
             )
     return AuthorityService(
         store,
         risk_authority_resolver=selected_resolver,
+        risk_policy_registry=risk_policy_registry,
     )
 
 
@@ -1581,21 +1612,10 @@ class AuthorityTests(unittest.TestCase):
         )
 
     def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
-        class FailingFinancialJournalStore(JournalStore):
-            def __init__(self, path):
-                super().__init__(path)
-                self.prepared_event_types = ()
-
-            def commit_command(self, **kwargs):
-                self.prepared_event_types = tuple(
-                    envelope["event_type"]
-                    for envelope, _topic in kwargs["events"]
-                )
-                raise RuntimeError("injected financial commit failure")
-
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            store = FailingFinancialJournalStore(path)
+            store = JournalStore(path)
+            prepared_event_types = []
             authority = authority_service(store)
             item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
@@ -1634,17 +1654,29 @@ class AuthorityTests(unittest.TestCase):
                 **public_financial_kwargs(store),
             )
 
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "injected financial commit failure",
+            def fail_financial_commit(**commit_kwargs):
+                prepared_event_types[:] = [
+                    envelope["event_type"]
+                    for envelope, _topic in commit_kwargs["events"]
+                ]
+                raise RuntimeError("injected financial commit failure")
+
+            with patch_journal_store_method(
+                store,
+                "commit_command",
+                side_effect=fail_financial_commit,
             ):
-                authority.admit(
-                    reservation_book=reservations,
-                    **kwargs,
-                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected financial commit failure",
+                ):
+                    authority.admit(
+                        reservation_book=reservations,
+                        **kwargs,
+                    )
 
             self.assertEqual(
-                store.prepared_event_types,
+                tuple(prepared_event_types),
                 (
                     "RiskDecisionRecorded",
                     "ReservationMutationCommitted",
@@ -2564,6 +2596,13 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(first.outcome, "ADMITTED")
             self.assertTrue(first.risk_decision_id.startswith("risk:sha256:"))
             self.assertEqual(first.reservation_id, "reservation-public")
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["arithmetic_policy_id"],
+                RISK_ARITHMETIC_POLICY_ID,
+            )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
                 Decimal("100"),
@@ -2598,6 +2637,1049 @@ class AuthorityTests(unittest.TestCase):
                 2,
             )
 
+            # SIMULATION uses the service-owned risk resolver but does not
+            # fabricate a production capability-history aggregate.  Restart
+            # replay and dispatch must therefore validate the persisted risk +
+            # reconciliation binding without requiring one.
+            self.assertIsNone(
+                store.get_event(
+                    f"capability-snapshot:{PUBLIC_CAPABILITY_SNAPSHOT_ID}"
+                )
+            )
+            allowed, reason = restarted_authority.dispatch_allowed(
+                first.admission_id,
+                intent_hash=first.intent_hash,
+                account_id=first.account_id,
+                environment=first.environment,
+                instrument_id=first.instrument_version.instrument_id,
+                instrument_version=first.instrument_version.version,
+                action=first.action,
+                now="2026-09-24T18:01:01Z",
+                capability_snapshot_id=first.capability_snapshot_id,
+            )
+            self.assertEqual((allowed, reason), (True, "allowed"))
+
+
+    def test_pre_arithmetic_policy_journal_restores_only_as_historical_authority(self):
+        with TemporaryDirectory() as directory:
+            template_store = JournalStore(f"{directory}/template.sqlite3")
+            template = authority_service(template_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            template.register_policy(item)
+            template_reservations = DurableReservationBook(
+                template_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-legacy-risk-policy",
+                idempotency_key="idem-legacy-risk-policy",
+                admission_id="admission-legacy-risk-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-legacy-risk-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-legacy-risk-policy",
+                **public_financial_kwargs(template_store),
+            )
+            current = template.admit(
+                reservation_book=template_reservations,
+                **kwargs,
+            )
+
+            current_risk_event = template_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            current_risk_payload = current_risk_event["payload"]
+            current_decision = authority_module.evaluate_bound_risk(
+                kwargs["risk_intent"],
+                kwargs["risk_context"],
+                kwargs["risk_policy"],
+                intent_hash=current.intent_hash,
+                policy_version=current.policy_version,
+                reservation_version=current_risk_payload[
+                    "reservation_version"
+                ],
+                reservation_requirements=current_risk_payload[
+                    "reservation_requirements"
+                ],
+                capability_snapshot_id=current.capability_snapshot_id,
+                evaluated_at=current_risk_payload["evaluated_at"],
+                valid_until=current.risk_valid_until,
+                authoritative_risk_snapshot_id=current_risk_payload[
+                    "authoritative_risk_snapshot"
+                ]["snapshot_id"],
+            )
+            self.assertEqual(
+                current_decision.decision_id,
+                current.risk_decision_id,
+            )
+            legacy_decision = replace(
+                current_decision,
+                arithmetic_policy_id=None,
+                decision_id=None,
+            )
+            legacy_digest = risk_decision_fingerprint(legacy_decision)
+            legacy_decision = replace(
+                legacy_decision,
+                decision_id="risk:sha256:" + legacy_digest,
+            )
+            self.assertNotEqual(
+                legacy_decision.decision_id,
+                current.risk_decision_id,
+            )
+
+            legacy_risk_payload = dict(current_risk_payload)
+            self.assertEqual(
+                legacy_risk_payload.pop("arithmetic_policy_id"),
+                RISK_ARITHMETIC_POLICY_ID,
+            )
+            self.assertEqual(
+                legacy_risk_payload.pop("input_fingerprint"),
+                current_decision.input_fingerprint,
+            )
+            self.assertEqual(
+                legacy_risk_payload.pop("risk_decision_schema"),
+                authority_module._RISK_DECISION_DURABLE_SCHEMA,
+            )
+            legacy_risk_payload["decision_id"] = legacy_decision.decision_id
+            legacy_risk_payload["fingerprint"] = legacy_digest
+            reservation_book = DurableReservationBook(
+                template_store,
+                environment=current.environment,
+                account_id=current.account_id,
+            )
+            reservation_event = next(
+                event
+                for event in template_store.load_events(
+                    "reservation_book", reservation_book.scope_id
+                )
+                if (
+                    event["payload"].get("operation") == "RESERVE"
+                    and event["payload"].get("snapshot", {}).get("reservation_id")
+                    == current.reservation_id
+                )
+            )
+            legacy_request = {
+                "command_id": current.financial_command_id,
+                "admission_id": current.admission_id,
+                "policy_id": current.policy_id,
+                "policy_version": current.policy_version,
+                "intent_id": current.intent_id,
+                "intent_hash": current.intent_hash,
+                "risk_intent": legacy_risk_payload["risk_intent"],
+                "financial_idempotency_key": legacy_risk_payload[
+                    "financial_idempotency_key"
+                ],
+                "account_id": current.account_id,
+                "environment": current.environment,
+                "instrument_id": current.instrument_version.instrument_id,
+                "instrument_version": current.instrument_version.version,
+                "action": current.action,
+                "notional": str(current.notional),
+                "current_state_version": current.state_version,
+                "capability_snapshot_id": current.capability_snapshot_id,
+                "risk_decision_id": legacy_decision.decision_id,
+                "risk_decision_fingerprint": legacy_digest,
+                "reservation_id": legacy_risk_payload[
+                    "financial_reservation_id"
+                ],
+                "reservation": reservation_event["payload"]["request"],
+                "reservation_availability_evidence": legacy_risk_payload[
+                    "reservation_availability_evidence"
+                ],
+                "authoritative_risk_snapshot": legacy_risk_payload[
+                    "authoritative_risk_snapshot"
+                ],
+                "confirmation_id": current.confirmation_id,
+                "risk_reducing": current.risk_reducing,
+                "journal_sequence_cut": legacy_risk_payload[
+                    "journal_sequence_cut"
+                ],
+            }
+            if "allocation_evidence" in legacy_risk_payload:
+                legacy_request["allocation_evidence"] = legacy_risk_payload[
+                    "allocation_evidence"
+                ]
+            legacy_fingerprint = sha256(
+                json.dumps(
+                    legacy_request,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            legacy_store = JournalStore(f"{directory}/legacy.sqlite3")
+            for stored in template_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    payload = legacy_risk_payload
+                    envelope["event_id"] = authority_module._authority_event_id(
+                        "RiskDecisionRecorded",
+                        legacy_decision.decision_id,
+                    )
+                    envelope["aggregate_id"] = legacy_decision.decision_id
+                elif (
+                    stored["event_type"] == "AuthorityAdmissionRecorded"
+                    and payload.get("admission_id") == current.admission_id
+                ):
+                    payload["risk_decision_id"] = legacy_decision.decision_id
+                    payload["request_fingerprint"] = legacy_fingerprint
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                legacy_store.append_event(envelope)
+
+            before_restore_sequence = legacy_store.current_journal_sequence()
+            restarted = authority_service(legacy_store)
+            self.assertEqual(
+                legacy_store.current_journal_sequence(),
+                before_restore_sequence,
+            )
+            historical = restarted._admissions[current.admission_id]
+            self.assertEqual(
+                historical.request_fingerprint,
+                legacy_fingerprint,
+            )
+            self.assertEqual(
+                historical.risk_decision_id,
+                legacy_decision.decision_id,
+            )
+
+            replay_reservations = DurableReservationBook(
+                legacy_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            replayed = restarted.admit(
+                reservation_book=replay_reservations,
+                **kwargs,
+            )
+            self.assertEqual(replayed, historical)
+            self.assertEqual(
+                legacy_store.current_journal_sequence(),
+                before_restore_sequence,
+            )
+
+            allowed, reason = restarted.dispatch_allowed(
+                current.admission_id,
+                intent_hash=current.intent_hash,
+                account_id=current.account_id,
+                environment=current.environment,
+                instrument_id=current.instrument_version.instrument_id,
+                instrument_version=current.instrument_version.version,
+                action=current.action,
+                now="2026-09-24T18:01:01Z",
+                capability_snapshot_id=current.capability_snapshot_id,
+            )
+            self.assertFalse(allowed)
+            self.assertEqual(reason, "financial_evidence_invalid")
+
+
+    def test_pre_schema_risk_journals_preserve_both_immediate_predecessor_encodings(self):
+        with TemporaryDirectory() as directory:
+            template_store = JournalStore(f"{directory}/template-input.sqlite3")
+            template = authority_service(template_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            template.register_policy(item)
+            reservations = DurableReservationBook(
+                template_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-pre-input-fingerprint",
+                idempotency_key="idem-pre-input-fingerprint",
+                admission_id="admission-pre-input-fingerprint",
+                policy_id=item.policy_id,
+                intent_id="intent-pre-input-fingerprint",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-pre-input-fingerprint",
+                **public_financial_kwargs(template_store),
+            )
+            current = template.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            current_risk_event = template_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            self.assertEqual(
+                current_risk_event["payload"]["arithmetic_policy_id"],
+                RISK_ARITHMETIC_POLICY_ID,
+            )
+            self.assertIn(
+                "input_fingerprint",
+                current_risk_event["payload"],
+            )
+            self.assertEqual(
+                current_risk_event["payload"]["risk_decision_schema"],
+                authority_module._RISK_DECISION_DURABLE_SCHEMA,
+            )
+            current_risk_payload = current_risk_event["payload"]
+            reservation_event = next(
+                event
+                for event in template_store.load_events(
+                    "reservation_book",
+                    DurableReservationBook(
+                        template_store,
+                        environment=current.environment,
+                        account_id=current.account_id,
+                    ).scope_id,
+                )
+                if (
+                    event["payload"].get("operation") == "RESERVE"
+                    and event["payload"].get("snapshot", {}).get("reservation_id")
+                    == current.reservation_id
+                )
+            )
+            legacy_request = {
+                "command_id": current.financial_command_id,
+                "admission_id": current.admission_id,
+                "policy_id": current.policy_id,
+                "policy_version": current.policy_version,
+                "intent_id": current.intent_id,
+                "intent_hash": current.intent_hash,
+                "risk_intent": current_risk_payload["risk_intent"],
+                "financial_idempotency_key": current_risk_payload[
+                    "financial_idempotency_key"
+                ],
+                "account_id": current.account_id,
+                "environment": current.environment,
+                "instrument_id": current.instrument_version.instrument_id,
+                "instrument_version": current.instrument_version.version,
+                "action": current.action,
+                "notional": str(current.notional),
+                "current_state_version": current.state_version,
+                "capability_snapshot_id": current.capability_snapshot_id,
+                "risk_decision_id": current.risk_decision_id,
+                "risk_decision_fingerprint": current_risk_payload["fingerprint"],
+                "risk_arithmetic_policy_id": RISK_ARITHMETIC_POLICY_ID,
+                "reservation_id": current_risk_payload["financial_reservation_id"],
+                "reservation": reservation_event["payload"]["request"],
+                "reservation_availability_evidence": current_risk_payload[
+                    "reservation_availability_evidence"
+                ],
+                "authoritative_risk_snapshot": current_risk_payload[
+                    "authoritative_risk_snapshot"
+                ],
+                "confirmation_id": current.confirmation_id,
+                "risk_reducing": current.risk_reducing,
+                "journal_sequence_cut": current_risk_payload[
+                    "journal_sequence_cut"
+                ],
+            }
+            if "allocation_evidence" in current_risk_payload:
+                legacy_request["allocation_evidence"] = current_risk_payload[
+                    "allocation_evidence"
+                ]
+            legacy_fingerprint = sha256(
+                json.dumps(
+                    legacy_request,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            for keep_input_fingerprint in (False, True):
+                format_name = (
+                    "pre-schema-with-input"
+                    if keep_input_fingerprint
+                    else "pre-input"
+                )
+                legacy_store = JournalStore(
+                    f"{directory}/{format_name}.sqlite3"
+                )
+                for stored in template_store.load_events_after_journal_sequence(0):
+                    envelope = dict(stored)
+                    envelope.pop("journal_sequence", None)
+                    envelope["aggregate_version"] = str(
+                        envelope["aggregate_version"]
+                    )
+                    payload = dict(envelope["payload"])
+                    if stored["event_id"] == current_risk_event["event_id"]:
+                        # Both exact predecessor shapes predate the explicit
+                        # schema marker. The current referenced #1219 writer is
+                        # the transitional shape that already persists the full
+                        # input_fingerprint; the immediately older writer does not.
+                        if not keep_input_fingerprint:
+                            payload.pop("input_fingerprint")
+                        payload.pop("risk_decision_schema")
+                    elif (
+                        stored["event_type"] == "AuthorityAdmissionRecorded"
+                        and payload.get("admission_id") == current.admission_id
+                    ):
+                        payload["request_fingerprint"] = legacy_fingerprint
+                    envelope["payload"] = payload
+                    envelope["payload_hash"] = payload_digest(payload)
+                    legacy_store.append_event(envelope)
+
+                before_restore_sequence = legacy_store.current_journal_sequence()
+                restarted = authority_service(legacy_store)
+                self.assertEqual(
+                    legacy_store.current_journal_sequence(),
+                    before_restore_sequence,
+                )
+                restored = restarted._admissions[current.admission_id]
+
+                replay_reservations = DurableReservationBook(
+                    legacy_store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                )
+                replayed = restarted.admit(
+                    reservation_book=replay_reservations,
+                    **kwargs,
+                )
+                self.assertEqual(replayed, restored)
+                self.assertEqual(
+                    legacy_store.current_journal_sequence(),
+                    before_restore_sequence,
+                )
+
+                if keep_input_fingerprint:
+                    # The currently referenced pre-schema writer already has
+                    # the complete semantic preimage, so upgrading must retain
+                    # strict current evidence rather than reject or downgrade it.
+                    restarted._validate_durable_financial_evidence(
+                        restored,
+                        item,
+                        require_transaction_cut=True,
+                    )
+                else:
+                    # The older shape lacks the semantic preimage. It remains
+                    # restart/replay compatible but cannot mint current send authority.
+                    allowed, reason = restarted.dispatch_allowed(
+                        current.admission_id,
+                        intent_hash=current.intent_hash,
+                        account_id=current.account_id,
+                        environment=current.environment,
+                        instrument_id=current.instrument_version.instrument_id,
+                        instrument_version=current.instrument_version.version,
+                        action=current.action,
+                        now="2026-09-24T18:01:01Z",
+                        capability_snapshot_id=current.capability_snapshot_id,
+                    )
+                    self.assertFalse(allowed)
+                    self.assertEqual(reason, "financial_evidence_invalid")
+
+            for index, invalid_policy_id in enumerate((None, "RISK_FOREIGN_POLICY_V1")):
+                with self.subTest(invalid_policy_id=invalid_policy_id):
+                    invalid_store = JournalStore(
+                        f"{directory}/pre-input-invalid-{index}.sqlite3"
+                    )
+                    for stored in template_store.load_events_after_journal_sequence(0):
+                        envelope = dict(stored)
+                        envelope.pop("journal_sequence", None)
+                        envelope["aggregate_version"] = str(
+                            envelope["aggregate_version"]
+                        )
+                        payload = dict(envelope["payload"])
+                        if stored["event_id"] == current_risk_event["event_id"]:
+                            payload.pop("input_fingerprint")
+                            payload.pop("risk_decision_schema")
+                            payload["arithmetic_policy_id"] = invalid_policy_id
+                        envelope["payload"] = payload
+                        envelope["payload_hash"] = payload_digest(payload)
+                        invalid_store.append_event(envelope)
+                    with self.assertRaisesRegex(
+                        AuthorityConflict,
+                        "arithmetic policy",
+                    ):
+                        authority_service(invalid_store)
+
+
+    def test_risk_decision_schema_blocks_preimage_strip_downgrade(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source-schema.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-risk-schema-strip",
+                idempotency_key="idem-risk-schema-strip",
+                admission_id="admission-risk-schema-strip",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-schema-strip",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-risk-schema-strip",
+                **public_financial_kwargs(source_store),
+            )
+            risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["risk_decision_schema"],
+                authority_module._RISK_DECISION_DURABLE_SCHEMA,
+            )
+
+            stripped_store = JournalStore(f"{directory}/stripped-schema.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(envelope["aggregate_version"])
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == risk_event["event_id"]:
+                    payload.pop("input_fingerprint")
+                    payload.pop("risk_decision_schema")
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                stripped_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "historical financial request fingerprint is inconsistent",
+            ):
+                authority_service(stripped_store)
+
+    def test_risk_decision_schema_mixed_or_unknown_shapes_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source-schema-shapes.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-risk-schema-shapes",
+                idempotency_key="idem-risk-schema-shapes",
+                admission_id="admission-risk-schema-shapes",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-schema-shapes",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-risk-schema-shapes",
+                **public_financial_kwargs(source_store),
+            )
+            risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+
+            cases = (
+                ("missing-preimage", authority_module._RISK_DECISION_DURABLE_SCHEMA, True),
+                ("unknown-schema", "RISK_DECISION_DURABLE_PREIMAGE_V999", False),
+            )
+            for name, schema, drop_input in cases:
+                with self.subTest(name=name):
+                    invalid_store = JournalStore(
+                        f"{directory}/invalid-schema-{name}.sqlite3"
+                    )
+                    for stored in source_store.load_events_after_journal_sequence(0):
+                        envelope = dict(stored)
+                        envelope.pop("journal_sequence", None)
+                        envelope["aggregate_version"] = str(
+                            envelope["aggregate_version"]
+                        )
+                        payload = dict(envelope["payload"])
+                        if stored["event_id"] == risk_event["event_id"]:
+                            payload["risk_decision_schema"] = schema
+                            if drop_input:
+                                payload.pop("input_fingerprint")
+                        envelope["payload"] = payload
+                        envelope["payload_hash"] = payload_digest(payload)
+                        invalid_store.append_event(envelope)
+                    with self.assertRaises(AuthorityConflict):
+                        authority_service(invalid_store)
+
+
+    def test_rehashed_risk_result_semantic_tamper_fails_restart(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-risk-result-tamper",
+                idempotency_key="idem-risk-result-tamper",
+                admission_id="admission-risk-result-tamper",
+                policy_id=item.policy_id,
+                intent_id="intent-risk-result-tamper",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-risk-result-tamper",
+                **public_financial_kwargs(source_store),
+            )
+            current_risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            self.assertIn(
+                "input_fingerprint",
+                current_risk_event["payload"],
+            )
+            self.assertEqual(
+                current_risk_event["payload"]["risk_decision_schema"],
+                authority_module._RISK_DECISION_DURABLE_SCHEMA,
+            )
+
+            invalid_store = JournalStore(f"{directory}/invalid.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    payload["gross_leverage"] = "999"
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                invalid_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "fingerprint",
+            ):
+                authority_service(invalid_store)
+
+
+    def test_explicit_unknown_arithmetic_policy_id_remains_fatal_on_restart(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-unknown-risk-policy",
+                idempotency_key="idem-unknown-risk-policy",
+                admission_id="admission-unknown-risk-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-unknown-risk-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-unknown-risk-policy",
+                **public_financial_kwargs(source_store),
+            )
+            current_risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+
+            invalid_store = JournalStore(f"{directory}/invalid.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    payload["arithmetic_policy_id"] = "RISK_UNKNOWN_POLICY_V999"
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                invalid_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "arithmetic policy",
+            ):
+                authority_service(invalid_store)
+
+
+
+    def test_missing_arithmetic_policy_id_does_not_downgrade_current_fingerprint(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source-current.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-stripped-current-risk-policy",
+                idempotency_key="idem-stripped-current-risk-policy",
+                admission_id="admission-stripped-current-risk-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-stripped-current-risk-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-stripped-current-risk-policy",
+                **public_financial_kwargs(source_store),
+            )
+            current_risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+            self.assertEqual(
+                current_risk_event["payload"]["arithmetic_policy_id"],
+                RISK_ARITHMETIC_POLICY_ID,
+            )
+
+            stripped_store = JournalStore(f"{directory}/stripped-current.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    self.assertEqual(
+                        payload.pop("arithmetic_policy_id"),
+                        RISK_ARITHMETIC_POLICY_ID,
+                    )
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                stripped_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "durable risk arithmetic policy is missing or stale",
+            ):
+                authority_service(stripped_store)
+
+    def test_financial_admission_binding_is_durable_exact_and_historical(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="cmd-fill-binding-admit",
+                idempotency_key="idem-fill-binding-admit",
+                admission_id="admission-fill-binding",
+                policy_id=item.policy_id,
+                intent_id="intent-fill-binding",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-fill-binding",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+
+            # Post-admission policy revocation must stop new sends but cannot erase
+            # the historical authority that explains an already-confirmed fill.
+            authority.revoke_policy(
+                item.policy_id,
+                reason="post-send operator revoke",
+                revoked_at="2026-09-24T18:01:30Z",
+            )
+
+            restarted = AuthorityService(store)
+            binding = restarted.financial_admission_binding(
+                "admission-fill-binding"
+            )
+            payload = authority_module.financial_admission_binding_payload(binding)
+            self.assertEqual(
+                payload["admission_id"],
+                "admission-fill-binding",
+            )
+            self.assertEqual(payload["intent_id"], "intent-fill-binding")
+            self.assertEqual(
+                payload["reservation_id"],
+                "reservation-fill-binding",
+            )
+            self.assertEqual(payload["provider_id"], "TEST_PROVIDER")
+            self.assertEqual(payload["account_id"], "paper-1")
+            self.assertEqual(payload["environment"], "SIMULATION")
+            self.assertEqual(payload["instrument_symbol"], "ABC")
+            self.assertEqual(
+                payload["instrument"],
+                {"instrument_id": INSTRUMENT_ID, "version": 1},
+            )
+            self.assertEqual(payload["action"], "ORDER.SUBMIT")
+            event = store.get_event(payload["authority_event_id"])
+            self.assertIsNotNone(event)
+            self.assertEqual(
+                event["payload_hash"],
+                payload["authority_event_payload_hash"],
+            )
+            self.assertEqual(
+                event["aggregate_version"],
+                payload["authority_aggregate_version"],
+            )
+            self.assertEqual(
+                event["journal_sequence"],
+                payload["authority_journal_sequence"],
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "financial admission is missing",
+            ):
+                restarted.financial_admission_binding(
+                    "caller-invented-admission"
+                )
+
+    def test_financial_admission_binds_registry_policy_at_exact_cut_and_retry_is_historical(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            risk_scope = RiskPolicyScope(
+                provider_id="TEST_PROVIDER",
+                account_id="paper-1",
+                environment="SIMULATION",
+                provider_environment="SIMULATION",
+                entity_policy_id="simulation-global-v1",
+                instrument_family="GENERIC",
+            )
+            first_policy = public_risk_policy()
+            registry.register(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=first_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, 1, tzinfo=timezone.utc
+                ),
+            )
+            authority = authority_service(
+                store,
+                risk_policy_registry=registry,
+                risk_policy_scope=risk_scope,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-durable-quant-policy",
+                idempotency_key="idem-durable-quant-policy",
+                admission_id="admission-durable-quant-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-durable-quant-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-durable-quant-policy",
+                **public_financial_kwargs(
+                    store,
+                    risk_policy=first_policy,
+                ),
+            )
+            first = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            snapshot = risk_event["payload"]["authoritative_risk_snapshot"]
+            proof = snapshot["quantitative_risk_policy_authority"]
+            self.assertEqual(
+                proof["identity"]["policy_id"],
+                "core-risk",
+            )
+            self.assertEqual(proof["identity"]["version"], 1)
+            self.assertEqual(
+                proof["identity"]["scope"]["provider_environment"],
+                "SIMULATION",
+            )
+            self.assertEqual(
+                proof["resolved_journal_sequence_cut"],
+                snapshot["journal_sequence_cut"],
+            )
+
+            second_policy = public_risk_policy(max_single_notional="50")
+            registry.register(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=2,
+                policy=second_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 18, 2, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=risk_scope,
+                policy_id="core-risk",
+                version=2,
+                committed_at=datetime(
+                    2026, 9, 24, 18, 2, 1, tzinfo=timezone.utc
+                ),
+                activation_request_id="activate-core-risk-v2",
+                expected_previous_activation_event_id=(
+                    proof["activation_event_id"]
+                ),
+            )
+
+            def forbidden_resolver(_request):
+                raise AssertionError(
+                    "historical retry must not resolve current RiskPolicy"
+                )
+
+            restarted = authority_service(
+                store,
+                resolver=forbidden_resolver,
+                risk_policy_registry=registry,
+                risk_policy_scope=risk_scope,
+            )
+            replayed = restarted.admit(
+                reservation_book=DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                ),
+                **{
+                    **kwargs,
+                    "now": "2026-09-25T18:01:00Z",
+                    "reservation_available": {"CASH:USD": "0"},
+                },
+            )
+            self.assertEqual(replayed, first)
+
+    def test_financial_admission_rejects_quantitative_policy_wrong_provider_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            wrong_scope = RiskPolicyScope(
+                provider_id="TEST_PROVIDER",
+                account_id="paper-1",
+                environment="SIMULATION",
+                provider_environment="OTHER_DOMAIN",
+                entity_policy_id="simulation-global-v1",
+                instrument_family="GENERIC",
+            )
+            quantitative_policy = public_risk_policy()
+            registry.register(
+                scope=wrong_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=quantitative_policy,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, tzinfo=timezone.utc
+                ),
+            )
+            registry.activate(
+                scope=wrong_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=datetime(
+                    2026, 9, 24, 17, 59, 1, tzinfo=timezone.utc
+                ),
+            )
+            authority = authority_service(
+                store,
+                risk_policy_registry=registry,
+                risk_policy_scope=wrong_scope,
+            )
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider environment does not match admission",
+            ):
+                authority.admit(
+                    command_id="cmd-wrong-quant-domain",
+                    idempotency_key="idem-wrong-quant-domain",
+                    admission_id="admission-wrong-quant-domain",
+                    policy_id=item.policy_id,
+                    intent_id="intent-wrong-quant-domain",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id="reservation-wrong-quant-domain",
+                    **public_financial_kwargs(
+                        store,
+                        risk_policy=quantitative_policy,
+                    ),
+                )
+            self.assertEqual(reservations.version, 0)
+
+    def test_financial_authority_rejects_risk_registry_from_other_journal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            other = JournalStore(f"{directory}/other.sqlite3")
+            registry = DurableRiskPolicyRegistry(other)
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "must share the financial authority JournalStore",
+            ):
+                AuthorityService(
+                    store,
+                    risk_authority_resolver=lambda _request: None,
+                    risk_policy_registry=registry,
+                )
 
     def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):
         import inspect
@@ -3204,6 +4286,25 @@ class AuthorityTests(unittest.TestCase):
                 ),
                 (False, "reservation_state_changed"),
             )
+
+
+class DispatchGuardIssuanceIntegrationTests(unittest.TestCase):
+    def test_authority_dispatch_guard_rejects_missing_admission_before_issuance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "financial admission is missing",
+            ):
+                authority.dispatch_guard(
+                    "missing-admission",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                )
 
 
 if __name__ == "__main__":

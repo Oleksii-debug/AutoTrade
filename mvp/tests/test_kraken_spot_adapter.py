@@ -11,12 +11,10 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
-    ExactJsonTransportResponse,
-    GuardedDispatcher,
-    load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.provider_write_fixture import journal_sent_response
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -55,6 +53,7 @@ def trade_history_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     surface=Surface.ACTIVITIES,
     query=None,
 ):
@@ -62,12 +61,14 @@ def trade_history_observation(
         capability=capability(
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         ),
         surface=surface,
         endpoint="/0/private/TradesHistory",
         query={"ofs": "0"} if query is None else query,
         at=NOW,
         permission_scope="TRADE.READ",
+        provider_environment=provider_environment,
     )
     raw = json.dumps(
         response,
@@ -91,17 +92,20 @@ def authenticated_activity_observation(
     permission_scope="ORDER.READ",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
 ):
     binding = prepare_authenticated_read_query(
         capability=capability(
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         ),
         surface=Surface.ACTIVITIES,
         endpoint=endpoint,
         query={} if query is None else query,
         at=NOW,
         permission_scope=permission_scope,
+        provider_environment=provider_environment,
     )
     raw = json.dumps(
         response,
@@ -124,6 +128,7 @@ def capability(
     tif=("GTC", "IOC"),
     account_id="spot-account",
     environment="PAPER",
+    provider_environment=None,
 ):
     observed_at = NOW - timedelta(hours=1)
     claims = tuple(
@@ -133,6 +138,7 @@ def capability(
             account_id=account_id,
             entity_id="kraken-spot",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version="XBTUSD:v1",
             observed_at=observed_at,
             expires_at=NOW + timedelta(hours=1),
@@ -358,29 +364,19 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
+        client_order_id = prepared.body["cl_ord_id"]
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            dispatcher = GuardedDispatcher(
+            binding = journal_sent_response(
                 store,
                 environment=prepared.environment,
                 account_id=prepared.account_id,
-                owner_token="owner",
-            )
-            outcome = dispatcher.dispatch(
                 attempt_id=attempt,
                 intent_id=intent_id,
-                intent_hash="kraken-spot-intent-hash",
                 provider="KRAKEN",
-                request=prepared.body,
-                now="2026-09-24T20:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
-                transport_send=lambda _cid, _request, guard: (
-                    guard(),
-                    ExactJsonTransportResponse(raw),
-                )[1],
-                client_id_max_length=36,
-                client_id_format="UUID",
-                sender_check=lambda _owner, _epoch: None,
+                request_hash=prepared.body_sha256,
+                client_order_id=client_order_id,
+                response_bytes=raw,
                 submission_scope={
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
@@ -391,13 +387,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                         prepared.instrument_version
                     ],
                 },
-            )
-            self.assertEqual(outcome.status, "SENT")
-            binding = load_submission_response_binding(
-                store,
-                environment=prepared.environment,
-                account_id=prepared.account_id,
-                attempt_id=attempt,
+                now="2026-09-24T20:00:00Z",
+                intent_hash="kraken-spot-intent-hash",
             )
             observation = observe_submission_json_response(
                 response_binding=binding,
@@ -412,7 +403,6 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 ),
             )
         return attempt, prepared, observation
-
     def _parse_submission(self, payload, **overrides):
         intent_id = overrides.pop(
             "intent_id",
@@ -671,6 +661,37 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("0.20"))
         self.assertEqual(fill.fee_currency, "USD")
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:01.123456Z")
+        self.assertEqual(fill.provider_environment, "PAPER")
+
+    def test_trade_history_preserves_authenticated_provider_domain(self):
+        response = {
+            "error": [],
+            "result": {
+                "count": 1,
+                "trades": {
+                    "T-DOMAIN-1": {
+                        "ordertxid": "O-DOMAIN-1",
+                        "pair": "XXBTZUSD",
+                        "type": "buy",
+                        "time": "1790280001.123456",
+                        "price": "60000.25",
+                        "vol": "0.0100",
+                        "fee": "0.20",
+                    }
+                },
+            },
+        }
+        fill = parse_trade_history(
+            trade_history_observation(
+                response,
+                provider_environment="KRAKEN-DEMO",
+            ),
+            instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+            client_ids_by_provider_order={"O-DOMAIN-1": "at-domain-1"},
+            fee_currency_by_pair={"XXBTZUSD": "USD"},
+        )[0]
+        self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.provider_environment, "KRAKEN-DEMO")
 
     def test_trade_history_side_is_provider_evidenced_and_fail_closed(self):
         trade = {
@@ -1151,6 +1172,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         snapshot = open_orders_snapshot_from_observation(observation)
         self.assertEqual(snapshot.account_id, "paper-1")
         self.assertEqual(snapshot.environment, "PAPER")
+        self.assertEqual(snapshot.provider_environment, "PAPER")
         self.assertEqual(snapshot.order_ids, ("O-1", "O-2"))
         self.assertTrue(snapshot.complete_for_account)
         self.assertEqual(snapshot.evidence_ref, observation.evidence_ref)
@@ -1220,6 +1242,43 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         ):
             coverage.add_page(second)
 
+    def test_kraken_pagination_rejects_cross_provider_domain_scope(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}},
+                        "count": 2,
+                    },
+                },
+                provider_environment="KRAKEN-DEMO-A",
+                query={"ofs": "0", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-2": {}},
+                        "count": 2,
+                    },
+                },
+                provider_environment="KRAKEN-DEMO-B",
+                query={"ofs": "1", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "provider-domain scope changed",
+        ):
+            coverage.add_page(second)
+
     def test_absence_evidence_consumes_concrete_kraken_pagination_coverages(self):
         order_history = KrakenSpotPaginationCoverage(surface="ORDER_HISTORY")
         order_history.add_page(
@@ -1284,6 +1343,26 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertTrue(evidence.trades_complete)
         self.assertTrue(evidence.ledgers_complete)
         self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+
+        cross_domain_open_orders = open_orders_snapshot_from_observation(
+            authenticated_activity_observation(
+                "/0/private/OpenOrders",
+                {"error": [], "result": {"open": {}}},
+                provider_environment="KRAKEN-DEMO",
+            )
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "provider-domain scope mismatch",
+        ):
+            absence_evidence_from_pagination(
+                order_found=False,
+                open_orders=cross_domain_open_orders,
+                order_history=order_history,
+                executions=executions,
+                activities=activities,
+                consistency_horizon_satisfied=True,
+            )
 
         with self.assertRaisesRegex(
             KrakenSpotAdapterError,
@@ -1393,15 +1472,17 @@ class KrakenSpotAdapterTests(unittest.TestCase):
 
     def test_coverage_defaults_to_non_authoritative_absence(self):
         coverage = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="PAPER",
             surface="executions",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(coverage.surface, "EXECUTIONS")
+        self.assertEqual(coverage.provider_environment, "PAPER")
         self.assertFalse(coverage.provider_semantics_exclude_execution)
         self.assertFalse(coverage.proves_absence_for(NOW))
         with self.assertRaisesRegex(
@@ -1409,15 +1490,16 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             "cannot self-assert provider exclusion semantics",
         ):
             coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="PAPER",
                 surface="executions",
                 coverage_start="2026-09-24T19:00:00Z",
                 coverage_end="2026-09-24T21:00:00Z",
                 pagination_complete=True,
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
 
 

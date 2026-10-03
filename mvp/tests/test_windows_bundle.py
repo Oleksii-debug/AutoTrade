@@ -1,14 +1,25 @@
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
+import stat
+import sys
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 import zipfile
 
 import research.autotrade_research.artifacts.durable_publish as durable_publish_module
-from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
+import tools.build_windows_bundle as windows_bundle_module
+from tools.build_windows_bundle import (
+    BundleError,
+    WINDOWS_REPARSE_POINT,
+    _has_windows_reparse_point,
+    _windows_path_key,
+    build_bundle,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -40,6 +51,151 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"hardlink creation unavailable: {error}")
 
+    def test_windows_reparse_attribute_predicate_is_fail_closed(self):
+        regular = type(
+            "RegularStat",
+            (),
+            {"st_file_attributes": 0},
+        )()
+        reparse = type(
+            "ReparseStat",
+            (),
+            {"st_file_attributes": WINDOWS_REPARSE_POINT},
+        )()
+        invalid = type(
+            "InvalidStat",
+            (),
+            {"st_file_attributes": "reparse"},
+        )()
+        self.assertFalse(_has_windows_reparse_point(regular))
+        self.assertTrue(_has_windows_reparse_point(reparse))
+        with self.assertRaisesRegex(BundleError, "file attributes are invalid"):
+            _has_windows_reparse_point(invalid)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_directory_junction_in_staging_is_rejected_before_descent(self):
+        external = self.root / "external-junction-target"
+        external.mkdir()
+        (external / "outside.bin").write_bytes(b"must-not-enter-bundle")
+        junction = self.staging / "junction"
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(
+                "directory junction creation unavailable: "
+                + (result.stderr or result.stdout).strip()
+            )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+                capture_output=True,
+                check=False,
+            )
+            if junction.exists()
+            else None
+        )
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_ancestor_junction_is_rejected(self):
+        external_parent = self.root / "external-parent"
+        external_parent.mkdir()
+        nested = external_parent / "payload"
+        nested.mkdir()
+        (nested / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction_parent = self.root / "junction-parent"
+        result = subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                str(junction_parent),
+                str(external_parent),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(
+                "directory junction creation unavailable: "
+                + (result.stderr or result.stdout).strip()
+            )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd.exe", "/d", "/c", "rmdir", str(junction_parent)],
+                capture_output=True,
+                check=False,
+            )
+            if junction_parent.exists()
+            else None
+        )
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction_parent / "payload",
+                output=self.root / "ancestor-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "ancestor-junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_root_junction_is_rejected(self):
+        real_staging = self.root / "real-staging"
+        real_staging.mkdir()
+        (real_staging / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction = self.root / "junction-staging"
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(real_staging)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(
+                "directory junction creation unavailable: "
+                + (result.stderr or result.stdout).strip()
+            )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+                capture_output=True,
+                check=False,
+            )
+            if junction.exists()
+            else None
+        )
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction,
+                output=self.root / "root-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "root-junction.zip").exists())
+
     def test_hardlinked_staged_file_is_rejected_without_reading_alias(self):
         staged = self.staging / "AutoTrade.exe"
         staged.unlink()
@@ -62,31 +218,135 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
 
         self.assertEqual(victim.read_bytes(), b"external-runtime")
 
+    def test_windows_enumeration_metadata_representation_may_differ(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows metadata representation regression")
+
+        original_scandir = os.scandir
+
+        class EntryProxy:
+            def __init__(self, entry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def is_symlink(self):
+                return self._entry.is_symlink()
+
+            def stat(self, *, follow_symlinks=True):
+                observed = self._entry.stat(follow_symlinks=follow_symlinks)
+
+                class StatProxy:
+                    def __getattr__(self, name):
+                        return getattr(observed, name)
+
+                    st_dev = observed.st_dev
+                    st_ino = observed.st_ino + 17
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns + 101
+                    st_ctime_ns = observed.st_ctime_ns + 103
+
+                return StatProxy()
+
+        def distinct_scandir(directory):
+            return [EntryProxy(entry) for entry in original_scandir(directory)]
+
+        output = self.root / "metadata-domain.zip"
+        with patch.object(
+            windows_bundle_module.os,
+            "scandir",
+            side_effect=distinct_scandir,
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertTrue(output.is_file())
+
+    def test_windows_path_stat_file_identity_drift_does_not_cross_domains(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows metadata representation regression")
+
+        original_stat = os.stat
+        staged_prefix = str(self.staging) + os.sep
+        counter = 0
+
+        def drifting_file_stat(path, *args, **kwargs):
+            nonlocal counter
+            observed = original_stat(path, *args, **kwargs)
+            candidate = str(path)
+            if candidate.startswith(staged_prefix) and stat.S_ISREG(observed.st_mode):
+                counter += 1
+
+                class StatProxy:
+                    def __getattr__(self, name):
+                        return getattr(observed, name)
+
+                    st_dev = observed.st_dev
+                    st_ino = observed.st_ino + (counter * 17)
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns
+                    st_ctime_ns = observed.st_ctime_ns
+
+                return StatProxy()
+            return observed
+
+        output = self.root / "path-stat-domain.zip"
+        with patch.object(
+            windows_bundle_module.os,
+            "stat",
+            side_effect=drifting_file_stat,
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertTrue(output.is_file())
+        self.assertEqual(counter, 0)
+
     def test_staged_path_swap_during_open_fails_closed(self):
+        if sys.platform != "win32":
+            self.skipTest("retained Windows namespace test")
         staged = self.staging / "AutoTrade.exe"
         replacement = self.root / "replacement.exe"
         replacement.write_bytes(b"replacement")
-        original_open = Path.open
+        original_retain = windows_bundle_module.retain_windows_regular_file
         swapped = False
 
-        def open_then_swap(path_obj, *args, **kwargs):
+        @contextmanager
+        def retain_after_swap(authority, *, target_name, subject):
             nonlocal swapped
-            handle = original_open(path_obj, *args, **kwargs)
-            mode = args[0] if args else kwargs.get("mode", "r")
-            if Path(path_obj) == staged and mode == "rb" and not swapped:
+            if target_name == staged.name and not swapped:
                 try:
                     os.replace(replacement, staged)
                 except OSError as error:
-                    handle.close()
                     self.skipTest(f"open-file replacement unavailable: {error}")
                 swapped = True
-            return handle
+            with original_retain(
+                authority,
+                target_name=target_name,
+                subject=subject,
+            ) as descriptor:
+                yield descriptor
 
         with patch.object(
-            Path,
-            "open",
-            autospec=True,
-            side_effect=open_then_swap,
+            windows_bundle_module,
+            "retain_windows_regular_file",
+            retain_after_swap,
         ):
             with self.assertRaisesRegex(
                 BundleError,

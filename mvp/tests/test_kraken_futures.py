@@ -20,12 +20,14 @@ from mvp.autotrade_mvp.kraken_futures import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.dispatch import (
-    ExactJsonTransportResponse,
-    GuardedDispatcher,
-    load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.provider_write_fixture import journal_sent_response
+from mvp.autotrade_mvp.reconciliation import (
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -39,7 +41,7 @@ NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 NOW = "2026-09-24T20:00:00Z"
 
 
-def futures_read_capability(*, account_id="paper-1"):
+def futures_read_capability(*, account_id="paper-1", provider_environment="DEMO"):
     observed_at = NOW_DT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -48,6 +50,7 @@ def futures_read_capability(*, account_id="paper-1"):
             account_id=account_id,
             entity_id="futures-api",
             environment="PAPER",
+            provider_environment=provider_environment,
             instrument_version="PI_XBTUSD@v1",
             observed_at=observed_at,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -74,13 +77,23 @@ def futures_read_capability(*, account_id="paper-1"):
     )
 
 
-def futures_position_observation(payload, *, account_id="paper-1", endpoint="/api/history/v3/positions"):
+def futures_position_observation(
+    payload,
+    *,
+    account_id="paper-1",
+    provider_environment="DEMO",
+    endpoint="/api/history/v3/positions",
+):
     binding = prepare_authenticated_read_query(
-        capability=futures_read_capability(account_id=account_id),
+        capability=futures_read_capability(
+            account_id=account_id,
+            provider_environment=provider_environment,
+        ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint=endpoint,
         query={},
         at=NOW_DT,
+        provider_environment=provider_environment,
     )
     return observe_authenticated_json_response(
         query_binding=binding,
@@ -278,29 +291,19 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         )
         raw = raw_bytes or futures_response_bytes(payload)
         attempt = attempt_id or str(uuid4())
+        client_order_id = prepared.body["cliOrdId"]
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            dispatcher = GuardedDispatcher(
+            binding = journal_sent_response(
                 store,
                 environment=prepared.environment,
                 account_id=prepared.account_id,
-                owner_token="owner",
-            )
-            outcome = dispatcher.dispatch(
                 attempt_id=attempt,
                 intent_id=intent_id,
-                intent_hash="kraken-futures-intent-hash",
                 provider="KRAKEN",
-                request=prepared.body,
-                now=NOW,
-                authority_check=lambda _hash, _now: (True, "allowed"),
-                transport_send=lambda _cid, _request, guard: (
-                    guard(),
-                    ExactJsonTransportResponse(raw),
-                )[1],
-                client_id_max_length=36,
-                client_id_format="UUID",
-                sender_check=lambda _owner, _epoch: None,
+                request_hash=prepared.body_sha256,
+                client_order_id=client_order_id,
+                response_bytes=raw,
                 submission_scope={
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
@@ -311,13 +314,8 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         prepared.instrument_version
                     ],
                 },
-            )
-            self.assertEqual(outcome.status, "SENT")
-            binding = load_submission_response_binding(
-                store,
-                environment=prepared.environment,
-                account_id=prepared.account_id,
-                attempt_id=attempt,
+                now=NOW,
+                intent_hash="kraken-futures-intent-hash",
             )
             observation = observe_submission_json_response(
                 response_binding=binding,
@@ -332,7 +330,6 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 ),
             )
         return attempt, prepared, observation
-
     def test_prepared_request_separates_provider_and_runtime_environment(self):
         demo = prepared_futures_request("futures-demo")
         live = prepared_futures_request(
@@ -582,6 +579,70 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.provider_environment, "DEMO")
+
+    def test_position_history_fallback_cannot_complete_financial_reconciliation(self):
+        fills = parse_position_executions(
+            futures_position_observation(
+                {
+                    "elements": [
+                        {
+                            "tradeable": "PI_XBTUSD",
+                            "fillTime": 1790280000123,
+                            "fee": "1.25",
+                            "feeCurrency": "USD",
+                            "executionUid": "exec-diagnostic",
+                            "executionPrice": "65000.10",
+                            "executionSize": "0.25",
+                            "timestamp": 1790280000123,
+                            "updateReason": "trade",
+                        }
+                    ]
+                }
+            ),
+            instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            execution_client_ids={"exec-diagnostic": "hedge-diagnostic"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertIsNone(fills[0].side)
+        self.assertEqual(fills[0].evidence_refs, ())
+
+        result = reconcile_account(
+            provider_id="KRAKEN",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="DEMO",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=["exec-diagnostic"],
+            provider_fills=fills,
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="KRAKEN",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="DEMO",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:59:00Z",
+                query_completed_at="2026-09-24T20:01:00Z",
+            ),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.matched_execution_ids, ())
+        self.assertEqual(
+            result.missing_local_execution_ids,
+            ("exec-diagnostic",),
+        )
+        self.assertEqual(result.unexpected_provider_fills, ())
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn(
+            "provider execution evidence lacks reconciliation financial direction/provenance authority",
+            result.reasons,
+        )
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(
@@ -620,26 +681,29 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             "cannot self-assert provider exclusion semantics",
         ):
             coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="DEMO",
                 surface="EXECUTIONS",
                 coverage_start="2026-09-24T19:00:00Z",
                 coverage_end="2026-09-24T21:00:00Z",
                 pagination_complete=True,
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_absence_semantics_default_fail_closed(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="DEMO",
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
+        self.assertEqual(evidence.provider_environment, "DEMO")
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(datetime(2026, 9, 24, 20, tzinfo=timezone.utc))

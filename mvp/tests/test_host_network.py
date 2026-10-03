@@ -1058,5 +1058,76 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_security_boundary_subclass_cannot_be_auth_oracle(self):
+        class HostileSecurityBoundary(SecurityBoundary):
+            def validate_session(self, *args, **kwargs):
+                raise AssertionError("hostile validate_session must not run")
+
+            def validate_host_session(self, *args, **kwargs):
+                raise AssertionError("hostile validate_host_session must not run")
+
+        hostile = object.__new__(HostileSecurityBoundary)
+        with self.assertRaisesRegex(TypeError, "exact SecurityBoundary"):
+            AuthenticatedHostApplication(
+                JournalStore(self.path),
+                security_boundary=hostile,
+                account_id="paper-account-1",
+                environment="PAPER",
+                host_id="host-local-1",
+                public_origin=self.origin,
+                principal_resolver=header_principal_resolver,
+                snapshot_provider=self._snapshot,
+            )
+
+    def test_security_validation_method_shadow_is_rejected_before_construction(self):
+        boundary = self._boundary(self.origin, "shadow-before-credentials.json")
+        boundary.validate_session = lambda *args, **kwargs: self.owner
+        with self.assertRaisesRegex(TypeError, "must not be shadowed"):
+            self._application(
+                origin=self.origin,
+                boundary=boundary,
+                session=self.owner,
+                path=str(Path(self.directory.name) / "shadow-before.sqlite3"),
+            )
+
+    def test_post_construction_security_shadow_fails_closed_without_state_mutation(self):
+        for method_name in ("validate_session", "validate_host_session"):
+            with self.subTest(method_name=method_name):
+                origin = self.origin
+                boundary = self._boundary(
+                    origin,
+                    f"shadow-after-{method_name}-credentials.json",
+                )
+                session = boundary.create_session(
+                    subject="owner",
+                    role="OWNER",
+                    origin=origin,
+                    ttl_seconds=600,
+                )
+                app = self._application(
+                    origin=origin,
+                    boundary=boundary,
+                    session=session,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"shadow-after-{method_name}.sqlite3"
+                    ),
+                )
+                called = []
+                setattr(
+                    boundary,
+                    method_name,
+                    lambda *args, **kwargs: called.append(True) or True,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(session=session.token),
+                )
+                self.assertEqual(response.status, 403)
+                self.assertEqual(app.store.state_version, 0)
+                self.assertEqual(called, [])
+
+
 if __name__ == "__main__":
     unittest.main()

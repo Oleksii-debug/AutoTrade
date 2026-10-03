@@ -18,6 +18,8 @@ import tempfile
 from typing import Any, Mapping
 from uuid import UUID
 
+from .decision_trace import _redact_embedded_secret_text
+
 
 _SENSITIVE_KEY = re.compile(
     r"(authorization|cookie|password|passphrase|secret|session|token|"
@@ -120,9 +122,11 @@ def _normalize(value: object, *, depth: int, max_depth: int, budget: _Budget) ->
         raise ExportBoundaryError("payload exceeds nesting limit")
     budget.consume()
 
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) in (bool, int):
         return value
-    if isinstance(value, Decimal):
+    if type(value) is str:
+        return _redact_embedded_secret_text(value)
+    if type(value) is Decimal:
         if not value.is_finite():
             raise ExportBoundaryError("Decimal values must be finite")
         return format(value, "f")
@@ -131,14 +135,15 @@ def _normalize(value: object, *, depth: int, max_depth: int, budget: _Budget) ->
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
-                raise ExportBoundaryError("object keys must be non-empty strings")
-            if key in result:
-                raise ExportBoundaryError("duplicate object key")
+            if type(key) is not str or not key:
+                raise ExportBoundaryError("object keys must be non-empty exact strings")
+            safe_key = _redact_embedded_secret_text(key)
+            if safe_key in result:
+                raise ExportBoundaryError("object keys collide after redaction")
             if _SENSITIVE_KEY.search(key):
-                result[key] = "[REDACTED]"
+                result[safe_key] = "[REDACTED]"
             else:
-                result[key] = _normalize(
+                result[safe_key] = _normalize(
                     item,
                     depth=depth + 1,
                     max_depth=max_depth,
@@ -253,8 +258,10 @@ def _serialized_payload_is_safe(
     if depth > max_depth:
         return False
     budget.consume()
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) in (bool, int):
         return True
+    if type(value) is str:
+        return _redact_embedded_secret_text(value) == value
     if isinstance(value, Decimal):
         # json.loads(parse_float=Decimal) exposes forbidden binary-style JSON
         # numeric fractions. Exact financial decimals must have been strings.
@@ -271,7 +278,9 @@ def _serialized_payload_is_safe(
         )
     if isinstance(value, dict):
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
+            if type(key) is not str or not key:
+                return False
+            if _redact_embedded_secret_text(key) != key:
                 return False
             if _SENSITIVE_KEY.search(key):
                 if item != "[REDACTED]":
@@ -288,9 +297,38 @@ def _serialized_payload_is_safe(
     return False
 
 
+def _snapshot_prepared_export(export: PreparedExport) -> PreparedExport:
+    if type(export) is not PreparedExport:
+        raise TypeError("export must be exact PreparedExport")
+    fields = (
+        ("export_id", export.export_id),
+        ("filename", export.filename),
+        ("media_type", export.media_type),
+        ("sha256", export.sha256),
+        ("rights_id", export.rights_id),
+    )
+    for name, value in fields:
+        if type(value) is not str:
+            raise TypeError(f"export.{name} must be an exact string")
+    if type(export.data) is not bytes:
+        raise TypeError("export.data must be exact bytes")
+    if type(export.source_refs) is not tuple or any(
+        type(item) is not str for item in export.source_refs
+    ):
+        raise TypeError("export.source_refs must be an exact tuple of strings")
+    return PreparedExport(
+        export_id=export.export_id,
+        filename=export.filename,
+        media_type=export.media_type,
+        data=export.data,
+        sha256=export.sha256,
+        rights_id=export.rights_id,
+        source_refs=export.source_refs,
+    )
+
+
 def verify_prepared_export(export: PreparedExport) -> bool:
-    if not isinstance(export, PreparedExport):
-        raise TypeError("export must be PreparedExport")
+    export = _snapshot_prepared_export(export)
     if export.media_type != "application/json":
         return False
     try:
@@ -342,6 +380,7 @@ def write_prepared_export(
     rights identity captured when the inert bytes were prepared.
     """
 
+    export = _snapshot_prepared_export(export)
     current_rights_id = _rights(rights)
     if current_rights_id != export.rights_id:
         raise PermissionError("publication rights identity does not match prepared export")

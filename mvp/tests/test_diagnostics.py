@@ -90,6 +90,57 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 
 
+    def test_separator_free_secret_aliases_use_shared_fail_closed_classifier(self):
+        payload = {
+            "credentialHandle": "OPAQUE-DIAG-CREDENTIAL",
+            "sessionReference": "OPAQUE-DIAG-SESSION",
+            "proxyAuthorizationToken": "OPAQUE-DIAG-PROXY",
+            "accessToken": "OPAQUE-DIAG-TOKEN",
+            "providerCredentialId": "OPAQUE-DIAG-PROVIDER",
+            "safe": "visible",
+        }
+        redacted = redact_diagnostic_value(payload)
+        for key in (
+            "credentialHandle",
+            "sessionReference",
+            "proxyAuthorizationToken",
+            "accessToken",
+            "providerCredentialId",
+        ):
+            self.assertEqual(redacted[key], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "visible")
+
+    def test_separator_free_secret_aliases_inside_unstructured_text_are_redacted(self):
+        payload = {
+            "log_line": (
+                "safe=visible "
+                "credentialHandle=DIAG-CREDENTIAL "
+                "sessionReference: DIAG-SESSION "
+                "mode=paper"
+            ),
+            "repr_message": (
+                "{'providerCredentialId': 'DIAG-PROVIDER', "
+                "'proxyAuthorizationToken': 'DIAG-PROXY', 'safe': 'ok'}"
+            ),
+            "mixed": "prefix accessToken=DIAG-TOKEN suffix",
+            "safe": "latency=12ms mode=paper",
+        }
+        redacted = redact_diagnostic_value(payload)
+        serialized = json.dumps(redacted, sort_keys=True)
+        for leaked in (
+            "DIAG-CREDENTIAL",
+            "DIAG-SESSION",
+            "DIAG-PROVIDER",
+            "DIAG-PROXY",
+            "DIAG-TOKEN",
+        ):
+            self.assertNotIn(leaked, serialized)
+        self.assertIn("credentialHandle=[REDACTED]", redacted["log_line"])
+        self.assertIn("sessionReference: [REDACTED]", redacted["log_line"])
+        self.assertIn("[REDACTED]", redacted["repr_message"])
+        self.assertIn("accessToken=[REDACTED]", redacted["mixed"])
+        self.assertEqual(redacted["safe"], "latency=12ms mode=paper")
+
     def test_embedded_secret_text_is_redacted_even_under_safe_keys(self):
         payload = {
             "url": "https://provider.test/path?access_token=token123&mode=read",
@@ -153,6 +204,26 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertIn("[REDACTED]", redacted["json_digest"])
         self.assertIn("[REDACTED]", redacted["quoted_key_with_spaces"])
 
+
+    def test_secret_material_embedded_in_mapping_keys_is_redacted(self):
+        payload = {
+            "Authorization: Bearer DIAG-KEY-SECRET": "ignored",
+            "https://diag-user:DIAG-URL-PASSWORD@provider.test/path": "visible",
+            "api_key=DIAG-ASSIGNMENT-SECRET": "ignored",
+            "safe": "visible",
+        }
+        redacted = redact_diagnostic_value(payload)
+        serialized = json.dumps(redacted, sort_keys=True)
+        for leaked in (
+            "DIAG-KEY-SECRET",
+            "DIAG-URL-PASSWORD",
+            "DIAG-ASSIGNMENT-SECRET",
+        ):
+            self.assertNotIn(leaked, serialized)
+        self.assertIn("Authorization: [REDACTED]", redacted)
+        self.assertIn("https://[REDACTED]@provider.test/path", redacted)
+        self.assertIn("api_key=[REDACTED]", redacted)
+        self.assertEqual(redacted["safe"], "visible")
 
     def test_whitebit_api_secret_is_redacted_directly_and_inside_safe_strings(self):
         payload = {

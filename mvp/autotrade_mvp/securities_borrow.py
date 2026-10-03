@@ -14,13 +14,27 @@ import json
 from typing import Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 
 
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
@@ -69,28 +83,35 @@ def _version(value: int) -> int:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        detail = str(error)
+        if "exceeds" in detail or "oversized" in detail:
+            raise ValueError(
+                f"{name} exceeds exact decimal resource envelope"
+            ) from error
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite() or result < 0 or (positive and result == 0):
+    if result < 0 or (positive and result == 0):
         word = "positive" if positive else "non-negative"
         raise ValueError(f"{name} must be a {word} finite decimal")
     return result
 
 
 def _signed_decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        detail = str(error)
+        if "exceeds" in detail or "oversized" in detail:
+            raise ValueError(
+                f"{name} exceeds exact decimal resource envelope"
+            ) from error
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
 
 
 def incremental_short_borrow_quantity(
@@ -110,19 +131,17 @@ def incremental_short_borrow_quantity(
         reserved_position_delta,
         name="reserved_position_delta",
     )
-    base = current + reserved
-    signed = qty if normalized_side == "BUY" else -qty
-    resulting = base + signed
-    base_short = max(Decimal("0"), -base)
-    resulting_short = max(Decimal("0"), -resulting)
-    return max(Decimal("0"), resulting_short - base_short)
+    zero = Decimal("0")
+    base = exact_add(current, reserved)
+    signed = qty if normalized_side == "BUY" else exact_subtract(zero, qty)
+    resulting = exact_add(base, signed)
+    base_short = max(zero, exact_subtract(zero, base))
+    resulting_short = max(zero, exact_subtract(zero, resulting))
+    return max(zero, exact_subtract(resulting_short, base_short))
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    text = format(value, "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    return canonical_decimal_text(value)
 
 
 def _instant(value: str, *, name: str) -> str:
@@ -169,11 +188,11 @@ def _immutable_evidence_ref(value: object) -> tuple[str, str, str]:
 
 
 def _provider_evidence_kind(evidence: object) -> str:
-    if isinstance(evidence, BorrowAvailabilityEvidence):
+    if type(evidence) is BorrowAvailabilityEvidence:
         return "AVAILABILITY"
-    if isinstance(evidence, BorrowRecallEvidence):
+    if type(evidence) is BorrowRecallEvidence:
         return "RECALL"
-    if isinstance(evidence, BorrowRecallResolutionEvidence):
+    if type(evidence) is BorrowRecallResolutionEvidence:
         return "RECALL_RESOLUTION"
     raise TypeError("unsupported securities-borrow evidence type")
 
@@ -220,9 +239,10 @@ def verify_provider_borrow_evidence(
     evidence: object,
     artifact_store: ArtifactStore,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    _provider_evidence_kind(evidence)
+    if type(artifact_store) is not ArtifactStore:
         raise BorrowEvidenceError(
-            "provider borrow evidence requires trusted ArtifactStore"
+            "provider borrow evidence requires canonical ArtifactStore"
         )
     artifact_id, digest, canonical_ref = _immutable_evidence_ref(
         evidence.evidence_ref
@@ -230,7 +250,10 @@ def verify_provider_borrow_evidence(
     expected_receipt = provider_borrow_evidence_receipt(evidence)
     expected_metadata = provider_borrow_evidence_metadata(evidence)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -257,11 +280,11 @@ def verify_provider_borrow_evidence(
             raise ArtifactIntegrityError(
                 "borrow evidence lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -569,11 +592,14 @@ class DurableBorrowRecallProjection:
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        store_identity = require_exact_journal_store_authority(
+            store,
+            subject="securities-borrow JournalStore",
+        )
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.store = store
+        self._store_identity = store_identity
         self.evidence_artifact_store = evidence_artifact_store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -595,6 +621,18 @@ class DurableBorrowRecallProjection:
         self._resolutions: dict[str, BorrowRecallResolutionEvidence] = {}
         self._reload()
 
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        store = self.store
+        expected = self._store_identity
+        current = require_exact_journal_store_authority(
+            store,
+            subject="securities-borrow JournalStore",
+        )
+        if current != expected:
+            raise BorrowRecallConflict("securities-borrow JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
+
     def _scope_matches(self, evidence) -> bool:
         return (
             evidence.provider_id == self.provider_id
@@ -606,7 +644,11 @@ class DurableBorrowRecallProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        return self._journal_operation(
+            JournalStore.load_events,
+            _AGGREGATE_TYPE,
+            self.aggregate_id,
+        )
 
     def _reload(self) -> None:
         recalls: dict[str, BorrowRecallEvidence] = {}
@@ -650,7 +692,7 @@ class DurableBorrowRecallProjection:
                     raise BorrowRecallConflict("resolution references unknown recall")
                 if _dt(evidence.effective_at) < _dt(recall.effective_at):
                     raise BorrowRecallConflict("resolution predates recall")
-                after = resolved[evidence.recall_id] + evidence.resolved_quantity
+                after = exact_add(resolved[evidence.recall_id], evidence.resolved_quantity)
                 if after > recall.quantity:
                     raise BorrowRecallConflict("resolution exceeds recalled quantity")
                 resolved[evidence.recall_id] = after
@@ -670,11 +712,11 @@ class DurableBorrowRecallProjection:
         recall = self._recalls.get(rid)
         if recall is None:
             raise KeyError(rid)
-        return recall.quantity - self._resolved.get(rid, Decimal("0"))
+        return exact_subtract(recall.quantity, self._resolved.get(rid, Decimal("0")))
 
     @property
     def active_quantity(self) -> Decimal:
-        return sum((self.remaining(rid) for rid in self._recalls), Decimal("0"))
+        return exact_sum(self.remaining(rid) for rid in self._recalls)
 
     @property
     def active_recall_ids(self) -> tuple[str, ...]:
@@ -692,7 +734,7 @@ class DurableBorrowRecallProjection:
                 + self.aggregate_id + "/" + event_type + "/" + identity,
             )
         )
-        existing = self.store.get_event(event_id)
+        existing = self._journal_operation(JournalStore.get_event, event_id)
         if existing is not None:
             if existing.get("event_type") == event_type and existing.get("payload") == payload:
                 self._reload()
@@ -709,15 +751,15 @@ class DurableBorrowRecallProjection:
             "committed_at": committed_at,
         }
         try:
-            self.store.append_event(envelope)
+            self._journal_operation(JournalStore.append_event, envelope)
         except Exception as error:
             self._reload()
             raise BorrowRecallConflict("borrow recall journal changed concurrently") from error
         self._reload()
 
     def record_recall(self, evidence: BorrowRecallEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallEvidence):
-            raise TypeError("evidence must be BorrowRecallEvidence")
+        if type(evidence) is not BorrowRecallEvidence:
+            raise TypeError("evidence must be exact BorrowRecallEvidence")
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,
@@ -738,8 +780,8 @@ class DurableBorrowRecallProjection:
         return self.remaining(evidence.recall_id)
 
     def resolve_recall(self, evidence: BorrowRecallResolutionEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallResolutionEvidence):
-            raise TypeError("evidence must be BorrowRecallResolutionEvidence")
+        if type(evidence) is not BorrowRecallResolutionEvidence:
+            raise TypeError("evidence must be exact BorrowRecallResolutionEvidence")
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,

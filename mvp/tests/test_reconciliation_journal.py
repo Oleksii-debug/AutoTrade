@@ -1,3 +1,10 @@
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -26,22 +33,36 @@ from mvp.autotrade_mvp.reconciliation_journal import (
 )
 
 
-def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def snapshot(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return SnapshotConsistencyEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         mode="ATOMIC",
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
     )
 
 
-def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def fill(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+):
     return ProviderFillEvidence.create(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         provider_execution_id="e1",
         client_order_id="c1",
         instrument="ABC",
@@ -49,15 +70,25 @@ def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment=
         price="100",
         fee_currency="USD",
         trade_time="2026-09-24T18:00:00Z",
+        side="BUY",
+        evidence_refs=("provider-read:sha256:" + "1" * 64,),
     )
 
 
-def availability(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
+def availability(
+    *,
+    provider_id="TEST_PROVIDER",
+    account_id="test-account",
+    environment="PAPER",
+    provider_environment=None,
+    snapshot_id="snapshot-capacity-1",
+):
     return ResourceAvailabilityEvidence(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
-        snapshot_id="snapshot-capacity-1",
+        provider_environment=provider_environment,
+        snapshot_id=snapshot_id,
         query_started_at="2026-09-24T17:00:00Z",
         query_completed_at="2026-09-24T19:00:00Z",
         provider_as_of="2026-09-24T18:59:59Z",
@@ -89,12 +120,17 @@ def reconciliation(**overrides):
     provider_id = values["provider_id"]
     account_id = values["account_id"]
     environment = values["environment"]
+    provider_environment = values.get("provider_environment")
+    resource_availability = values.get("resource_availability")
+    if provider_environment is None and resource_availability is not None:
+        provider_environment = resource_availability.provider_environment
     if "provider_fills" not in overrides:
         values["provider_fills"] = [
             fill(
                 provider_id=provider_id,
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
             )
         ]
     if "snapshot_consistency" not in overrides:
@@ -102,6 +138,7 @@ def reconciliation(**overrides):
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
     if "provider_activity_provider_id" not in overrides:
         values["provider_activity_provider_id"] = provider_id
@@ -125,6 +162,266 @@ class ReconciliationJournalTests(unittest.TestCase):
             environment="PAPER",
         )
         self.assertNotEqual(left, right)
+
+    def test_bybit_resource_availability_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "BYBIT requires explicit provider_environment",
+        ):
+            availability(
+                provider_id="BYBIT",
+                account_id="bybit-domain-account",
+                environment="PAPER",
+            )
+
+    def test_provider_environment_scopes_current_availability_independently(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-domain-account"
+            testnet = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-availability",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-capacity",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            demo = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-demo-availability",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="DEMO",
+                        snapshot_id="demo-capacity",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:01Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            self.assertEqual(
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )["event_id"],
+                testnet["event_id"],
+            )
+            self.assertEqual(
+                load_latest_reconciliation_checkpoint_for_scope(
+                    store,
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )["event_id"],
+                demo["event_id"],
+            )
+
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=testnet["event_id"],
+                provider_id="BYBIT",
+                account_id=account_id,
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+                require_latest_scope=True,
+            )
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+            self.assertEqual(
+                evidence["resource_snapshot_id"],
+                "testnet-capacity",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=testnet["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
+
+    def test_settlement_freshness_is_isolated_by_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-settlement-domain-account"
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-domain-settlement",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-before-domain-settlement",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            def append_settlement(event_id, aggregate_id, provider_environment):
+                payload = {
+                    "schema_version": "1.0.0",
+                    "scope": {
+                        "provider_id": "BYBIT",
+                        "account_id": account_id,
+                        "environment": "PAPER",
+                        "provider_environment": provider_environment,
+                    },
+                    "obligations": [{"obligation_id": event_id}],
+                }
+                store.append_event(
+                    {
+                        "event_id": event_id,
+                        "event_type": "SettlementObligationsRegistered",
+                        "aggregate_type": "settlement_book",
+                        "aggregate_id": aggregate_id,
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-24T19:00:10Z",
+                    }
+                )
+
+            append_settlement(
+                "demo-settlement-after-testnet-snapshot",
+                "bybit-demo-settlement-domain-test",
+                "DEMO",
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="BYBIT",
+                account_id=account_id,
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+                require_latest_scope=True,
+            )
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+
+            append_settlement(
+                "testnet-settlement-after-testnet-snapshot",
+                "bybit-testnet-settlement-domain-test",
+                "TESTNET",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates settlement financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
+
+    def test_legacy_bybit_settlement_freshness_is_ambiguous_and_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            account_id = "bybit-legacy-settlement-account"
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-legacy-settlement",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id=account_id,
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        snapshot_id="testnet-before-legacy-settlement",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            payload = {
+                "schema_version": "1.0.0",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "account_id": account_id,
+                    "environment": "PAPER",
+                },
+                "obligations": [{"obligation_id": "legacy-ambiguous"}],
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-ambiguous-bybit-settlement",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": "legacy-bybit-paper-settlement",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "BYBIT requires explicit provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                    require_latest_scope=True,
+                )
 
     def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
         with TemporaryDirectory() as directory:
@@ -262,7 +559,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(first["event_id"], second["event_id"])
             self.assertEqual(
                 first["payload"]["cash_differences"]["USD"],
-                "-0.50",
+                "-0.5",
             )
             self.assertEqual(
                 first["payload"]["resource_availability"],
@@ -270,6 +567,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     "provider_id": "TEST_PROVIDER",
                     "account_id": "test-account",
                     "environment": "PAPER",
+                    "provider_environment": "PAPER",
                     "snapshot_id": "snapshot-capacity-1",
                     "query_started_at": "2026-09-24T17:00:00Z",
                     "query_completed_at": "2026-09-24T19:00:00Z",
@@ -1282,6 +1580,206 @@ class ReconciliationJournalTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
             )
+
+
+    def test_availability_max_age_is_exact_across_decimal_contexts(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="exact-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            contexts = (
+                (6, ROUND_FLOOR),
+                (6, ROUND_CEILING),
+                (6, ROUND_HALF_EVEN),
+                (10, ROUND_FLOOR),
+                (28, ROUND_HALF_EVEN),
+                (80, ROUND_HALF_EVEN),
+            )
+            for precision, rounding in contexts:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        evidence = load_account_resource_availability_evidence(
+                            store,
+                            checkpoint_event_id=checkpoint["event_id"],
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                            resources=("CASH:USD",),
+                            now="2026-09-24T19:02:03.456789Z",
+                            max_age_seconds="123.4568",
+                        )
+                    self.assertEqual(
+                        evidence["availability"]["CASH:USD"],
+                        "850",
+                    )
+                    self.assertEqual(
+                        evidence["age_seconds"],
+                        "123.456789",
+                    )
+
+            boundary = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:02:03.456800Z",
+                max_age_seconds=Decimal("123.4568"),
+            )
+            self.assertEqual(boundary["age_seconds"], "123.4568")
+            with self.assertRaisesRegex(ValueError, "checkpoint is stale"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:02:03.456801Z",
+                    max_age_seconds=Decimal("123.4568"),
+                )
+
+
+    def test_availability_max_age_rejects_oversized_text_at_public_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="oversized-max-age",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact resource envelope",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="9" * 10_000,
+                )
+
+
+    def test_availability_max_age_rejects_decimal_subclass_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal.is_finite dispatched")
+
+            def __lt__(self, other):
+                raise AssertionError("hostile Decimal comparison dispatched")
+
+            def __gt__(self, other):
+                raise AssertionError("hostile Decimal comparison dispatched")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="decimal-subclass-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "max_age_seconds must be an exact built-in Decimal",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds=HostileDecimal("60"),
+                )
+
+
+    def test_durable_availability_replay_bounds_numeric_payload_before_decimal_construction(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bounded-durable-availability-source",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            hostile_values = (
+                "9" * 10_000,
+                "1e999999",
+            )
+            for index, hostile_value in enumerate(hostile_values):
+                with self.subTest(hostile_value=hostile_value[:20]):
+                    availability_payload = dict(
+                        checkpoint["payload"]["resource_availability"]
+                    )
+                    availability_payload["available_resources"] = {
+                        "CASH:USD": hostile_value,
+                    }
+                    payload = dict(checkpoint["payload"])
+                    payload["resource_availability"] = availability_payload
+                    event_id = f"hostile-durable-availability-{index}"
+                    store.append_event(
+                        {
+                            "event_id": event_id,
+                            "event_type": "AccountReconciled",
+                            "schema_version": "1.0.0",
+                            "aggregate_type": "account_reconciliation",
+                            "aggregate_id": f"hostile-durable-availability:{index}",
+                            "aggregate_version": "1",
+                            "host_id": "test-host",
+                            "owner_epoch": "epoch-1",
+                            "environment": "PAPER",
+                            "occurred_at": payload["observed_at"],
+                            "observed_at": payload["observed_at"],
+                            "committed_at": payload["observed_at"],
+                            "correlation_id": event_id,
+                            "causation_id": None,
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "evidence_refs": [],
+                        }
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "exact resource envelope",
+                    ):
+                        load_account_resource_availability_evidence(
+                            store,
+                            checkpoint_event_id=event_id,
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                            resources=("CASH:USD",),
+                            now="2026-09-24T19:00:30Z",
+                            max_age_seconds="60",
+                        )
+
 
 
 if __name__ == "__main__":

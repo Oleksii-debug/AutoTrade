@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
@@ -10,6 +10,20 @@ from mvp.autotrade_mvp.financing import (
     FinancingRevisionBook,
     book_financing_delta,
 )
+
+
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile as_tuple dispatch")
+
+    def __format__(self, format_spec):
+        raise AssertionError("hostile format dispatch")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile equality dispatch")
 
 
 BASE = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
@@ -175,6 +189,88 @@ class FinancingTests(unittest.TestCase):
                 source_account="CASH:USD",
                 evidence_ref="artifact:x",
             )
+
+    def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("1.25")
+        with self.assertRaisesRegex(
+            FinancingError,
+            "bounded exact decimal input",
+        ):
+            FinancingEvent.create(
+                charge_id="hostile",
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount=hostile,
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        with self.assertRaisesRegex(
+            FinancingError,
+            "bounded exact decimal input",
+        ):
+            book_financing_delta(
+                transaction_id="hostile-tx",
+                cause_event_id="hostile-event",
+                unit="USD",
+                source_account="CASH:USD",
+                economic_delta=hostile,
+            )
+
+    def test_revision_delta_and_posting_are_independent_of_decimal_context(self):
+        first_event = FinancingEvent.create(
+            charge_id="context",
+            revision=1,
+            kind="FINAL",
+            effective_at=BASE,
+            available_at=BASE,
+            unit="USD",
+            amount="12345678901234567890.123456789",
+            source_account="CASH:USD",
+            evidence_ref="artifact:context-r1",
+        )
+        corrected_event = FinancingEvent.create(
+            charge_id="context",
+            revision=2,
+            kind="FINAL",
+            effective_at=BASE,
+            available_at=BASE + timedelta(seconds=1),
+            unit="USD",
+            amount="12345678901234567889.123456788",
+            source_account="CASH:USD",
+            evidence_ref="artifact:context-r2",
+        )
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_CEILING
+            revisions = FinancingRevisionBook()
+            first = revisions.record(first_event)
+            corrected = revisions.record(corrected_event)
+            self.assertEqual(
+                first.economic_delta,
+                Decimal("12345678901234567890.123456789"),
+            )
+            self.assertEqual(
+                corrected.economic_delta,
+                Decimal("-1.000000001"),
+            )
+            transaction = book_financing_delta(
+                transaction_id="context-tx",
+                cause_event_id="context-event",
+                unit="USD",
+                source_account="CASH:USD",
+                economic_delta=corrected.economic_delta,
+            )
+        self.assertEqual(
+            transaction.postings[0].signed_amount,
+            Decimal("1.000000001"),
+        )
+        self.assertEqual(
+            transaction.postings[1].signed_amount,
+            Decimal("-1.000000001"),
+        )
 
     def test_zero_delta_is_not_booked(self):
         with self.assertRaises(FinancingError):

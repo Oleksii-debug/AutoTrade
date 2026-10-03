@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
+from mvp.autotrade_mvp import option_lifecycle as option_lifecycle_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -21,6 +23,7 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleConflict,
     OptionLifecycleError,
     OptionLifecycleObservation,
+    canonical_option_lifecycle_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -29,6 +32,17 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
+
+
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal as_tuple dispatch")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile Decimal equality dispatch")
 
 
 OPTION_ID = "11111111-1111-1111-1111-111111111111"
@@ -54,6 +68,10 @@ def option_version(
     settlement_method: str = "PHYSICAL",
     deliverable_quantity: str = "100",
     strike: str = "50",
+    contract_multiplier: str = "100",
+    quantity_step: str = "1",
+    minimum_quantity: str = "1",
+    maximum_quantity: str | None = None,
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
@@ -66,10 +84,13 @@ def option_version(
         quote_currency="USD",
         settlement_currency="USD",
         quantity_unit="contract",
-        contract_multiplier=Decimal("100"),
+        contract_multiplier=Decimal(contract_multiplier),
         price_tick=Decimal("0.01"),
-        quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"),
+        quantity_step=Decimal(quantity_step),
+        minimum_quantity=Decimal(minimum_quantity),
+        maximum_quantity=(
+            None if maximum_quantity is None else Decimal(maximum_quantity)
+        ),
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
         effective_from=effective_from,
@@ -98,6 +119,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self._evidence = {}
         self.authority = self._authority(
@@ -147,6 +169,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id=source.provider_id,
             account_id=source.account_id,
             environment=source.environment,
+            provider_environment=source.provider_environment,
             venue_id=payload["venue_id"],
             instrument_version=source.query_binding.instrument_version,
             external_event_id=payload["external_event_id"],
@@ -176,6 +199,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         instrument_version,
         observed_at,
         permission_scope=LIFECYCLE_SCOPE,
+        provider_environment="TESTNET",
     ):
         claim_time = observed_at - timedelta(minutes=2)
         expires_at = observed_at + timedelta(minutes=10)
@@ -186,6 +210,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 account_id="paper-1",
                 entity_id="entity-1",
                 environment="PAPER",
+                provider_environment=provider_environment,
                 instrument_version=instrument_version,
                 observed_at=claim_time,
                 expires_at=expires_at,
@@ -227,12 +252,14 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         venue_id: str = "OPTIONS",
         endpoint: str = LIFECYCLE_ENDPOINT,
         permission_scope: str = LIFECYCLE_SCOPE,
+        provider_environment: str = "TESTNET",
     ) -> str:
         capability = self._capability(
             provider_id=provider_id,
             instrument_version=instrument_version,
             observed_at=observed_at,
             permission_scope=permission_scope,
+            provider_environment=provider_environment,
         )
         binding = prepare_authenticated_read_query(
             capability=capability,
@@ -241,6 +268,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             query={"kind": "OPTION_LIFECYCLE"},
             at=observed_at - timedelta(seconds=30),
             permission_scope=permission_scope,
+            provider_environment=provider_environment,
         )
         payload = {
             "venue_id": venue_id,
@@ -288,6 +316,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="forged-life",
@@ -297,6 +326,202 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             observed_at=utc(12, 18, 19, 1),
             raw_evidence_digest="sha256:" + "f" * 64,
             provider_revision="forged-r1",
+        )
+
+    def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
+        base = {
+            "provider_id": "BYBIT",
+            "account_id": "paper-1",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "venue_id": "OPTIONS",
+            "instrument_version": f"{OPTION_ID}@1",
+            "external_event_id": "hostile-life",
+            "event_kind": "EXERCISE",
+            "signed_contracts": Decimal("1"),
+            "effective_at": utc(12, 18, 19),
+            "observed_at": utc(12, 18, 19, 1),
+            "raw_evidence_digest": "sha256:" + "e" * 64,
+            "provider_revision": "hostile-r1",
+        }
+        for field in (
+            "signed_contracts",
+            "underlying_price",
+            "cash_settlement_amount",
+        ):
+            with self.subTest(field=field):
+                values = dict(base)
+                values[field] = HostileDecimal("1.25")
+                with self.assertRaisesRegex(
+                    OptionLifecycleError,
+                    "bounded exact decimal input",
+                ):
+                    OptionLifecycleObservation(**values)
+
+    def test_lifecycle_decimal_identity_is_context_independent(self):
+        observation = OptionLifecycleObservation(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            venue_id="OPTIONS",
+            instrument_version=f"{OPTION_ID}@1",
+            external_event_id="context-independent-life",
+            event_kind="EXERCISE",
+            signed_contracts=Decimal("1.2345678901234567890123456789"),
+            effective_at=utc(12, 18, 19),
+            observed_at=utc(12, 18, 19, 1),
+            raw_evidence_digest="sha256:" + "d" * 64,
+            provider_revision="provider-context-r1",
+            underlying_price=Decimal("12345678901234567890.123456789"),
+            cash_settlement_amount=Decimal("0.000000000000000000123456789"),
+        )
+
+        payloads = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        payloads.append(
+                            canonical_option_lifecycle_observation(observation)
+                        )
+
+        self.assertTrue(all(payload == payloads[0] for payload in payloads))
+        self.assertEqual(
+            payloads[0]["signed_contracts"],
+            "1.2345678901234567890123456789",
+        )
+        self.assertEqual(
+            payloads[0]["underlying_price"],
+            "12345678901234567890.123456789",
+        )
+        self.assertEqual(
+            payloads[0]["cash_settlement_amount"],
+            "0.000000000000000000123456789",
+        )
+
+    def test_lifecycle_quantity_below_order_minimum_is_valid_when_on_grid(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="1",
+                    minimum_quantity="2",
+                ),
+            )
+        )
+        authority = self._authority(registry=registry, economic_book=self.book)
+        self.seed_option_position("1")
+
+        result = authority.apply(
+            self.evidence(
+                external_event_id="below-order-minimum-life",
+                signed_contracts="1",
+            )
+        )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            1,
+        )
+
+    def test_lifecycle_quantity_above_order_maximum_is_valid_when_on_grid(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="1",
+                    minimum_quantity="1",
+                    maximum_quantity="1",
+                ),
+            )
+        )
+        authority = self._authority(registry=registry, economic_book=self.book)
+        self.seed_option_position("2")
+
+        result = authority.apply(
+            self.evidence(
+                external_event_id="above-order-maximum-life",
+                signed_contracts="2",
+            )
+        )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            1,
+        )
+
+    def test_lifecycle_quantity_off_grid_still_fails_before_mutation(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="2",
+                    minimum_quantity="1",
+                ),
+            )
+        )
+        authority = self._authority(registry=registry, economic_book=self.book)
+        self.seed_option_position("1")
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity grid",
+        ):
+            authority.apply(
+                self.evidence(
+                    external_event_id="off-grid-life",
+                    signed_contracts="1",
+                )
+            )
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+
+    def test_physical_exercise_cash_is_decimal_context_independent(self):
+        version = option_version(
+            strike="123456789.123456789",
+            contract_multiplier="100.000000001",
+            deliverable_quantity="100.000000001",
+        )
+        values = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        values.append(
+                            option_lifecycle_module._standard_physical_exercise_cash(
+                                version
+                            )
+                        )
+        self.assertTrue(all(value == values[0] for value in values))
+        self.assertEqual(
+            values[0],
+            Decimal("12345678912.469135689123456789"),
+        )
+
+    def test_sealed_provider_invalid_cash_settlement_fails_as_lifecycle_error(self):
+        reference = self.evidence(
+            external_event_id="invalid-cash-settlement",
+            cash_settlement_amount="NaN",
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider lifecycle payload contains invalid financial values",
+        ):
+            self.authority.apply(reference)
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
         )
 
     def test_direct_fabricated_lifecycle_fact_cannot_mutate_financial_state(self):
@@ -365,6 +590,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 provider_id=valid.provider_id,
                 account_id=valid.account_id,
                 environment=valid.environment,
+                provider_environment=valid.provider_environment,
                 venue_id="FORGED_VENUE",
                 instrument_version=valid.instrument_version,
                 external_event_id="forged-external-id",
@@ -447,6 +673,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         restarted = self._authority(
             registry=self.registry,
@@ -534,7 +761,14 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
         self.assertEqual(self.book.position("ABC"), Decimal("-100"))
-        # The -2 seed is itself canonical economics: selling two contracts at\n        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected\n        # correction evidence must leave that exact 5002 USD state unchanged.\n        self.assertEqual(self.book.cash("USD"), Decimal("5002"))\n        self.assertEqual(\n            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),\n            1,\n        )
+        # The -2 seed is itself canonical economics: selling two contracts at
+        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected
+        # correction evidence must leave that exact 5002 USD state unchanged.
+        self.assertEqual(self.book.cash("USD"), Decimal("5002"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            1,
+        )
 
     def test_correction_atomically_reverses_and_replaces_economics(self):
         self.seed_option_position("-2")
@@ -583,6 +817,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         self.assertEqual(restarted.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(restarted.position("ABC"), Decimal("-200"))
@@ -599,6 +834,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -630,6 +866,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -662,6 +899,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -697,6 +935,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -753,6 +992,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority = self._authority(
             registry=registry,
@@ -774,6 +1014,123 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         ):
             self.authority.apply(self.evidence(event_kind="CASH_IN_LIEU"))
 
+
+    def test_demo_lifecycle_evidence_cannot_enter_testnet_economic_book(self):
+        before = tuple(self.book.transactions)
+        reference = self.evidence(
+            external_event_id="demo-domain-life",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "provider lifecycle evidence scope mismatch",
+        ):
+            self.authority.apply(reference)
+        self.assertEqual(tuple(self.book.transactions), before)
+
+
+
+
+
+    def test_stale_facade_cannot_authorize_option_position_consumption(self):
+        self.seed_option_position("1")
+        stale_position = self.book.position(f"{OPTION_ID}@1")
+        self.assertEqual(stale_position, Decimal("1"))
+
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        competing_book.append(
+            book_equity_fill(
+                transaction_id="competing-option-consume",
+                cause_event_id="competing-option-consume-cause",
+                instrument=f"{OPTION_ID}@1",
+                settlement_currency="USD",
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+            )
+        )
+        self.assertEqual(competing_book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+
+        before_economic = tuple(
+            self.store.load_events("economic_book", self.book.book_id)
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "exceed canonical option position",
+        ):
+            self.authority.apply(self.evidence(external_event_id="stale-cut-life"))
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            tuple(self.store.load_events("economic_book", self.book.book_id)),
+            before_economic,
+        )
+
+    def test_economic_writer_between_position_cut_and_prepare_fails_closed(self):
+        self.seed_option_position("1")
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        original_prepare = self.book.prepare_batch_mutation
+        raced = False
+
+        def racing_prepare(transactions, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                competing_book.append(
+                    book_equity_fill(
+                        transaction_id="racing-option-consume",
+                        cause_event_id="racing-option-consume-cause",
+                        instrument=f"{OPTION_ID}@1",
+                        settlement_currency="USD",
+                        side="SELL",
+                        quantity=Decimal("1"),
+                        price=Decimal("1"),
+                    )
+                )
+            return original_prepare(transactions, **kwargs)
+
+        with patch.object(
+            self.book,
+            "prepare_batch_mutation",
+            side_effect=racing_prepare,
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleConflict,
+                "changed after lifecycle position validation",
+            ):
+                self.authority.apply(
+                    self.evidence(external_event_id="race-cut-life")
+                )
+
+        self.assertTrue(raced)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        current = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        self.assertEqual(current.position(f"{OPTION_ID}@1"), Decimal("0"))
 
 if __name__ == "__main__":
     unittest.main()

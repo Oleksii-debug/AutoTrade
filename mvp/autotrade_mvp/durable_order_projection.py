@@ -14,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )

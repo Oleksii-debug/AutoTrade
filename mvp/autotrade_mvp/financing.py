@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import ExactDecimalError, exact_subtract, parse_bounded_exact_decimal
 
 
 class FinancingError(ValueError):
@@ -24,15 +25,10 @@ class FinancingConflict(FinancingError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise FinancingError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FinancingError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FinancingError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise FinancingError(f"{name} must use bounded exact decimal input") from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -220,7 +216,7 @@ class FinancingRevisionBook:
         self._history.append(event)
         return FinancingUpdate(
             accepted=True,
-            economic_delta=new_final - old_final,
+            economic_delta=exact_subtract(new_final, old_final),
             current_revision=event.revision,
             current_final_charge=new_final,
         )
@@ -250,7 +246,7 @@ def book_financing_delta(
         transaction_id=_text(transaction_id, name="transaction_id"),
         cause_event_id=_text(cause_event_id, name="cause_event_id"),
         postings=(
-            posting(source, charge_unit, -delta),
+            posting(source, charge_unit, exact_subtract(Decimal("0"), delta)),
             posting(f"FINANCING_EXPENSE:{charge_unit}", charge_unit, delta),
         ),
     )

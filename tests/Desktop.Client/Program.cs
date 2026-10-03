@@ -1170,9 +1170,79 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void WebExperienceSecurityPolicyFailsClosedTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            policy.AllowsTopLevelNavigation(
+                new Uri("http://127.0.0.1:8765/portfolio")),
+            "same-origin product navigation was rejected");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(
+                new Uri("http://127.0.0.1:8766/portfolio")),
+            "different host port was admitted into the embedded trust surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(
+                new Uri("https://example.com/portfolio")),
+            "external origin was admitted into the embedded trust surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(
+                new Uri("http://user@127.0.0.1:8765/portfolio")),
+            "userinfo-bearing navigation was admitted");
+
+        Check.True(
+            policy.AllowsSessionHeaderForwarding(
+                new Uri("http://127.0.0.1:8765/api/v1/state")),
+            "canonical Host API request was not eligible for session headers");
+        Check.True(
+            policy.AllowsSessionHeaderForwarding(
+                new Uri("http://127.0.0.1:8765/api/v1/operations/abc?view=status")),
+            "canonical Host API child request lost session-header eligibility");
+        Check.True(
+            !policy.AllowsSessionHeaderForwarding(
+                new Uri("http://127.0.0.1:8765/index.html")),
+            "static web asset became eligible for bearer forwarding");
+        Check.True(
+            !policy.AllowsSessionHeaderForwarding(
+                new Uri("http://127.0.0.1:8765/api/v10/state")),
+            "lookalike API prefix became eligible for bearer forwarding");
+        Check.True(
+            !policy.AllowsSessionHeaderForwarding(
+                new Uri("http://127.0.0.1:8766/api/v1/state")),
+            "bearer forwarding crossed the paired host origin");
+        Check.True(
+            !policy.AllowsSessionHeaderForwarding(
+                new Uri("https://example.com/api/v1/state")),
+            "bearer forwarding reached an external origin");
+
+        Check.True(
+            !policy.AllowsWebMessageCommandAuthority,
+            "web messages were granted financial command authority");
+        Check.True(
+            !policy.AllowsDeveloperTools,
+            "release-mode developer tools were enabled by the security contract");
+        Check.True(
+            !policy.AllowsDownloads,
+            "embedded downloads were enabled by the security contract");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri("http://127.0.0.1:8765/help")),
+            "new-window navigation was silently trusted");
+
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(
+                new Uri("http://example.com/")),
+            "remote cleartext host origin was accepted");
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(
+                new Uri("https://example.com/app")),
+            "path-bearing host origin was accepted");
+    }
+
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
+        WebExperienceSecurityPolicyFailsClosedTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();

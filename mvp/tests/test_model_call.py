@@ -123,7 +123,21 @@ def _observation_evidence(observed, binding):
     )
 
 
-def _billing_evidence(attempt_id, billing_id, billed, observed_payload):
+_TEST_BILLING_AMOUNTS = {
+    "invoice-invalid-fallback": Decimal("0.2"),
+    "invoice-retry-safe": Decimal("0.2"),
+    "late-invoice-line": Decimal("0.4"),
+    "invoice-line-7": Decimal("0.25"),
+    "other-line": Decimal("0.25"),
+    "invoice-stable": Decimal("0.2"),
+    "bill-after-process-exit": Decimal("0.6"),
+}
+
+
+def _billing_evidence(attempt_id, billing_id, observed_payload):
+    billed = _TEST_BILLING_AMOUNTS.get(billing_id)
+    if billed is None:
+        raise ValueError("test billing identity has no independent amount")
     return BillingEvidence(
         attempt_id=attempt_id,
         billing_id=billing_id,
@@ -144,7 +158,6 @@ def _billing_evidence(attempt_id, billing_id, billed, observed_payload):
         ),
         issuer=observed_payload["provider_id"],
     )
-
 
 def orchestrator_for(
     *,
@@ -323,7 +336,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=parent.attempt_id,
                     billing_id="invoice-invalid-fallback",
-                    billed="0.2",
+                    expected_billed="0.2",
                 )
             )
             self.assertEqual(
@@ -388,7 +401,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="invoice-retry-safe",
-                    billed="0.2",
+                    expected_billed="0.2",
                 )
             )
 
@@ -414,7 +427,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
 
-            def reject_billing(_attempt, _billing, _billed, _scope):
+            def reject_billing(_attempt, _billing, _scope):
                 raise ValueError("invoice line is not issuer-authenticated")
 
             orchestrator = orchestrator_for(
@@ -443,7 +456,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_billing(
                     attempt_id=result.attempt_id,
                     billing_id="untrusted-invoice",
-                    billed="0.4",
+                    expected_billed="0.4",
                 )
             self.assertEqual(budget.snapshot(), before)
 
@@ -485,7 +498,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 restarted.reconcile_billing(
                     attempt_id=result.attempt_id,
                     billing_id="late-invoice-line",
-                    billed="0.4",
+                    expected_billed="0.4",
                 )
             )
             reconciled = budget.snapshot()
@@ -1338,9 +1351,14 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 validate_result=lambda _value: True,
                 now_utc=NOW,
             )
-            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "adapter_not_sent_claim_unverified")
             self.assertEqual(resolver_calls, [])
             self.assertEqual(len(bindings), 1)
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
+            )
             self.assertEqual(
                 bindings[0].pricing_evidence_digest,
                 pricing_p1.evidence_digest,
@@ -1534,9 +1552,9 @@ class ModelCallLifecycleTests(unittest.TestCase):
             self.assertEqual(snap.incurred, Decimal("0"))
             self.assertEqual(snap.estimated_unbilled, Decimal("1.2"))
 
-    def test_explicit_not_sent_proof_releases_and_is_idempotent(self):
+    def test_post_started_not_sent_claim_is_unknown_and_idempotent(self):
         with TemporaryDirectory() as directory:
-            _journal, budget = open_budget(directory)
+            journal, budget = open_budget(directory)
             orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
@@ -1547,6 +1565,8 @@ class ModelCallLifecycleTests(unittest.TestCase):
 
             def invoke(_binding, _cancel):
                 calls.append("call")
+                # An injected adapter may have crossed a paid boundary before
+                # making this claim. Its exception type is not billing proof.
                 raise ModelCallNotSent("socket was never opened")
 
             first = orchestrator.execute(
@@ -1558,10 +1578,13 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 validate_result=lambda _value: True,
                 now_utc=NOW,
             )
-            self.assertEqual(first.status, "NOT_SENT")
-            self.assertIsNone(
-                budget.active_reservation(orchestrator.attempt_id(call_spec))
-            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first.reason, "adapter_not_sent_claim_unverified")
+            snapshot = budget.snapshot()
+            self.assertEqual(snapshot.reserved, Decimal("0"))
+            self.assertEqual(snapshot.incurred, Decimal("0"))
+            self.assertEqual(snapshot.estimated_unbilled, Decimal("1.2"))
+
             second = orchestrator.execute(
                 spec=call_spec,
                 policy=fixed_policy(),
@@ -1571,8 +1594,16 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 validate_result=lambda _value: True,
                 now_utc=NOW,
             )
-            self.assertEqual(second.status, "NOT_SENT")
+            self.assertEqual(second.status, "UNKNOWN")
             self.assertEqual(calls, ["call"])
+            events = journal.load_events(
+                "model_call_attempt",
+                orchestrator._aggregate_id(orchestrator.attempt_id(call_spec)),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["ModelCallPrepared", "ModelCallStarted", "ModelCallUnknown"],
+            )
 
     def test_pre_call_cancellation_releases_without_invocation(self):
         with TemporaryDirectory() as directory:
@@ -1627,7 +1658,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="invoice-line-7",
-                    billed="0.25",
+                    expected_billed="0.25",
                 )
             )
             with self.assertRaisesRegex(
@@ -1637,14 +1668,14 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="other-line",
-                    billed="0.25",
+                    expected_billed="0.25",
                 )
 
     def test_self_authored_billing_line_cannot_reconcile_unbilled_cost(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
 
-            def reject_billing(_attempt, _billing, _billed, _observed):
+            def reject_billing(_attempt, _billing, _observed):
                 raise ValueError("invoice line is not issuer-authenticated")
 
             orchestrator = orchestrator_for(
@@ -1672,7 +1703,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="invoice-self-authored",
-                    billed="0.25",
+                    expected_billed="0.25",
                 )
             after = budget.snapshot()
             self.assertEqual(after.incurred, before.incurred)
@@ -1681,9 +1712,34 @@ class ModelCallLifecycleTests(unittest.TestCase):
     def test_reused_billing_identity_with_changed_amount_fails_closed(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
+            amounts = iter((Decimal("0.2"), Decimal("0.3")))
+
+            def changing_billing(attempt_id, billing_id, observed_payload):
+                billed = next(amounts)
+                return BillingEvidence(
+                    attempt_id=attempt_id,
+                    billing_id=billing_id,
+                    provider_id=observed_payload["provider_id"],
+                    model_id=observed_payload["model_id"],
+                    revision=observed_payload.get("revision"),
+                    billed=billed,
+                    cost_currency=observed_payload["cost_currency"],
+                    observed_at="2026-09-25T10:05:00Z",
+                    evidence_id="billing-evidence:" + billing_id,
+                    evidence_digest=payload_digest(
+                        {
+                            "attempt_id": attempt_id,
+                            "billing_id": billing_id,
+                            "billed": str(billed),
+                        }
+                    ),
+                    issuer=observed_payload["provider_id"],
+                )
+
             orchestrator = orchestrator_for(
                 budget=budget,
                 clock=MutableClock(),
+                billing_evidence_resolver=changing_billing,
             )
             call_spec = spec()
             request = request_for(orchestrator, call_spec)
@@ -1704,17 +1760,93 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="invoice-stable",
-                    billed="0.2",
                 )
             )
             before = budget.snapshot()
-            with self.assertRaisesRegex(ModelCallError, "conflicting immutable evidence"):
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "conflicting immutable evidence",
+            ):
                 orchestrator.reconcile_observed_billing(
                     attempt_id=result.attempt_id,
                     billing_id="invoice-stable",
-                    billed="0.3",
                 )
             self.assertEqual(budget.snapshot(), before)
+
+    def test_billing_amount_is_evidence_derived_and_scope_is_immutable(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            mutation_blocked = []
+
+            def evidence_authority(attempt_id, billing_id, observed_payload):
+                try:
+                    observed_payload["provider_id"] = "forged-provider"
+                except TypeError:
+                    mutation_blocked.append(True)
+                return BillingEvidence(
+                    attempt_id=attempt_id,
+                    billing_id=billing_id,
+                    provider_id=observed_payload["provider_id"],
+                    model_id=observed_payload["model_id"],
+                    revision=observed_payload.get("revision"),
+                    billed=Decimal("0.25"),
+                    cost_currency=observed_payload["cost_currency"],
+                    observed_at="2026-09-25T10:05:00Z",
+                    evidence_id="billing-evidence:" + billing_id,
+                    evidence_digest=payload_digest(
+                        {
+                            "attempt_id": attempt_id,
+                            "billing_id": billing_id,
+                            "billed": "0.25",
+                        }
+                    ),
+                    issuer=observed_payload["provider_id"],
+                )
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                billing_evidence_resolver=evidence_authority,
+            )
+            call_spec = spec()
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.3",
+                    unbilled="0.4",
+                    billing_id="invoice-evidence-derived",
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            before = budget.snapshot()
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "amount does not match caller expectation",
+            ):
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-evidence-derived",
+                    expected_billed="0.2",
+                )
+            self.assertEqual(budget.snapshot(), before)
+            self.assertTrue(
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-evidence-derived",
+                    expected_billed="0.25",
+                )
+            )
+            self.assertEqual(mutation_blocked, [True, True])
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.55"))
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("0.15"),
+            )
+
 
     def test_fallback_requires_real_durable_parent(self):
         with TemporaryDirectory() as directory:
@@ -1992,7 +2124,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 validate_result=lambda _value: True,
                 now_utc=NOW,
             )
-            self.assertEqual(parent.status, "NOT_SENT")
+            self.assertEqual(parent.status, "UNKNOWN")
             fallback = spec(
                 fallback_parent_attempt_id=parent.attempt_id,
                 fallback_index=1,
@@ -2003,23 +2135,23 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 allowed_model_ids=("remote-only",),
             )
             calls = []
-            outcome = orchestrator.execute(
-                spec=fallback,
-                policy=local_policy,
-                request=request,
-                descriptors=[
-                    descriptor(
-                        model_id="remote-only",
-                        provider_id="remote-provider",
-                        remote=True,
-                        cost="0.1",
-                    )
-                ],
-                call=lambda *_args: calls.append(True),
-                validate_result=lambda _value: True,
-                now_utc=NOW,
-            )
-            self.assertEqual(outcome.status, "NO_MODEL")
+            with self.assertRaisesRegex(ModelCallError, "uncertain"):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=local_policy,
+                    request=request,
+                    descriptors=[
+                        descriptor(
+                            model_id="remote-only",
+                            provider_id="remote-provider",
+                            remote=True,
+                            cost="0.1",
+                        )
+                    ],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
             self.assertEqual(calls, [])
 
     def test_over_reserved_observed_cost_is_conservative_unknown(self):
@@ -2155,7 +2287,7 @@ class ModelCallIntegrityTests(unittest.TestCase):
             raise ModelCallNotSent("TEST_SECRET_DO_NOT_PERSIST")
         with TemporaryDirectory() as directory:
             _, _, orchestrator, result = self._run(directory, call=not_sent)
-            self.assertEqual(result.status, "NOT_SENT")
+            self.assertEqual(result.status, "UNKNOWN")
             self.assertNotIn("TEST_SECRET_DO_NOT_PERSIST", str(orchestrator._events(result.attempt_id)))
 
     def test_callback_cannot_extend_original_request_deadline(self):
@@ -2213,7 +2345,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
             self.assertTrue(restarted.reconcile_billing(attempt_id=result.attempt_id,
-                billing_id="bill-after-process-exit", billed="0.6"))
+                billing_id="bill-after-process-exit", expected_billed="0.6"))
             self.assertEqual(budget.snapshot().incurred, Decimal("0.6"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.6"))
             second = restarted.execute(spec=call_spec, policy=fixed_policy(),

@@ -140,6 +140,32 @@ def begin_provider_policy(
 
 
 class MarketNormalizationTests(unittest.TestCase):
+    def test_market_normalizer_rejects_polymorphic_instrument_registry_authority(self):
+        class ForgedRegistry(InstrumentRegistry):
+            def resolve(self, *args, **kwargs):
+                raise AssertionError("polymorphic resolve must never execute")
+
+            def require_tradable(self, *args, **kwargs):
+                return None
+
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            MarketNormalizer(ForgedRegistry())
+
+    def test_market_normalizer_rejects_timedelta_subclass_configuration(self):
+        class ForgedTimedelta(timedelta):
+            pass
+
+        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
+            MarketNormalizer(
+                registry(),
+                max_available_age=ForgedTimedelta(seconds=5),
+            )
+        with self.assertRaisesRegex(MarketDataError, "exact positive timedelta"):
+            MarketNormalizer(
+                registry(),
+                max_book_age=ForgedTimedelta(seconds=5),
+            )
+
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

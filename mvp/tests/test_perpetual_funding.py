@@ -603,5 +603,90 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_correction_reuses_frozen_position_cut_after_late_backfill(self):
+        original = sealed_funding()
+        wrong_position = sealed_funding(
+            external_event_id="funding-2-wrong-position",
+            revision="2",
+            rate="0.002",
+            contracts="3",
+            observed_offset=2,
+            corrects="funding-1",
+        )
+        correction = sealed_funding(
+            external_event_id="funding-3",
+            revision="3",
+            rate="0.002",
+            contracts="2",
+            observed_offset=3,
+            corrects="funding-1",
+        )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store,
+                [original, wrong_position, correction],
+            )
+            authority.apply(original.evidence_ref)
+            original_event = store.load_events(
+                "perpetual_funding",
+                authority.aggregate_id,
+            )[0]
+            frozen_cut = dict(original_event["payload"]["position_cut"])
+
+            # This transaction is committed after the accepted funding cut but
+            # carries older causal timestamps.  Replaying today's whole book by
+            # timestamps would silently rewrite the historical funding position.
+            seed_position(
+                book,
+                transaction_id="late-backfilled-position",
+                contracts="1",
+                effective_at="2026-09-25T09:30:00Z",
+                observed_at="2026-09-25T09:31:00Z",
+            )
+            self.assertEqual(book.position("BTCUSDT"), Decimal("3"))
+
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "canonical position at funding cut",
+            ):
+                authority.apply(wrong_position.evidence_ref)
+
+            # Rejection is zero-mutation even though the current position now
+            # happens to equal the forged correction's signed_contracts.
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "perpetual_funding",
+                        authority.aggregate_id,
+                    )
+                ),
+                1,
+            )
+
+            corrected = authority.apply(correction.evidence_ref)
+            self.assertTrue(corrected.inserted)
+            self.assertEqual(corrected.cashflow, Decimal("-0.400000"))
+            self.assertEqual(book.position("BTCUSDT"), Decimal("3"))
+            self.assertEqual(book.cash("USDT"), Decimal("-300000.400000"))
+
+            events = store.load_events(
+                "perpetual_funding",
+                authority.aggregate_id,
+            )
+            self.assertEqual(len(events), 2)
+            correction_cut = events[-1]["payload"]["position_cut"]
+            self.assertEqual(correction_cut, frozen_cut)
+            self.assertEqual(
+                correction_cut["contributing_transaction_ids"],
+                ["position-1"],
+            )
+            self.assertNotIn(
+                "late-backfilled-position",
+                correction_cut["contributing_transaction_ids"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

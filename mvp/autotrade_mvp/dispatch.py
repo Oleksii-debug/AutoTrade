@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
+import weakref
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -19,7 +20,9 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .provider_response_limits import require_provider_json_depth
+from .sender_gate import journal_sender_gate
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -27,6 +30,10 @@ SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
+_FINANCIAL_AUTHORITY_ISSUANCE_TOKEN = object()
+_FINANCIAL_AUTHORITY_BINDINGS = weakref.WeakKeyDictionary()
+_BOUND_SENDER_ISSUANCE_TOKEN = object()
+_DISPATCHER_SENDER_BINDINGS = weakref.WeakKeyDictionary()
 _EXACT_RESPONSE_MARKERS = frozenset(
     {"response_encoding", "response_text", "response_sha256"}
 )
@@ -179,7 +186,10 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    terminal_state: str
+    response_encoding: str
     http_status: int | None = None
+    provider_environment: str | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -212,6 +222,13 @@ class SubmissionResponseBinding:
         ):
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
+        if type(self.terminal_state) is not str or self.terminal_state not in {
+            "SENT",
+            "UNKNOWN",
+        }:
+            raise ValueError("durable submission terminal_state must be SENT or UNKNOWN")
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("durable submission response_encoding must be utf-8-json")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -222,6 +239,17 @@ class SubmissionResponseBinding:
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
         object.__setattr__(self, "environment", environment)
+        try:
+            domain = normalize_provider_environment(
+                provider_id=self.provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "durable submission provider_environment is invalid"
+            ) from error
+        object.__setattr__(self, "provider_environment", domain)
         if not isinstance(self.submission_scope, Mapping):
             raise TypeError("submission_scope must be a mapping")
         canonical_scope = json.loads(canonical_json(dict(self.submission_scope)))
@@ -276,6 +304,179 @@ def _validated_authority_result(result: Any) -> tuple[bool, str]:
 
 
 @dataclass(frozen=True)
+class _FinancialAuthorityBinding:
+    """Immutable AuthorityService-owned scope behind one opaque dispatch capability."""
+
+    authority_service: object
+    store: JournalStore | None
+    admission_id: str
+    account_id: str
+    environment: str
+    instrument_id: str
+    instrument_version: int
+    action: str
+    capability_snapshot_id: str | None
+    provider_id: str | None = None
+    provider_environment: str | None = None
+
+
+class _IssuedFinancialAuthorityCheck:
+    """Opaque capability bound to canonical AuthorityService evaluation."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls, issuance_token: object):
+        if (
+            cls is not _IssuedFinancialAuthorityCheck
+            or issuance_token is not _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
+        ):
+            raise PermissionError(
+                "financial dispatch authority must be issued by AuthorityService"
+            )
+        return super().__new__(cls)
+
+    def __call__(self, intent_hash: str, now: str) -> tuple[bool, str]:
+        if type(self) is not _IssuedFinancialAuthorityCheck:
+            raise PermissionError("financial dispatch authority type changed")
+        binding = _FINANCIAL_AUTHORITY_BINDINGS.get(self)
+        if type(binding) is not _FinancialAuthorityBinding:
+            raise PermissionError("financial dispatch authority is not issued")
+
+        # Deliberately invoke the exact class-owned method rather than storing or
+        # calling a caller-supplied callback.  This keeps PAPER/LIVE authority on
+        # the canonical AuthorityService path even if a caller imports this
+        # module's private helpers.
+        from .authority import AuthorityService
+
+        if type(binding.authority_service) is not AuthorityService:
+            raise PermissionError("financial dispatch authority issuer changed")
+        return AuthorityService.dispatch_allowed(
+            binding.authority_service,
+            binding.admission_id,
+            intent_hash=intent_hash,
+            account_id=binding.account_id,
+            environment=binding.environment,
+            instrument_id=binding.instrument_id,
+            instrument_version=binding.instrument_version,
+            action=binding.action,
+            now=now,
+            capability_snapshot_id=binding.capability_snapshot_id,
+        )
+
+
+def _issue_financial_authority_check(
+    authority_service: object,
+    *,
+    store: JournalStore | None,
+    admission_id: str,
+    account_id: str,
+    environment: str,
+    instrument_id: str,
+    instrument_version: int,
+    action: str,
+    capability_snapshot_id: str | None = None,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
+) -> AuthorityCheck:
+    """Issue one opaque capability bound to exact AuthorityService scope.
+
+    This helper is intentionally not a generic callback wrapper.  Direct callers
+    may invoke it, but they cannot replace canonical authority evaluation with an
+    arbitrary allow callback.
+    """
+
+    from .authority import AuthorityService
+
+    if type(authority_service) is not AuthorityService:
+        raise TypeError("financial authority issuer must be exact AuthorityService")
+    if getattr(authority_service, "store", None) is not store:
+        raise PermissionError(
+            "financial authority store must be selected by AuthorityService"
+        )
+    if store is not None:
+        _canonical_journal_authority_snapshot(store)
+
+    scoped_text = []
+    for value, name in (
+        (admission_id, "admission_id"),
+        (account_id, "account_id"),
+        (environment, "environment"),
+        (instrument_id, "instrument_id"),
+        (action, "action"),
+    ):
+        if type(value) is not str or not value.strip():
+            raise ValueError(f"{name} is required")
+        scoped_text.append(value.strip())
+    aid, account, env, instrument, normalized_action = scoped_text
+    env = env.upper()
+    normalized_action = normalized_action.upper()
+    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("invalid financial authority environment")
+    if type(instrument_version) is not int or instrument_version <= 0:
+        raise ValueError("instrument_version must be a positive integer")
+    if capability_snapshot_id is not None and (
+        type(capability_snapshot_id) is not str
+        or not capability_snapshot_id.strip()
+    ):
+        raise ValueError("capability_snapshot_id must be non-empty text")
+    normalized_provider: str | None = None
+    normalized_provider_environment: str | None = None
+    if provider_id is not None or provider_environment is not None:
+        if type(provider_id) is not str or not provider_id.strip():
+            raise ValueError("provider_id is required with provider_environment")
+        normalized_provider = provider_id.strip().upper()
+        try:
+            normalized_provider_environment = normalize_provider_environment(
+                provider_id=normalized_provider,
+                environment=env,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "financial dispatch provider_environment is invalid"
+            ) from error
+    if env in {"PAPER", "LIVE"} and normalized_provider_environment is None:
+        raise PermissionError(
+            "PAPER/LIVE financial authority requires exact provider domain"
+        )
+
+    capability = _IssuedFinancialAuthorityCheck(
+        _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
+    )
+    _FINANCIAL_AUTHORITY_BINDINGS[capability] = _FinancialAuthorityBinding(
+        authority_service=authority_service,
+        store=store,
+        admission_id=aid,
+        account_id=account,
+        environment=env,
+        instrument_id=instrument,
+        instrument_version=instrument_version,
+        action=normalized_action,
+        capability_snapshot_id=(
+            None
+            if capability_snapshot_id is None
+            else capability_snapshot_id.strip()
+        ),
+        provider_id=normalized_provider,
+        provider_environment=normalized_provider_environment,
+    )
+    return capability
+
+
+def _issued_financial_authority_binding(
+    value: object,
+) -> tuple[AuthorityCheck, JournalStore | None]:
+    if type(value) is not _IssuedFinancialAuthorityCheck:
+        raise PermissionError(
+            "PAPER/LIVE financial authority must be issued by AuthorityService"
+        )
+    binding = _FINANCIAL_AUTHORITY_BINDINGS.get(value)
+    if type(binding) is not _FinancialAuthorityBinding:
+        raise PermissionError("financial dispatch authority is not issued")
+    return value, binding.store
+
+
+@dataclass(frozen=True)
 class DispatchOutcome:
     status: str
     client_order_id: str
@@ -286,6 +487,98 @@ class DispatchOutcome:
 def _identity_digest(*parts: str) -> str:
     """Hash a canonical tuple without delimiter-boundary ambiguity."""
     return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
+
+
+def _provider_domain_submission_attempt_identity(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> tuple[str, str, str, str]:
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise ValueError("attempt_id is required")
+    provider = provider_id.strip().upper() if isinstance(provider_id, str) else ""
+    runtime = environment.strip().upper() if isinstance(environment, str) else ""
+    if not provider:
+        raise ValueError("provider_id is required")
+    if runtime not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("invalid submission environment")
+    try:
+        domain = normalize_provider_environment(
+            provider_id=provider,
+            environment=runtime,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(
+            "submission attempt requires exact provider_environment"
+        ) from error
+    return attempt_id.strip(), provider, runtime, domain
+
+
+def provider_domain_submission_attempt_key(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Return the collision-resistant v2 durable key for one provider attempt.
+
+    The logical attempt-id namespace is caller controlled.  Never concatenate a
+    derived provider suffix onto that namespace: another caller could choose the
+    resulting text as its logical id.  Every provider/domain tuple is instead
+    placed in one typed, SHA-bound internal namespace.
+    """
+
+    logical, provider, runtime, domain = _provider_domain_submission_attempt_identity(
+        attempt_id=attempt_id,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
+    return "provider-domain-attempt:v2:" + _identity_digest(
+        logical,
+        provider,
+        runtime,
+        domain,
+    )
+
+
+def provider_domain_submission_attempt_keys(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> tuple[str, ...]:
+    """Return current then legacy durable keys for restart-safe migration.
+
+    New writes use the first key only.  Readers may inspect the legacy key to
+    recover pre-v2 state, but must fail closed if both identities exist.
+    """
+
+    logical, provider, runtime, domain = _provider_domain_submission_attempt_identity(
+        attempt_id=attempt_id,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
+    current = "provider-domain-attempt:v2:" + _identity_digest(
+        logical,
+        provider,
+        runtime,
+        domain,
+    )
+    legacy = (
+        logical
+        if domain == runtime
+        else logical
+        + ":provider-domain:"
+        + _identity_digest(provider, runtime, domain)
+    )
+    return (current,) if legacy == current else (current, legacy)
 
 
 def submission_attempt_aggregate_id(
@@ -352,6 +645,8 @@ def load_submission_response_binding(
     environment: str,
     account_id: str,
     attempt_id: str,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
 ) -> SubmissionResponseBinding:
     """Load exact provider response provenance from the canonical submission journal."""
 
@@ -360,16 +655,43 @@ def load_submission_response_binding(
     # Full product-selected store capability/recovery composition remains owned
     # by the canonical WP-48/WP-49 lineage.
     _canonical_journal_authority_snapshot(store)
-    aggregate_id = submission_attempt_aggregate_id(
-        environment=environment,
-        account_id=account_id,
-        attempt_id=attempt_id,
-    )
+    durable_attempt_ids = (attempt_id,)
+    if provider_id is not None or provider_environment is not None:
+        if provider_id is None:
+            raise ValueError("provider_id is required with provider_environment")
+        durable_attempt_ids = provider_domain_submission_attempt_keys(
+            attempt_id=attempt_id,
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
     # Resolve the method from the canonical class after rejecting all instance
-    # shadow state; never dispatch through a caller-attached load_events.
-    events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
-    if not events:
+    # shadow state; never dispatch through a caller-attached load_events.  The
+    # legacy identity is read-only migration authority: dual presence is
+    # ambiguous financial state and must never be resolved by preference.
+    located: list[tuple[str, str, list[dict[str, Any]]]] = []
+    for durable_attempt_id in durable_attempt_ids:
+        candidate_aggregate_id = submission_attempt_aggregate_id(
+            environment=environment,
+            account_id=account_id,
+            attempt_id=durable_attempt_id,
+        )
+        candidate_events = JournalStore.load_events(
+            store,
+            "submission_attempt",
+            candidate_aggregate_id,
+        )
+        if candidate_events:
+            located.append(
+                (durable_attempt_id, candidate_aggregate_id, candidate_events)
+            )
+    if not located:
         raise ValueError("durable submission attempt was not found")
+    if len(located) != 1:
+        raise ValueError(
+            "durable submission attempt exists under multiple identity versions"
+        )
+    durable_attempt_id, aggregate_id, events = located[0]
     event_types = [event.get("event_type") for event in events]
     if (
         len(event_types) != 3
@@ -380,12 +702,103 @@ def load_submission_response_binding(
             "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
     prepared, sending, sent = events
+    expected_environment = environment.strip().upper()
+    expected_account_id = account_id.strip()
+    expected_versions = (1, 2, 3)
+    if tuple(event.get("aggregate_version") for event in events) != expected_versions:
+        raise ValueError(
+            "durable submission aggregate versions must be exactly 1/2/3"
+        )
+    for event in events:
+        if (
+            event.get("aggregate_type") != "submission_attempt"
+            or event.get("aggregate_id") != aggregate_id
+        ):
+            raise ValueError("durable submission aggregate identity mismatch")
+        if event.get("environment") != expected_environment:
+            raise ValueError("durable submission environment identity mismatch")
+
     payload = prepared.get("payload")
+    sending_payload = sending.get("payload")
+    sent_payload = sent.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
-    sent_payload = sent.get("payload")
+    if not isinstance(sending_payload, dict):
+        raise ValueError("durable SubmissionSending payload is invalid")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
+
+    if (
+        payload.get("attempt_id") != attempt_id
+        or payload.get("environment") != expected_environment
+        or payload.get("account_id") != expected_account_id
+    ):
+        raise ValueError("durable SubmissionPrepared scope identity mismatch")
+    durable_provider = str(payload.get("provider", "")).strip().upper()
+    if not durable_provider:
+        raise ValueError("durable SubmissionPrepared provider identity is invalid")
+    durable_domain = payload.get("provider_environment")
+    if durable_domain is None:
+        if durable_provider == "BYBIT":
+            raise ValueError(
+                "legacy BYBIT SubmissionPrepared lacks exact provider_environment"
+            )
+        durable_domain = expected_environment
+    try:
+        durable_domain = normalize_provider_environment(
+            provider_id=durable_provider,
+            environment=expected_environment,
+            provider_environment=durable_domain,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(
+            "durable SubmissionPrepared provider_environment is invalid"
+        ) from error
+    if provider_id is not None:
+        requested_provider = provider_id.strip().upper()
+        requested_domain = normalize_provider_environment(
+            provider_id=requested_provider,
+            environment=expected_environment,
+            provider_environment=provider_environment,
+        )
+        if durable_provider != requested_provider or durable_domain != requested_domain:
+            raise ValueError(
+                "durable SubmissionPrepared provider_environment mismatch"
+            )
+    client_order_id = payload.get("client_order_id")
+    if not isinstance(client_order_id, str) or not client_order_id:
+        raise ValueError("durable SubmissionPrepared client-order identity is invalid")
+    if (
+        sending_payload.get("client_order_id") != client_order_id
+        or sent_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("durable submission client-order identity mismatch")
+    if (
+        sending_payload.get("owner_token") != payload.get("owner_token")
+        or sending_payload.get("owner_epoch") != payload.get("owner_epoch")
+        or sending_payload.get("reason") != "final_send_barrier_passed"
+    ):
+        raise ValueError("durable SubmissionSending authority identity mismatch")
+    if sent.get("event_type") == "SubmissionUnknown":
+        reason = sent_payload.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason
+            or sent_payload.get("retry_disposition") != "RECONCILE_FIRST"
+        ):
+            raise ValueError(
+                "durable ambiguous response must require reconciliation"
+            )
+
+    prepared_at = payload.get("prepared_at")
+    sending_at = sending.get("observed_at")
+    sent_at = sent.get("observed_at")
+    if not all(
+        isinstance(value, str) for value in (prepared_at, sending_at, sent_at)
+    ):
+        raise ValueError("durable submission timestamps are unavailable")
+    if not (_instant(prepared_at) <= _instant(sending_at) <= _instant(sent_at)):
+        raise ValueError("durable submission chronology is invalid")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
     if (
@@ -412,16 +825,10 @@ def load_submission_response_binding(
     scope_hash = payload.get("submission_scope_hash")
     if not isinstance(scope, dict) or not isinstance(scope_hash, str):
         raise ValueError("durable submission scope is unavailable")
-    prepared_at = payload.get("prepared_at")
-    sent_at = sent.get("observed_at")
-    if not isinstance(prepared_at, str) or not isinstance(sent_at, str):
-        raise ValueError("durable submission timestamps are unavailable")
-    if sending.get("aggregate_id") != aggregate_id or sent.get("aggregate_id") != aggregate_id:
-        raise ValueError("durable submission aggregate identity mismatch")
     return SubmissionResponseBinding(
         attempt_id=attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(payload.get("provider", "")),
+        provider=durable_provider,
         request_hash=str(payload.get("request_hash", "")),
         client_order_id=str(payload.get("client_order_id", "")),
         environment=str(payload.get("environment", "")),
@@ -432,7 +839,12 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        terminal_state=(
+            "SENT" if sent.get("event_type") == "SubmissionSent" else "UNKNOWN"
+        ),
+        response_encoding="utf-8-json",
         http_status=http_status,
+        provider_environment=durable_domain,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
 
@@ -443,6 +855,7 @@ def stable_client_order_id(
     *,
     environment: str,
     account_id: str,
+    provider_environment: str | None = None,
     max_length: int = 32,
     client_id_format: str = "TOKEN",
 ) -> str:
@@ -460,12 +873,26 @@ def stable_client_order_id(
     normalized_format = client_id_format.strip().upper()
     if normalized_format not in {"TOKEN", "UUID"}:
         raise ValueError("client_id_format must be TOKEN or UUID")
-    digest = _identity_digest(
+    identity_parts = [
         provider.strip().lower(),
         normalized_environment,
         account_id.strip(),
-        intent_id.strip(),
-    )
+    ]
+    if provider_environment is not None:
+        try:
+            domain = normalize_provider_environment(
+                provider_id=provider.strip().upper(),
+                environment=normalized_environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "client-order identity provider_environment is invalid"
+            ) from error
+        if domain != normalized_environment:
+            identity_parts.append(domain)
+    identity_parts.append(intent_id.strip())
+    digest = _identity_digest(*identity_parts)
     if normalized_format == "UUID":
         if (
             not isinstance(max_length, int)
@@ -549,6 +976,55 @@ def _envelope(
     }
 
 
+@dataclass(frozen=True)
+class _RecoverySenderBinding:
+    """Exact RecoveryController ownership behind one guarded dispatcher."""
+
+    recovery_controller: object
+    store: JournalStore
+    environment: str
+    account_id: str
+    owner_token: str
+    owner_epoch: int
+    issued_check: SenderCheck
+
+
+def _issued_sender_check(dispatcher: object) -> SenderCheck | None:
+    """Return only a canonical RecoveryController-issued sender check."""
+
+    if type(dispatcher) is not GuardedDispatcher:
+        raise TypeError("dispatcher must be exact GuardedDispatcher")
+    binding = _DISPATCHER_SENDER_BINDINGS.get(dispatcher)
+    if binding is None:
+        if dispatcher._bound_sender_check is not None:
+            raise PermissionError("dispatcher sender authority changed")
+        return None
+    if type(binding) is not _RecoverySenderBinding:
+        raise PermissionError("dispatcher sender binding is invalid")
+
+    from .recovery import RecoveryController
+
+    if type(binding.recovery_controller) is not RecoveryController:
+        raise PermissionError("dispatcher sender issuer changed")
+    if binding.store is not dispatcher.store:
+        raise PermissionError("dispatcher sender journal authority changed")
+    if (
+        binding.environment != dispatcher.environment
+        or binding.account_id != dispatcher.account_id
+        or binding.owner_token != dispatcher.owner_token
+        or binding.owner_epoch != dispatcher.owner_epoch
+    ):
+        raise PermissionError("dispatcher sender scope changed")
+    issued_check = binding.issued_check
+    if (
+        getattr(issued_check, "__self__", None) is not binding.recovery_controller
+        or getattr(issued_check, "__func__", None) is not RecoveryController.validate_sender
+        or dispatcher._bound_sender_check is not issued_check
+    ):
+        raise PermissionError("dispatcher sender authority changed")
+    return issued_check
+
+
 class GuardedDispatcher:
     """Persist-before-send dispatcher that never blindly retries ambiguity.
 
@@ -566,6 +1042,8 @@ class GuardedDispatcher:
         owner_token: str | None = None,
         owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
+        bound_sender_check: SenderCheck | None = None,
+        _bound_sender_issuance_token: object | None = None,
     ):
         # SubmissionPrepared/Sending/Sent/Unknown is financial send-state
         # authority. Capture the exact selected physical generation and reject
@@ -594,6 +1072,15 @@ class GuardedDispatcher:
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
+        # Public construction never accepts an authority-bearing sender callback.
+        # RecoveryController issuance attaches the exact class-owned validation
+        # method only after this neutral dispatcher has been constructed.
+        if bound_sender_check is not None or _bound_sender_issuance_token is not None:
+            raise PermissionError(
+                "bound sender authority must be issued by RecoveryController"
+            )
+        self._bound_sender_check = None
+        _DISPATCHER_SENDER_BINDINGS[self] = None
 
     def _journal_store_authority(self) -> JournalStore:
         store = self.store
@@ -628,23 +1115,45 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
-            store,
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            return JournalStore.append_event(
+                store,
+                envelope,
+                outbox_topic="autotrade.submission.events",
+            )
+
+        _, inserted, appended = JournalStore.commit_command(
+            store,
+            command_id=envelope["event_id"],
+            actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment,
+            idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={
+                "event": envelope,
+                "journal_sequence": expected_journal_sequence,
+            },
+            result={"event_id": envelope["event_id"]},
+            state_version=expected_journal_sequence,
+            events=[(envelope, "autotrade.submission.events")],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
@@ -763,6 +1272,41 @@ class GuardedDispatcher:
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
+        provider_environment: str | None = None
+        logical_attempt_id = attempt_id
+        durable_attempt_candidates = (attempt_id,)
+        if self.environment in {"PAPER", "LIVE"}:
+            _issued_callback, issued_store = _issued_financial_authority_binding(
+                authority_check
+            )
+            binding = _FINANCIAL_AUTHORITY_BINDINGS.get(authority_check)
+            if type(binding) is not _FinancialAuthorityBinding:
+                raise PermissionError("financial dispatch authority is not issued")
+            selected_store = self._journal_store_authority()
+            if issued_store is None or issued_store is not selected_store:
+                raise PermissionError(
+                    "PAPER/LIVE financial authority belongs to another journal authority"
+                )
+            normalized_provider = provider.strip().upper()
+            if (
+                binding.provider_id != normalized_provider
+                or binding.provider_environment is None
+            ):
+                raise PermissionError(
+                    "PAPER/LIVE provider scope differs from financial authority"
+                )
+            provider_environment = binding.provider_environment
+            durable_attempt_candidates = provider_domain_submission_attempt_keys(
+                attempt_id=logical_attempt_id,
+                provider_id=normalized_provider,
+                environment=self.environment,
+                provider_environment=provider_environment,
+            )
+            attempt_id = durable_attempt_candidates[0]
+            if _issued_sender_check(self) is None:
+                raise PermissionError(
+                    "PAPER/LIVE sender authority must be issued by RecoveryController"
+                )
         _instant(now)
         request_canonical = canonical_json(dict(request))
         request_dict = json.loads(request_canonical)
@@ -784,15 +1328,25 @@ class GuardedDispatcher:
             intent_id,
             environment=self.environment,
             account_id=self.account_id,
+            provider_environment=provider_environment,
             max_length=client_id_max_length,
             client_id_format=client_id_format,
         )
 
-        existing = self._events(attempt_id)
-        if existing:
+        located_attempts = [
+            (candidate, candidate_events)
+            for candidate in durable_attempt_candidates
+            if (candidate_events := self._events(candidate))
+        ]
+        if len(located_attempts) > 1:
+            raise ValueError(
+                "attempt_id exists under multiple provider-domain identity versions"
+            )
+        if located_attempts:
+            attempt_id, existing = located_attempts[0]
             prepared = existing[0]["payload"]
             expected = {
-                "attempt_id": attempt_id,
+                "attempt_id": logical_attempt_id,
                 "intent_id": intent_id,
                 "intent_hash": intent_hash,
                 "provider": provider,
@@ -802,6 +1356,10 @@ class GuardedDispatcher:
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
             }
+            if provider_environment is not None and provider_environment != self.environment:
+                expected["provider_environment"] = provider_environment
+            elif prepared.get("provider_environment") not in {None, self.environment}:
+                raise ValueError("attempt_id conflicts with existing provider domain")
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
@@ -811,7 +1369,7 @@ class GuardedDispatcher:
             )
 
         prepared_payload = {
-            "attempt_id": attempt_id,
+            "attempt_id": logical_attempt_id,
             "intent_id": intent_id,
             "intent_hash": intent_hash,
             "provider": provider,
@@ -825,6 +1383,8 @@ class GuardedDispatcher:
             "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
         }
+        if provider_environment is not None and provider_environment != self.environment:
+            prepared_payload["provider_environment"] = provider_environment
         prepared = self._append(
             attempt_id=attempt_id,
             event_type="SubmissionPrepared",
@@ -913,8 +1473,37 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            if self.environment in {"PAPER", "LIVE"} and sender_check is None:
-                barrier_reason = "sender_fence_required"
+
+            # Capture one durable global cut before the final sender/financial
+            # reads. SubmissionSending compare-and-appends against this cut.
+            barrier_store = self._journal_store_authority()
+            barrier_journal_sequence = JournalStore.current_journal_sequence(
+                barrier_store
+            )
+            try:
+                bound_sender_check = _issued_sender_check(self)
+            except Exception as error:
+                barrier_reason = (
+                    "bound_sender_authority_changed:" + type(error).__name__
+                )
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": barrier_reason,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                    },
+                    now=barrier_now,
+                )
+                raise DispatchBlocked(barrier_reason) from error
+            if (
+                self.environment in {"PAPER", "LIVE"}
+                and bound_sender_check is None
+            ):
+                barrier_reason = "sender_authority_required"
                 self._append(
                     attempt_id=attempt_id,
                     event_type="SubmissionBlocked",
@@ -928,9 +1517,14 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            if sender_check is not None:
+            effective_sender_check = (
+                bound_sender_check
+                if bound_sender_check is not None
+                else sender_check
+            )
+            if effective_sender_check is not None:
                 try:
-                    sender_check(self.owner_token, self.owner_epoch)
+                    effective_sender_check(self.owner_token, self.owner_epoch)
                 except Exception as error:
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -971,57 +1565,118 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
-            barrier_passed = True
-
-        try:
-            response = transport_send(client_order_id, request_frozen, final_guard)
-        except DispatchBlocked as error:
-            return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
-        except Exception as error:
-            events = self._events(attempt_id)
-            last = events[-1]
-            if last["event_type"] == "SubmissionSending":
+            try:
                 self._append(
                     attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
-                    version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
-                    },
-                    now=barrier_now,
-                )
-                return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
-            if not guard_called:
-                self._append(
-                    attempt_id=attempt_id,
-                    event_type="SubmissionBlocked",
+                    event_type="SubmissionSending",
                     version=2,
                     payload={
                         "client_order_id": client_order_id,
-                        "reason": f"transport_failed_before_final_guard:{type(error).__name__}",
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                )
+            except ValueError as error:
+                reason = "journal_changed_during_final_send_validation"
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(reason) from error
+            barrier_passed = True
+
+        with journal_sender_gate(self._journal_store_authority()):
+            try:
+                response = transport_send(client_order_id, request_frozen, final_guard)
+            except DispatchBlocked as error:
+                return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
+            except Exception as error:
+                events = self._events(attempt_id)
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
+                        },
+                        now=barrier_now,
+                    )
+                    return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
+                if not guard_called:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": f"transport_failed_before_final_guard:{type(error).__name__}",
+                        },
+                        now=now,
+                    )
+                    return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+                if not barrier_passed:
+                    # The provider wrapper invoked a guard that rejected, but did
+                    # not propagate DispatchBlocked. Once it masks that rejection
+                    # and raises something else, we can no longer prove that it
+                    # refrained from an outbound side effect after the guard.
+                    # Preserve worst-case exposure and force reconciliation.
+                    next_version = int(last["aggregate_version"]) + 1
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=next_version,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": (
+                                "provider_wrapper_masked_final_guard_failure:"
+                                + type(error).__name__
+                            ),
+                        },
+                        now=barrier_now,
+                    )
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "provider_guard_contract_violation",
+                    )
+                raise
+
+            if not guard_called:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionUnknown",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": "provider_wrapper_returned_without_final_guard",
                     },
                     now=now,
                 )
-                return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+                return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
+
             if not barrier_passed:
-                # The provider wrapper invoked a guard that rejected, but did
-                # not propagate DispatchBlocked. Once it masks that rejection
-                # and raises something else, we can no longer prove that it
-                # refrained from an outbound side effect after the guard.
-                # Preserve worst-case exposure and force reconciliation.
+                # A wrapper that catches DispatchBlocked (or any final-guard
+                # failure) and then returns has violated the only safe outbound
+                # contract. We cannot prove that it refrained from sending after
+                # swallowing the barrier, so preserve worst-case exposure and force
+                # reconciliation instead of fabricating SENT or safe-to-retry.
+                events = self._events(attempt_id)
+                last = events[-1]
                 next_version = int(last["aggregate_version"]) + 1
                 self._append(
                     attempt_id=attempt_id,
@@ -1029,10 +1684,7 @@ class GuardedDispatcher:
                     version=next_version,
                     payload={
                         "client_order_id": client_order_id,
-                        "reason": (
-                            "provider_wrapper_masked_final_guard_failure:"
-                            + type(error).__name__
-                        ),
+                        "reason": "provider_wrapper_swallowed_final_guard_failure",
                     },
                     now=barrier_now,
                 )
@@ -1042,132 +1694,163 @@ class GuardedDispatcher:
                     None,
                     "provider_guard_contract_violation",
                 )
-            raise
 
-        if not guard_called:
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "provider_wrapper_returned_without_final_guard",
-                },
-                now=now,
-            )
-            return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
-
-        if not barrier_passed:
-            # A wrapper that catches DispatchBlocked (or any final-guard
-            # failure) and then returns has violated the only safe outbound
-            # contract. We cannot prove that it refrained from sending after
-            # swallowing the barrier, so preserve worst-case exposure and force
-            # reconciliation instead of fabricating SENT or safe-to-retry.
-            events = self._events(attempt_id)
-            last = events[-1]
-            next_version = int(last["aggregate_version"]) + 1
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=next_version,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "provider_wrapper_swallowed_final_guard_failure",
-                },
-                now=barrier_now,
-            )
-            return DispatchOutcome(
-                "UNKNOWN",
-                client_order_id,
-                None,
-                "provider_guard_contract_violation",
-            )
-
-        terminal_requires_reconciliation = False
-        terminal_reason = "sent_confirmed"
-        try:
-            if type(response) is ExactJsonTransportResponse:
-                # The exact raw bytes + digest are the durable source.
-                # The prior "response" JSON mirror could silently round
-                # decimals to float; persisting Decimal objects directly is
-                # not JSON-serializable and misclassified valid sends UNKNOWN.
-                # Keep the mirror out of exact response events altogether.
-                sent_payload = {
-                    "client_order_id": client_order_id,
-                    "response_text": response.response_text,
-                    "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
-                }
-                if response.http_status is not None:
-                    sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
-                terminal_requires_reconciliation = response.requires_reconciliation
-                if terminal_requires_reconciliation:
-                    terminal_reason = (
-                        response.ambiguity_reason
-                        or "provider_response_ambiguous"
-                    )
-                    sent_payload["reason"] = terminal_reason
-                    sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
-                # Caller-polymorphic post-SEND response getters are not evidence.
-                # A durable UNKNOWN retains the no-blind-retry property.
-                raise TypeError("exact provider response subtype is forbidden")
-            else:
-                sent_payload = {
-                    "client_order_id": client_order_id,
-                    "response": response,
-                }
-                outcome_response = response
-            self._append(
-                attempt_id=attempt_id,
-                event_type=(
-                    "SubmissionUnknown"
-                    if terminal_requires_reconciliation
-                    else "SubmissionSent"
-                ),
-                version=3,
-                payload=sent_payload,
-                now=barrier_now,
-            )
-        except Exception as persistence_error:
-            # The outbound request has already crossed the final barrier.
-            # Never make this state safe to retry merely because the provider
-            # response could not be journaled.
+            terminal_requires_reconciliation = False
+            terminal_reason = "sent_confirmed"
             try:
+                if type(response) is ExactJsonTransportResponse:
+                    # The exact raw bytes + digest are the durable source.
+                    # The prior "response" JSON mirror could silently round
+                    # decimals to float; persisting Decimal objects directly is
+                    # not JSON-serializable and misclassified valid sends UNKNOWN.
+                    # Keep the mirror out of exact response events altogether.
+                    sent_payload = {
+                        "client_order_id": client_order_id,
+                        "response_text": response.response_text,
+                        "response_sha256": response.response_sha256,
+                        "response_encoding": "utf-8-json",
+                    }
+                    if response.http_status is not None:
+                        sent_payload["http_status"] = response.http_status
+                    outcome_response = response.payload
+                    terminal_requires_reconciliation = response.requires_reconciliation
+                    if terminal_requires_reconciliation:
+                        terminal_reason = (
+                            response.ambiguity_reason
+                            or "provider_response_ambiguous"
+                        )
+                        sent_payload["reason"] = terminal_reason
+                        sent_payload["retry_disposition"] = "RECONCILE_FIRST"
+                elif isinstance(response, ExactJsonTransportResponse):
+                    # Caller-polymorphic post-SEND response getters are not evidence.
+                    # A durable UNKNOWN retains the no-blind-retry property.
+                    raise TypeError("exact provider response subtype is forbidden")
+                else:
+                    sent_payload = {
+                        "client_order_id": client_order_id,
+                        "response": response,
+                    }
+                    outcome_response = response
                 self._append(
                     attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
+                    event_type=(
+                        "SubmissionUnknown"
+                        if terminal_requires_reconciliation
+                        else "SubmissionSent"
+                    ),
                     version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": (
-                            "sent_response_persistence_failed:"
-                            + type(persistence_error).__name__
-                        ),
-                    },
+                    payload=sent_payload,
                     now=barrier_now,
                 )
-            except Exception:
-                # A durable SubmissionSending row already exists. Recovery will
-                # convert that state to UNKNOWN without another outbound send.
-                raise persistence_error
+            except Exception as persistence_error:
+                # The outbound request has already crossed the final barrier.
+                # Never make this state safe to retry merely because the provider
+                # response could not be journaled.
+                try:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": (
+                                "sent_response_persistence_failed:"
+                                + type(persistence_error).__name__
+                            ),
+                        },
+                        now=barrier_now,
+                    )
+                except Exception:
+                    # A durable SubmissionSending row already exists. Recovery will
+                    # convert that state to UNKNOWN without another outbound send.
+                    raise persistence_error
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "sent_response_persistence_failed",
+                )
+            if terminal_requires_reconciliation:
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    terminal_reason,
+                )
             return DispatchOutcome(
-                "UNKNOWN",
+                "SENT",
                 client_order_id,
-                None,
-                "sent_response_persistence_failed",
+                outcome_response,
+                "sent_confirmed",
             )
-        if terminal_requires_reconciliation:
-            return DispatchOutcome(
-                "UNKNOWN",
-                client_order_id,
-                None,
-                terminal_reason,
-            )
-        return DispatchOutcome(
-            "SENT",
-            client_order_id,
-            outcome_response,
-            "sent_confirmed",
+
+
+def _issue_recovery_guarded_dispatcher(
+    recovery_controller: object,
+    store: JournalStore,
+    *,
+    environment: str,
+    account_id: str,
+    prepared_lease_seconds: int,
+) -> GuardedDispatcher:
+    """Issue a dispatcher bound to exact RecoveryController ownership.
+
+    No caller-selected sender callback is accepted. The binding always invokes
+    the canonical RecoveryController.validate_sender method for the controller's
+    exact current owner, journal generation and submission scope.
+    """
+
+    from .recovery import RecoveryController
+
+    if type(recovery_controller) is not RecoveryController:
+        raise TypeError("sender authority issuer must be exact RecoveryController")
+    RecoveryController._require_current_durable_owner(recovery_controller)
+    RecoveryController._journal_store_authority(recovery_controller)
+    selected_identity = RecoveryController._selected_journal_identity(
+        recovery_controller
+    )
+    if _canonical_journal_authority_snapshot(store)[1] != selected_identity:
+        raise PermissionError(
+            "Dispatcher journal does not match selected recovery authority"
         )
+    normalized_environment, normalized_account = (
+        RecoveryController._normalized_submission_scope(
+            environment,
+            account_id,
+        )
+    )
+    if (
+        recovery_controller._owner_scope
+        != f"{normalized_environment}:{normalized_account}"
+    ):
+        raise PermissionError(
+            "Dispatcher scope does not match recovery owner scope"
+        )
+    owner = recovery_controller.owner
+    if owner is None:
+        raise RuntimeError("No active recovery owner")
+
+    dispatcher = GuardedDispatcher(
+        store,
+        environment=normalized_environment,
+        account_id=normalized_account,
+        owner_token=owner.owner_id,
+        owner_epoch=owner.epoch,
+        prepared_lease_seconds=prepared_lease_seconds,
+    )
+    issued_check = RecoveryController.validate_sender.__get__(
+        recovery_controller,
+        RecoveryController,
+    )
+    dispatcher._bound_sender_check = issued_check
+    _DISPATCHER_SENDER_BINDINGS[dispatcher] = _RecoverySenderBinding(
+        recovery_controller=recovery_controller,
+        store=store,
+        environment=normalized_environment,
+        account_id=normalized_account,
+        owner_token=owner.owner_id,
+        owner_epoch=owner.epoch,
+        issued_check=issued_check,
+    )
+    return dispatcher
+

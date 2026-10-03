@@ -1459,6 +1459,18 @@ def complete_restore_reconciliation(
             )
         evidence.append(item)
 
+    # Content addressing proves only that these bytes are stable.  It does not
+    # prove that the old host/process/session/credential sender was actually
+    # fenced by an authority capable of doing so.  WP-49/#696 therefore treats
+    # the current schema-v1 JSON receipts as integrity evidence only, never as
+    # takeover or restore-completion authority.  Keep all structural/binding
+    # validation above for diagnostics and migration, but fail closed before any
+    # completion proof or marker mutation until the external issuer is composed.
+    raise BackupError(
+        "Restore completion requires independently issued external sender "
+        "fence authority; content-addressed fencing evidence is not authority"
+    )
+
     proof = {
         "schema_version": 2,
         "backup_manifest_sha256": marker["backup_manifest_sha256"],
@@ -1502,6 +1514,14 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
     except BackupIntegrityError:
         return True
     if marker["status"] != "RECONCILIATION_COMPLETE":
+        return True
+
+    # Schema-v2 completion proofs contain content-addressed sender-fence JSON,
+    # but no independently authenticated issuer identity.  Older proof files
+    # must not remain terminal authority after this correction: upgrading the
+    # product reopens the restore gate until WP-49's external fence issuer is
+    # integrated and its issued proof can be revalidated here.
+    if marker.get("schema_version") == 2:
         return True
 
     try:

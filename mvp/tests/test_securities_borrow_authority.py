@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -331,6 +331,91 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             ),
             Decimal("0"),
         )
+
+    def test_incremental_short_quantity_is_independent_of_ambient_decimal_context(self):
+        with localcontext() as context:
+            context.prec = 3
+            observed = incremental_short_borrow_quantity(
+                side="SELL",
+                quantity="0.2",
+                current_position="-1000000",
+                reserved_position_delta="-0.1",
+            )
+        self.assertEqual(observed, Decimal("0.2"))
+
+    def test_borrow_decimal_ingress_rejects_subclass_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal.is_finite dispatched")
+
+            def __format__(self, _spec):
+                raise AssertionError("hostile Decimal.__format__ dispatched")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            _borrow_evidence(capacity=HostileDecimal("1"))
+
+    def test_borrow_decimal_ingress_rejects_oversized_exponent_before_rendering(self):
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            _borrow_evidence(capacity="1e999999")
+
+    def test_recall_projection_arithmetic_is_independent_of_ambient_decimal_context(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            scope = dict(
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+            )
+            projection = EvidencedBorrowRecallProjection(store, **scope)
+            projection.record_recall(
+                BorrowRecallEvidence(
+                    recall_id="decimal-context-recall",
+                    provider_revision="borrow-r1",
+                    quantity="1000000.3",
+                    observed_at="2026-09-25T05:00:30Z",
+                    effective_at="2026-09-25T05:00:00Z",
+                    evidence_ref="provider:decimal-context-r1",
+                    **scope,
+                )
+            )
+            projection.resolve_recall(
+                BorrowRecallResolutionEvidence(
+                    resolution_id="decimal-context-resolution-1",
+                    recall_id="decimal-context-recall",
+                    provider_revision="borrow-r2",
+                    resolved_quantity="1000000",
+                    observed_at="2026-09-25T05:00:40Z",
+                    effective_at="2026-09-25T05:00:40Z",
+                    evidence_ref="provider:decimal-context-r2",
+                    **scope,
+                )
+            )
+            projection.resolve_recall(
+                BorrowRecallResolutionEvidence(
+                    resolution_id="decimal-context-resolution-2",
+                    recall_id="decimal-context-recall",
+                    provider_revision="borrow-r3",
+                    resolved_quantity="0.1",
+                    observed_at="2026-09-25T05:00:50Z",
+                    effective_at="2026-09-25T05:00:50Z",
+                    evidence_ref="provider:decimal-context-r3",
+                    **scope,
+                )
+            )
+            with localcontext() as context:
+                context.prec = 3
+                restarted = DurableBorrowRecallProjection(
+                    store,
+                    evidence_artifact_store=artifact_store_for(store),
+                    **scope,
+                )
+                self.assertEqual(
+                    restarted.remaining("decimal-context-recall"),
+                    Decimal("0.2"),
+                )
+                self.assertEqual(restarted.active_quantity, Decimal("0.2"))
 
     def test_capacity_100_existing_40_reserved_30_allows_20_then_rejects_next_20(self):
         with TemporaryDirectory() as directory:
@@ -701,7 +786,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 Decimal("-1"),
             )
             self.assertIn(key, result.blocking_resources)
-            self.assertTrue(result.complete)
+            self.assertFalse(result.complete)
 
             checkpoint = record_reconciliation_checkpoint(
                 store,
@@ -716,7 +801,10 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 checkpoint["payload"]["borrow_differences"],
                 {key: "-1"},
             )
-            with self.assertRaisesRegex(ValueError, "blocked"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "complete consistent reconciliation",
+            ):
                 load_account_resource_availability_evidence(
                     store,
                     checkpoint_event_id=checkpoint["event_id"],

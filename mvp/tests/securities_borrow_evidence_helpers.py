@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
+from autotrade_runtime.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.securities_borrow import (
     BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE,
@@ -11,7 +12,6 @@ from mvp.autotrade_mvp.securities_borrow import (
     provider_borrow_evidence_metadata,
     provider_borrow_evidence_receipt,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 def artifact_store_for(store: JournalStore) -> ArtifactStore:

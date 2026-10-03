@@ -13,7 +13,7 @@ RiskAuthorityRequest / AuthoritativeRiskSnapshot.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import InitVar, dataclass, field, fields
 from datetime import datetime, timezone
 from hashlib import sha256
 import re
@@ -35,6 +35,9 @@ from .persistence import (
 )
 from .risk import RISK_ENVIRONMENTS, RiskPolicy
 from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
+
+
+_RESOLVED_POLICY_AUTHORITY_TOKEN = object()
 
 
 class RiskPolicyAuthorityError(ValueError):
@@ -60,6 +63,29 @@ def _canonical_journal_authority_snapshot(
         store,
         subject="current risk policy journal",
     )
+
+def _journal_store_identity_payload(
+    identity: JournalStoreIdentity,
+) -> dict[str, object]:
+    exact = require_exact_journal_store_identity(
+        identity,
+        subject="resolved risk policy journal identity",
+    )
+    return {
+        "schema_version": "1.0.0",
+        "canonical_path": exact.canonical_path,
+        "filesystem_device": exact.filesystem_device,
+        "filesystem_inode": exact.filesystem_inode,
+        "identity_source": exact.identity_source,
+        "windows_volume_serial": exact.windows_volume_serial,
+        "windows_file_index_high": exact.windows_file_index_high,
+        "windows_file_index_low": exact.windows_file_index_low,
+    }
+
+
+def journal_store_identity_digest(identity: JournalStoreIdentity) -> str:
+    return payload_digest(_journal_store_identity_payload(identity))
+
 
 _DECIMAL_FIELDS = (
     "max_abs_position",
@@ -290,7 +316,7 @@ class RiskPolicyIdentity:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedRiskPolicy:
     """One immutable policy plus the durable events that establish its authority."""
 
@@ -301,8 +327,15 @@ class ResolvedRiskPolicy:
     activation_event_id: str
     activation_journal_sequence: int
     resolved_journal_sequence_cut: int
+    journal_store_identity_digest: str
+    _authority_token: InitVar[object | None] = None
+    _authority_digest: str = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _authority_token: object | None) -> None:
+        if _authority_token is not _RESOLVED_POLICY_AUTHORITY_TOKEN:
+            raise RiskPolicyAuthorityError(
+                "ResolvedRiskPolicy must be issued by DurableRiskPolicyRegistry"
+            )
         if type(self.identity) is not RiskPolicyIdentity:
             raise TypeError("identity must be RiskPolicyIdentity")
         if type(self.policy) is not RiskPolicy:
@@ -314,6 +347,14 @@ class ResolvedRiskPolicy:
             "activation_journal_sequence",
         ):
             _positive_int(getattr(self, name), name=name)
+        object.__setattr__(
+            self,
+            "journal_store_identity_digest",
+            _digest(
+                self.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
+        )
         if (
             type(self.resolved_journal_sequence_cut) is not int
             or self.resolved_journal_sequence_cut < 0
@@ -327,6 +368,11 @@ class ResolvedRiskPolicy:
             raise RiskPolicyAuthorityError("policy activation is newer than resolved cut")
         if risk_policy_digest(self.policy) != self.identity.content_digest:
             raise RiskPolicyAuthorityError("resolved policy content digest mismatch")
+        object.__setattr__(
+            self,
+            "_authority_digest",
+            _resolved_policy_authority_digest(self),
+        )
 
     @property
     def evidence_payload(self) -> dict[str, object]:
@@ -337,7 +383,105 @@ class ResolvedRiskPolicy:
             "activation_event_id": self.activation_event_id,
             "activation_journal_sequence": self.activation_journal_sequence,
             "resolved_journal_sequence_cut": self.resolved_journal_sequence_cut,
+            "journal_store_identity_digest": self.journal_store_identity_digest,
         }
+
+
+def _canonical_resolved_policy_identity(
+    value: object,
+) -> RiskPolicyIdentity:
+    if type(value) is not RiskPolicyIdentity:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity must be exact RiskPolicyIdentity"
+        )
+    raw = vars(value)
+    if any(type(key) is not str for key in raw):
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity state keys must be exact strings"
+        )
+    if frozenset(raw) != _IDENTITY_KEYS:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity state shape is not canonical"
+        )
+    return RiskPolicyIdentity(
+        policy_id=_text(raw["policy_id"], name="policy_id"),
+        version=_positive_int(raw["version"], name="version"),
+        content_digest=_digest(raw["content_digest"], name="content_digest"),
+        scope=RiskPolicyScope(*_require_canonical_scope(raw["scope"])),
+    )
+
+
+def _resolved_policy_authority_digest(value: ResolvedRiskPolicy) -> str:
+    identity = _canonical_resolved_policy_identity(value.identity)
+    if type(value.policy) is not RiskPolicy:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy content must be exact RiskPolicy"
+        )
+    registration_event_id = _text(
+        value.registration_event_id,
+        name="registration_event_id",
+    )
+    activation_event_id = _text(
+        value.activation_event_id,
+        name="activation_event_id",
+    )
+    registration_sequence = _positive_int(
+        value.registration_journal_sequence,
+        name="registration_journal_sequence",
+    )
+    activation_sequence = _positive_int(
+        value.activation_journal_sequence,
+        name="activation_journal_sequence",
+    )
+    cut = value.resolved_journal_sequence_cut
+    if type(cut) is not int or cut < 0:
+        raise RiskPolicyAuthorityError(
+            "resolved_journal_sequence_cut must be a non-negative integer"
+        )
+    if registration_sequence > activation_sequence or activation_sequence > cut:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy chronology is not canonical"
+        )
+    policy_digest = risk_policy_digest(value.policy)
+    if policy_digest != identity.content_digest:
+        raise RiskPolicyAuthorityError(
+            "resolved policy content digest mismatch"
+        )
+    return payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "identity": identity.payload(),
+            "policy_digest": policy_digest,
+            "registration_event_id": registration_event_id,
+            "registration_journal_sequence": str(registration_sequence),
+            "activation_event_id": activation_event_id,
+            "activation_journal_sequence": str(activation_sequence),
+            "resolved_journal_sequence_cut": str(cut),
+            "journal_store_identity_digest": _digest(
+                value.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
+        }
+    )
+
+
+def require_registry_issued_resolved_policy(
+    value: object,
+) -> ResolvedRiskPolicy:
+    """Verify the immutable in-object seal of one resolved policy.
+
+    This detects post-construction mutation only. Durable provenance is
+    established by DurableRiskPolicyRegistry.require_resolved_policy(), which
+    replays the canonical JournalStore at the claimed exact cut.
+    """
+
+    if type(value) is not ResolvedRiskPolicy:
+        raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
+    if value._authority_digest != _resolved_policy_authority_digest(value):
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy authority changed after registry issuance"
+        )
+    return value
 
 
 def _decimal_text(value: object, *, name: str) -> str | None:
@@ -1161,4 +1305,48 @@ class DurableRiskPolicyRegistry:
             activation_event_id=state.activation_event_id,
             activation_journal_sequence=state.activation_sequence,
             resolved_journal_sequence_cut=cut,
+            journal_store_identity_digest=journal_store_identity_digest(
+                expected_store_identity
+            ),
+            _authority_token=_RESOLVED_POLICY_AUTHORITY_TOKEN,
         )
+
+    def require_resolved_policy(
+        self,
+        value: object,
+    ) -> ResolvedRiskPolicy:
+        """Revalidate one resolved policy against durable registry authority.
+
+        The constructor token and in-object digest are tamper-evidence only.
+        Financial use must prove that the claimed registration and activation
+        actually exist in this exact JournalStore generation at the claimed
+        journal cut and resolve to the same policy identity and content.
+        """
+
+        sealed = require_registry_issued_resolved_policy(value)
+        _store, expected_store_identity = (
+            DurableRiskPolicyRegistry._journal_store_authority(self)
+        )
+        expected_store_digest = journal_store_identity_digest(
+            expected_store_identity
+        )
+        if sealed.journal_store_identity_digest != expected_store_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy JournalStore generation mismatch"
+            )
+
+        current = DurableRiskPolicyRegistry.resolve_current(
+            self,
+            sealed.identity.scope,
+            journal_sequence_cut=sealed.resolved_journal_sequence_cut,
+        )
+        current = require_registry_issued_resolved_policy(current)
+        if (
+            current.evidence_payload != sealed.evidence_payload
+            or canonical_risk_policy(current.policy)
+            != canonical_risk_policy(sealed.policy)
+        ):
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy does not match durable registry authority"
+            )
+        return current

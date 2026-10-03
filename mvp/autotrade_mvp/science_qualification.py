@@ -14,14 +14,15 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
     QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -39,6 +40,54 @@ _REQUIRED_GATES = (
 )
 
 GateEvidenceVerifier = Callable[["QualificationGate"], bool]
+
+
+def _gate_assertion_requirement(gate: "QualificationGate") -> str:
+    """Return the signed identity of one complete scientific gate assertion."""
+
+    canonical = json.dumps(
+        {
+            "gate_id": gate.gate_id,
+            "status": gate.status,
+            "evidence_hashes": list(gate.evidence_hashes),
+            "candidate_hash": gate.candidate_hash,
+            "frozen_protocol_hash": gate.frozen_protocol_hash,
+            "input_snapshot_hash": gate.input_snapshot_hash,
+            "reason_codes": list(gate.reason_codes),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = sha256(canonical.encode("utf-8")).hexdigest()
+    return f"gate-assertion/{gate.gate_id}/sha256:{digest}"
+
+
+def _input_assertion_requirement(
+    evidence: "ScientificQualificationInput",
+) -> str:
+    """Return the signed identity of caller-controlled scientific assertions."""
+
+    canonical = json.dumps(
+        {
+            "candidate_hash": evidence.candidate_hash,
+            "frozen_protocol_hash": evidence.frozen_protocol_hash,
+            "input_snapshot_hash": evidence.input_snapshot_hash,
+            "economic_claim": evidence.economic_claim,
+            "holdout_used_for_tuning": evidence.holdout_used_for_tuning,
+            "future_information_used_for_routing": (
+                evidence.future_information_used_for_routing
+            ),
+            "population_coverage_hash": evidence.population_coverage_hash,
+            "source_sha": evidence.source_sha,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = sha256(canonical.encode("utf-8")).hexdigest()
+    return f"science-input/sha256:{digest}"
+
 
 _QUALIFICATION_DOMAIN = "SCIENCE"
 _QUALIFICATION_GATE = "ECONOMIC_EDGE"
@@ -137,6 +186,100 @@ class ScientificQualificationInput:
             raise ValueError("duplicate qualification gate")
 
 
+def _exact_text(value: object, name: str) -> str:
+    """Admit only non-polymorphic built-in strings to terminal science state."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact str")
+    return value
+
+
+def _exact_gate_snapshot(gate: QualificationGate) -> QualificationGate:
+    """Detach one caller gate into an exact, non-polymorphic local value."""
+
+    if type(gate) is not QualificationGate:
+        raise TypeError("gates must contain exact QualificationGate values")
+    evidence_hashes = object.__getattribute__(gate, "evidence_hashes")
+    reason_codes = object.__getattribute__(gate, "reason_codes")
+    if type(evidence_hashes) is not tuple or any(
+        type(item) is not str for item in evidence_hashes
+    ):
+        raise TypeError("gate evidence hashes must be an exact tuple of exact strings")
+    if type(reason_codes) is not tuple or any(
+        type(item) is not str for item in reason_codes
+    ):
+        raise TypeError("gate reason codes must be an exact tuple of exact strings")
+    return QualificationGate(
+        _exact_text(object.__getattribute__(gate, "gate_id"), "gate_id"),
+        _exact_text(object.__getattribute__(gate, "status"), "gate status"),
+        evidence_hashes,
+        _exact_text(
+            object.__getattribute__(gate, "candidate_hash"),
+            "gate candidate_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(gate, "frozen_protocol_hash"),
+            "gate frozen_protocol_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(gate, "input_snapshot_hash"),
+            "gate input_snapshot_hash",
+        ),
+        reason_codes,
+    )
+
+
+def _exact_scientific_input_snapshot(
+    evidence: ScientificQualificationInput,
+) -> ScientificQualificationInput:
+    """Freeze caller science input once before any trust callback or decision read."""
+
+    if type(evidence) is not ScientificQualificationInput:
+        raise TypeError("evidence must be exact ScientificQualificationInput")
+    gates = object.__getattribute__(evidence, "gates")
+    if type(gates) is not tuple:
+        raise TypeError("gates must be an exact tuple")
+    exact_gates = tuple(_exact_gate_snapshot(gate) for gate in gates)
+
+    holdout_used = object.__getattribute__(evidence, "holdout_used_for_tuning")
+    future_used = object.__getattribute__(evidence, "future_information_used_for_routing")
+    if type(holdout_used) is not bool:
+        raise TypeError("holdout_used_for_tuning must be exact boolean")
+    if type(future_used) is not bool:
+        raise TypeError("future_information_used_for_routing must be exact boolean")
+
+    population = object.__getattribute__(evidence, "population_coverage_hash")
+    if population is not None:
+        population = _exact_text(population, "population_coverage_hash")
+    source_sha = object.__getattribute__(evidence, "source_sha")
+    if source_sha is not None:
+        source_sha = _exact_text(source_sha, "source_sha")
+
+    return ScientificQualificationInput(
+        _exact_text(
+            object.__getattribute__(evidence, "candidate_hash"),
+            "candidate_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(evidence, "frozen_protocol_hash"),
+            "frozen_protocol_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(evidence, "input_snapshot_hash"),
+            "input_snapshot_hash",
+        ),
+        exact_gates,
+        _exact_text(
+            object.__getattribute__(evidence, "economic_claim"),
+            "economic_claim",
+        ),
+        holdout_used,
+        future_used,
+        population,
+        source_sha,
+    )
+
+
 @dataclass(frozen=True)
 class ScientificQualificationResult:
     qualification_id: str
@@ -156,9 +299,11 @@ def _required_signed_bindings(
 ) -> frozenset[str]:
     bindings = {
         _QUALIFICATION_REQUIREMENT,
+        _input_assertion_requirement(evidence),
         f"candidate/{evidence.candidate_hash}",
         f"input/{evidence.input_snapshot_hash}",
         *(f"gate/{gate_id}" for gate_id in _REQUIRED_GATES),
+        *(_gate_assertion_requirement(gate) for gate in evidence.gates),
     }
     if evidence.population_coverage_hash is not None:
         bindings.add(f"population/{evidence.population_coverage_hash}")
@@ -188,15 +333,19 @@ def qualify_scientific_learning(
     evidence_root: str | Path | None = None,
     expected_policy_id: str | None = None,
     expected_policy_version: str | None = None,
+    trusted_source_sha: str | None = None,
 ) -> ScientificQualificationResult:
     """Audit scientific evidence without granting release or trading authority.
 
     ``evidence_verifier`` is retained only for source compatibility. A
     caller-selected callback is not an independent trust boundary and can
-    never make a gate terminally VERIFIED.
+    never make a gate terminally VERIFIED. Terminal signed evidence is checked
+    only against the fixed canonical qualification trust policy; caller-selected
+    policy objects or pins are rejected fail-closed. Signed terminal verification
+    additionally requires ``trusted_source_sha`` from the qualification runner;
+    the evidence payload cannot nominate its own trusted source revision.
     """
-    if not isinstance(evidence, ScientificQualificationInput):
-        raise TypeError("evidence must be ScientificQualificationInput")
+    evidence = _exact_scientific_input_snapshot(evidence)
     by_id = {gate.gate_id: gate for gate in evidence.gates}
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
@@ -207,28 +356,37 @@ def qualify_scientific_learning(
     signed_digest_set: frozenset[str] = frozenset()
     signed_requirement_set: frozenset[str] = frozenset()
     trust_status = "INCONCLUSIVE"
-    trust_inputs = (
-        qualification_receipt,
+    caller_selected_trust = (
         qualification_policy,
-        evidence_store,
-        evidence_root,
         expected_policy_id,
         expected_policy_version,
     )
-    if all(value is None for value in trust_inputs):
+    trust_inputs = (qualification_receipt, evidence_store, evidence_root)
+    trusted_source = (
+        None
+        if trusted_source_sha is None
+        else _git_sha_identity(trusted_source_sha, "trusted_source_sha")
+    )
+    if any(value is not None for value in caller_selected_trust):
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN")
+    elif all(value is None for value in trust_inputs):
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_MISSING")
-    elif any(value is None for value in trust_inputs) or evidence.source_sha is None:
+    elif any(value is None for value in trust_inputs):
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INCOMPLETE")
+    elif trusted_source is None:
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.TRUSTED_SOURCE_MISSING")
+    elif evidence.source_sha is None or evidence.source_sha != trusted_source:
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.TRUSTED_SOURCE_MISMATCH")
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
-                expected_source_sha=evidence.source_sha,
+                expected_source_sha=trusted_source,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
                 expected_package_id=_QUALIFICATION_PACKAGE,
@@ -236,17 +394,16 @@ def qualify_scientific_learning(
                 expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
                 expected_requirement_id=_QUALIFICATION_REQUIREMENT,
             )
+        except QualificationTrustUnavailable:
+            reasons.append("SCIENCE.CANONICAL_TRUST_UNAVAILABLE")
         except (QualificationTrustError, TypeError, ValueError):
             trust_status = "FAIL"
             reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INVALID")
         else:
             signed_digest_set = frozenset(
-                item.sha256
-                for item in qualification_receipt.attestation.evidence_refs
+                item.sha256 for item in accepted.evidence_refs
             )
-            signed_requirement_set = frozenset(
-                qualification_receipt.attestation.requirement_ids
-            )
+            signed_requirement_set = frozenset(accepted.requirement_ids)
             if accepted.result == "FAIL":
                 trust_status = "FAIL"
                 reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_RESULT_FAIL")
@@ -286,6 +443,7 @@ def qualify_scientific_learning(
         verified = (
             trust_status == "PASS"
             and f"gate/{gate_id}" in signed_requirement_set
+            and _gate_assertion_requirement(gate) in signed_requirement_set
             and all(digest in signed_digest_set for digest in gate.evidence_hashes)
         )
         if not verified:

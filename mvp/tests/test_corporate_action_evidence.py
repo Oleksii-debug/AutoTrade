@@ -140,6 +140,7 @@ def resolve(
     expected_provider_id="BINANCE",
     expected_account_id="acct-1",
     expected_environment="PAPER",
+    expected_provider_environment=None,
 ):
     return resolve_authoritative_corporate_action(
         source.evidence_ref,
@@ -152,6 +153,7 @@ def resolve(
         expected_provider_id=expected_provider_id,
         expected_account_id=expected_account_id,
         expected_environment=expected_environment,
+        expected_provider_environment=expected_provider_environment,
         allowed_endpoints=frozenset({ENDPOINT}),
         permission_scope=permission_scope,
     )
@@ -165,6 +167,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(accepted.provider_id, "BINANCE")
         self.assertEqual(accepted.account_id, "acct-1")
         self.assertEqual(accepted.environment, "PAPER")
+        self.assertEqual(accepted.provider_environment, "PAPER")
         self.assertEqual(
             accepted.provider_instrument_version,
             source.query_binding.instrument_version,
@@ -230,6 +233,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             ("expected_provider_id", "ALPACA"),
             ("expected_account_id", "other-account"),
             ("expected_environment", "LIVE"),
+            ("expected_provider_environment", "OTHER"),
         ):
             with self.subTest(field=field), self.assertRaisesRegex(
                 CorporateActionEvidenceError, "scope mismatch"
@@ -244,6 +248,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 provider_id="BINANCE",
                 account_id="acct-1",
                 environment="PAPER",
+                provider_environment=source.provider_environment,
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -369,6 +374,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 provider_id="BINANCE",
                 account_id="acct-1",
                 environment="PAPER",
+                provider_environment=source.provider_environment,
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -403,6 +409,10 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         accepted = resolve(source)
         self.assertEqual(accepted.corrects_external_event_id, "corp-old")
         self.assertEqual(accepted.provider_revision, "2")
+        self.assertEqual(
+            accepted.provider_environment,
+            source.provider_environment,
+        )
         self.assertIn(accepted.provenance_digest, accepted.event.source_revision)
 
 
@@ -424,13 +434,20 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
         )
         return resolve(source)
 
-    def _store(self, path, *, account_id="acct-1"):
+    def _store(
+        self,
+        path,
+        *,
+        account_id="acct-1",
+        provider_environment=None,
+    ):
         journal = JournalStore(path)
         durable = DurableCorporateActionEvidenceStore(
             journal,
             provider_id="BINANCE",
             account_id=account_id,
             environment="PAPER",
+            provider_environment=provider_environment,
         )
         return journal, durable
 
@@ -478,6 +495,42 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_provider_environment_mismatch_fails_before_journal_mutation(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(
+                path,
+                provider_environment="OTHER",
+            )
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "durable scope",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_distinct_provider_environment_rejects_ambiguous_legacy_history(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            _journal, legacy = self._store(path)
+            self.assertTrue(legacy.record(accepted).inserted)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "explicit migration",
+            ):
+                self._store(
+                    path,
+                    provider_environment="OTHER",
+                )
 
     def test_same_external_identity_with_changed_evidence_conflicts(self):
         original = self._accepted()

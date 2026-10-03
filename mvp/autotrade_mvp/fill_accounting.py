@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 
@@ -26,6 +26,13 @@ from .accounting import (
     reverse_transaction,
 )
 from .durable_reservations import reservation_snapshot_digest
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+    parse_bounded_exact_decimal,
+)
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
 from .reconciliation_journal import require_current_reconciliation_checkpoint
@@ -39,15 +46,12 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded exact decimal") from error
 
 
 def _utc_text(value: str, *, name: str) -> str:
@@ -265,10 +269,16 @@ def _validated_fill_evidence(
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
     if (
-        provider_fill.client_order_id is not None
-        and projected_fill.client_order_id != provider_fill.client_order_id
+        projected_fill.client_order_id is None
+        or provider_fill.client_order_id is None
     ):
-        raise AccountingConflict("provider client order identity does not match projection")
+        raise AccountingConflict(
+            "admitted provider fill requires exact client order identity"
+        )
+    if projected_fill.client_order_id != provider_fill.client_order_id:
+        raise AccountingConflict(
+            "provider client order identity does not match projection"
+        )
     if projected_fill.quantity != provider_fill.quantity:
         raise AccountingConflict("provider fill quantity does not match projection")
     if projected_fill.price != provider_fill.price:
@@ -465,9 +475,12 @@ def build_unexpected_provider_fill_transaction(
         raise AccountingConflict(
             "unexpected provider fill direction is not independently evidenced"
         )
-    if provider_fill.position_side in {"LONG", "SHORT"}:
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "unexpected hedge-mode fill requires leg-aware economic accounting"
+            "unexpected derivative-position fill requires leg-aware economic accounting"
         )
 
     instrument = _text(expected_instrument, name="expected_instrument")
@@ -671,18 +684,32 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "cash-equity reservation consumption is qualified only for BUY fills"
         )
-    if provider_fill.position_side is not None:
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "cash-equity reservation consumption rejects derivative position_side"
+            "cash-equity reservation consumption rejects derivative position identity"
         )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()
-    usage: dict[str, Decimal] = {
-        f"CASH:{settlement}": provider_fill.quantity * provider_fill.price,
-    }
-    if provider_fill.fee_amount > 0:
-        fee_key = f"CASH:{provider_fill.fee_currency}"
-        usage[fee_key] = usage.get(fee_key, Decimal("0")) + provider_fill.fee_amount
+    try:
+        usage: dict[str, Decimal] = {
+            f"CASH:{settlement}": exact_multiply(
+                provider_fill.quantity,
+                provider_fill.price,
+            ),
+        }
+        if provider_fill.fee_amount > 0:
+            fee_key = f"CASH:{provider_fill.fee_currency}"
+            usage[fee_key] = exact_add(
+                usage.get(fee_key, Decimal("0")),
+                provider_fill.fee_amount,
+            )
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "provider fill reservation usage exceeds exact decimal authority"
+        ) from error
 
     original = dict(reservation_snapshot.original)
     for resource, amount in usage.items():
@@ -712,7 +739,7 @@ def build_provider_fill_financial_plan(
         "reservation_cut_digest": reservation_cut_digest,
         "transaction": canonical_transaction(transaction),
         "derived_usage": {
-            key: format(value, "f")
+            key: canonical_decimal_text(value)
             for key, value in usage_items
         },
     }
@@ -808,6 +835,15 @@ def build_provider_fill_correction_transactions(
         raise AccountingConflict("correction side changed")
     if corrected_provider_fill.position_side != original_provider_fill.position_side:
         raise AccountingConflict("correction provider position_side changed")
+    if (
+        original_provider_fill.position_side is not None
+        or original_provider_fill.position_effect is not None
+        or corrected_provider_fill.position_side is not None
+        or corrected_provider_fill.position_effect is not None
+    ):
+        raise AccountingConflict(
+            "cash-equity correction rejects derivative position identity"
+        )
 
     observation = _utc_text(correction_observed_at, name="correction_observed_at")
     order_key = _economic_order_key(

@@ -14,13 +14,20 @@ from decimal import Decimal
 from typing import Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import canonical_decimal_text
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .settlement import (
     SettlementAccountScope,
     SettlementBook,
@@ -58,12 +65,7 @@ def _instant(value: str, *, name: str) -> str:
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    return canonical_decimal_text(value)
 
 
 def _artifact_ref(value: object, *, name: str) -> tuple[str, str, str]:
@@ -98,13 +100,16 @@ def _verify_artifact(
     expected_metadata: Mapping[str, object],
     name: str,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise SettlementConflict(f"{name} requires trusted ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -121,11 +126,11 @@ def _verify_artifact(
         rights = manifest.get("rights")
         if not isinstance(rights, dict) or rights.get("storage") is not True:
             raise ArtifactIntegrityError("settlement evidence lacks storage provenance")
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -141,7 +146,20 @@ def _verify_artifact(
     return canonical_ref
 
 
+def _scope_identity_parts(scope: SettlementAccountScope) -> list[str]:
+    parts = [scope.provider_id, scope.account_id, scope.environment]
+    if scope.provider_environment != scope.environment:
+        parts.append(scope.provider_environment)
+    return parts
+
+
 def _scope_id(scope: SettlementAccountScope) -> str:
+    material = canonical_json([*_scope_identity_parts(scope), "settlement-book"])
+    return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
+
+
+def _legacy_runtime_only_scope_id(scope: SettlementAccountScope) -> str:
+    """Historical aggregate identity before exact provider-domain binding."""
     material = canonical_json(
         [scope.provider_id, scope.account_id, scope.environment, "settlement-book"]
     )
@@ -149,18 +167,19 @@ def _scope_id(scope: SettlementAccountScope) -> str:
 
 
 def _event_id(scope: SettlementAccountScope, kind: str, identity: object) -> str:
-    material = canonical_json(
-        [scope.provider_id, scope.account_id, scope.environment, kind, identity]
-    )
+    material = canonical_json([*_scope_identity_parts(scope), kind, identity])
     return str(uuid5(NAMESPACE_URL, "settlement-event:" + material))
 
 
 def _scope_payload(scope: SettlementAccountScope) -> dict[str, str]:
-    return {
+    payload = {
         "provider_id": scope.provider_id,
         "account_id": scope.account_id,
         "environment": scope.environment,
     }
+    if scope.provider_environment != scope.environment:
+        payload["provider_environment"] = scope.provider_environment
+    return payload
 
 
 def _rule_payload(rule: SettlementRuleBinding) -> dict[str, object]:
@@ -185,8 +204,8 @@ def settlement_rule_evidence_receipt(
     trade_date: date,
     expected_settlement_date: date,
 ) -> dict[str, object]:
-    if not isinstance(rule, SettlementRuleBinding):
-        raise TypeError("rule must be SettlementRuleBinding")
+    if type(rule) is not SettlementRuleBinding:
+        raise TypeError("rule must be exact SettlementRuleBinding")
     if type(trade_date) is not date or type(expected_settlement_date) is not date:
         raise TypeError("trade_date and expected_settlement_date must be dates")
     return {
@@ -196,9 +215,7 @@ def settlement_rule_evidence_receipt(
         "observation": {
             "rule_id": rule.rule_id,
             "rule_version": rule.rule_version,
-            "provider_id": rule.scope.provider_id,
-            "account_id": rule.scope.account_id,
-            "environment": rule.scope.environment,
+            **_scope_payload(rule.scope),
             "instrument_version": rule.instrument_version,
             "settlement_currency": rule.settlement_currency,
             "effective_from": rule.effective_from.isoformat(),
@@ -222,9 +239,7 @@ def settlement_rule_evidence_metadata(
         "observation_kind": "SETTLEMENT_RULE",
         "rule_id": rule.rule_id,
         "rule_version": rule.rule_version,
-        "provider_id": rule.scope.provider_id,
-        "account_id": rule.scope.account_id,
-        "environment": rule.scope.environment,
+        **_scope_payload(rule.scope),
         "instrument_version": rule.instrument_version,
         "settlement_currency": rule.settlement_currency,
         "trade_date": trade_date.isoformat(),
@@ -291,6 +306,7 @@ def _rule_from_payload(value: Mapping[str, object]) -> SettlementRuleBinding:
             provider_id=raw_scope.get("provider_id"),
             account_id=raw_scope.get("account_id"),
             environment=raw_scope.get("environment"),
+            provider_environment=raw_scope.get("provider_environment"),
         ),
         instrument_version=value.get("instrument_version"),
         settlement_currency=value.get("settlement_currency"),
@@ -304,6 +320,8 @@ def _rule_from_payload(value: Mapping[str, object]) -> SettlementRuleBinding:
 
 
 def _obligation_payload(obligation: SettlementObligation) -> dict[str, object]:
+    if type(obligation) is not SettlementObligation:
+        raise TypeError("obligation must be exact SettlementObligation")
     if obligation.source_transaction_id is None or obligation.rule_binding is None:
         raise SettlementConflict(
             "durable settlement obligation requires source transaction and rule binding"
@@ -349,20 +367,18 @@ def settlement_completion_evidence_receipt(
     obligation: SettlementObligation,
     evidence: SettlementEvidence,
 ) -> dict[str, object]:
-    if not isinstance(scope, SettlementAccountScope):
-        raise TypeError("scope must be SettlementAccountScope")
-    if not isinstance(obligation, SettlementObligation):
-        raise TypeError("obligation must be SettlementObligation")
-    if not isinstance(evidence, SettlementEvidence):
-        raise TypeError("evidence must be SettlementEvidence")
+    if type(scope) is not SettlementAccountScope:
+        raise TypeError("scope must be exact SettlementAccountScope")
+    if type(obligation) is not SettlementObligation:
+        raise TypeError("obligation must be exact SettlementObligation")
+    if type(evidence) is not SettlementEvidence:
+        raise TypeError("evidence must be exact SettlementEvidence")
     return {
         "schema_version": SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
         "observation_kind": "SETTLEMENT_COMPLETION",
         "observation": {
-            "provider_id": scope.provider_id,
-            "account_id": scope.account_id,
-            "environment": scope.environment,
+            **_scope_payload(scope),
             "obligation_id": obligation.obligation_id,
             "cause_event_id": obligation.cause_event_id,
             "source_transaction_id": obligation.source_transaction_id,
@@ -385,9 +401,7 @@ def settlement_completion_evidence_metadata(
     return {
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
         "observation_kind": "SETTLEMENT_COMPLETION",
-        "provider_id": scope.provider_id,
-        "account_id": scope.account_id,
-        "environment": scope.environment,
+        **_scope_payload(scope),
         "obligation_id": obligation.obligation_id,
         "cause_event_id": obligation.cause_event_id,
         "source_transaction_id": obligation.source_transaction_id,
@@ -468,24 +482,63 @@ class DurableSettlementBook:
         account_id: str,
         environment: str,
         evidence_artifact_store: ArtifactStore,
+        provider_environment: str | None = None,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        store_identity = require_exact_journal_store_authority(
+            store,
+            subject="durable-settlement JournalStore",
+        )
         self.store = store
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
+        self._store_identity = store_identity
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError(
+                "evidence_artifact_store must be canonical ArtifactStore"
+            )
         self.evidence_artifact_store = evidence_artifact_store
         self.scope = SettlementAccountScope(
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
         self.scope_id = _scope_id(self.scope)
+        if (
+            self.scope.provider_id == "BYBIT"
+            and self.scope.environment == "PAPER"
+            and self.scope.provider_environment != self.scope.environment
+        ):
+            legacy_scope_id = _legacy_runtime_only_scope_id(self.scope)
+            if (
+                legacy_scope_id != self.scope_id
+                and self._journal_operation(
+                    JournalStore.load_events, _AGGREGATE_TYPE, legacy_scope_id
+                )
+            ):
+                raise SettlementConflict(
+                    "legacy BYBIT/PAPER settlement history lacks "
+                    "provider_environment; migration/reconciliation is required"
+                )
         self._book = SettlementBook()
         self._reload()
 
+    def _journal_operation(self, operation, /, *args, **kwargs):
+        store = self.store
+        expected = self._store_identity
+        current = require_exact_journal_store_authority(
+            store,
+            subject="durable-settlement JournalStore",
+        )
+        if current != expected:
+            raise SettlementConflict("durable-settlement JournalStore changed")
+        with journal_store_authority_scope(store, expected):
+            return operation(store, *args, **kwargs)
+
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.scope_id)
+        return self._journal_operation(
+            JournalStore.load_events,
+            _AGGREGATE_TYPE,
+            self.scope_id,
+        )
 
     def _replay(self, events: list[dict[str, object]]) -> SettlementBook:
         book = SettlementBook()
@@ -586,6 +639,10 @@ class DurableSettlementBook:
         batch = tuple(obligations)
         if not batch:
             raise ValueError("settlement obligation batch must not be empty")
+        if any(type(item) is not SettlementObligation for item in batch):
+            raise TypeError(
+                "settlement obligation batch requires exact SettlementObligation values"
+            )
         canonical = tuple(
             _obligation_from_payload(_obligation_payload(item))
             for item in batch
@@ -684,7 +741,8 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
+            _, inserted, _ = self._journal_operation(
+                JournalStore.commit_command,
                 command_id=_text(command_id, name="command_id"),
                 actor=_ACTOR,
                 environment=self.scope.environment,
@@ -709,8 +767,8 @@ class DurableSettlementBook:
         as_of: date,
         committed_at: str,
     ) -> PreparedSettlementMutation:
-        if not isinstance(evidence, SettlementEvidence):
-            raise TypeError("evidence must be SettlementEvidence")
+        if type(evidence) is not SettlementEvidence:
+            raise TypeError("evidence must be exact SettlementEvidence")
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
         events = self._events()
@@ -815,7 +873,8 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
+            _, inserted, _ = self._journal_operation(
+                JournalStore.commit_command,
                 command_id=_text(command_id, name="command_id"),
                 actor=_ACTOR,
                 environment=self.scope.environment,

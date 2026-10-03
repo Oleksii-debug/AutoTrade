@@ -167,6 +167,51 @@ class SimulationOperatorTests(unittest.TestCase):
                 event["payload"]["client_order_id"] = "another-order"
         self._invalid_journal(alter)
 
+    def test_provider_fill_financial_binding_must_match_committed_transaction(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["transaction_digest"] = "sha256:" + "0" * 64
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
+    def test_provider_fill_financial_binding_rejects_rehashed_provider_evidence(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["provider_fill"]["price"] = "999"
+                request["provider_fill_digest"] = payload_digest(
+                    request["provider_fill"]
+                )
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
+    def test_provider_fill_binding_cannot_rehash_both_prices_away_from_economics(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["projected_fill"]["price"] = "999"
+                request["provider_fill"]["price"] = "999"
+                request["projected_fill_digest"] = payload_digest(
+                    request["projected_fill"]
+                )
+                request["provider_fill_digest"] = payload_digest(
+                    request["provider_fill"]
+                )
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
+    def test_provider_fill_financial_binding_cannot_replace_admission_identity(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["financial_admission"]["admission_id"] = "another-admission"
+                request["financial_admission_digest"] = payload_digest(
+                    request["financial_admission"]
+                )
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
     def test_complete_flag_cannot_replace_activity_coverage(self):
         def alter(event):
             if event["event_type"] == "AccountReconciled":
@@ -302,6 +347,15 @@ class SimulationOperatorTests(unittest.TestCase):
             self.assertEqual(status["active_reservations"][0]["remaining"], {"CASH:USD": "0"})
             self.assertEqual(status["active_reservations"][0]["state"], "WORKING")
 
+    def test_buy_direct_operator_projection_is_readable(self):
+        """A valid completed BUY must survive the strict direct projection."""
+        with TemporaryDirectory() as directory:
+            run(directory)
+            read = inspect_canonical_simulation(directory)
+            self.assertEqual(read["status"]["status"], "awaiting_order_reconciliation")
+            self.assertEqual(read["status"]["cash"], "896.897")
+            self.assertEqual(read["status"]["position"], "1")
+
     def test_buy_report_does_not_invent_a_mark_or_pnl(self):
         with TemporaryDirectory() as directory:
             run(directory)
@@ -370,7 +424,7 @@ class SimulationOperatorTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             original = simulation_session._reconcile
             def crash(provider, book, now, **kwargs):
-                if kwargs.get("fill") is not None:
+                if kwargs.get("provider_fill") is not None:
                     raise RuntimeError("post-fill reconciliation crash")
                 return original(provider, book, now, **kwargs)
             with patch.object(simulation_session, "_reconcile", crash):

@@ -11,10 +11,15 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    provider_domain_submission_attempt_keys,
+    submission_attempt_aggregate_id,
+)
+from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation import (
     ReconciliationResult,
     UnknownSubmission,
@@ -60,20 +65,55 @@ def _scope(
     )
 
 
+def _provider_environment_scope(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(str(error)) from error
+
+
 def _reconciliation_aggregate_id(
     *,
     reconciliation_id: str,
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> str:
+    """Return the durable reconciliation identity for one provider domain.
+
+    Runtime-only identity is retained when the provider has no narrower domain
+    so existing non-BYBIT journals remain byte-compatible. A narrower domain is
+    an authority-bearing identity component and must never share one aggregate
+    with another provider domain.
+    """
+
     rid = _text(reconciliation_id, name="reconciliation_id")
     provider, account, scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
     )
-    scoped_identity = canonical_json([provider, account, scope, rid])
+    identity_parts = [provider, account, scope]
+    if provider_environment is not None:
+        domain = _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+        if domain != scope:
+            identity_parts.append(domain)
+    identity_parts.append(rid)
+    scoped_identity = canonical_json(identity_parts)
     return "account-reconciliation:" + str(
         uuid5(
             NAMESPACE_URL,
@@ -89,6 +129,7 @@ def _require_checkpoint_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> Mapping[str, Any]:
     payload = checkpoint.get("payload")
     if not isinstance(payload, Mapping):
@@ -104,6 +145,27 @@ def _require_checkpoint_scope(
         or payload.get("environment") != scope
     ):
         raise ValueError("checkpoint reconciliation scope mismatch")
+    if provider_environment is not None:
+        domain = _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+        payload_domain = payload.get("provider_environment")
+        if payload_domain is None:
+            resource_scope = payload.get("resource_availability")
+            payload_domain = (
+                resource_scope.get("provider_environment")
+                if isinstance(resource_scope, Mapping)
+                else None
+            )
+        if payload_domain is None:
+            if provider == "BYBIT" or domain != scope:
+                raise ValueError(
+                    "checkpoint lacks an unambiguous provider_environment"
+                )
+        elif payload_domain != domain:
+            raise ValueError("checkpoint provider_environment scope mismatch")
     return payload
 
 
@@ -136,6 +198,8 @@ def reconciliation_payload(
             identity["provider_id"] != result.provider_id
             or identity["account_id"] != result.account_id
             or identity["environment"] != result.environment
+            or identity.get("provider_environment", identity["environment"])
+            != result.provider_environment
         ):
             raise ValueError(
                 "unexpected provider fill identity scope must match reconciliation result"
@@ -162,7 +226,7 @@ def reconciliation_payload(
         key=lambda item: str(item["provider_execution_id"])
     )
 
-    return {
+    payload = {
         "provider_id": result.provider_id,
         "account_id": result.account_id,
         "environment": result.environment,
@@ -230,6 +294,7 @@ def reconciliation_payload(
                 "provider_id": result.resource_availability.provider_id,
                 "account_id": result.resource_availability.account_id,
                 "environment": result.resource_availability.environment,
+                "provider_environment": result.resource_availability.provider_environment,
                 "snapshot_id": result.resource_availability.snapshot_id,
                 "query_started_at": result.resource_availability.query_started_at,
                 "query_completed_at": result.resource_availability.query_completed_at,
@@ -256,6 +321,9 @@ def reconciliation_payload(
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }
+    if result.provider_environment != result.environment:
+        payload["provider_environment"] = result.provider_environment
+    return payload
 
 
 def _verify_borrow_checkpoint_evidence(
@@ -309,10 +377,53 @@ def record_reconciliation_checkpoint(
         provider_id=result.provider_id,
         account_id=result.account_id,
         environment=result.environment,
+        provider_environment=result.provider_environment,
     )
     existing = store.load_events("account_reconciliation", aggregate_id)
-    if existing and existing[-1]["payload"] == payload:
-        return existing[-1]
+    if not existing:
+        legacy_aggregate_id = _reconciliation_aggregate_id(
+            reconciliation_id=rid,
+            provider_id=result.provider_id,
+            account_id=result.account_id,
+            environment=result.environment,
+        )
+        if legacy_aggregate_id != aggregate_id:
+            legacy_events = store.load_events(
+                "account_reconciliation",
+                legacy_aggregate_id,
+            )
+            exact_legacy_matches = [
+                event
+                for event in legacy_events
+                if event.get("payload") == payload
+            ]
+            if len(exact_legacy_matches) > 1:
+                raise ValueError(
+                    "legacy reconciliation retry identity is ambiguous"
+                )
+            if exact_legacy_matches:
+                return exact_legacy_matches[0]
+
+    if existing:
+        if existing[-1]["payload"] == payload:
+            return existing[-1]
+        payload_domain = (
+            result.resource_availability.provider_environment
+            if result.resource_availability is not None
+            else None
+        )
+        if (
+            payload_domain == result.environment
+            and result.provider_id != "BYBIT"
+        ):
+            legacy_payload = dict(payload)
+            legacy_resource = legacy_payload.get("resource_availability")
+            if isinstance(legacy_resource, Mapping):
+                legacy_resource = dict(legacy_resource)
+                legacy_resource.pop("provider_environment", None)
+                legacy_payload["resource_availability"] = legacy_resource
+            if existing[-1]["payload"] == legacy_payload:
+                return existing[-1]
 
     version = store.next_aggregate_version(
         "account_reconciliation", aggregate_id
@@ -360,6 +471,7 @@ def load_latest_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
@@ -369,18 +481,54 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     events = store.load_events("account_reconciliation", aggregate_id)
-    if not events:
-        return None
-    event = events[-1]
-    _require_checkpoint_scope(
-        event,
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
-    )
-    return event
+    if events:
+        event = events[-1]
+        _require_checkpoint_scope(
+            event,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+        return event
+
+    # Narrow-domain journals written before provider_environment became part of
+    # aggregate identity remain readable, but only when exactly one legacy event
+    # validates against the requested provider domain.
+    if provider_environment is not None:
+        legacy_aggregate_id = _reconciliation_aggregate_id(
+            reconciliation_id=rid,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
+        if legacy_aggregate_id != aggregate_id:
+            legacy_matches: list[dict[str, Any]] = []
+            for event in store.load_events(
+                "account_reconciliation",
+                legacy_aggregate_id,
+            ):
+                try:
+                    _require_checkpoint_scope(
+                        event,
+                        provider_id=provider_id,
+                        account_id=account_id,
+                        environment=environment,
+                        provider_environment=provider_environment,
+                    )
+                except ValueError:
+                    continue
+                legacy_matches.append(event)
+            if len(legacy_matches) > 1:
+                raise ValueError(
+                    "legacy reconciliation checkpoint identity is ambiguous"
+                )
+            if legacy_matches:
+                return legacy_matches[0]
+    return None
 
 
 def load_latest_reconciliation_checkpoint_for_scope(
@@ -389,6 +537,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest durably recorded reconciliation fact for one scope.
 
@@ -408,6 +557,15 @@ def load_latest_reconciliation_checkpoint_for_scope(
         account_id=account_id,
         environment=environment,
     )
+    domain = (
+        None
+        if provider_environment is None
+        else _provider_environment_scope(
+            provider_id=provider,
+            environment=scope,
+            provider_environment=provider_environment,
+        )
+    )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
     for event in store.load_events_by_aggregate_type("account_reconciliation"):
@@ -422,6 +580,20 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("environment") != scope
         ):
             continue
+        if domain is not None:
+            payload_domain = payload.get("provider_environment")
+            if payload_domain is None:
+                resource_scope = payload.get("resource_availability")
+                payload_domain = (
+                    resource_scope.get("provider_environment")
+                    if isinstance(resource_scope, Mapping)
+                    else None
+                )
+            if payload_domain is None:
+                if provider == "BYBIT" or domain != scope:
+                    continue
+            elif payload_domain != domain:
+                continue
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -453,6 +625,7 @@ def require_current_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless an exact checkpoint is current scope-wide truth."""
 
@@ -462,6 +635,7 @@ def require_current_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     if latest is None:
         raise ValueError("no reconciliation checkpoint exists for account scope")
@@ -480,6 +654,7 @@ def load_reconciliation_checkpoint_for_readiness(
     account_id: str,
     environment: str,
     host_id: str,
+    provider_environment: str | None = None,
     owner_epoch: str,
 ) -> dict[str, Any] | None:
     """Return only a checkpoint eligible to authorize the current owner.
@@ -489,12 +664,23 @@ def load_reconciliation_checkpoint_for_readiness(
     new checkpoint before reconciliation can clear recovery/UNKNOWN gates.
     """
 
+    provider, _account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    domain = _provider_environment_scope(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     checkpoint = load_latest_reconciliation_checkpoint(
         store,
         reconciliation_id=reconciliation_id,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     if checkpoint is None:
         return None
@@ -503,12 +689,14 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     if (
         latest_scope_checkpoint is None
@@ -534,6 +722,7 @@ def load_submission_resolution_evidence(
     account_id: str,
     environment: str,
     attempt_id: str,
+    provider_environment: str | None = None,
     intent_id: str,
     client_order_id: str,
 ) -> dict[str, Any]:
@@ -560,11 +749,18 @@ def load_submission_resolution_evidence(
     if checkpoint.get("aggregate_type") != "account_reconciliation":
         raise ValueError("checkpoint event has invalid reconciliation aggregate type")
 
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -648,6 +844,9 @@ def load_submission_resolution_evidence(
         "provider_order_ids": provider_order_ids,
         "provider_execution_ids": provider_execution_ids,
     }
+    runtime = _text(payload.get("environment"), name="environment").upper()
+    if selected_domain != runtime:
+        evidence["provider_environment"] = selected_domain
     return evidence
 
 
@@ -658,6 +857,7 @@ def load_account_resource_availability_evidence(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
     resources: Iterable[str],
     now: str,
     max_age_seconds: Decimal | str | int,
@@ -677,15 +877,16 @@ def load_account_resource_availability_evidence(
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
-    current_scope_head = None
-    if require_latest_scope:
-        current_scope_head = require_current_reconciliation_checkpoint(
-            store,
-            checkpoint_event_id=event_id,
-            provider_id=provider_id,
-            account_id=account_id,
-            environment=environment,
-        )
+    provider, account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    domain = _provider_environment_scope(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
@@ -697,10 +898,21 @@ def load_account_resource_availability_evidence(
 
     payload = _require_checkpoint_scope(
         checkpoint,
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
+        provider_id=provider,
+        account_id=account,
+        environment=scope,
+        provider_environment=domain,
     )
+    current_scope_head = None
+    if require_latest_scope:
+        current_scope_head = require_current_reconciliation_checkpoint(
+            store,
+            checkpoint_event_id=event_id,
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            provider_environment=domain,
+        )
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
@@ -733,39 +945,59 @@ def load_account_resource_availability_evidence(
 
     if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
+    if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
+        raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
-        max_age = (
-            max_age_seconds
-            if isinstance(max_age_seconds, Decimal)
-            else Decimal(max_age_seconds)
-        )
-    except Exception as error:
-        raise ValueError("max_age_seconds must be a finite decimal") from error
-    if not max_age.is_finite() or max_age < 0:
+        max_age = parse_bounded_exact_decimal(max_age_seconds)
+        max_age_fraction = as_fraction(max_age)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "max_age_seconds must be a finite decimal within the exact resource envelope"
+        ) from error
+    if max_age < 0:
         raise ValueError("max_age_seconds must be a non-negative finite decimal")
     delta = current - completed
     age_microseconds = (
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
-    if age_seconds > max_age:
+    if (
+        age_microseconds * max_age_fraction.denominator
+        > 1_000_000 * max_age_fraction.numerator
+    ):
         raise ValueError("availability checkpoint is stale")
+
+    # Preserve the historical canonical decimal text without reintroducing
+    # ambient Decimal-context authority.  The timedelta cut is exact to one
+    # microsecond, so integer division renders the finite base-10 value exactly.
+    age_whole_seconds, age_fractional_microseconds = divmod(
+        age_microseconds,
+        1_000_000,
+    )
+    age_seconds_text = str(age_whole_seconds)
+    if age_fractional_microseconds:
+        age_seconds_text += (
+            "." + f"{age_fractional_microseconds:06d}".rstrip("0")
+        )
 
     resource_evidence = payload.get("resource_availability")
     if not isinstance(resource_evidence, Mapping):
         raise ValueError(
             "availability checkpoint lacks explicit provider resource availability"
         )
-    provider, account, scope = _scope(
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
-    )
+    resource_domain = resource_evidence.get("provider_environment")
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
         or resource_evidence.get("environment") != scope
+        or (
+            resource_domain is None
+            and (provider == "BYBIT" or domain != scope)
+        )
+        or (
+            resource_domain is not None
+            and resource_domain != domain
+        )
     ):
         raise ValueError("resource availability evidence scope mismatch")
 
@@ -814,17 +1046,17 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) not in (Decimal, str, int):
             raise TypeError(
-                "resource availability must use exact decimal encoding"
+                "resource availability must use exact Decimal, string or integer encoding"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "resource availability must be a finite decimal within the exact resource envelope"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )
@@ -870,6 +1102,13 @@ def load_account_resource_availability_evidence(
                 or settlement_scope.get("environment") != scope
             ):
                 continue
+            settlement_domain = _provider_environment_scope(
+                provider_id=provider,
+                environment=scope,
+                provider_environment=settlement_scope.get("provider_environment"),
+            )
+            if settlement_domain != domain:
+                continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"
@@ -906,6 +1145,13 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("environment") != scope
             ):
                 continue
+            lifecycle_domain = _provider_environment_scope(
+                provider_id=provider,
+                environment=scope,
+                provider_environment=lifecycle_payload.get("provider_environment"),
+            )
+            if lifecycle_domain != domain:
+                continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates option lifecycle financial truth"
@@ -920,6 +1166,50 @@ def load_account_resource_availability_evidence(
                 raise ValueError(
                     "resource availability snapshot predates option lifecycle financial truth"
                 )
+
+        # Current admission/dispatch also joins provider cash with the current
+        # DurableProviderEconomicBook.  A newer local cash fact must therefore
+        # never gain reservation authority from an older provider snapshot.  This
+        # check is limited to current-scope authorization: historical replay keeps
+        # validating the exact durable witness that was accepted at its own cut,
+        # while every fresh admission/dispatch passes require_latest_scope=True.
+        if require_latest_scope:
+            for economic_event in store.load_events_by_aggregate_type(
+                "economic_book"
+            ):
+                economic_sequence = economic_event.get("journal_sequence")
+                economic_payload = economic_event.get("payload")
+                if (
+                    type(economic_sequence) is not int
+                    or not isinstance(economic_payload, Mapping)
+                ):
+                    continue
+                if (
+                    economic_payload.get("provider_id") != provider
+                    or economic_payload.get("account_id") != account
+                    or economic_payload.get("environment") != scope
+                ):
+                    continue
+                economic_domain = economic_payload.get("provider_environment")
+                if economic_domain is None:
+                    if provider == "BYBIT" or domain != scope:
+                        continue
+                elif economic_domain != domain:
+                    continue
+                if economic_sequence >= checkpoint_sequence:
+                    raise ValueError(
+                        "availability checkpoint predates economic financial truth"
+                    )
+                economic_committed = datetime.fromisoformat(
+                    _instant(
+                        economic_event.get("committed_at"),
+                        name="economic_book.committed_at",
+                    ).replace("Z", "+00:00")
+                )
+                if resource_started <= economic_committed:
+                    raise ValueError(
+                        "resource availability snapshot predates economic financial truth"
+                    )
     if "ACCOUNT" in blocking_resources or any(
         resource in blocking_resources for resource in requested
     ):
@@ -1023,6 +1313,7 @@ def load_account_resource_availability_evidence(
         "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
         "account_id": _text(payload.get("account_id"), name="account_id"),
         "environment": _text(payload.get("environment"), name="environment").upper(),
+        "provider_environment": domain,
         "snapshot_mode": _text(snapshot.get("mode"), name="snapshot.mode").upper(),
         "snapshot_query_completed_at": completed_text,
         "resource_snapshot_id": _text(
@@ -1034,7 +1325,7 @@ def load_account_resource_availability_evidence(
         # risk/admission events and must compare identically after restart.
         "resource_evidence_refs": list(normalized_evidence_refs),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
-        "age_seconds": str(age_seconds),
+        "age_seconds": age_seconds_text,
         "availability": {
             resource: str(amount)
             for resource, amount in sorted(availability.items())
@@ -1075,20 +1366,58 @@ def load_account_resource_availability_evidence(
         )
     return evidence
 
+def _selected_checkpoint_provider_environment(
+    checkpoint: Mapping[str, Any],
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is required")
+    selected = provider_environment
+    if selected is None:
+        selected = payload.get("provider_environment")
+    if selected is None:
+        resource_scope = payload.get("resource_availability")
+        if isinstance(resource_scope, Mapping):
+            selected = resource_scope.get("provider_environment")
+    if selected is None:
+        if _text(provider_id, name="provider_id").upper() == "BYBIT":
+            raise ValueError(
+                "legacy BYBIT reconciliation checkpoint lacks exact provider_environment"
+            )
+        selected = environment
+    return _provider_environment_scope(
+        provider_id=_text(provider_id, name="provider_id").upper(),
+        environment=_text(environment, name="environment").upper(),
+        provider_environment=selected,
+    )
+
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -1110,14 +1439,22 @@ def unresolved_provider_activity_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
@@ -1141,6 +1478,8 @@ def unknown_submissions_from_dispatch(
     aggregate_ids: Mapping[str, str] | None = None,
     environment: str | None = None,
     account_id: str | None = None,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
 ) -> tuple[UnknownSubmission, ...]:
     """Rebuild ambiguous outbound attempts from durable Submission* events.
 
@@ -1157,7 +1496,7 @@ def unknown_submissions_from_dispatch(
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
 
-    durable_ids: dict[str, str] = {}
+    durable_ids: dict[str, tuple[str, ...]] = {}
     scoped_lookup = environment is not None or account_id is not None
     if scoped_lookup:
         if environment is None or account_id is None:
@@ -1170,11 +1509,26 @@ def unknown_submissions_from_dispatch(
             )
         lookup_environment = _text(environment, name="environment").upper()
         lookup_account = _text(account_id, name="account_id")
+        if (provider_id is None) != (provider_environment is None):
+            raise ValueError(
+                "provider_id and provider_environment must be supplied together"
+            )
         for attempt_key in normalized:
-            durable_ids[attempt_key] = submission_attempt_aggregate_id(
-                environment=lookup_environment,
-                account_id=lookup_account,
-                attempt_id=attempt_key,
+            durable_attempt_keys = (attempt_key,)
+            if provider_id is not None:
+                durable_attempt_keys = provider_domain_submission_attempt_keys(
+                    attempt_id=attempt_key,
+                    provider_id=provider_id,
+                    environment=lookup_environment,
+                    provider_environment=provider_environment,
+                )
+            durable_ids[attempt_key] = tuple(
+                submission_attempt_aggregate_id(
+                    environment=lookup_environment,
+                    account_id=lookup_account,
+                    attempt_id=durable_attempt_key,
+                )
+                for durable_attempt_key in durable_attempt_keys
             )
     elif aggregate_ids is not None:
         if not isinstance(aggregate_ids, Mapping):
@@ -1182,19 +1536,29 @@ def unknown_submissions_from_dispatch(
         for raw_attempt_id, raw_aggregate_id in aggregate_ids.items():
             attempt_key = _text(raw_attempt_id, name="aggregate_ids attempt_id")
             aggregate_id = _text(raw_aggregate_id, name="aggregate_id")
-            if attempt_key in durable_ids and durable_ids[attempt_key] != aggregate_id:
+            candidate = (aggregate_id,)
+            if attempt_key in durable_ids and durable_ids[attempt_key] != candidate:
                 raise ValueError("aggregate_ids contains conflicting attempt identity")
-            durable_ids[attempt_key] = aggregate_id
+            durable_ids[attempt_key] = candidate
         extra = set(durable_ids) - set(normalized)
         if extra:
             raise ValueError("aggregate_ids contains identities outside attempt_ids")
 
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
-        aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        events = store.load_events("submission_attempt", aggregate_id)
-        if not events:
+        aggregate_candidates = durable_ids.get(attempt_id, (attempt_id,))
+        located = [
+            (aggregate_id, events)
+            for aggregate_id in aggregate_candidates
+            if (events := store.load_events("submission_attempt", aggregate_id))
+        ]
+        if not located:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
+        if len(located) != 1:
+            raise ValueError(
+                "submission attempt exists under multiple durable identity versions"
+            )
+        aggregate_id, events = located[0]
         first = events[0]
         if first["event_type"] != "SubmissionPrepared":
             raise ValueError(
@@ -1203,9 +1567,21 @@ def unknown_submissions_from_dispatch(
         payload = first["payload"]
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
-        provider_id = _text(
+        durable_provider_id = _text(
             payload.get("provider"), name="provider"
         ).upper()
+        durable_provider_environment = payload.get("provider_environment")
+        if durable_provider_environment is None:
+            if durable_provider_id == "BYBIT":
+                raise ValueError(
+                    "legacy BYBIT SubmissionPrepared lacks exact provider_environment"
+                )
+            durable_provider_environment = payload.get("environment")
+        durable_provider_environment = _provider_environment_scope(
+            provider_id=durable_provider_id,
+            environment=_text(payload.get("environment"), name="environment").upper(),
+            provider_environment=durable_provider_environment,
+        )
         account_id = _text(
             payload.get("account_id"), name="account_id"
         )
@@ -1219,6 +1595,20 @@ def unknown_submissions_from_dispatch(
             raise ValueError(
                 "SubmissionPrepared durable scope does not match requested scope"
             )
+        if provider_id is not None:
+            requested_provider = _text(provider_id, name="provider_id").upper()
+            requested_domain = _provider_environment_scope(
+                provider_id=requested_provider,
+                environment=lookup_environment,
+                provider_environment=provider_environment,
+            )
+            if (
+                durable_provider_id != requested_provider
+                or durable_provider_environment != requested_domain
+            ):
+                raise ValueError(
+                    "SubmissionPrepared provider domain does not match requested scope"
+                )
         environment = durable_environment
         intent_id = _text(
             payload.get("intent_id"), name="intent_id"
@@ -1242,9 +1632,10 @@ def unknown_submissions_from_dispatch(
                     attempt_id=attempt_id,
                     intent_id=intent_id,
                     client_order_id=client_order_id,
-                    provider_id=provider_id,
+                    provider_id=durable_provider_id,
                     account_id=account_id,
                     environment=environment,
+                    provider_environment=durable_provider_environment,
                     started_at=started_at,
                 )
             )

@@ -13,7 +13,7 @@ from .economics import build_economic_report
 from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
 from .simulation_session import run_canonical_simulation
 from .simulation_status import inspect_canonical_simulation, SimulationStateChanging
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 
 def _jsonable_result(result) -> dict:

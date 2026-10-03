@@ -347,7 +347,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Blind retry; claiming exactly-once external execution; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: EXECUTION / guarded-dispatch; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Guarded durable dispatch is present on main with persist-before-send, final authority recheck, deterministic client identity, timeout/crash UNKNOWN handling and no blind resend. Remaining work: qualified real-provider transport seams, quota interception and crash-at-every-send-point qualification.
+- **Status evidence / remaining work:** Guarded durable dispatch remains IN_PROGRESS. On the exact #1219 source lineage, source-only Host authority now includes a process-held P-256 issuer for signed authenticated-read Prepared bindings and one-shot definitive-response receipts that bind exact provider/account/entity/runtime/provider_environment/route/query/C/Q/build/credential/network/transport identity; the ordinary same-process Python provider-origin token remains explicitly falsified by test_provider_read_origin_authority.py and is not accepted as production origin. Remaining blockers: compose the signed Host receipt with the canonical credential-bearing HTTP cut and JournalStore Prepared/Observed chronology, pin/verify issuer session across restart without caller-selected trust roots, remove the Python self-mint path only after that bridge exists, qualify remaining real-provider/socket surfaces, and run exact-SHA focused plus dual-OS Verify. No PAPER/LIVE/provider or economic-edge qualification follows from the source-only issuer.
 
 ### WP-19 — order-projection
 
@@ -823,7 +823,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Loopback assumed unauthenticated-safe; keys in logs/artifacts; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: SECURITY / secrets-auth; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Security/auth foundation is present on main without granting live trading authority. Remaining work: OS-backed secret storage, redaction/export tests, authentication hardening and Windows qualification.
+- **Status evidence / remaining work:** Security/auth remains IN_PROGRESS. The current source-only credential frontier advances ProtectedCredentialVault to v3 and binds exact provider_environment through persistent handle metadata/entropy, SecurityBoundary resolve+lease and Bybit authenticated read/write credential-domain checks; legacy v2 requires explicit reattachment and TESTNET/DEMO cannot alias merely because both map to PAPER. Existing exact-handle ingress, frozen vault path/leaf checks, generation lease and TRADE rotation handover barrier are retained. Remaining blockers: exact-SHA execution, delivered Windows DPAPI/ACL/crash-durable qualification, operator credential-management UX, redaction/export/auth hardening, and the independent old-process/session/credential fencing authority owned by WP-49/#696.
 
 ### WP-47 — decision-traces
 
@@ -874,7 +874,7 @@ Generated from `control/work-packages/bank.json` by `python tools/baseline.py re
 - **Forbidden scope:** Copying only live DB main file; promising zero loss after unbacked disk destruction; No unrelated shared-contract or sibling-provider mutation.
 - **Conflicts:** Exclusive mutation key: RECOVERY / backup-restore; Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path.
 - **Status:** IN_PROGRESS
-- **Status evidence / remaining work:** Backup/restore foundation is present on main in mvp/autotrade_mvp/backup.py with SQLite backup API use, content verification, artifact integrity, atomic staging restore and fail-closed post-restore reconciliation requirement. Remaining work: qualified gate clearing, sender fencing integration, interrupted/power-loss drills and clean-machine release evidence.
+- **Status evidence / remaining work:** Backup/restore remains IN_PROGRESS and fail-closed. Current source deliberately does not allow caller booleans or self-authored/hash-only fence receipts to satisfy the production takeover boundary; seven positive restore acceptance paths remain blocked until independently issued external host/process/session/credential fencing is composed with current journal-issued reconciliation evidence. Remaining work: canonical #696 fence issuer integration, exact owner/epoch/restore-manifest binding, restart revalidation, interrupted/power-loss drills and clean-machine release evidence. No restored state may reacquire financial sender authority before those proofs are current.
 
 ### WP-50 — windows-packaging
 

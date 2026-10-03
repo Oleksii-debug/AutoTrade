@@ -29,6 +29,10 @@ from autotrade_numeric.exact_decimal import (
 
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
+from .provider_domain import (
+    ProviderDomainError,
+    normalize_provider_environment as _normalize_provider_environment,
+)
 from .provider_response_limits import require_provider_json_depth
 
 
@@ -223,6 +227,7 @@ class AuthenticatedReadQueryBinding:
     account_id: str
     entity_id: str
     environment: str
+    provider_environment: str
     capability_snapshot_id: str
     instrument_version: str
     surface: Surface
@@ -248,6 +253,19 @@ class AuthenticatedReadQueryBinding:
             self,
             "environment",
             _text(self.environment, "environment").upper(),
+        )
+        try:
+            provider_environment = _normalize_provider_environment(
+                provider_id=provider,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ProviderCoreError(str(error)) from error
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
         )
         object.__setattr__(
             self,
@@ -304,6 +322,7 @@ class AuthenticatedReadQueryBinding:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
             raise ProviderCoreError("provider-read provenance provider mismatch")
@@ -318,6 +337,19 @@ class AuthenticatedReadQueryBinding:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-read provenance environment mismatch")
+        if provider_environment is not None:
+            try:
+                required_provider_environment = _normalize_provider_environment(
+                    provider_id=self.provider_id,
+                    environment=self.environment,
+                    provider_environment=provider_environment,
+                )
+            except ProviderDomainError as error:
+                raise ProviderCoreError(str(error)) from error
+            if required_provider_environment != self.provider_environment:
+                raise ProviderCoreError(
+                    "provider-read provenance provider environment mismatch"
+                )
 
 
 def prepare_authenticated_read_query(
@@ -328,6 +360,7 @@ def prepare_authenticated_read_query(
     query: Mapping[str, str] | None,
     at: datetime,
     permission_scope: str = "ORDER.READ",
+    provider_environment: str | None = None,
 ) -> AuthenticatedReadQueryBinding:
     """Prepare one authenticated query from canonical capability identity.
 
@@ -335,8 +368,8 @@ def prepare_authenticated_read_query(
     from the VERIFIED capability snapshot before any provider response exists.
     """
 
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
     point = _utc(at, "at")
     scope = _text(permission_scope, "permission_scope")
     if (
@@ -350,6 +383,23 @@ def prepare_authenticated_read_query(
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
+    try:
+        provider_domain = _normalize_provider_environment(
+            provider_id=provider,
+            environment=capability.environment,
+            provider_environment=provider_environment,
+        )
+        capability_provider_domain = _normalize_provider_environment(
+            provider_id=provider,
+            environment=capability.environment,
+            provider_environment=capability.provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ProviderCoreError(str(error)) from error
+    if provider_domain != capability_provider_domain:
+        raise ProviderCoreError(
+            "authenticated-read provider environment does not match capability"
+        )
     normalized_endpoint = _text(endpoint, "endpoint")
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
@@ -362,6 +412,7 @@ def prepare_authenticated_read_query(
         "account_id": capability.account_id,
         "entity_id": capability.entity_id,
         "environment": capability.environment,
+        "provider_environment": provider_domain,
         "capability_snapshot_id": capability.snapshot_id,
         "instrument_version": capability.instrument_version,
         "surface": surface.value if isinstance(surface, Surface) else str(surface),
@@ -382,6 +433,7 @@ def prepare_authenticated_read_query(
         account_id=capability.account_id,
         entity_id=capability.entity_id,
         environment=capability.environment,
+        provider_environment=provider_domain,
         capability_snapshot_id=capability.snapshot_id,
         instrument_version=capability.instrument_version,
         surface=surface,
@@ -411,9 +463,9 @@ class ProviderResponseObservation:
             raise ProviderCoreError(
                 "provider response observations must come from exact response bytes"
             )
-        if not isinstance(self.query_binding, AuthenticatedReadQueryBinding):
+        if type(self.query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
         if (
             isinstance(self.http_status, bool)
@@ -470,6 +522,10 @@ class ProviderResponseObservation:
     def environment(self) -> str:
         return self.query_binding.environment
 
+    @property
+    def provider_environment(self) -> str:
+        return self.query_binding.provider_environment
+
     def require_scope(
         self,
         *,
@@ -478,6 +534,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         self.query_binding.require_scope(
             provider_id=provider_id,
@@ -485,6 +542,7 @@ class ProviderResponseObservation:
             endpoint=endpoint,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
 
@@ -495,8 +553,8 @@ def observe_authenticated_json_response(
     response_bytes: bytes,
     observed_at: datetime,
 ) -> ProviderResponseObservation:
-    if not isinstance(query_binding, AuthenticatedReadQueryBinding):
-        raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
     if (
         isinstance(http_status, bool)
         or not isinstance(http_status, int)
@@ -552,6 +610,9 @@ class ProviderSubmissionObservation:
     payload: object
     _observation_token: InitVar[object | None] = None
 
+    def __init_subclass__(cls, **_kwargs) -> None:
+        raise TypeError("ProviderSubmissionObservation is sealed")
+
     def __post_init__(self, _observation_token: object | None) -> None:
         if _observation_token is not _SUBMISSION_OBSERVED_RESPONSE_TOKEN:
             raise ProviderCoreError(
@@ -559,6 +620,10 @@ class ProviderSubmissionObservation:
             )
         if not isinstance(self.response_binding, SubmissionResponseBinding):
             raise TypeError("response_binding must be SubmissionResponseBinding")
+        if self.response_binding.terminal_state != "SENT":
+            raise ProviderCoreError(
+                "provider submission observation requires definitive SENT response"
+            )
         endpoint = _text(self.endpoint, "endpoint")
         if not endpoint.startswith("/") or "://" in endpoint:
             raise ProviderCoreError(
@@ -602,12 +667,20 @@ class ProviderSubmissionObservation:
         return self.response_binding.environment
 
     @property
+    def provider_environment(self) -> str:
+        return self.response_binding.provider_environment
+
+    @property
     def client_order_id(self) -> str:
         return self.response_binding.client_order_id
 
     @property
     def response_sha256(self) -> str:
         return self.response_binding.response_sha256
+
+    @property
+    def http_status(self) -> int | None:
+        return self.response_binding.http_status
 
     @property
     def observed_at(self) -> str:
@@ -627,6 +700,7 @@ class ProviderSubmissionObservation:
         instrument_versions: tuple[str, ...],
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
@@ -646,6 +720,21 @@ class ProviderSubmissionObservation:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
+        if provider_environment is not None:
+            try:
+                expected_provider_environment = _normalize_provider_environment(
+                    provider_id=self.provider_id,
+                    environment=self.environment,
+                    provider_environment=provider_environment,
+                )
+            except ProviderDomainError as error:
+                raise ProviderCoreError(
+                    "provider-write provenance provider_environment is invalid"
+                ) from error
+            if expected_provider_environment != self.provider_environment:
+                raise ProviderCoreError(
+                    "provider-write provenance provider_environment mismatch"
+                )
         if (
             client_order_id is not None
             and _text(client_order_id, "client_order_id") != self.client_order_id
@@ -666,6 +755,14 @@ def observe_submission_json_response(
 
     if not isinstance(response_binding, SubmissionResponseBinding):
         raise TypeError("response_binding must be SubmissionResponseBinding")
+    if response_binding.terminal_state != "SENT":
+        raise ProviderCoreError(
+            "provider submission observation requires definitive SENT response"
+        )
+    if response_binding.response_encoding != "utf-8-json":
+        raise ProviderCoreError(
+            "provider-write JSON observation requires durable utf-8-json response bytes"
+        )
     provider = _text(provider_id, "provider_id").upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
@@ -716,6 +813,8 @@ def observe_submission_json_response(
             "request_sha256": response_binding.request_hash,
             "submission_scope_hash": response_binding.submission_scope_hash,
             "response_sha256": response_binding.response_sha256,
+            "http_status": response_binding.http_status,
+            "terminal_state": response_binding.terminal_state,
             "sent_at": response_binding.sent_at,
             "endpoint": normalized_endpoint,
         },

@@ -29,8 +29,10 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise FuturesError(f"{name} must use exact decimal input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise FuturesError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise FuturesError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -265,7 +267,7 @@ class FuturesSettlementEvidence:
             or self.instrument_version < 1
         ):
             raise FuturesError("instrument_version must be a positive integer")
-        if not isinstance(self.scope, FuturesSettlementScope):
+        if type(self.scope) is not FuturesSettlementScope:
             raise FuturesError("settlement scope is required")
         object.__setattr__(
             self, "effective_at", _utc(self.effective_at, "effective_at")
@@ -313,7 +315,7 @@ def _require_settlement_contract(
     scope: FuturesSettlementScope,
     evidence: FuturesSettlementEvidence,
 ) -> None:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     version = contract.canonical_instrument
     if version is None:
@@ -343,7 +345,7 @@ def _validate_settlement_history(
     history: tuple[FuturesSettlementEvidence, ...],
     last_price: Decimal,
 ) -> None:
-    if not isinstance(scope, FuturesSettlementScope):
+    if type(scope) is not FuturesSettlementScope:
         raise FuturesError("settlement_scope is required")
     if not isinstance(history, tuple):
         raise FuturesError("settlement_history must be an immutable tuple")
@@ -434,7 +436,7 @@ def _settlement_duplicate_or_require_new(
 
 
 def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     material = {
         "settlement_id": evidence.settlement_id,

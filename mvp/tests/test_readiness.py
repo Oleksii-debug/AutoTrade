@@ -116,9 +116,9 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertIn("reconciliation_lag_exceeded", over.blockers)
 
     def test_float_timing_inputs_are_rejected(self):
-        with self.assertRaisesRegex(ReadinessError, "exact decimal"):
+        with self.assertRaisesRegex(ReadinessError, "exact.*decimal"):
             healthy(clock_skew_seconds=0.1)
-        with self.assertRaisesRegex(ReadinessError, "exact decimal"):
+        with self.assertRaisesRegex(ReadinessError, "exact.*decimal"):
             healthy(reconciliation_lag_seconds=1.0)
 
     def test_lease_like_ownership_without_external_fencing_never_becomes_ready(self):
@@ -221,6 +221,30 @@ class RuntimeReadinessTests(unittest.TestCase):
             "new_exposure_protection_path_unqualified",
             result.blockers,
         )
+
+    def test_decimal_subclass_cannot_supply_readiness_threshold_authority(self):
+        class ForgedDecimal(Decimal):
+            pass
+
+        with self.assertRaisesRegex(ReadinessError, "exact finite decimal"):
+            healthy(clock_skew_seconds=ForgedDecimal("0"))
+
+    def test_runtime_signal_subclass_is_rejected_before_virtual_field_reads(self):
+        class ForgedSignals(RuntimeSafetySignals):
+            def __getattribute__(self, name):
+                if name == "schema_compatible":
+                    raise AssertionError("subclass field dispatch must not run")
+                return super().__getattribute__(name)
+
+        forged = object.__new__(ForgedSignals)
+        with self.assertRaisesRegex(TypeError, "exact RuntimeSafetySignals"):
+            evaluate_readiness(forged)
+
+    def test_mutated_noncanonical_signal_field_fails_during_terminal_snapshot(self):
+        signals = healthy()
+        object.__setattr__(signals, "journal_writable", 1)
+        with self.assertRaisesRegex(ReadinessError, "boolean"):
+            evaluate_readiness(signals)
 
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):

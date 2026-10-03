@@ -346,14 +346,52 @@ class SecurityBoundaryTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
-    def test_rotation_invalidates_old_generation(self):
+    def test_trade_rotation_cannot_activate_without_external_fence_workflow(self):
         old_handle = self._credential()
+        before = self.boundary.describe_handle(old_handle.handle_id)
+        with self.assertRaisesRegex(
+            PermissionError,
+            "verified sender-fence and reconciliation workflow",
+        ):
+            self.boundary.rotate_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=old_handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+        self.assertEqual(self.boundary.describe_handle(old_handle.handle_id), before)
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=old_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "top-secret",
+        )
+
+    def test_read_rotation_remains_local_and_invalidates_old_generation(self):
+        old_handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="read-secret",
+        )
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,
             handle_id=old_handle.handle_id,
             owner_identity="windows-user-1",
-            new_secret_value="rotated-secret",
+            new_secret_value="rotated-read-secret",
         )
         self.assertEqual(new_handle.generation, old_handle.generation + 1)
         with self.assertRaisesRegex(PermissionError, "stale"):
@@ -365,19 +403,77 @@ class SecurityBoundaryTests(unittest.TestCase):
                 account_id="paper-1",
                 provider="SIMULATED",
                 environment="PAPER",
+                purpose="READ",
+            )
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=new_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+            ),
+            "rotated-read-secret",
+        )
+
+    def test_credential_handle_subclass_is_rejected_before_vault_resolution(self):
+        handle = self._credential()
+
+        class HostileHandle(type(handle)):
+            pass
+
+        forged = HostileHandle(
+            handle.handle_id,
+            handle.account_id,
+            handle.provider,
+            handle.environment,
+            handle.purpose,
+            handle.generation,
+            handle.provider_environment,
+        )
+        with self.assertRaisesRegex(PermissionError, "Credential handle is invalid"):
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
                 purpose="TRADE",
             )
-        resolved = self.boundary.resolve_for_execution(
-            self.owner.token,
-            origin=self.owner.origin,
-            handle=new_handle,
-            execution_identity="windows-user-1",
-            account_id="paper-1",
-            provider="SIMULATED",
-            environment="PAPER",
-            purpose="TRADE",
-        )
-        self.assertEqual(resolved, "rotated-secret")
+        with self.assertRaisesRegex(PermissionError, "Credential handle is invalid"):
+            with self.boundary.lease_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ):
+                self.fail("handle subclass must not reach vault lease")
+
+    def test_string_subclass_is_rejected_before_security_scope_normalization(self):
+        class HostileText(str):
+            def strip(self):
+                return "paper-1"
+
+        with self.assertRaises(ValueError):
+            self.boundary.register_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                owner_identity="windows-user-1",
+                account_id=HostileText("attacker"),
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value="read-secret",
+            )
 
     def test_withdrawal_credentials_are_not_supported(self):
         with self.assertRaises(PermissionError):
@@ -408,6 +504,32 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(redacted["nested"]["Authorization"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["safe"], "visible")
         self.assertEqual(redacted["rows"][0]["refresh_token"], "[REDACTED]")
+
+    def test_diagnostic_redaction_scrubs_secret_material_from_mapping_keys(self):
+        value = {
+            "Authorization: Bearer SECURITY-KEY-SECRET": "ignored",
+            "https://security-user:SECURITY-URL-PASSWORD@provider.test/path": "visible",
+            "api_key=SECURITY-ASSIGNMENT-ONE": "ignored-one",
+            "api_key=SECURITY-ASSIGNMENT-TWO": "ignored-two",
+            "safe": "visible",
+        }
+        redacted = self.boundary.redact(value)
+        serialized = repr(redacted)
+        for leaked in (
+            "SECURITY-KEY-SECRET",
+            "SECURITY-URL-PASSWORD",
+            "SECURITY-ASSIGNMENT-ONE",
+            "SECURITY-ASSIGNMENT-TWO",
+        ):
+            self.assertNotIn(leaked, serialized)
+        self.assertEqual(redacted["Authorization: [REDACTED]"], "[REDACTED]")
+        self.assertEqual(
+            redacted["https://[REDACTED]@provider.test/path"],
+            "[REDACTED]",
+        )
+        self.assertEqual(redacted["api_key=[REDACTED]"], "[REDACTED]")
+        self.assertEqual(redacted["api_key=[REDACTED] [2]"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "visible")
 
     def test_handle_description_never_contains_secret_value(self):
         handle = self._credential()
@@ -849,7 +971,16 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("[REDACTED]", repr(redacted))
 
     def test_rotated_and_revoked_secret_values_remain_redacted(self):
-        old_handle = self._credential()
+        old_handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="top-secret",
+        )
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,

@@ -30,7 +30,7 @@ from mvp.autotrade_mvp.reconciliation import (
     ReconciliationResult,
     SubmissionResolution,
 )
-from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
 
@@ -603,6 +603,31 @@ class BackupRestoreTests(unittest.TestCase):
                 restore_backup(backup, root / "restored")
             self.assertFalse((root / "restored").exists())
 
+    @staticmethod
+    def _assume_externally_authorized_owner(
+        controller: RecoveryController,
+        owner_id: str,
+    ) -> OwnerFence:
+        """Fixture-only precondition for downstream restore-gate tests.
+
+        Production durable takeover deliberately remains fail-closed until an
+        independent external fence issuer exists. These backup tests exercise
+        reconciliation/fence-proof semantics after that authority decision; the
+        public takeover boundary is covered separately by
+        test_recovery_takeover_authority.py.
+        """
+        durable = controller._latest_durable_owner()
+        if durable is None:
+            raise AssertionError("fixture requires an existing durable owner")
+        candidate = OwnerFence(owner_id=owner_id, epoch=durable.epoch + 1)
+        controller._append_durable_owner(candidate)
+        controller.owner = candidate
+        controller.state = HostState.RECOVERING
+        controller.provider_reconciled = False
+        controller.reason_codes = {"startup_reconciliation_required"}
+        controller._recover_scoped_submission_uncertainty_from_owner_scope()
+        return candidate
+
     def _restored_with_owner(
         self,
         root: Path,
@@ -611,7 +636,10 @@ class BackupRestoreTests(unittest.TestCase):
         (state / "checkpoint.json").unlink()
         (state / "learning-evidence.jsonl").unlink()
         source_store = JournalStore(state / "journal.sqlite3")
-        source = RecoveryController(owner_store=source_store)
+        source = RecoveryController(
+            owner_store=source_store,
+            owner_scope="PAPER:paper-account",
+        )
         source.start("source-owner")
         backup = create_backup(state, artifacts, root / "backup")
         restored = restore_backup(backup, root / "restored")
@@ -621,14 +649,17 @@ class BackupRestoreTests(unittest.TestCase):
             )
         )
         restored_store = JournalStore(restored / "state" / "journal.sqlite3")
-        controller = RecoveryController(owner_store=restored_store)
-        controller.start("restored-owner")
+        controller = RecoveryController(
+            owner_store=restored_store,
+            owner_scope="PAPER:paper-account",
+        )
+        self._assume_externally_authorized_owner(controller, "restored-owner")
         checkpoint_id = self._record_durable_ready(
             controller, restored_store, reconciliation_id="restore-readiness"
         )
         return restored, controller, marker, checkpoint_id
 
-    def test_restore_completion_requires_reconciliation_and_immutable_fence(self):
+    def test_restore_completion_rejects_self_authored_fence_even_with_reconciliation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
@@ -641,18 +672,26 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            marker_before = marker_path.read_bytes()
 
-            proof = complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(fence,),
-                completed_at=_after_restore(marker, 2),
+            with self.assertRaisesRegex(
+                BackupError,
+                "independently issued external sender fence authority",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=checkpoint_id,
+                    fencing_evidence=(fence,),
+                    completed_at=_after_restore(marker, 2),
+                )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
             )
-
-            self.assertEqual(proof["current_owner_id"], "restored-owner")
-            self.assertEqual(proof["current_owner_epoch"], 2)
-            self.assertFalse(restore_requires_reconciliation(restored))
+            self.assertEqual(marker_path.read_bytes(), marker_before)
 
     def test_restore_completion_rejects_unknown_reconciliation(self):
         with TemporaryDirectory() as directory:
@@ -707,7 +746,10 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             restored, _, marker, _checkpoint_id = self._restored_with_owner(root)
             other_store = JournalStore(root / "other" / "journal.sqlite3")
-            other = RecoveryController(owner_store=other_store)
+            other = RecoveryController(
+                owner_store=other_store,
+                owner_scope="PAPER:paper-account",
+            )
             other.start("other-owner")
             other_checkpoint_id = self._record_durable_ready(
                 other, other_store, reconciliation_id="other-readiness"
@@ -746,14 +788,20 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            controller.transfer_owner(
-                new_owner_id="replacement-owner",
-                old_sender_fenced=True,
-                reconciled=True,
+            replacement_store = JournalStore(
+                restored / "state" / "journal.sqlite3"
+            )
+            controller = RecoveryController(
+                owner_store=replacement_store,
+                owner_scope="PAPER:paper-account",
+            )
+            self._assume_externally_authorized_owner(
+                controller,
+                "replacement-owner",
             )
             checkpoint_id = self._record_durable_ready(
                 controller,
-                JournalStore(restored / "state" / "journal.sqlite3"),
+                replacement_store,
                 reconciliation_id="replacement-readiness",
             )
             second = _publish_sender_fence_evidence(
@@ -778,70 +826,20 @@ class BackupRestoreTests(unittest.TestCase):
                     completed_at=_after_restore(marker, 3),
                 )
 
-            complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(first, second),
-                completed_at=_after_restore(marker, 3),
-            )
-            self.assertFalse(restore_requires_reconciliation(restored))
-
-    def test_restore_completion_semantic_tamper_fails_closed_even_if_rehashed(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
-            fence = _publish_sender_fence_evidence(
-                restored,
-                backup_manifest_sha256=marker["backup_manifest_sha256"],
-                old_owner_id="source-owner",
-                old_owner_epoch=1,
-                new_owner_id="restored-owner",
-                new_owner_epoch=2,
-                fenced_at=_after_restore(marker, 1),
-            )
-            complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(fence,),
-                completed_at=_after_restore(marker, 2),
-            )
-            proof_path = restored / "RESTORE_RECONCILIATION_COMPLETE.json"
-            proof = json.loads(proof_path.read_text(encoding="utf-8"))
-            proof["reconciliation"]["summary"]["complete"] = False
-            proof_bytes = (
-                json.dumps(
-                    proof,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
+            with self.assertRaisesRegex(
+                BackupError,
+                "independently issued external sender fence authority",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=checkpoint_id,
+                    fencing_evidence=(first, second),
+                    completed_at=_after_restore(marker, 3),
                 )
-                + "\n"
-            ).encode("utf-8")
-            proof_path.write_bytes(proof_bytes)
-            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
-            completed_marker = json.loads(
-                marker_path.read_text(encoding="utf-8")
-            )
-            completed_marker["completion_proof_sha256"] = (
-                "sha256:" + sha256(proof_bytes).hexdigest()
-            )
-            marker_path.write_text(
-                json.dumps(
-                    completed_marker,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_newer_reconciliation_checkpoint_reopens_restore_gate(self):
+    def test_content_addressed_fence_receipt_cannot_mint_restore_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
@@ -854,14 +852,48 @@ class BackupRestoreTests(unittest.TestCase):
                 new_owner_epoch=2,
                 fenced_at=_after_restore(marker, 1),
             )
-            complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(fence,),
-                completed_at=_after_restore(marker, 2),
+
+            with self.assertRaisesRegex(
+                BackupError,
+                "content-addressed fencing evidence is not authority",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=checkpoint_id,
+                    fencing_evidence=(fence,),
+                    completed_at=_after_restore(marker, 2),
+                )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            self.assertFalse(
+                (restored / "RESTORE_RECONCILIATION_COMPLETE.json").exists()
             )
-            self.assertFalse(restore_requires_reconciliation(restored))
+
+    def test_newer_reconciliation_checkpoint_cannot_bypass_external_fence_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
+            fence = _publish_sender_fence_evidence(
+                restored,
+                backup_manifest_sha256=marker["backup_manifest_sha256"],
+                old_owner_id="source-owner",
+                old_owner_epoch=1,
+                new_owner_id="restored-owner",
+                new_owner_epoch=2,
+                fenced_at=_after_restore(marker, 1),
+            )
+            with self.assertRaisesRegex(
+                BackupError,
+                "independently issued external sender fence authority",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=checkpoint_id,
+                    fencing_evidence=(fence,),
+                    completed_at=_after_restore(marker, 2),
+                )
 
             store = JournalStore(restored / "state" / "journal.sqlite3")
             owner = controller.owner
@@ -875,35 +907,34 @@ class BackupRestoreTests(unittest.TestCase):
                 owner_epoch=str(owner.epoch),
             )
             self.assertNotEqual(newer["event_id"], checkpoint_id)
+            with self.assertRaisesRegex(
+                BackupError,
+                "independently issued external sender fence authority",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=controller,
+                    reconciliation_checkpoint_event_id=str(newer["event_id"]),
+                    fencing_evidence=(fence,),
+                    completed_at=_after_restore(marker, 3),
+                )
             self.assertTrue(restore_requires_reconciliation(restored))
 
-    def test_new_sender_epoch_after_completion_reopens_restore_gate(self):
+    def test_restart_cannot_advance_sender_epoch_without_external_takeover_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            restored, controller, marker, checkpoint_id = self._restored_with_owner(root)
-            fence = _publish_sender_fence_evidence(
-                restored,
-                backup_manifest_sha256=marker["backup_manifest_sha256"],
-                old_owner_id="source-owner",
-                old_owner_epoch=1,
-                new_owner_id="restored-owner",
-                new_owner_epoch=2,
-                fenced_at=_after_restore(marker, 1),
+            restored, _controller, _marker, _checkpoint_id = self._restored_with_owner(root)
+            later = RecoveryController(
+                owner_store=JournalStore(
+                    restored / "state" / "journal.sqlite3"
+                ),
+                owner_scope="PAPER:paper-account",
             )
-            complete_restore_reconciliation(
-                restored,
-                controller=controller,
-                reconciliation_checkpoint_event_id=checkpoint_id,
-                fencing_evidence=(fence,),
-                completed_at=_after_restore(marker, 2),
-            )
-            self.assertFalse(restore_requires_reconciliation(restored))
-
-            controller.transfer_owner(
-                new_owner_id="later-owner",
-                old_sender_fenced=True,
-                reconciled=True,
-            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued external fence authority",
+            ):
+                later.takeover_durable_owner("later-owner")
             self.assertTrue(restore_requires_reconciliation(restored))
 
     def test_missing_or_corrupt_restore_marker_fails_closed(self):

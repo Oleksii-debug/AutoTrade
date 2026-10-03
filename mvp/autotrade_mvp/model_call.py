@@ -6,10 +6,11 @@ store, or trading sender. Its only authority is the inference-call boundary:
 one deterministic semantic attempt may cross that boundary at most once.
 
 Remote/local adapters are injected. A durable ModelCallStarted event is written
-before adapter invocation. After that point an exception is conservatively
-UNKNOWN and the full reserved ceiling becomes estimated-unbilled until billing
-evidence resolves it. A provider adapter may raise ModelCallNotSent only when it
-can prove the external/local inference boundary was not crossed.
+before adapter invocation. After that point every adapter exception is
+conservatively UNKNOWN and the full reserved ceiling becomes estimated-unbilled
+until billing evidence resolves it. In particular, an injected adapter cannot
+self-author a NOT_SENT proof after ModelCallStarted merely by raising
+ModelCallNotSent.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import re
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from uuid import uuid4
 
@@ -44,7 +46,7 @@ class ModelCallError(RuntimeError):
 
 
 class ModelCallNotSent(ModelCallError):
-    """Adapter proof that no inference boundary was crossed."""
+    """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -456,7 +458,7 @@ ObservationEvidenceResolver = Callable[
     ModelObservationEvidence,
 ]
 BillingEvidenceResolver = Callable[
-    [str, str, Decimal, Mapping[str, object]],
+    [str, str, Mapping[str, object]],
     BillingEvidence,
 ]
 ResultValidator = Callable[[object], bool]
@@ -1474,18 +1476,27 @@ class DurableModelCallOrchestrator:
         try:
             observation = call(binding, cancelled)
         except ModelCallNotSent:
+            # Once ModelCallStarted is durable, the injected adapter is inside
+            # the possibly-billed boundary. Its own exception type is not an
+            # independently authenticated proof that no external/local work
+            # crossed that boundary. Preserve the entire reserved ceiling as
+            # uncertain until billing evidence reconciles it.
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "adapter_proved_not_sent",
-                "released": str(decision.reserved_cost),
+                "reason": "adapter_not_sent_claim_unverified",
+                "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
                 attempt_id=attempt_id,
-                event_type="ModelCallNotSent",
+                event_type="ModelCallUnknown",
                 version=3,
                 payload=payload,
             )
-            self.budget.release(attempt_id)
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
             return self._outcome_from_terminal(
                 self._events(attempt_id)[-1],
                 route=decision,
@@ -1790,19 +1801,19 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None = None,
     ) -> bool:
-        """Reconcile authenticated provider billing for OBSERVED or UNKNOWN calls.
+        """Reconcile independently authenticated billing for OBSERVED or UNKNOWN calls.
 
-        UNKNOWN attempts retain their full reservation as estimated-unbilled.
-        Provider-authenticated invoice evidence may later convert part of that
-        uncertainty into incurred cost without re-entering the inference boundary.
+        The billing resolver, not the caller, is the source of truth for the
+        billed amount. expected_billed is assertion-only and is never presented
+        to the resolver.
         """
 
         return self._reconcile_billing(
             attempt_id=attempt_id,
             billing_id=billing_id,
-            billed=billed,
+            expected_billed=expected_billed,
             observed_only=False,
         )
 
@@ -1811,14 +1822,14 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None = None,
     ) -> bool:
-        """Backward-compatible observed-call-only reconciliation boundary."""
+        """Observed-call-only billing reconciliation with evidence-derived amount."""
 
         return self._reconcile_billing(
             attempt_id=attempt_id,
             billing_id=billing_id,
-            billed=billed,
+            expected_billed=expected_billed,
             observed_only=True,
         )
 
@@ -1827,14 +1838,17 @@ class DurableModelCallOrchestrator:
         *,
         attempt_id: str,
         billing_id: str,
-        billed: object,
+        expected_billed: object | None,
         observed_only: bool,
     ) -> bool:
         attempt = _canonical_text(attempt_id, name="attempt_id")
         billing = _canonical_text(billing_id, name="billing_id")
-        normalized = _exact_decimal(billed, name="billed")
         if type(observed_only) is not bool:
             raise TypeError("observed_only must be boolean")
+
+        expected: Decimal | None = None
+        if expected_billed is not None:
+            expected = _exact_decimal(expected_billed, name="expected_billed")
 
         events = self._events(attempt)
         terminal = next(
@@ -1865,35 +1879,102 @@ class DurableModelCallOrchestrator:
         if not isinstance(terminal_payload, Mapping):
             raise ModelCallError("durable terminal model-call payload is invalid")
 
+        prepared = next(
+            (
+                event
+                for event in events
+                if event.get("event_type") == "ModelCallPrepared"
+            ),
+            None,
+        )
+        if prepared is None or not isinstance(prepared.get("payload"), Mapping):
+            raise ModelCallError(
+                "billing reconciliation lacks durable prepared scope"
+            )
+        prepared_payload = prepared["payload"]
+
         if terminal_type == "ModelCallObserved":
-            scope_payload = terminal_payload
-            if scope_payload.get("billing_id") != billing:
+            if terminal_payload.get("billing_id") != billing:
                 raise ModelCallError(
                     "billing identity does not match the observed model call"
                 )
             scope_name = "observed model call"
         else:
-            prepared = next(
-                (
-                    event
-                    for event in events
-                    if event.get("event_type") == "ModelCallPrepared"
-                ),
-                None,
-            )
-            if prepared is None or not isinstance(prepared.get("payload"), Mapping):
-                raise ModelCallError(
-                    "UNKNOWN billing reconciliation lacks durable prepared scope"
-                )
-            scope_payload = prepared["payload"]
             scope_name = "UNKNOWN model call"
+
+        # Give evidence resolvers a detached, immutable scope. A callback may
+        # inspect durable authority but cannot mutate the object subsequently
+        # used for the acceptance comparison.
+        billing_scope = {
+            "attempt_id": attempt,
+            "request_id": prepared_payload.get("request_id"),
+            "request_identity_digest": prepared_payload.get(
+                "request_identity_digest"
+            ),
+            "budget_id": prepared_payload.get("budget_id"),
+            "environment": prepared_payload.get("environment"),
+            "provider_id": prepared_payload.get("provider_id"),
+            "model_id": prepared_payload.get("model_id"),
+            "revision": prepared_payload.get("revision"),
+            "remote": prepared_payload.get("remote"),
+            "pricing_evidence_id": prepared_payload.get("pricing_evidence_id"),
+            "pricing_evidence_digest": prepared_payload.get(
+                "pricing_evidence_digest"
+            ),
+            "cost_currency": prepared_payload.get("cost_currency"),
+            "terminal_state": (
+                "OBSERVED" if terminal_type == "ModelCallObserved" else "UNKNOWN"
+            ),
+            "provider_request_id": (
+                terminal_payload.get("provider_request_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "provider_response_id": (
+                terminal_payload.get("provider_response_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "usage_id": (
+                terminal_payload.get("usage_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_digest": (
+                terminal_payload.get("observation_digest")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_id": (
+                terminal_payload.get("observation_evidence_id")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_digest": (
+                terminal_payload.get("observation_evidence_digest")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+            "observation_evidence_issuer": (
+                terminal_payload.get("observation_evidence_issuer")
+                if terminal_type == "ModelCallObserved"
+                else None
+            ),
+        }
+        try:
+            frozen_scope = MappingProxyType(
+                json.loads(canonical_json(billing_scope))
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelCallError(
+                "durable billing scope cannot be canonicalized"
+            ) from error
 
         try:
             evidence = self.billing_evidence_resolver(
                 attempt,
                 billing,
-                normalized,
-                scope_payload,
+                frozen_scope,
             )
         except Exception as error:
             raise ModelCallError(
@@ -1909,14 +1990,17 @@ class DurableModelCallOrchestrator:
         if (
             evidence.attempt_id != attempt
             or evidence.billing_id != billing
-            or evidence.billed != normalized
-            or evidence.provider_id != scope_payload.get("provider_id")
-            or evidence.model_id != scope_payload.get("model_id")
-            or evidence.revision != scope_payload.get("revision")
-            or evidence.cost_currency != scope_payload.get("cost_currency")
+            or evidence.provider_id != billing_scope.get("provider_id")
+            or evidence.model_id != billing_scope.get("model_id")
+            or evidence.revision != billing_scope.get("revision")
+            or evidence.cost_currency != billing_scope.get("cost_currency")
         ):
             raise ModelCallError(
                 f"billing evidence scope does not match the {scope_name}"
+            )
+        if expected is not None and evidence.billed != expected:
+            raise ModelCallError(
+                "billing evidence amount does not match caller expectation"
             )
 
         evidence_payload = {
@@ -1955,5 +2039,5 @@ class DurableModelCallOrchestrator:
         return self.budget.reconcile_unbilled(
             billing_id=billing,
             request_id=attempt,
-            billed=normalized,
+            billed=evidence.billed,
         )

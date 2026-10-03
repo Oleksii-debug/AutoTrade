@@ -7,9 +7,11 @@ import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.windows_secrets import (
     DpapiCurrentUserProtector,
+    PersistentCredentialHandle,
     ProtectedCredentialVault,
     SecretVaultError,
 )
@@ -598,14 +600,188 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 f"secret-{index}",
             )
 
-    def test_legacy_v1_vault_requires_explicit_reattachment(self):
-        legacy = {"version": 1, "records": {}}
-        self.path.write_text(json.dumps(legacy), encoding="utf-8")
-        with self.assertRaisesRegex(SecretVaultError, "reattachment"):
-            ProtectedCredentialVault(
-                self.path,
-                protector=DeterministicProtector(),
+    def test_legacy_v1_v2_vaults_require_explicit_reattachment(self):
+        for version in (1, 2):
+            with self.subTest(version=version):
+                legacy = {"version": version, "records": {}}
+                self.path.write_text(json.dumps(legacy), encoding="utf-8")
+                with self.assertRaisesRegex(SecretVaultError, "reattachment"):
+                    ProtectedCredentialVault(
+                        self.path,
+                        protector=DeterministicProtector(),
+                    )
+
+    def test_bybit_provider_environment_is_bound_to_ciphertext_scope(self):
+        testnet_path = Path(self.directory.name) / "bybit-testnet.json"
+        demo_path = Path(self.directory.name) / "bybit-demo.json"
+        testnet = ProtectedCredentialVault(
+            testnet_path,
+            protector=DeterministicProtector(),
+        )
+        demo = ProtectedCredentialVault(
+            demo_path,
+            protector=DeterministicProtector(),
+        )
+        common = dict(
+            handle_id="cred-bybit",
+            owner_identity="windows-user-1",
+            account_id="paper-bybit",
+            provider="BYBIT",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="same-secret",
+        )
+        testnet_handle = testnet.register(
+            **common,
+            provider_environment="TESTNET",
+        )
+        demo_handle = demo.register(
+            **common,
+            provider_environment="DEMO",
+        )
+        self.assertEqual(testnet_handle.provider_environment, "TESTNET")
+        self.assertEqual(demo_handle.provider_environment, "DEMO")
+        testnet_state = json.loads(testnet_path.read_text(encoding="utf-8"))
+        demo_state = json.loads(demo_path.read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            testnet_state["records"]["cred-bybit"]["ciphertext"],
+            demo_state["records"]["cred-bybit"]["ciphertext"],
+        )
+        self.assertEqual(
+            testnet.resolve(
+                testnet_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-bybit",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="READ",
+            ),
+            "same-secret",
+        )
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            testnet.resolve(
+                testnet_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-bybit",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="DEMO",
+                purpose="READ",
             )
+
+    def test_reattachment_manifest_retains_exact_provider_environment(self):
+        handle = self.vault.register(
+            handle_id="cred-bybit-reattach",
+            owner_identity="windows-user-1",
+            account_id="paper-bybit",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+            purpose="READ",
+            secret_value="read-secret",
+        )
+        manifest = self.vault.export_reattachment_manifest()
+        requirements = ProtectedCredentialVault.validate_reattachment_manifest(manifest)
+        self.assertEqual(len(requirements), 1)
+        self.assertEqual(requirements[0].handle, handle)
+        self.assertEqual(requirements[0].handle.provider_environment, "DEMO")
+
+    def test_string_subclass_cannot_enter_credential_scope_or_secret_value(self):
+        class HostileText(str):
+            def strip(self):
+                return "windows-user-1"
+
+            def encode(self, *args, **kwargs):
+                raise AssertionError("hostile string encode must not execute")
+
+        with self.assertRaises(SecretVaultError):
+            self.vault.register(
+                owner_identity=HostileText("attacker"),
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value="read-secret",
+            )
+        with self.assertRaises(SecretVaultError):
+            self.vault.register(
+                owner_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value=HostileText("attacker"),
+            )
+
+    def test_generation_subclass_is_rejected_without_numeric_callback(self):
+        class HostileGeneration(int):
+            def __lt__(self, other):
+                raise AssertionError("hostile generation comparison must not execute")
+
+        with self.assertRaises(SecretVaultError):
+            PersistentCredentialHandle(
+                handle_id="cred-hostile-generation",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                generation=HostileGeneration(1),
+            )
+
+    def test_handle_subclass_cannot_enter_resolution_lease_or_mutation(self):
+        handle = self.vault.register(
+            handle_id="cred-exact-handle",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="read-secret",
+        )
+
+        class HostileHandle(PersistentCredentialHandle):
+            pass
+
+        forged = HostileHandle(
+            handle.handle_id,
+            handle.account_id,
+            handle.provider,
+            handle.environment,
+            handle.purpose,
+            handle.generation,
+            handle.provider_environment,
+        )
+        operations = (
+            lambda: self.vault.resolve(
+                forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+            ),
+            lambda: self.vault.lease(
+                forged,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+            ).__enter__(),
+            lambda: self.vault.rotate(
+                forged,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated",
+            ),
+            lambda: self.vault.revoke(
+                forged,
+                execution_identity="windows-user-1",
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation), self.assertRaises(TypeError):
+                operation()
 
     def test_duplicate_handle_and_corrupt_vault_fail_closed(self):
         self.register()
@@ -867,6 +1043,43 @@ class CredentialReattachmentManifestTests(unittest.TestCase):
         for bad in bad_cases:
             with self.subTest(bad=bad), self.assertRaises(SecretVaultError):
                 ProtectedCredentialVault.validate_reattachment_manifest(bad)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows retained publication runs on Windows CI")
+class WindowsCredentialPublicationTests(unittest.TestCase):
+    def test_vault_write_uses_neutral_retained_publication_authority(self):
+        from autotrade_foundation import windows_namespace
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials.json"
+            vault = ProtectedCredentialVault(
+                path,
+                protector=DeterministicProtector(),
+            )
+            with patch.object(
+                windows_namespace,
+                "publish_windows_regular_bytes",
+                wraps=windows_namespace.publish_windows_regular_bytes,
+            ) as publish:
+                vault.register(
+                    handle_id="cred-neutral-publisher",
+                    owner_identity="windows-user-1",
+                    account_id="paper-1",
+                    provider="SIMULATED",
+                    environment="PAPER",
+                    purpose="READ",
+                    secret_value="read-secret",
+                )
+
+            self.assertEqual(publish.call_count, 1)
+            call = publish.call_args
+            self.assertEqual(call.kwargs["target_name"], path.name)
+            self.assertIs(type(call.kwargs["data"]), bytes)
+            self.assertTrue(call.kwargs["replace"])
+            self.assertNotIn(
+                "read-secret",
+                path.read_text(encoding="utf-8"),
+            )
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI qualification runs on Windows CI")

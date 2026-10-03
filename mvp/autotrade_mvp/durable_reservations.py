@@ -12,20 +12,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    provider_domain_submission_attempt_keys,
+    submission_attempt_aggregate_id,
+)
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
+from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -39,6 +48,14 @@ _COMMAND_ACTOR = "autotrade-reservation-authority"
 _RESOLUTION_MEDIA_TYPE = "application/vnd.autotrade.reservation-resolution+json"
 _RESOLUTION_EVIDENCE_TYPE = "AUTOTRADE_RESERVATION_RESOLUTION"
 _RESOLUTION_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class _VerifiedResolutionEvidence:
+    evidence: str
+    reconciliation_event_id: str
+    reconciliation_payload_hash: str
+    provider_environment: str | None
 
 
 def _text(value: str, *, name: str) -> str:
@@ -74,21 +91,20 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be an exact finite decimal within the resource envelope"
+        ) from error
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "reservation decimal exceeds exact decimal authority"
+        ) from error
 
 
 def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
@@ -283,7 +299,7 @@ class DurableReservationBook:
             try:
                 if operation == "MARK_TERMINAL":
                     current = book.get(request.get("reservation_id"))
-                    self._verify_resolution_evidence(
+                    verified = self._verify_resolution_evidence(
                         reservation_id=request.get("reservation_id"),
                         intent_id=current.intent_id,
                         outcome=request.get("outcome"),
@@ -291,6 +307,40 @@ class DurableReservationBook:
                         attempt_id=request.get("attempt_id"),
                         resolution_evidence=request.get("resolution_evidence"),
                     )
+                    validation = payload.get("current_reconciliation_validation")
+                    if validation is not None:
+                        if type(validation) is not dict:
+                            raise ReservationConflict(
+                                "terminal reconciliation validation must be an object"
+                            )
+                        if set(validation) != {
+                            "reconciliation_event_id",
+                            "reconciliation_payload_hash",
+                            "journal_sequence",
+                        }:
+                            raise ReservationConflict(
+                                "terminal reconciliation validation has unexpected fields"
+                            )
+                        if (
+                            validation.get("reconciliation_event_id")
+                            != verified.reconciliation_event_id
+                            or validation.get("reconciliation_payload_hash")
+                            != verified.reconciliation_payload_hash
+                        ):
+                            raise ReservationConflict(
+                                "terminal reconciliation validation does not match evidence"
+                            )
+                        validated_cut = validation.get("journal_sequence")
+                        event_sequence = event.get("journal_sequence")
+                        if (
+                            type(validated_cut) is not int
+                            or validated_cut < 0
+                            or type(event_sequence) is not int
+                            or event_sequence != validated_cut + 1
+                        ):
+                            raise ReservationConflict(
+                                "terminal reconciliation validation journal cut is invalid"
+                            )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -547,6 +597,8 @@ class DurableReservationBook:
         idempotency_key: str,
         operation: str,
         request: dict[str, object],
+        expected_journal_sequence: int | None = None,
+        current_reconciliation_validation: dict[str, object] | None = None,
     ) -> ReservationSnapshot:
         cid = _text(command_id, name="command_id")
         idem = _text(idempotency_key, name="idempotency_key")
@@ -610,6 +662,10 @@ class DurableReservationBook:
             "request_hash": payload_digest(request),
             "snapshot": snapshot_value,
         }
+        if current_reconciliation_validation is not None:
+            payload["current_reconciliation_validation"] = (
+                current_reconciliation_validation
+            )
         envelope = {
             "event_id": event_id,
             "event_type": _EVENT_TYPE,
@@ -638,6 +694,7 @@ class DurableReservationBook:
                 result=snapshot_value,
                 state_version=next_version,
                 events=[(envelope, None)],
+                expected_journal_sequence=expected_journal_sequence,
             )
         except Exception:
             # A competing writer may have committed after this projection was
@@ -759,7 +816,7 @@ class DurableReservationBook:
         provider: object,
         attempt_id: object,
         resolution_evidence: object,
-    ) -> str:
+    ) -> _VerifiedResolutionEvidence:
         rid = _text(reservation_id, name="reservation_id")
         intent = _text(intent_id, name="intent_id")
         terminal_outcome = _text(outcome, name="outcome").upper()
@@ -858,57 +915,11 @@ class DurableReservationBook:
                 "resolution evidence receipt must use canonical JSON bytes"
             )
 
-        aggregate_id = submission_attempt_aggregate_id(
-            environment=self.environment,
-            account_id=self.account_id,
-            attempt_id=attempt,
-        )
-        attempt_events = self.store.load_events(
-            "submission_attempt",
-            aggregate_id,
-        )
-        if not attempt_events:
-            raise ReservationConflict(
-                "resolution evidence is not bound to a durable submission attempt"
-            )
-        prepared = attempt_events[0]
-        if prepared.get("event_type") != "SubmissionPrepared":
-            raise ReservationConflict(
-                "submission attempt does not start with durable preparation"
-            )
-        prepared_payload = prepared.get("payload")
-        if not isinstance(prepared_payload, dict):
-            raise ReservationConflict(
-                "submission attempt preparation payload is invalid"
-            )
-        if (
-            prepared_payload.get("environment") != self.environment
-            or prepared_payload.get("account_id") != self.account_id
-            or _text(
-                prepared_payload.get("provider"),
-                name="submission provider",
-            ).upper()
-            != provider_name
-            or prepared_payload.get("intent_id") != intent
-        ):
-            raise ReservationConflict(
-                "resolution evidence does not match durable submission scope"
-            )
-        client_order_id = _text(
-            prepared_payload.get("client_order_id"),
-            name="submission client_order_id",
-        )
-        if (
-            terminal_outcome == "PROVEN_ABSENT"
-            and not any(
-                event.get("event_type") == "SubmissionUnknown"
-                for event in attempt_events
-            )
-        ):
-            raise ReservationConflict(
-                "PROVEN_ABSENT requires a durable UNKNOWN submission state"
-            )
-
+        # The immutable receipt names the exact reconciliation checkpoint and
+        # its payload hash. Authenticate that checkpoint first; its provider
+        # domain is the authority for resolving the provider-domain attempt
+        # namespace. Never let caller-controlled logical attempt text choose a
+        # TESTNET/DEMO (or future provider-domain) durable aggregate.
         reconciliation_event = self.store.get_event(reconciliation_event_id)
         if (
             reconciliation_event is None
@@ -939,6 +950,111 @@ class DurableReservationBook:
         ):
             raise ReservationConflict(
                 "durable reconciliation checkpoint scope does not match reservation"
+            )
+        provider_environment = reconciliation_payload.get("provider_environment")
+        if provider_environment is None:
+            resource_availability = reconciliation_payload.get(
+                "resource_availability"
+            )
+            if isinstance(resource_availability, dict):
+                provider_environment = resource_availability.get(
+                    "provider_environment"
+                )
+        try:
+            durable_attempt_keys = provider_domain_submission_attempt_keys(
+                attempt_id=attempt,
+                provider_id=provider_name,
+                environment=self.environment,
+                provider_environment=provider_environment,
+            )
+        except ValueError as error:
+            raise ReservationConflict(
+                "durable reconciliation checkpoint lacks exact provider domain"
+            ) from error
+
+        candidates: list[tuple[str, list[dict[str, object]]]] = []
+        for durable_attempt_key in durable_attempt_keys:
+            aggregate_id = submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=durable_attempt_key,
+            )
+            events = self.store.load_events(
+                "submission_attempt",
+                aggregate_id,
+            )
+            if events:
+                candidates.append((aggregate_id, events))
+        if not candidates:
+            raise ReservationConflict(
+                "resolution evidence is not bound to a durable submission attempt"
+            )
+        if len(candidates) != 1:
+            raise ReservationConflict(
+                "resolution evidence maps to multiple durable submission identities"
+            )
+        aggregate_id, attempt_events = candidates[0]
+        prepared = attempt_events[0]
+        if prepared.get("event_type") != "SubmissionPrepared":
+            raise ReservationConflict(
+                "submission attempt does not start with durable preparation"
+            )
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, dict):
+            raise ReservationConflict(
+                "submission attempt preparation payload is invalid"
+            )
+        if (
+            prepared_payload.get("environment") != self.environment
+            or prepared_payload.get("account_id") != self.account_id
+            or _text(
+                prepared_payload.get("provider"),
+                name="submission provider",
+            ).upper()
+            != provider_name
+            or prepared_payload.get("intent_id") != intent
+        ):
+            raise ReservationConflict(
+                "resolution evidence does not match durable submission scope"
+            )
+        try:
+            prepared_keys = provider_domain_submission_attempt_keys(
+                attempt_id=attempt,
+                provider_id=provider_name,
+                environment=self.environment,
+                provider_environment=prepared_payload.get(
+                    "provider_environment"
+                ),
+            )
+        except ValueError as error:
+            raise ReservationConflict(
+                "durable submission preparation lacks exact provider domain"
+            ) from error
+        expected_aggregates = {
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=durable_attempt_key,
+            )
+            for durable_attempt_key in prepared_keys
+        }
+        if aggregate_id not in expected_aggregates:
+            raise ReservationConflict(
+                "durable submission provider domain differs from reconciliation"
+            )
+        client_order_id = _text(
+            prepared_payload.get("client_order_id"),
+            name="submission client_order_id",
+        )
+        if (
+            terminal_outcome == "PROVEN_ABSENT"
+            and not any(
+                event.get("event_type") == "SubmissionUnknown"
+                for event in attempt_events
+            )
+        ):
+            raise ReservationConflict(
+                "PROVEN_ABSENT requires a durable UNKNOWN submission state"
             )
         if (
             reconciliation_payload.get("complete") is not True
@@ -983,7 +1099,12 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "terminal outcome does not match durable reconciliation resolution"
             )
-        return evidence
+        return _VerifiedResolutionEvidence(
+            evidence=evidence,
+            reconciliation_event_id=reconciliation_event_id,
+            reconciliation_payload_hash=reconciliation_payload_hash,
+            provider_environment=provider_environment,
+        )
 
     def mark_terminal(
         self,
@@ -1001,7 +1122,7 @@ class DurableReservationBook:
         terminal_outcome = _text(outcome, name="outcome").upper()
         provider_name = _text(provider, name="provider").upper()
         attempt = _text(attempt_id, name="attempt_id")
-        evidence = self._verify_resolution_evidence(
+        verified = self._verify_resolution_evidence(
             reservation_id=rid,
             intent_id=current.intent_id,
             outcome=terminal_outcome,
@@ -1014,11 +1135,60 @@ class DurableReservationBook:
             "outcome": terminal_outcome,
             "provider": provider_name,
             "attempt_id": attempt,
-            "resolution_evidence": evidence,
+            "resolution_evidence": verified.evidence,
+        }
+
+        # Historical exact retries are replay authority, not a request to
+        # reinterpret the original release decision under newer provider truth.
+        # Verify the immutable historical receipt above, then return the
+        # already-committed result before applying current-head gates.
+        existing = self._existing(
+            idempotency_key=idempotency_key,
+            request=request,
+        )
+        if existing is not None:
+            return self.get(
+                _text(existing.get("reservation_id"), name="reservation_id")
+            )
+
+        # Capture the global journal cut before checking currentness. If a new
+        # same-scope reconciliation arrives before the lookup, the lookup sees
+        # it and rejects the old checkpoint. If any event arrives after the
+        # lookup, commit_command's global journal-sequence fence rejects the
+        # stale validation cut before reservation capacity can be released.
+        journal_cut = self.store.current_journal_sequence()
+        try:
+            checkpoint = require_current_reconciliation_checkpoint(
+                self.store,
+                checkpoint_event_id=verified.reconciliation_event_id,
+                provider_id=provider_name,
+                account_id=self.account_id,
+                environment=self.environment,
+                provider_environment=verified.provider_environment,
+            )
+        except (TypeError, ValueError) as error:
+            raise ReservationConflict(
+                "terminal release requires the current reconciliation checkpoint"
+            ) from error
+        if (
+            checkpoint.get("event_id") != verified.reconciliation_event_id
+            or checkpoint.get("payload_hash")
+            != verified.reconciliation_payload_hash
+        ):
+            raise ReservationConflict(
+                "current reconciliation checkpoint does not match resolution evidence"
+            )
+
+        validation = {
+            "reconciliation_event_id": verified.reconciliation_event_id,
+            "reconciliation_payload_hash": verified.reconciliation_payload_hash,
+            "journal_sequence": journal_cut,
         }
         return self._commit(
             command_id=command_id,
             idempotency_key=idempotency_key,
             operation="MARK_TERMINAL",
             request=request,
+            expected_journal_sequence=journal_cut,
+            current_reconciliation_validation=validation,
         )

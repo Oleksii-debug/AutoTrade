@@ -4,10 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.accounting import (
-    book_equity_fill,
-    book_external_cash_flow,
-)
+from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityPolicy,
@@ -16,9 +13,10 @@ from mvp.autotrade_mvp.authority import (
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
-    commit_economic_batch_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
@@ -138,14 +136,29 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 account_id="sim-account",
                 environment="SIMULATION",
             )
-            economic.append(
-                book_external_cash_flow(
-                    transaction_id="seed",
-                    cause_event_id="deposit",
-                    currency="USD",
-                    amount="1000",
-                )
+            seed = economic.prepare_batch_mutation(
+                (
+                    book_external_cash_flow(
+                        transaction_id="seed",
+                        cause_event_id="deposit",
+                        currency="USD",
+                        amount="1000",
+                    ),
+                ),
+                committed_at="2026-09-24T17:59:59Z",
             )
+            assert seed.envelope is not None
+            journal.commit_command(
+                command_id=f"test-economic:{seed.batch_digest}",
+                actor="provider-economic-accounting",
+                environment="SIMULATION",
+                idempotency_key=f"test-economic:{economic.book_id}:{seed.batch_digest}",
+                request=seed.request,
+                result=seed.result,
+                state_version=seed.aggregate_version,
+                events=[(seed.envelope, "autotrade.economic.events")],
+            )
+            economic.refresh()
             bootstrap_outbox = journal.pending_outbox()
             self.assertEqual(
                 len(bootstrap_outbox),
@@ -309,32 +322,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             fill = provider.activity_fills()[0]
             fee = fill["fees"][0]
-            commit_economic_batch_with_reservation_consumption(
-                economic,
-                reservations,
-                command_id="fill-financial-commit-1",
-                idempotency_key="fill-financial-commit-1",
-                reservation_id="reservation-1",
-                usage={"CASH:USD": "200.2"},
-                transactions=(
-                    book_equity_fill(
-                        transaction_id="economic-fill-1",
-                        cause_event_id=fill["provider_execution_id"],
-                        instrument=fill["instrument_version"],
-                        settlement_currency="USD",
-                        side=fill["side"],
-                        quantity=fill["last_quantity"]["value"],
-                        price=fill["last_price"],
-                        fee=fee["amount"],
-                        fee_currency=fee["currency"],
-                    ),
-                ),
-                committed_at=LATER,
-            )
-            self.assertEqual(economic.cash("USD"), Decimal("799.8"))
-            self.assertEqual(economic.position(INSTRUMENT), Decimal("2"))
-
-            snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
                 provider_id="SIMULATED",
                 account_id="sim-account",
@@ -347,7 +334,86 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_amount=fee["amount"],
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
+                side=fill["side"],
+                evidence_refs=(
+                    f"simulated:provider-execution:{fill['provider_execution_id']}",
+                ),
             )
+            projected_fill = ProjectedFillEvidence.create(
+                fill_id=fill["fill_id"],
+                provider_execution_id=fill["provider_execution_id"],
+                intent_id="intent-1",
+                client_order_id=dispatched.client_order_id,
+                side=fill["side"],
+                quantity=fill["last_quantity"]["value"],
+                price=fill["last_price"],
+            )
+            commit_provider_fill_with_reservation_consumption(
+                economic,
+                reservations,
+                command_id="fill-financial-commit-1",
+                idempotency_key="fill-financial-commit-1",
+                reservation_id="reservation-1",
+                admission_id="admission-1",
+                projected_fill=projected_fill,
+                provider_fill=provider_fill,
+                expected_instrument=INSTRUMENT,
+                settlement_currency="USD",
+                observed_at=LATER,
+                committed_at=LATER,
+            )
+            self.assertEqual(economic.cash("USD"), Decimal("799.8"))
+            self.assertEqual(economic.position(INSTRUMENT), Decimal("2"))
+            reservation_after_fill = reservations.get("reservation-1")
+            self.assertEqual(
+                reservation_after_fill.consumed["CASH:USD"],
+                Decimal("200.2"),
+            )
+            fill_bindings = journal.load_events_by_aggregate_type(
+                "provider_fill_financial_binding"
+            )
+            self.assertEqual(len(fill_bindings), 1)
+            fill_binding = fill_bindings[0]["payload"]["request"]
+            self.assertEqual(fill_binding["reservation_id"], "reservation-1")
+            self.assertEqual(fill_binding["intent_id"], "intent-1")
+            self.assertEqual(
+                fill_binding["provider_execution_id"],
+                fill["provider_execution_id"],
+            )
+            self.assertEqual(
+                fill_binding["derived_usage"],
+                {"CASH:USD": "200.2"},
+            )
+            self.assertEqual(
+                fill_binding["financial_admission"]["admission_id"],
+                "admission-1",
+            )
+
+            restarted_journal = JournalStore(f"{directory}/journal.sqlite3")
+            restarted_economic = DurableProviderEconomicBook(
+                restarted_journal,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+            )
+            restarted_reservations = DurableReservationBook(
+                restarted_journal,
+                environment="SIMULATION",
+                account_id="sim-account",
+                resolution_artifact_store=artifacts,
+                resolution_artifact_root=artifact_root,
+            )
+            self.assertEqual(restarted_economic.cash("USD"), Decimal("799.8"))
+            self.assertEqual(
+                restarted_economic.position(INSTRUMENT),
+                Decimal("2"),
+            )
+            self.assertEqual(
+                restarted_reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("200.2"),
+            )
+
+            snapshot = provider.account_snapshot(now=LATER)
             unresolved_submission = UnknownSubmission.create(
                 attempt_id=attempt_id,
                 intent_id="intent-1",

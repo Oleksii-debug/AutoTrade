@@ -8,12 +8,23 @@ order-stream acknowledgement.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
-from typing import Mapping
+from typing import Any, Mapping
+from uuid import NAMESPACE_URL, uuid5
 
 from .alpaca import AlpacaAdapterError, AlpacaOrderIntent
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_subtract,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+    parse_canonical_decimal_text,
+)
+from .persistence import JournalStore, payload_digest
 
 
 def _instant(value: datetime, *, name: str) -> datetime:
@@ -26,6 +37,21 @@ def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AlpacaAdapterError(f"{name} is required")
     return value.strip()
+
+
+def _instant_text(value: datetime, *, name: str) -> str:
+    return _instant(value, name=name).isoformat().replace("+00:00", "Z")
+
+
+def _date_from_text(value: object, *, name: str) -> date:
+    raw = _text(value, name=name)
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as error:
+        raise AlpacaAdapterError(f"{name} must be canonical YYYY-MM-DD") from error
+    if parsed.isoformat() != raw:
+        raise AlpacaAdapterError(f"{name} must be canonical YYYY-MM-DD")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -109,68 +135,893 @@ def require_option_entitlement(
 
 @dataclass(frozen=True)
 class AlpacaOptionLifecycleObservation:
+    """Date-granular option NTA fact parsed from an Alpaca account-activity row.
+
+    The REST NonTradeActivity contract exposes a provider date, not an execution
+    timestamp.  Keeping date granularity explicit prevents downstream code from
+    inventing midnight or another intraday ordering fact.  This value remains
+    reconciliation evidence only; it is not provider-origin authority.
+    """
+
+    account_id: str
+    environment: str
     activity_type: str
     symbol: str
     observed_at: datetime
-    effective_at: datetime
+    effective_date: date
     provider_activity_id: str
+    signed_contracts: Decimal
+    quantity_unit: str
     source_sha256: str
 
     def __post_init__(self) -> None:
+        account_id = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise AlpacaAdapterError("environment must be PAPER or LIVE")
         activity_type = _text(self.activity_type, name="activity_type").upper()
-        if activity_type not in {"OPTION_EXERCISE", "OPTION_ASSIGNMENT", "OPTION_EXPIRATION"}:
+        if activity_type not in {
+            "OPTION_EXERCISE",
+            "OPTION_ASSIGNMENT",
+            "OPTION_EXPIRATION",
+        }:
             raise AlpacaAdapterError("unsupported option lifecycle activity")
         symbol = _text(self.symbol, name="symbol").upper()
         observed_at = _instant(self.observed_at, name="observed_at")
-        effective_at = _instant(self.effective_at, name="effective_at")
-        if effective_at > observed_at:
-            raise AlpacaAdapterError("effective_at cannot be after observed_at")
-        provider_activity_id = _text(self.provider_activity_id, name="provider_activity_id")
+        if type(self.effective_date) is not date:
+            raise AlpacaAdapterError("effective_date must be a date without time")
+        effective_date = self.effective_date
+        if effective_date > observed_at.date():
+            raise AlpacaAdapterError(
+                "effective_date cannot be after observed_at date"
+            )
+        provider_activity_id = _text(
+            self.provider_activity_id, name="provider_activity_id"
+        )
+        if type(self.signed_contracts) is not Decimal:
+            raise AlpacaAdapterError(
+                "signed_contracts must be an exact Decimal option-contract quantity"
+            )
+        signed_contracts = self.signed_contracts
+        try:
+            if signed_contracts == 0 or not is_exact_decimal_multiple(
+                signed_contracts, Decimal("1")
+            ):
+                raise AlpacaAdapterError(
+                    "signed_contracts must be a non-zero whole option-contract quantity"
+                )
+        except ExactDecimalError as error:
+            raise AlpacaAdapterError(
+                "signed_contracts exceeds the exact option-contract quantity envelope"
+            ) from error
+        if activity_type == "OPTION_EXERCISE" and signed_contracts < 0:
+            raise AlpacaAdapterError(
+                "OPTION_EXERCISE requires positive canonical signed_contracts"
+            )
+        if activity_type == "OPTION_ASSIGNMENT" and signed_contracts > 0:
+            raise AlpacaAdapterError(
+                "OPTION_ASSIGNMENT requires negative canonical signed_contracts"
+            )
+        quantity_unit = _text(self.quantity_unit, name="quantity_unit").upper()
+        if quantity_unit != "OPTION_CONTRACT":
+            raise AlpacaAdapterError(
+                "quantity_unit must be canonical OPTION_CONTRACT"
+            )
         digest = _text(self.source_sha256, name="source_sha256").lower()
-        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
             raise AlpacaAdapterError("source_sha256 must be 64 hex characters")
+        object.__setattr__(self, "account_id", account_id)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "activity_type", activity_type)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "observed_at", observed_at)
-        object.__setattr__(self, "effective_at", effective_at)
+        object.__setattr__(self, "effective_date", effective_date)
         object.__setattr__(self, "provider_activity_id", provider_activity_id)
+        object.__setattr__(self, "signed_contracts", signed_contracts)
+        object.__setattr__(self, "quantity_unit", quantity_unit)
         object.__setattr__(self, "source_sha256", digest)
 
+    @property
+    def effective_at(self) -> None:
+        """Date-only REST evidence cannot answer intraday ordering questions."""
 
-def parse_polled_option_activity(payload: Mapping[str, object], *, observed_at: datetime) -> AlpacaOptionLifecycleObservation:
-    """Parse a separately polled account activity.
+        return None
 
-    Order-stream absence is never interpreted as lifecycle absence.
+
+def parse_polled_option_activity(
+    payload: Mapping[str, object],
+    *,
+    account_id: str,
+    environment: str,
+    observed_at: datetime,
+) -> AlpacaOptionLifecycleObservation:
+    """Parse one option NonTradeActivity without inventing timestamp precision.
+
+    Alpaca's option-event examples use OPEXC while the general Account
+    Activities table currently lists OPXRC for exercise.  Both exact raw codes
+    are accepted as exercise; the original payload remains represented in the
+    diagnostic source digest.
     """
 
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
-    activity_type = _text(payload.get("activity_type"), name="activity_type").upper()
+    raw_activity_type = _text(
+        payload.get("activity_type"), name="activity_type"
+    ).upper()
     mapping = {
         "OPEXC": "OPTION_EXERCISE",
+        "OPXRC": "OPTION_EXERCISE",
         "OPASN": "OPTION_ASSIGNMENT",
         "OPEXP": "OPTION_EXPIRATION",
-        "OPTION_EXERCISE": "OPTION_EXERCISE",
-        "OPTION_ASSIGNMENT": "OPTION_ASSIGNMENT",
-        "OPTION_EXPIRATION": "OPTION_EXPIRATION",
     }
-    if activity_type not in mapping:
+    if raw_activity_type not in mapping:
         raise AlpacaAdapterError("unsupported polled Alpaca option activity")
     symbol = _text(payload.get("symbol"), name="symbol")
     activity_id = _text(payload.get("id"), name="id")
-    effective_raw = _text(payload.get("transaction_time"), name="transaction_time")
+    effective_date = _date_from_text(payload.get("date"), name="date")
+    raw_quantity = payload.get("qty")
+    if type(raw_quantity) is not str:
+        raise AlpacaAdapterError(
+            "qty must be provider Decimal text in option-contract units"
+        )
     try:
-        effective = datetime.fromisoformat(effective_raw.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise AlpacaAdapterError("transaction_time must be ISO timestamp") from error
-    if effective.tzinfo is None:
-        raise AlpacaAdapterError("transaction_time must include timezone")
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        provider_quantity = parse_bounded_exact_decimal(
+            raw_quantity,
+            allow_exponent=False,
+        )
+        if provider_quantity == 0 or not is_exact_decimal_multiple(
+            provider_quantity, Decimal("1")
+        ):
+            raise AlpacaAdapterError(
+                "qty must be a non-zero whole option-contract quantity"
+            )
+        signed_contracts = exact_subtract(
+            Decimal("0"),
+            provider_quantity,
+        )
+    except ExactDecimalError as error:
+        raise AlpacaAdapterError(
+            "qty must be bounded option-contract Decimal text"
+        ) from error
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise AlpacaAdapterError(
+            "polled Alpaca option activity must be canonical JSON-safe data"
+        ) from error
     return AlpacaOptionLifecycleObservation(
-        activity_type=mapping[activity_type],
+        account_id=_text(account_id, name="account_id"),
+        environment=_text(environment, name="environment").upper(),
+        activity_type=mapping[raw_activity_type],
         symbol=symbol,
         observed_at=observed_at,
-        effective_at=effective,
+        effective_date=effective_date,
         provider_activity_id=activity_id,
+        signed_contracts=signed_contracts,
+        quantity_unit="OPTION_CONTRACT",
         source_sha256=sha256(encoded).hexdigest(),
     )
+
+
+_ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE = "alpaca_option_lifecycle_obligation"
+_ALPACA_OPTION_LIFECYCLE_OUTBOX_TOPIC = "autotrade.alpaca.option-lifecycle.events"
+
+
+@dataclass(frozen=True)
+class AlpacaOptionLifecycleObligation:
+    """Durable unresolved/resolved lifecycle evidence for one economic change.
+
+    This is reconciliation evidence only. It never applies position/cash effects
+    and therefore cannot double-apply provider economics when delayed activities
+    arrive or are replayed after restart.
+    """
+
+    economic_change_id: str
+    account_id: str
+    environment: str
+    symbol: str
+    economic_effect_observed_at: datetime
+    status: str
+    provider_activity_id: str | None = None
+    activity_type: str | None = None
+    activity_source_sha256: str | None = None
+    activity_effective_date: date | None = None
+    activity_signed_contracts: Decimal | None = None
+    activity_quantity_unit: str | None = None
+    activity_observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        economic_change_id = _text(
+            self.economic_change_id, name="economic_change_id"
+        )
+        account_id = _text(self.account_id, name="account_id")
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise AlpacaAdapterError("environment must be PAPER or LIVE")
+        symbol = _text(self.symbol, name="symbol").upper()
+        observed = _instant(
+            self.economic_effect_observed_at,
+            name="economic_effect_observed_at",
+        )
+        status = _text(self.status, name="status").upper()
+        if status not in {"PROVISIONAL", "RESOLVED"}:
+            raise AlpacaAdapterError(
+                "lifecycle obligation status must be PROVISIONAL or RESOLVED"
+            )
+
+        activity_fields = (
+            self.provider_activity_id,
+            self.activity_type,
+            self.activity_source_sha256,
+            self.activity_effective_date,
+            self.activity_signed_contracts,
+            self.activity_quantity_unit,
+            self.activity_observed_at,
+        )
+        if status == "PROVISIONAL":
+            if any(value is not None for value in activity_fields):
+                raise AlpacaAdapterError(
+                    "provisional lifecycle obligation cannot claim provider activity"
+                )
+        else:
+            if any(value is None for value in activity_fields):
+                raise AlpacaAdapterError(
+                    "resolved lifecycle obligation requires complete provider activity"
+                )
+            activity_type = _text(
+                self.activity_type, name="activity_type"
+            ).upper()
+            if activity_type not in {
+                "OPTION_EXERCISE",
+                "OPTION_ASSIGNMENT",
+                "OPTION_EXPIRATION",
+            }:
+                raise AlpacaAdapterError(
+                    "resolved lifecycle obligation has unsupported activity type"
+                )
+            digest = _text(
+                self.activity_source_sha256,
+                name="activity_source_sha256",
+            ).lower()
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise AlpacaAdapterError(
+                    "activity_source_sha256 must be 64 hex characters"
+                )
+            if type(self.activity_effective_date) is not date:
+                raise AlpacaAdapterError(
+                    "activity_effective_date must be a date without time"
+                )
+            activity_effective_date = self.activity_effective_date
+            if type(self.activity_signed_contracts) is not Decimal:
+                raise AlpacaAdapterError(
+                    "activity_signed_contracts must be an exact Decimal"
+                )
+            activity_signed_contracts = self.activity_signed_contracts
+            try:
+                if activity_signed_contracts == 0 or not is_exact_decimal_multiple(
+                    activity_signed_contracts, Decimal("1")
+                ):
+                    raise AlpacaAdapterError(
+                        "activity_signed_contracts must be a non-zero whole option-contract quantity"
+                    )
+            except ExactDecimalError as error:
+                raise AlpacaAdapterError(
+                    "activity_signed_contracts exceeds exact quantity envelope"
+                ) from error
+            if (
+                activity_type == "OPTION_EXERCISE"
+                and activity_signed_contracts < 0
+            ):
+                raise AlpacaAdapterError(
+                    "OPTION_EXERCISE requires positive durable signed contracts"
+                )
+            if (
+                activity_type == "OPTION_ASSIGNMENT"
+                and activity_signed_contracts > 0
+            ):
+                raise AlpacaAdapterError(
+                    "OPTION_ASSIGNMENT requires negative durable signed contracts"
+                )
+            activity_quantity_unit = _text(
+                self.activity_quantity_unit,
+                name="activity_quantity_unit",
+            ).upper()
+            if activity_quantity_unit != "OPTION_CONTRACT":
+                raise AlpacaAdapterError(
+                    "activity_quantity_unit must be OPTION_CONTRACT"
+                )
+            activity_observed_at = _instant(
+                self.activity_observed_at,
+                name="activity_observed_at",
+            )
+            if activity_effective_date > activity_observed_at.date():
+                raise AlpacaAdapterError(
+                    "activity_effective_date cannot be after activity_observed_at date"
+                )
+            object.__setattr__(
+                self,
+                "provider_activity_id",
+                _text(self.provider_activity_id, name="provider_activity_id"),
+            )
+            object.__setattr__(self, "activity_type", activity_type)
+            object.__setattr__(self, "activity_source_sha256", digest)
+            object.__setattr__(
+                self, "activity_effective_date", activity_effective_date
+            )
+            object.__setattr__(
+                self, "activity_signed_contracts", activity_signed_contracts
+            )
+            object.__setattr__(
+                self, "activity_quantity_unit", activity_quantity_unit
+            )
+            object.__setattr__(
+                self, "activity_observed_at", activity_observed_at
+            )
+
+        object.__setattr__(self, "economic_change_id", economic_change_id)
+        object.__setattr__(self, "account_id", account_id)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(
+            self, "economic_effect_observed_at", observed
+        )
+        object.__setattr__(self, "status", status)
+
+    @property
+    def unresolved(self) -> bool:
+        return self.status == "PROVISIONAL"
+
+
+def classify_option_lifecycle_evidence(
+    *,
+    order_stream_quiet: bool,
+    activity: AlpacaOptionLifecycleObservation | None,
+) -> str:
+    """Never infer option lifecycle absence from a quiet order stream.
+
+    Alpaca option assignment is discovered via polled account activities; PAPER
+    activity publication may lag the economic position/balance change. Therefore
+    stream silence plus no activity is INCONCLUSIVE, not proof of absence.
+    """
+
+    if type(order_stream_quiet) is not bool:
+        raise TypeError("order_stream_quiet must be boolean")
+    if activity is None:
+        return "INCONCLUSIVE"
+    if not isinstance(activity, AlpacaOptionLifecycleObservation):
+        raise TypeError("activity must be AlpacaOptionLifecycleObservation")
+    return "OBSERVED"
+
+
+def _provider_activity_claim_event_id(
+    observation: AlpacaOptionLifecycleObservation,
+) -> str:
+    if not isinstance(observation, AlpacaOptionLifecycleObservation):
+        raise TypeError("observation must be AlpacaOptionLifecycleObservation")
+    claim = {
+        "provider_id": "ALPACA",
+        "account_id": observation.account_id,
+        "environment": observation.environment,
+        "provider_activity_id": observation.provider_activity_id,
+    }
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/alpaca-option-lifecycle/activity-claim/"
+            + payload_digest(claim),
+        )
+    )
+
+
+def _lifecycle_aggregate_id(
+    *,
+    economic_change_id: str,
+    account_id: str,
+    environment: str,
+) -> str:
+    payload = {
+        "provider_id": "ALPACA",
+        "economic_change_id": _text(
+            economic_change_id, name="economic_change_id"
+        ),
+        "account_id": _text(account_id, name="account_id"),
+        "environment": _text(environment, name="environment").upper(),
+    }
+    if payload["environment"] not in {"PAPER", "LIVE"}:
+        raise AlpacaAdapterError("environment must be PAPER or LIVE")
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _open_payload(
+    *,
+    economic_change_id: str,
+    account_id: str,
+    environment: str,
+    symbol: str,
+    economic_effect_observed_at: datetime,
+) -> dict[str, str]:
+    return {
+        "provider_id": "ALPACA",
+        "economic_change_id": _text(
+            economic_change_id, name="economic_change_id"
+        ),
+        "account_id": _text(account_id, name="account_id"),
+        "environment": _text(environment, name="environment").upper(),
+        "symbol": _text(symbol, name="symbol").upper(),
+        "economic_effect_observed_at": _instant_text(
+            economic_effect_observed_at,
+            name="economic_effect_observed_at",
+        ),
+        "status": "PROVISIONAL",
+        "reason": "economic_change_without_matching_option_activity",
+    }
+
+
+def _attachment_payload(
+    *,
+    economic_change_id: str,
+    observation: AlpacaOptionLifecycleObservation,
+) -> dict[str, str]:
+    if not isinstance(observation, AlpacaOptionLifecycleObservation):
+        raise TypeError("observation must be AlpacaOptionLifecycleObservation")
+    return {
+        "provider_id": "ALPACA",
+        "economic_change_id": _text(
+            economic_change_id, name="economic_change_id"
+        ),
+        "account_id": observation.account_id,
+        "environment": observation.environment,
+        "symbol": observation.symbol,
+        "provider_activity_id": observation.provider_activity_id,
+        "activity_type": observation.activity_type,
+        "activity_source_sha256": observation.source_sha256,
+        "activity_effective_date": observation.effective_date.isoformat(),
+        "activity_signed_contracts": canonical_decimal_text(
+            observation.signed_contracts
+        ),
+        "activity_quantity_unit": observation.quantity_unit,
+        "activity_observed_at": _instant_text(
+            observation.observed_at, name="activity_observed_at"
+        ),
+        "status": "RESOLVED",
+    }
+
+
+def _append_lifecycle_event(
+    store: JournalStore,
+    *,
+    aggregate_id: str,
+    event_type: str,
+    payload: Mapping[str, Any],
+    committed_at: datetime,
+    host_id: str,
+    owner_epoch: str,
+    event_id: str | None = None,
+) -> None:
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    version = store.next_aggregate_version(
+        _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+        aggregate_id,
+    )
+    committed = _instant_text(committed_at, name="committed_at")
+    digest = payload_digest(dict(payload))
+    event_identifier = (
+        _text(event_id, name="event_id")
+        if event_id is not None
+        else str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://events.autotrade.local/alpaca-option-lifecycle/"
+                f"{aggregate_id}/{version}/{digest}",
+            )
+        )
+    )
+    envelope = {
+        "event_id": event_identifier,
+        "event_type": event_type,
+        "schema_version": "1.0.0",
+        "aggregate_type": _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+        "aggregate_id": aggregate_id,
+        "aggregate_version": str(version),
+        "host_id": _text(host_id, name="host_id"),
+        "owner_epoch": _text(owner_epoch, name="owner_epoch"),
+        "environment": _text(
+            payload.get("environment"), name="environment"
+        ).upper(),
+        "occurred_at": committed,
+        "observed_at": committed,
+        "committed_at": committed,
+        "correlation_id": event_identifier,
+        "causation_id": None,
+        "payload": dict(payload),
+        "payload_hash": digest,
+        "evidence_refs": [],
+    }
+    store.append_event(
+        envelope,
+        outbox_topic=_ALPACA_OPTION_LIFECYCLE_OUTBOX_TOPIC,
+    )
+
+
+def _replay_lifecycle_obligation(
+    events: list[dict[str, Any]],
+) -> AlpacaOptionLifecycleObligation | None:
+    if not events:
+        return None
+    opened: dict[str, Any] | None = None
+    attached: dict[str, Any] | None = None
+    expected_version = 1
+    for event in events:
+        if event.get("aggregate_version") != expected_version:
+            raise AlpacaAdapterError(
+                "Alpaca lifecycle obligation journal versions are not contiguous"
+            )
+        expected_version += 1
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise AlpacaAdapterError(
+                "Alpaca lifecycle obligation payload must be an object"
+            )
+        if event.get("payload_hash") != payload_digest(payload):
+            raise AlpacaAdapterError(
+                "Alpaca lifecycle obligation payload hash mismatch"
+            )
+        event_type = event.get("event_type")
+        if event_type == "OptionLifecycleObligationOpened":
+            if opened is not None or event.get("aggregate_version") != 1:
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle obligation has invalid opening event"
+                )
+            expected = {
+                "provider_id",
+                "economic_change_id",
+                "account_id",
+                "environment",
+                "symbol",
+                "economic_effect_observed_at",
+                "status",
+                "reason",
+            }
+            if set(payload) != expected:
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle opening payload fields mismatch"
+                )
+            if (
+                payload.get("provider_id") != "ALPACA"
+                or payload.get("status") != "PROVISIONAL"
+                or payload.get("reason")
+                != "economic_change_without_matching_option_activity"
+            ):
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle opening payload is not canonical"
+                )
+            opened = payload
+        elif event_type == "OptionLifecycleActivityAttached":
+            if opened is None or attached is not None:
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle obligation has invalid attachment event"
+                )
+            expected = {
+                "provider_id",
+                "economic_change_id",
+                "account_id",
+                "environment",
+                "symbol",
+                "provider_activity_id",
+                "activity_type",
+                "activity_source_sha256",
+                "activity_effective_date",
+                "activity_signed_contracts",
+                "activity_quantity_unit",
+                "activity_observed_at",
+                "status",
+            }
+            if set(payload) != expected:
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle attachment payload fields mismatch"
+                )
+            if payload.get("provider_id") != "ALPACA" or payload.get(
+                "status"
+            ) != "RESOLVED":
+                raise AlpacaAdapterError(
+                    "Alpaca lifecycle attachment payload is not canonical"
+                )
+            for field in (
+                "economic_change_id",
+                "account_id",
+                "environment",
+                "symbol",
+            ):
+                if payload.get(field) != opened.get(field):
+                    raise AlpacaAdapterError(
+                        f"Alpaca lifecycle attachment {field} mismatch"
+                    )
+            attached = payload
+        else:
+            raise AlpacaAdapterError(
+                "Alpaca lifecycle obligation journal contains unsupported event type"
+            )
+
+    if opened is None:
+        raise AlpacaAdapterError(
+            "Alpaca lifecycle obligation journal lacks opening event"
+        )
+    observed_at = datetime.fromisoformat(
+        str(opened["economic_effect_observed_at"]).replace("Z", "+00:00")
+    )
+    if attached is None:
+        return AlpacaOptionLifecycleObligation(
+            economic_change_id=opened["economic_change_id"],
+            account_id=opened["account_id"],
+            environment=opened["environment"],
+            symbol=opened["symbol"],
+            economic_effect_observed_at=observed_at,
+            status="PROVISIONAL",
+        )
+    return AlpacaOptionLifecycleObligation(
+        economic_change_id=opened["economic_change_id"],
+        account_id=opened["account_id"],
+        environment=opened["environment"],
+        symbol=opened["symbol"],
+        economic_effect_observed_at=observed_at,
+        status="RESOLVED",
+        provider_activity_id=attached["provider_activity_id"],
+        activity_type=attached["activity_type"],
+        activity_source_sha256=attached["activity_source_sha256"],
+        activity_effective_date=_date_from_text(
+            attached["activity_effective_date"],
+            name="activity_effective_date",
+        ),
+        activity_signed_contracts=parse_canonical_decimal_text(
+            attached["activity_signed_contracts"]
+        ),
+        activity_quantity_unit=_text(
+            attached["activity_quantity_unit"],
+            name="activity_quantity_unit",
+        ),
+        activity_observed_at=datetime.fromisoformat(
+            str(attached["activity_observed_at"]).replace("Z", "+00:00")
+        ),
+    )
+
+
+def load_option_lifecycle_obligation(
+    store: JournalStore,
+    *,
+    economic_change_id: str,
+    account_id: str,
+    environment: str,
+) -> AlpacaOptionLifecycleObligation | None:
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    aggregate_id = _lifecycle_aggregate_id(
+        economic_change_id=economic_change_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    return _replay_lifecycle_obligation(
+        store.load_events(
+            _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+            aggregate_id,
+        )
+    )
+
+
+def open_provisional_option_lifecycle_obligation(
+    store: JournalStore,
+    *,
+    economic_change_id: str,
+    account_id: str,
+    environment: str,
+    symbol: str,
+    economic_effect_observed_at: datetime,
+    host_id: str,
+    owner_epoch: str,
+) -> AlpacaOptionLifecycleObligation:
+    """Persist an unresolved lifecycle obligation without inventing a subtype."""
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    payload = _open_payload(
+        economic_change_id=economic_change_id,
+        account_id=account_id,
+        environment=environment,
+        symbol=symbol,
+        economic_effect_observed_at=economic_effect_observed_at,
+    )
+    aggregate_id = _lifecycle_aggregate_id(
+        economic_change_id=payload["economic_change_id"],
+        account_id=payload["account_id"],
+        environment=payload["environment"],
+    )
+    existing_events = store.load_events(
+        _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+        aggregate_id,
+    )
+    existing = _replay_lifecycle_obligation(existing_events)
+    if existing is not None:
+        if (
+            existing.symbol != payload["symbol"]
+            or _instant_text(
+                existing.economic_effect_observed_at,
+                name="economic_effect_observed_at",
+            )
+            != payload["economic_effect_observed_at"]
+        ):
+            raise AlpacaAdapterError(
+                "economic_change_id conflicts with existing lifecycle obligation"
+            )
+        return existing
+
+    _append_lifecycle_event(
+        store,
+        aggregate_id=aggregate_id,
+        event_type="OptionLifecycleObligationOpened",
+        payload=payload,
+        committed_at=economic_effect_observed_at,
+        host_id=host_id,
+        owner_epoch=owner_epoch,
+    )
+    result = load_option_lifecycle_obligation(
+        store,
+        economic_change_id=payload["economic_change_id"],
+        account_id=payload["account_id"],
+        environment=payload["environment"],
+    )
+    if result is None:
+        raise RuntimeError("Alpaca lifecycle obligation was not persisted")
+    return result
+
+
+def _reject_reused_provider_activity(
+    store: JournalStore,
+    *,
+    aggregate_id: str,
+    observation: AlpacaOptionLifecycleObservation,
+) -> None:
+    for event in store.load_events_by_aggregate_type(
+        _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE
+    ):
+        if event.get("event_type") != "OptionLifecycleActivityAttached":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise AlpacaAdapterError(
+                "Alpaca lifecycle attachment payload must be an object"
+            )
+        if (
+            payload.get("provider_activity_id")
+            == observation.provider_activity_id
+            and payload.get("account_id") == observation.account_id
+            and payload.get("environment") == observation.environment
+            and event.get("aggregate_id") != aggregate_id
+        ):
+            raise AlpacaAdapterError(
+                "provider activity already resolves another economic change"
+            )
+
+
+def attach_polled_option_activity(
+    store: JournalStore,
+    *,
+    economic_change_id: str,
+    observation: AlpacaOptionLifecycleObservation,
+    host_id: str,
+    owner_epoch: str,
+) -> AlpacaOptionLifecycleObligation:
+    """Bind delayed provider activity idempotently to one existing economic change."""
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    if not isinstance(observation, AlpacaOptionLifecycleObservation):
+        raise TypeError("observation must be AlpacaOptionLifecycleObservation")
+    aggregate_id = _lifecycle_aggregate_id(
+        economic_change_id=economic_change_id,
+        account_id=observation.account_id,
+        environment=observation.environment,
+    )
+    events = store.load_events(
+        _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+        aggregate_id,
+    )
+    current = _replay_lifecycle_obligation(events)
+    if current is None:
+        raise AlpacaAdapterError(
+            "provider activity cannot resolve a missing lifecycle obligation"
+        )
+    if current.account_id != observation.account_id:
+        raise AlpacaAdapterError(
+            "provider activity account_id differs from lifecycle obligation"
+        )
+    if current.environment != observation.environment:
+        raise AlpacaAdapterError(
+            "provider activity environment differs from lifecycle obligation"
+        )
+    if current.symbol != observation.symbol:
+        raise AlpacaAdapterError(
+            "provider activity symbol differs from lifecycle obligation"
+        )
+
+    expected_payload = _attachment_payload(
+        economic_change_id=economic_change_id,
+        observation=observation,
+    )
+    if current.status == "RESOLVED":
+        existing_payload = events[-1].get("payload")
+        if existing_payload == expected_payload:
+            return current
+        raise AlpacaAdapterError(
+            "lifecycle obligation is already resolved by different provider activity"
+        )
+
+    _reject_reused_provider_activity(
+        store,
+        aggregate_id=aggregate_id,
+        observation=observation,
+    )
+    try:
+        _append_lifecycle_event(
+            store,
+            aggregate_id=aggregate_id,
+            event_type="OptionLifecycleActivityAttached",
+            payload=expected_payload,
+            committed_at=observation.observed_at,
+            host_id=host_id,
+            owner_epoch=owner_epoch,
+            event_id=_provider_activity_claim_event_id(observation),
+        )
+    except ValueError as error:
+        # append_event() serializes writers with BEGIN IMMEDIATE and event_id is
+        # globally unique.  A concurrent winner for this provider activity is
+        # therefore durable before we classify the losing attempt.
+        latest = load_option_lifecycle_obligation(
+            store,
+            economic_change_id=economic_change_id,
+            account_id=observation.account_id,
+            environment=observation.environment,
+        )
+        if latest is not None and latest.status == "RESOLVED":
+            latest_events = store.load_events(
+                _ALPACA_OPTION_LIFECYCLE_AGGREGATE_TYPE,
+                aggregate_id,
+            )
+            if latest_events and latest_events[-1].get("payload") == expected_payload:
+                return latest
+        try:
+            _reject_reused_provider_activity(
+                store,
+                aggregate_id=aggregate_id,
+                observation=observation,
+            )
+        except AlpacaAdapterError as claimed:
+            raise claimed from error
+        raise AlpacaAdapterError(
+            "concurrent Alpaca lifecycle attachment conflicted with durable state"
+        ) from error
+    result = load_option_lifecycle_obligation(
+        store,
+        economic_change_id=economic_change_id,
+        account_id=observation.account_id,
+        environment=observation.environment,
+    )
+    if result is None or result.status != "RESOLVED":
+        raise RuntimeError("Alpaca lifecycle activity attachment was not persisted")
+    return result

@@ -29,12 +29,10 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
-    ExactJsonTransportResponse,
-    GuardedDispatcher,
-    load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.provider_write_fixture import journal_sent_response
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -519,25 +517,16 @@ class AlpacaAdapterTests(unittest.TestCase):
         ).encode("utf-8")
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            dispatcher = GuardedDispatcher(
+            binding = journal_sent_response(
                 store,
                 environment="PAPER",
                 account_id="paper-account",
-                owner_token="owner",
-            )
-            outcome = dispatcher.dispatch(
                 attempt_id=attempt,
                 intent_id=intent_id,
-                intent_hash="alpaca-intent-hash",
                 provider="ALPACA",
-                request=prepared.body,
-                now="2026-09-24T20:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
-                transport_send=lambda _cid, _request, guard: (
-                    guard(),
-                    ExactJsonTransportResponse(raw),
-                )[1],
-                sender_check=lambda _owner, _epoch: None,
+                request_hash=prepared.body_sha256,
+                client_order_id=client_id,
+                response_bytes=raw,
                 submission_scope={
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
@@ -546,13 +535,8 @@ class AlpacaAdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                 },
-            )
-            self.assertEqual(outcome.status, "SENT")
-            binding = load_submission_response_binding(
-                store,
-                environment="PAPER",
-                account_id="paper-account",
-                attempt_id=attempt,
+                now="2026-09-24T20:00:00Z",
+                intent_hash="alpaca-intent-hash",
             )
             observation = observe_submission_json_response(
                 response_binding=binding,

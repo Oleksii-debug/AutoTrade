@@ -19,6 +19,7 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .host_actions import required_roles_for_host_action
+from .decision_trace import _redact_embedded_secret_text
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -31,7 +32,7 @@ CredentialHandle = PersistentCredentialHandle
 
 
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value.strip()
 
@@ -366,6 +367,7 @@ class SecurityBoundary:
         environment: str,
         purpose: str,
         secret_value: str,
+        provider_environment: str | None = None,
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized_purpose = _required_text(purpose, name="purpose").upper()
@@ -378,6 +380,11 @@ class SecurityBoundary:
             environment=_required_text(environment, name="environment").upper(),
             purpose=normalized_purpose,
             secret_value=secret_value,
+            provider_environment=(
+                None
+                if provider_environment is None
+                else _required_text(provider_environment, name="provider_environment").upper()
+            ),
         )
 
     def _current_handle(self, handle_id: str) -> CredentialHandle:
@@ -389,6 +396,7 @@ class SecurityBoundary:
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
             environment=str(metadata["environment"]),
+            provider_environment=str(metadata["provider_environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -404,6 +412,11 @@ class SecurityBoundary:
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         current = self._current_handle(handle_id)
+        if current.purpose == "TRADE":
+            raise PermissionError(
+                "TRADE credential rotation requires the verified sender-fence "
+                "and reconciliation workflow before a successor generation can activate"
+            )
         return self._credential_vault.rotate(
             current,
             execution_identity=_required_text(owner_identity, name="owner_identity"),
@@ -436,9 +449,10 @@ class SecurityBoundary:
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str | None = None,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
-        if not isinstance(handle, CredentialHandle):
+        if type(handle) is not CredentialHandle:
             raise PermissionError("Credential handle is invalid")
         return self._credential_vault.resolve(
             handle,
@@ -449,6 +463,11 @@ class SecurityBoundary:
             provider=_required_text(provider, name="provider"),
             environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
+            provider_environment=(
+                None
+                if provider_environment is None
+                else _required_text(provider_environment, name="provider_environment").upper()
+            ),
         )
 
 
@@ -464,10 +483,11 @@ class SecurityBoundary:
         provider: str,
         environment: str,
         purpose: str,
+        provider_environment: str | None = None,
     ):
         """Authorize and hold one exact credential generation for terminal use."""
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
-        if not isinstance(handle, CredentialHandle):
+        if type(handle) is not CredentialHandle:
             raise PermissionError("Credential handle is invalid")
         with self._credential_vault.lease(
             handle,
@@ -478,6 +498,11 @@ class SecurityBoundary:
             provider=_required_text(provider, name="provider"),
             environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
+            provider_environment=(
+                None
+                if provider_environment is None
+                else _required_text(provider_environment, name="provider_environment").upper()
+            ),
         ) as plaintext:
             yield plaintext
 
@@ -489,12 +514,22 @@ class SecurityBoundary:
     @staticmethod
     def redact(value: object) -> object:
         if isinstance(value, Mapping):
-            return {
-                key: "[REDACTED]"
-                if _REDACT_RE.search(str(key))
-                else SecurityBoundary.redact(item)
-                for key, item in value.items()
-            }
+            result: dict[object, object] = {}
+            for key, item in value.items():
+                raw_key = str(key)
+                safe_key: object = _redact_embedded_secret_text(raw_key)
+                if safe_key in result and safe_key != key:
+                    base_key = str(safe_key)
+                    suffix = 2
+                    while safe_key in result:
+                        safe_key = f"{base_key} [{suffix}]"
+                        suffix += 1
+                result[safe_key] = (
+                    "[REDACTED]"
+                    if _REDACT_RE.search(raw_key)
+                    else SecurityBoundary.redact(item)
+                )
+            return result
         if isinstance(value, list):
             return [SecurityBoundary.redact(item) for item in value]
         if isinstance(value, tuple):

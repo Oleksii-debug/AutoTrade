@@ -40,6 +40,61 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertNotIn("super-secret", path.read_text(encoding="utf-8"))
             self.assertTrue(store.verify())
 
+    def test_separator_free_secret_aliases_never_reach_accessible_export(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-camel-secret")
+            item["attributes"].update(
+                {
+                    "credentialHandle": "OBS-CREDENTIAL-SENTINEL",
+                    "sessionReference": "OBS-SESSION-SENTINEL",
+                    "proxyAuthorizationToken": "OBS-PROXY-SENTINEL",
+                    "accessToken": "OBS-TOKEN-SENTINEL",
+                    "providerCredentialId": "OBS-PROVIDER-SENTINEL",
+                    "token_budget": "OBS-BUDGET-CARRIER",
+                    "api_secret_rotation_count": "OBS-ROTATION-CARRIER",
+                    "free_text": (
+                        "safe=visible "
+                        "credentialHandle=OBS-TEXT-CREDENTIAL "
+                        "sessionReference: OBS-TEXT-SESSION"
+                    ),
+                    "repr_text": (
+                        "{'providerCredentialId': 'OBS-TEXT-PROVIDER', "
+                        "'safe': 'ok'}"
+                    ),
+                }
+            )
+            self.assertTrue(store.append(item))
+
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export(item["trace_id"])
+            for leaked in (
+                "OBS-CREDENTIAL-SENTINEL",
+                "OBS-SESSION-SENTINEL",
+                "OBS-PROXY-SENTINEL",
+                "OBS-TOKEN-SENTINEL",
+                "OBS-PROVIDER-SENTINEL",
+                "OBS-BUDGET-CARRIER",
+                "OBS-ROTATION-CARRIER",
+                "OBS-TEXT-CREDENTIAL",
+                "OBS-TEXT-SESSION",
+                "OBS-TEXT-PROVIDER",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+            attributes = json.loads(raw)["attributes"]
+            for key in (
+                "credentialHandle",
+                "sessionReference",
+                "proxyAuthorizationToken",
+                "accessToken",
+                "providerCredentialId",
+                "token_budget",
+                "api_secret_rotation_count",
+            ):
+                self.assertEqual(attributes[key], "[REDACTED]")
+
     def test_reconstruction_requires_all_durable_links(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

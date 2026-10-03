@@ -175,6 +175,29 @@ class PosixStagingNamespaceAuthorityTests(unittest.TestCase):
 
             self.assertFalse((staging / "first").exists())
 
+    def test_missing_final_nested_parent_is_created_under_retained_ancestor(self):
+        with TemporaryDirectory() as directory:
+            staging = Path(directory)
+            first = staging / "first"
+            first.mkdir()
+            with staging_module._retained_posix_directory(
+                staging,
+                label="staging",
+            ) as staging_descriptor:
+                with staging_module._retained_posix_relative_directory(
+                    staging_descriptor,
+                    ("first", "second"),
+                    create=True,
+                ) as second_descriptor:
+                    opened = os.fstat(second_descriptor)
+                    visible = (first / "second").stat()
+                    self.assertEqual(
+                        (opened.st_dev, opened.st_ino),
+                        (visible.st_dev, visible.st_ino),
+                    )
+
+            self.assertTrue((first / "second").is_dir())
+
     def test_source_root_ancestor_symlink_is_rejected_before_staging_mutation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

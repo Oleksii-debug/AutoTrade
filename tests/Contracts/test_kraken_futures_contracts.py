@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +15,6 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
-    ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
     stable_client_order_id,
@@ -23,7 +23,7 @@ from mvp.autotrade_mvp.kraken_futures import (
     parse_submission_response,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -68,11 +68,11 @@ def capability():
     )
 
 
-def prepared(intent_id: str):
+def prepared(intent_id: str, *, client_id_environment: str = "PAPER"):
     client_id = stable_client_order_id(
         "KRAKEN",
         intent_id,
-        environment="PAPER",
+        environment=client_id_environment,
         account_id="contract-account",
         max_length=36,
         client_id_format="UUID",
@@ -95,38 +95,76 @@ def durable_observation(payload, *, intent_id: str):
     request = prepared(intent_id)
     attempt = str(uuid4())
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    client_order_id = stable_client_order_id(
+        "KRAKEN",
+        intent_id,
+        environment="PAPER",
+        account_id="contract-account",
+        max_length=36,
+        client_id_format="UUID",
+    )
+    submission_scope = {
+        "endpoint": request.endpoint,
+        "prepared_request_sha256": request.body_sha256,
+        "capability_snapshot_ids": [request.capability_snapshot_id],
+        "instrument_versions": [request.instrument_version],
+    }
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
             store,
             environment="PAPER",
             account_id="contract-account",
-            owner_token="owner",
+            owner_token="contract-fixture-owner",
         )
-        outcome = dispatcher.dispatch(
+        scope_hash = "sha256:" + sha256(
+            canonical_json(submission_scope).encode("utf-8")
+        ).hexdigest()
+        dispatcher._append(
             attempt_id=attempt,
-            intent_id=intent_id,
-            intent_hash="contract-intent-hash",
-            provider="KRAKEN",
-            request=request.body,
-            now=NOW,
-            authority_check=lambda _hash, _now: (True, "allowed"),
-            transport_send=lambda _cid, _request, guard: (
-                guard(),
-                ExactJsonTransportResponse(raw),
-            )[1],
-            client_id_max_length=36,
-            client_id_format="UUID",
-            sender_check=lambda _owner, _epoch: None,
-            submission_scope={
-                "endpoint": request.endpoint,
-                "prepared_request_sha256": request.body_sha256,
-                "capability_snapshot_ids": [request.capability_snapshot_id],
-                "instrument_versions": [request.instrument_version],
+            event_type="SubmissionPrepared",
+            version=1,
+            payload={
+                "attempt_id": attempt,
+                "intent_id": intent_id,
+                "intent_hash": "contract-intent-hash",
+                "provider": "KRAKEN",
+                "request_hash": request.body_sha256,
+                "client_order_id": client_order_id,
+                "environment": "PAPER",
+                "account_id": "contract-account",
+                "owner_token": dispatcher.owner_token,
+                "owner_epoch": dispatcher.owner_epoch,
+                "prepared_at": NOW,
+                "submission_scope": submission_scope,
+                "submission_scope_hash": scope_hash,
             },
+            now=NOW,
         )
-        if outcome.status != "SENT":
-            raise AssertionError("contract fixture submission was not SENT")
+        dispatcher._append(
+            attempt_id=attempt,
+            event_type="SubmissionSending",
+            version=2,
+            payload={
+                "client_order_id": client_order_id,
+                "owner_token": dispatcher.owner_token,
+                "owner_epoch": dispatcher.owner_epoch,
+                "reason": "final_send_barrier_passed",
+            },
+            now=NOW,
+        )
+        dispatcher._append(
+            attempt_id=attempt,
+            event_type="SubmissionSent",
+            version=3,
+            payload={
+                "client_order_id": client_order_id,
+                "response_text": raw.decode("utf-8"),
+                "response_sha256": "sha256:" + sha256(raw).hexdigest(),
+                "response_encoding": "utf-8-json",
+            },
+            now=NOW,
+        )
         binding = load_submission_response_binding(
             store,
             environment="PAPER",

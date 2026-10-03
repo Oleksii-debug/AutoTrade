@@ -20,7 +20,7 @@ class RuntimeBudgetError(ValueError):
 
 
 def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+    if type(value) is not int:
         raise RuntimeBudgetError(f"{name} must be an integer")
     minimum = 0 if allow_zero else 1
     if value < minimum:
@@ -30,7 +30,7 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 def _git_sha(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or value != value.lower()
         or len(value) not in {40, 64}
@@ -44,7 +44,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 def _sha256_identity(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or not value.startswith("sha256:")
     ):
@@ -93,7 +93,7 @@ class RuntimeBudgetSpec:
     min_research_samples: int = 1
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
+        if type(self.scenario_id) is not str or not self.scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         object.__setattr__(self, "scenario_id", self.scenario_id.strip())
         object.__setattr__(self, "release_sha", _git_sha(self.release_sha, name="release_sha"))
@@ -173,7 +173,7 @@ class RuntimeLoadObservation:
     observed_duration_us: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
+        if type(self.scenario_id) is not str or not self.scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         expected = _positive_int(
             self.expected_financial_events,
@@ -276,7 +276,7 @@ class RuntimeLoadObservation:
         declared_duration_us: int | None = None,
         observed_duration_us: int | None = None,
     ) -> "RuntimeLoadObservation":
-        if not isinstance(scenario_id, str) or not scenario_id.strip():
+        if type(scenario_id) is not str or not scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         expected = _positive_int(
             expected_financial_events, name="expected_financial_events", allow_zero=True
@@ -324,16 +324,53 @@ class RuntimeBudgetDecision:
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
 
 
+def _snapshot_runtime_budget_spec(spec: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    return RuntimeBudgetSpec(
+        scenario_id=spec.scenario_id,
+        release_sha=spec.release_sha,
+        configuration_hash=spec.configuration_hash,
+        host_fingerprint=spec.host_fingerprint,
+        strategy_horizon_us=spec.strategy_horizon_us,
+        max_p95_financial_latency_us=spec.max_p95_financial_latency_us,
+        max_financial_staleness_us=spec.max_financial_staleness_us,
+        max_research_interference_us=spec.max_research_interference_us,
+        min_financial_samples=spec.min_financial_samples,
+        min_research_samples=spec.min_research_samples,
+    )
+
+
+def _snapshot_runtime_load_observation(
+    observation: RuntimeLoadObservation,
+) -> RuntimeLoadObservation:
+    if type(observation) is not RuntimeLoadObservation:
+        raise TypeError("observation must be exact RuntimeLoadObservation")
+    return RuntimeLoadObservation.create(
+        scenario_id=observation.scenario_id,
+        spec_digest=observation.spec_digest,
+        release_sha=observation.release_sha,
+        configuration_hash=observation.configuration_hash,
+        host_fingerprint=observation.host_fingerprint,
+        expected_financial_events=observation.expected_financial_events,
+        recovered_financial_events=observation.recovered_financial_events,
+        financial_latency_us=observation.financial_latency_us,
+        financial_staleness_us=observation.financial_staleness_us,
+        research_interference_us=observation.research_interference_us,
+        reconnect_backlog_remaining=observation.reconnect_backlog_remaining,
+        declared_duration_us=observation.declared_duration_us,
+        observed_duration_us=observation.observed_duration_us,
+    )
+
+
 def evaluate_runtime_budget(
     spec: RuntimeBudgetSpec,
     observation: RuntimeLoadObservation,
 ) -> RuntimeBudgetDecision:
     """Evaluate declared-load evidence without extrapolating beyond that scenario."""
 
-    if not isinstance(spec, RuntimeBudgetSpec):
-        raise TypeError("spec must be RuntimeBudgetSpec")
-    if not isinstance(observation, RuntimeLoadObservation):
-        raise TypeError("observation must be RuntimeLoadObservation")
+    spec = _snapshot_runtime_budget_spec(spec)
+    observation = _snapshot_runtime_load_observation(observation)
     if spec.scenario_id != observation.scenario_id:
         raise RuntimeBudgetError("observation belongs to another declared scenario")
     if spec.release_sha != observation.release_sha:

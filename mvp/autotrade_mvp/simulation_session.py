@@ -12,9 +12,10 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import book_equity_fill, book_external_cash_flow
+from .accounting import book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import GuardedDispatcher, stable_client_order_id
+from .fill_accounting import ProjectedFillEvidence
 from .durable_reservations import DurableReservationBook
 from .exact_decimal import (
     canonical_decimal_text, exact_add, exact_multiply,
@@ -24,7 +25,7 @@ from .persistence import JournalStore, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
-    commit_economic_batch_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
 from .reconciliation import (
     ProviderFillEvidence,
@@ -35,8 +36,8 @@ from .reconciliation import (
 from .reconciliation_journal import record_reconciliation_checkpoint
 from .risk import RiskContext, RiskIntent, RiskPolicy
 from .simulated_provider import SimulatedProvider
-from research.autotrade_research.artifacts.resource_lock import ResourceLock
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 
 ACCOUNT = "canonical-sim-account"
@@ -135,27 +136,25 @@ def _risk_context(price: Decimal) -> RiskContext:
     )
 
 
-def _reconcile(provider: SimulatedProvider, economic: DurableProviderEconomicBook,
-               now: str, *, fill: dict | None = None, client_order_id: str | None = None):
+def _reconcile(
+    provider: SimulatedProvider,
+    economic: DurableProviderEconomicBook,
+    now: str,
+    *,
+    provider_fill: ProviderFillEvidence | None = None,
+):
     snapshot = provider.account_snapshot(now=now)
-    fills = ()
-    ids = ()
-    if fill is not None:
-        fee = fill["fees"][0]
-        fills = (ProviderFillEvidence.create(
-            provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
-            provider_execution_id=fill["provider_execution_id"],
-            client_order_id=client_order_id, instrument=fill["instrument_version"],
-            quantity=fill["last_quantity"]["value"], price=fill["last_price"],
-            fee_amount=fee["amount"], fee_currency=fee["currency"],
-            trade_time=fill["trade_time"],
-        ),)
-        ids = (fill["provider_execution_id"],)
+    fills = () if provider_fill is None else (provider_fill,)
+    ids = () if provider_fill is None else (provider_fill.provider_execution_id,)
     result = reconcile_account(
         provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
         local_cash={"USD": economic.cash("USD")},
         provider_cash={"USD": snapshot["balances"][0]["total"]},
-        local_positions=({INSTRUMENT: economic.position(INSTRUMENT)} if fill else {}),
+        local_positions=(
+            {INSTRUMENT: economic.position(INSTRUMENT)}
+            if provider_fill is not None
+            else {}
+        ),
         provider_positions={item["instrument_version"]: item["quantity"]["value"]
                             for item in snapshot["positions"]},
         local_execution_ids=ids, provider_fills=fills,
@@ -175,7 +174,7 @@ def _reconcile(provider: SimulatedProvider, economic: DurableProviderEconomicBoo
             available_resources={"CASH:USD": snapshot["balances"][0]["available"]},
             provider_as_of=snapshot["provider_as_of"],
             evidence_refs=(f"simulated:provider-snapshot:{snapshot['snapshot_id']}",),
-        ) if fill is None else None),
+        ) if provider_fill is None else None),
     )
     return result, snapshot
 
@@ -260,11 +259,19 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "episode_id": episode_id, "reason": "orphaned_durable_state_requires_reconciliation",
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
-    economic.append(book_external_cash_flow(
-        transaction_id=_uuid("seed-transaction", episode_id),
-        cause_event_id=_uuid("seed-cause", episode_id),
-        currency="USD", amount=str(INITIAL_CASH),
-    ))
+    bootstrap_committed_at = (
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        - timedelta(microseconds=1)
+    ).isoformat().replace("+00:00", "Z")
+    economic.append(
+        book_external_cash_flow(
+            transaction_id=_uuid("seed-transaction", episode_id),
+            cause_event_id=_uuid("seed-cause", episode_id),
+            currency="USD",
+            amount=str(INITIAL_CASH),
+        ),
+        committed_at=bootstrap_committed_at,
+    )
     bootstrap = store.load_events("economic_book", economic.book_id)
     _deliver_event(store, bootstrap[-1]["event_id"])
     admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
@@ -409,23 +416,51 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         raise ValueError("acknowledgement is not a fill; reconciliation required")
     fill = fills[0]
     fee = fill["fees"][0]
-    commit_economic_batch_with_reservation_consumption(
-        economic, reservations,
+    provider_fill = ProviderFillEvidence.create(
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_execution_id=fill["provider_execution_id"],
+        client_order_id=dispatch.client_order_id,
+        instrument=fill["instrument_version"],
+        quantity=fill["last_quantity"]["value"],
+        price=fill["last_price"],
+        fee_amount=fee["amount"],
+        fee_currency=fee["currency"],
+        trade_time=fill["trade_time"],
+        side=fill["side"],
+        evidence_refs=(
+            f"simulated:provider-execution:{fill['provider_execution_id']}",
+        ),
+    )
+    projected_fill = ProjectedFillEvidence.create(
+        fill_id=_uuid("projected-fill", episode_id),
+        provider_execution_id=provider_fill.provider_execution_id,
+        intent_id=intent_id,
+        client_order_id=dispatch.client_order_id,
+        side=provider_fill.side,
+        quantity=provider_fill.quantity,
+        price=provider_fill.price,
+    )
+    commit_provider_fill_with_reservation_consumption(
+        economic,
+        reservations,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
         reservation_id=_uuid("reservation", episode_id),
-        usage={"CASH:USD": required_text},
-        transactions=(book_equity_fill(
-            transaction_id=_uuid("fill-transaction", episode_id),
-            cause_event_id=fill["provider_execution_id"],
-            instrument=fill["instrument_version"], settlement_currency="USD",
-            side=fill["side"], quantity=fill["last_quantity"]["value"],
-            price=fill["last_price"], fee=fee["amount"],
-            fee_currency=fee["currency"],
-        ),), committed_at=timestamp,
+        admission_id=admission_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        observed_at=timestamp,
+        committed_at=timestamp,
     )
     reconciled, _ = _reconcile(
-        provider, economic, timestamp, fill=fill, client_order_id=dispatch.client_order_id,
+        provider,
+        economic,
+        timestamp,
+        provider_fill=provider_fill,
     )
     if not reconciled.complete or reconciled.blocks_new_risk:
         raise ValueError("simulated fill failed account reconciliation")

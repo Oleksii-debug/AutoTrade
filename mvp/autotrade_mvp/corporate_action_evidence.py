@@ -25,6 +25,7 @@ from .corporate_actions import CorporateEvent
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .persistence import JournalStore, payload_digest
 from .provider_core import ProviderResponseObservation, Surface
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -142,6 +143,7 @@ class CorporateActionObservation:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     provider_instrument_version: str
     instrument_id: str
     instrument_version: int
@@ -168,6 +170,14 @@ class CorporateActionObservation:
             raise CorporateActionEvidenceError(
                 "environment must be canonical"
             )
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CorporateActionEvidenceError(str(error)) from error
         provider_version = _text(
             self.provider_instrument_version, "provider_instrument_version"
         )
@@ -224,6 +234,9 @@ class CorporateActionObservation:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
+        object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
         object.__setattr__(
             self, "provider_instrument_version", provider_version
         )
@@ -319,6 +332,7 @@ def _canonical_observation_from_sealed_response(
         provider_id=source.provider_id,
         account_id=source.account_id,
         environment=source.environment,
+        provider_environment=source.provider_environment,
         provider_instrument_version=source.query_binding.instrument_version,
         instrument_id=payload["instrument_id"],
         instrument_version=instrument_version,
@@ -350,6 +364,7 @@ class AuthoritativeCorporateAction:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     external_event_id: str
     provider_revision: str
     raw_evidence_digest: str
@@ -372,6 +387,7 @@ def resolve_authoritative_corporate_action(
     expected_provider_id: str,
     expected_account_id: str,
     expected_environment: str,
+    expected_provider_environment: str | None = None,
     allowed_endpoints: frozenset[str],
     permission_scope: str,
     normalizer: object | None = None,
@@ -408,6 +424,14 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
+    try:
+        expected_provider_environment_value = normalize_provider_environment(
+            provider_id=expected_provider,
+            environment=expected_environment_value,
+            provider_environment=expected_provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise CorporateActionEvidenceError(str(error)) from error
     if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
         raise TypeError("allowed_endpoints must be a non-empty frozenset")
     endpoints = frozenset(
@@ -450,6 +474,7 @@ def resolve_authoritative_corporate_action(
             endpoint=endpoint,
             account_id=expected_account,
             environment=expected_environment_value,
+            provider_environment=expected_provider_environment_value,
         )
     except Exception as error:
         raise CorporateActionEvidenceError(
@@ -541,6 +566,8 @@ def resolve_authoritative_corporate_action(
         "complete": True,
         "payload": dict(observation.payload),
     }
+    if observation.provider_environment != observation.environment:
+        provenance["provider_environment"] = observation.provider_environment
     provenance_digest = payload_digest(provenance)
     event = CorporateEvent.create(
         event_id=observation.external_event_id,
@@ -562,6 +589,7 @@ def resolve_authoritative_corporate_action(
         provider_id=observation.provider_id,
         account_id=observation.account_id,
         environment=observation.environment,
+        provider_environment=observation.provider_environment,
         external_event_id=observation.external_event_id,
         provider_revision=observation.provider_revision,
         raw_evidence_digest=source.response_sha256,
@@ -623,6 +651,7 @@ class DurableCorporateActionEvidenceStore:
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> None:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -632,16 +661,53 @@ class DurableCorporateActionEvidenceStore:
         self.environment = _text(environment, "environment").upper()
         if self.environment not in _ENVIRONMENTS:
             raise CorporateActionEvidenceError("environment must be canonical")
+        try:
+            self.provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CorporateActionEvidenceError(str(error)) from error
+        legacy_scope = {
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+        }
+        scope = dict(legacy_scope)
+        if self.provider_environment != self.environment:
+            scope["provider_environment"] = self.provider_environment
+        legacy_aggregate_id = (
+            "corporate-action-evidence:"
+            + payload_digest(legacy_scope)[7:]
+        )
         self.aggregate_id = (
             "corporate-action-evidence:"
-            + payload_digest(
-                {
-                    "provider_id": self.provider_id,
-                    "account_id": self.account_id,
-                    "environment": self.environment,
-                }
-            )[7:]
+            + payload_digest(scope)[7:]
         )
+        if (
+            self.aggregate_id != legacy_aggregate_id
+            and self.store.load_events(self._AGGREGATE_TYPE, legacy_aggregate_id)
+        ):
+            raise CorporateActionEvidenceConflict(
+                "ambiguous legacy corporate-action evidence journal requires explicit migration"
+            )
+
+    def _scope_payload(self) -> dict[str, str]:
+        scope = {
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+        }
+        if self.provider_environment != self.environment:
+            scope["provider_environment"] = self.provider_environment
+        return scope
+
+    def _scope_identity_parts(self) -> tuple[str, ...]:
+        parts = [self.provider_id, self.account_id, self.environment]
+        if self.provider_environment != self.environment:
+            parts.append(self.provider_environment)
+        return tuple(parts)
 
     def _events(self) -> list[dict[str, object]]:
         events = self.store.load_events(
@@ -668,6 +734,16 @@ class DurableCorporateActionEvidenceStore:
                 payload.get("provider_id") != self.provider_id
                 or payload.get("account_id") != self.account_id
                 or payload.get("environment") != self.environment
+                or (
+                    self.provider_environment == self.environment
+                    and payload.get("provider_environment")
+                    not in {None, self.provider_environment}
+                )
+                or (
+                    self.provider_environment != self.environment
+                    and payload.get("provider_environment")
+                    != self.provider_environment
+                )
             ):
                 raise CorporateActionEvidenceConflict(
                     "corporate-action durable scope is invalid"
@@ -688,11 +764,7 @@ class DurableCorporateActionEvidenceStore:
             uuid5(
                 NAMESPACE_URL,
                 "https://commands.autotrade.local/corporate-action-evidence/"
-                + self.provider_id
-                + "/"
-                + self.account_id
-                + "/"
-                + self.environment
+                + "/".join(self._scope_identity_parts())
                 + "/"
                 + external_event_id,
             )
@@ -703,9 +775,7 @@ class DurableCorporateActionEvidenceStore:
             "corporate-action-evidence:"
             + payload_digest(
                 {
-                    "provider_id": self.provider_id,
-                    "account_id": self.account_id,
-                    "environment": self.environment,
+                    **self._scope_payload(),
                     "external_event_id": external_event_id,
                 }
             )[7:]
@@ -723,6 +793,7 @@ class DurableCorporateActionEvidenceStore:
             accepted.provider_id != self.provider_id
             or accepted.account_id != self.account_id
             or accepted.environment != self.environment
+            or accepted.provider_environment != self.provider_environment
         ):
             raise CorporateActionEvidenceConflict(
                 "accepted corporate action does not match durable scope"
@@ -834,20 +905,18 @@ class DurableCorporateActionEvidenceStore:
             uuid5(
                 NAMESPACE_URL,
                 "https://events.autotrade.local/corporate-action-evidence/"
-                + self.provider_id
-                + "/"
-                + self.account_id
-                + "/"
-                + self.environment
+                + "/".join(self._scope_identity_parts())
                 + "/"
                 + accepted.external_event_id,
             )
         )
         durable_payload = {
-            "schema_version": "1.0.0",
-            "provider_id": accepted.provider_id,
-            "account_id": accepted.account_id,
-            "environment": accepted.environment,
+            "schema_version": (
+                "1.1.0"
+                if self.provider_environment != self.environment
+                else "1.0.0"
+            ),
+            **self._scope_payload(),
             "external_event_id": accepted.external_event_id,
             "corrects_external_event_id": corrected,
             "provider_revision": accepted.provider_revision,

@@ -8,9 +8,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable
 
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    canonical_decimal_text,
+    exact_abs,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+    terminating_decimal,
+)
 from .persistence import payload_digest
 
 
@@ -19,15 +31,12 @@ class AccountingConflict(ValueError):
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _name(value: str, *, field: str) -> str:
@@ -56,13 +65,7 @@ def _instant_value(value: str, *, field: str) -> datetime:
 
 
 def _canonical_decimal(value: Decimal) -> str:
-    amount = _decimal(value, name="signed_amount")
-    if amount == 0:
-        return "0"
-    fixed = format(amount, "f")
-    if "." in fixed:
-        fixed = fixed.rstrip("0").rstrip(".")
-    return fixed
+    return canonical_decimal_text(_decimal(value, name="signed_amount"))
 
 
 @dataclass(frozen=True)
@@ -199,13 +202,17 @@ def validate_transaction(transaction: JournalTransaction) -> None:
             )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
-    totals: dict[str, Decimal] = {}
+    totals: dict[str, list[Decimal]] = {}
     for item in transaction.postings:
         _name(item.ledger_account, field="ledger_account")
         asset = _name(item.asset_or_currency, field="asset_or_currency")
         amount = _decimal(item.signed_amount, name="signed_amount")
-        totals[asset] = totals.get(asset, Decimal("0")) + amount
-    unbalanced = {asset: amount for asset, amount in totals.items() if amount != 0}
+        totals.setdefault(asset, []).append(amount)
+    unbalanced = {
+        asset: total
+        for asset, amounts in totals.items()
+        if (total := exact_sum(amounts)) != 0
+    }
     if unbalanced:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
@@ -253,7 +260,11 @@ class EconomicBook:
             if original_id in self._reversed_transaction_ids:
                 raise AccountingConflict("Transaction has already been reversed")
             expected = tuple(
-                Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+                Posting(
+                    item.ledger_account,
+                    item.asset_or_currency,
+                    exact_subtract(Decimal("0"), item.signed_amount),
+                )
                 for item in original.postings
             )
             if normalized.postings != expected:
@@ -337,14 +348,11 @@ class EconomicBook:
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         account = _name(ledger_account, field="ledger_account")
         asset = _name(asset_or_currency, field="asset_or_currency")
-        return sum(
-            (
-                item.signed_amount
-                for transaction in self._transactions
-                for item in transaction.postings
-                if item.ledger_account == account and item.asset_or_currency == asset
-            ),
-            Decimal("0"),
+        return exact_sum(
+            item.signed_amount
+            for transaction in self._transactions
+            for item in transaction.postings
+            if item.ledger_account == account and item.asset_or_currency == asset
         )
 
     def cash(self, currency: str) -> Decimal:
@@ -445,7 +453,11 @@ def book_external_cash_flow(
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
             posting(f"CASH:{unit}", unit, value),
-            posting(f"EXTERNAL_EQUITY:{unit}", unit, -value),
+            posting(
+                f"EXTERNAL_EQUITY:{unit}",
+                unit,
+                exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)
@@ -478,20 +490,41 @@ def book_equity_fill(
     fee_amount = _decimal(fee, name="fee")
     if qty <= 0 or unit_price <= 0:
         raise ValueError("quantity and price must be positive")
-    signed_quantity = qty if normalized_side == "BUY" else -qty
-    trade_cash = -(qty * unit_price) if normalized_side == "BUY" else qty * unit_price
+    signed_quantity = (
+        qty
+        if normalized_side == "BUY"
+        else exact_subtract(Decimal("0"), qty)
+    )
+    trade_value = exact_multiply(qty, unit_price)
+    trade_cash = (
+        exact_subtract(Decimal("0"), trade_value)
+        if normalized_side == "BUY"
+        else trade_value
+    )
 
     items = [
         posting(f"POSITION:{symbol}", symbol, signed_quantity),
-        posting(f"CLEARING:{symbol}", symbol, -signed_quantity),
+        posting(
+            f"CLEARING:{symbol}",
+            symbol,
+            exact_subtract(Decimal("0"), signed_quantity),
+        ),
         posting(f"CASH:{settlement}", settlement, trade_cash),
-        posting(f"CLEARING:{settlement}", settlement, -trade_cash),
+        posting(
+            f"CLEARING:{settlement}",
+            settlement,
+            exact_subtract(Decimal("0"), trade_cash),
+        ),
     ]
     if fee_amount != 0:
         fee_unit = _name(fee_currency or settlement, field="fee_currency")
         items.extend(
             (
-                posting(f"CASH:{fee_unit}", fee_unit, -fee_amount),
+                posting(
+                    f"CASH:{fee_unit}",
+                    fee_unit,
+                    exact_subtract(Decimal("0"), fee_amount),
+                ),
                 posting(f"FEE_EXPENSE:{fee_unit}", fee_unit, fee_amount),
             )
         )
@@ -529,10 +562,18 @@ def book_fx_exchange(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
-            posting(f"CASH:{sold}", sold, -sold_value),
+            posting(
+                f"CASH:{sold}",
+                sold,
+                exact_subtract(Decimal("0"), sold_value),
+            ),
             posting(f"FX_CLEARING:{sold}", sold, sold_value),
             posting(f"CASH:{bought}", bought, bought_value),
-            posting(f"FX_CLEARING:{bought}", bought, -bought_value),
+            posting(
+                f"FX_CLEARING:{bought}",
+                bought,
+                exact_subtract(Decimal("0"), bought_value),
+            ),
         ),
     )
     validate_transaction(transaction)
@@ -551,7 +592,11 @@ def reverse_transaction(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=tuple(
-            Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+            Posting(
+                item.ledger_account,
+                item.asset_or_currency,
+                exact_subtract(Decimal("0"), item.signed_amount),
+            )
             for item in original.postings
         ),
         reverses_transaction_id=original.transaction_id,
@@ -632,20 +677,31 @@ def _canonical_equity_fill_terms(
     ]
     if (
         len(instrument_clearing) != 1
-        or instrument_clearing[0].signed_amount != -quantity
+        or instrument_clearing[0].signed_amount
+        != exact_subtract(Decimal("0"), quantity)
         or len(settlement_clearing) != 1
     ):
         raise AccountingConflict(
             "Position projection requires canonical equity-fill clearing postings"
         )
 
-    trade_cash = -settlement_clearing[0].signed_amount
+    trade_cash = exact_subtract(
+        Decimal("0"),
+        settlement_clearing[0].signed_amount,
+    )
     if trade_cash == 0 or (trade_cash > 0) == (quantity > 0):
         raise AccountingConflict(
             "Position projection requires cash direction opposite to quantity"
         )
-    unit_price = abs(trade_cash / quantity)
-    if unit_price <= 0 or not unit_price.is_finite():
+    try:
+        unit_price = terminating_decimal(
+            abs(as_fraction(trade_cash) / as_fraction(quantity))
+        )
+    except (ExactDecimalError, ZeroDivisionError) as error:
+        raise AccountingConflict(
+            "Position projection requires an exact terminating positive price"
+        ) from error
+    if unit_price <= 0:
         raise AccountingConflict("Position projection requires a finite positive price")
 
     # Clearing legs alone are not evidence that this transaction came from the
@@ -681,7 +737,7 @@ def _canonical_equity_fill_terms(
         instrument=symbol,
         settlement_currency=settlement,
         side="BUY" if quantity > 0 else "SELL",
-        quantity=abs(quantity),
+        quantity=exact_abs(quantity),
         price=unit_price,
         fee=fee_amount,
         fee_currency=fee_currency,
@@ -836,16 +892,31 @@ def project_equity_position(
             lot_price = mutable_lots[0][1]
             assert isinstance(lot_quantity, Decimal)
             assert isinstance(lot_price, Decimal)
-            close_quantity = min(abs(remaining), abs(lot_quantity))
+            close_quantity = min(
+                exact_abs(remaining),
+                exact_abs(lot_quantity),
+            )
 
             if lot_quantity > 0:
-                realized += close_quantity * (unit_price - lot_price)
-                lot_quantity -= close_quantity
-                remaining += close_quantity
+                realized = exact_add(
+                    realized,
+                    exact_multiply(
+                        close_quantity,
+                        exact_subtract(unit_price, lot_price),
+                    ),
+                )
+                lot_quantity = exact_subtract(lot_quantity, close_quantity)
+                remaining = exact_add(remaining, close_quantity)
             else:
-                realized += close_quantity * (lot_price - unit_price)
-                lot_quantity += close_quantity
-                remaining -= close_quantity
+                realized = exact_add(
+                    realized,
+                    exact_multiply(
+                        close_quantity,
+                        exact_subtract(lot_price, unit_price),
+                    ),
+                )
+                lot_quantity = exact_add(lot_quantity, close_quantity)
+                remaining = exact_subtract(remaining, close_quantity)
 
             if lot_quantity == 0:
                 mutable_lots.pop(0)
@@ -865,27 +936,26 @@ def project_equity_position(
         )
         for lot in mutable_lots
     )
-    quantity = sum((lot.quantity for lot in lots), Decimal("0"))
-    open_cost_basis = sum(
-        (abs(lot.quantity) * lot.unit_price for lot in lots),
-        Decimal("0"),
+    quantity = exact_sum(lot.quantity for lot in lots)
+    open_cost_basis = exact_sum(
+        exact_multiply(exact_abs(lot.quantity), lot.unit_price)
+        for lot in lots
     )
 
     unrealized: Decimal | None
     if mark is None:
         unrealized = None
     else:
-        unrealized = sum(
-            (
-                abs(lot.quantity)
-                * (
-                    (mark - lot.unit_price)
+        unrealized = exact_sum(
+            exact_multiply(
+                exact_abs(lot.quantity),
+                (
+                    exact_subtract(mark, lot.unit_price)
                     if lot.quantity > 0
-                    else (lot.unit_price - mark)
-                )
-                for lot in lots
-            ),
-            Decimal("0"),
+                    else exact_subtract(lot.unit_price, mark)
+                ),
+            )
+            for lot in lots
         )
 
     return EquityPositionProjection(

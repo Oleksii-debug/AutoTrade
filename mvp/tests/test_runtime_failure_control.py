@@ -69,20 +69,21 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:test-account",
             )
-            new_owner = restarted.start("host-b")
-            self.assertGreater(new_owner.epoch, owner.epoch)
             with self.assertRaisesRegex(
                 PermissionError,
-                "bound to this recovery owner",
+                "independently issued external fence authority",
             ):
+                restarted.takeover_durable_owner("host-b")
+            with self.assertRaisesRegex(RuntimeError, "No active owner"):
                 restarted.record_reconciliation_checkpoint(
                     reconciliation_id="runtime-readiness",
                     provider_id="TEST_PROVIDER",
                     account_id="test-account",
                     environment="PAPER",
                 )
-            self.assertEqual(restarted.state, HostState.RECOVERING)
+            self.assertEqual(restarted.state, HostState.STOPPED)
             self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.durable_owner_chain(), (owner,))
 
     def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
         with TemporaryDirectory() as directory:
@@ -436,7 +437,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         controller.record_reconciliation(consistent=True)
         controller.validate_sender(new_owner.owner_id, new_owner.epoch)
 
-    def test_durable_owner_epoch_survives_restart_and_fences_old_process(self):
+    def test_durable_restart_cannot_self_issue_owner_epoch(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             first = RecoveryController(
@@ -446,33 +447,20 @@ class RuntimeRecoveryTests(unittest.TestCase):
             owner_one = first.start("host-a")
             self._record_durable_ready(first)
             first.validate_sender(owner_one.owner_id, owner_one.epoch)
-            self.assertEqual(owner_one.epoch, 1)
 
             second = RecoveryController(
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:paper-account",
             )
-            owner_two = second.start("host-b")
-            self.assertEqual(owner_two.epoch, 2)
-            self.assertEqual(second.state, HostState.RECOVERING)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued external fence authority",
+            ):
+                second.takeover_durable_owner("host-b")
 
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                first.validate_sender(owner_one.owner_id, owner_one.epoch)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                first.validate_admission(owner_one.epoch)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                self._record_durable_ready(first)
-
-            self._record_durable_ready(second)
-            second.validate_sender(owner_two.owner_id, owner_two.epoch)
-
-            third = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:paper-account",
-            )
-            owner_three = third.start("host-c")
-            self.assertEqual(owner_three.epoch, 3)
-            self.assertEqual(third.state, HostState.RECOVERING)
+            self.assertIsNone(second.owner)
+            self.assertEqual(second.durable_owner_chain(), (owner_one,))
+            first.validate_sender(owner_one.owner_id, owner_one.epoch)
 
     def test_durable_owner_scopes_are_independent(self):
         with TemporaryDirectory() as directory:
@@ -492,16 +480,21 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(live_owner.epoch, 1)
 
             self._record_durable_ready(paper)
-            transferred = paper.transfer_owner(
-                new_owner_id="paper-host-2",
-                old_sender_fenced=True,
-                reconciled=True,
+            paper_restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
             )
-            self.assertEqual(transferred.epoch, 2)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued external fence authority",
+            ):
+                paper_restarted.takeover_durable_owner("paper-host-2")
+
             self._record_durable_ready(live)
             live.validate_sender(live_owner.owner_id, live_owner.epoch)
+            self.assertEqual(paper_restarted.durable_owner_chain(), (paper_owner,))
 
-    def test_durable_transfer_fences_an_observer_of_old_generation(self):
+    def test_denied_durable_takeover_does_not_fence_current_generation(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             first = RecoveryController(
@@ -520,14 +513,18 @@ class RuntimeRecoveryTests(unittest.TestCase):
             stale.reason_codes.clear()
             stale.state = HostState.READY
 
-            transferred = first.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
             )
-            self.assertEqual(transferred.epoch, 2)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                stale.validate_sender(owner.owner_id, owner.epoch)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued external fence authority",
+            ):
+                restarted.takeover_durable_owner("host-b")
+
+            self.assertEqual(restarted.durable_owner_chain(), (owner,))
+            stale.validate_sender(owner.owner_id, owner.epoch)
 
     def test_owner_identity_is_normalized_before_start_and_transfer(self):
         controller = RecoveryController()

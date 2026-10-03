@@ -57,6 +57,10 @@ def fill_evidence(fill, client_order_id: str) -> ProviderFillEvidence:
         fee_amount=fee["amount"],
         fee_currency=fee["currency"],
         trade_time=fill["trade_time"],
+        side=fill["side"],
+        evidence_refs=(
+            f"simulated:provider-execution:{fill['provider_execution_id']}",
+        ),
     )
 
 

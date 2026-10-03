@@ -8,15 +8,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import json
 from typing import Iterable, Literal, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_abs,
+    exact_multiply,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 
 
 class OptionError(ValueError):
@@ -24,14 +32,10 @@ class OptionError(ValueError):
 
 
 def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise OptionError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionError(f"{name} must use bounded exact decimal input") from error
     if positive and result <= 0:
         raise OptionError(f"{name} must be positive")
     return result
@@ -175,8 +179,8 @@ def intrinsic_value_per_unit(
 ) -> Decimal:
     price = _decimal(underlying_price, "underlying_price", positive=True)
     if contract.right == "CALL":
-        return max(price - contract.strike, Decimal("0"))
-    return max(contract.strike - price, Decimal("0"))
+        return max(exact_subtract(price, contract.strike), Decimal("0"))
+    return max(exact_subtract(contract.strike, price), Decimal("0"))
 
 
 def expiration_cash_settlement(
@@ -189,7 +193,7 @@ def expiration_cash_settlement(
         raise OptionError("expiration_cash_settlement requires a cash-settled option")
     contracts = _decimal(signed_contracts, "signed_contracts")
     intrinsic = intrinsic_value_per_unit(contract, underlying_price)
-    return contracts * contract.multiplier * intrinsic
+    return exact_multiply(exact_multiply(contracts, contract.multiplier), intrinsic)
 
 
 def expiration_pnl_after_premium(
@@ -204,7 +208,10 @@ def expiration_pnl_after_premium(
     if premium < 0:
         raise OptionError("premium_per_unit cannot be negative")
     intrinsic = intrinsic_value_per_unit(contract, underlying_price)
-    return contracts * contract.multiplier * (intrinsic - premium)
+    return exact_multiply(
+        exact_multiply(contracts, contract.multiplier),
+        exact_subtract(intrinsic, premium),
+    )
 
 
 def physical_exercise_obligation(
@@ -225,14 +232,17 @@ def physical_exercise_obligation(
     if contracts == 0:
         raise OptionError("signed_contracts must be non-zero")
     right_direction = Decimal("1") if contract.right == "CALL" else Decimal("-1")
-    direction = contracts * right_direction
+    direction = exact_multiply(contracts, right_direction)
     assets = tuple(
-        (leg.asset_id, direction * leg.quantity_per_contract)
+        (leg.asset_id, exact_multiply(direction, leg.quantity_per_contract))
         for leg in contract.deliverable
     )
     if contract.exercise_cash_per_contract is None:
         raise OptionError("physical exercise cash is not evidenced")
-    cash = -(direction * contract.exercise_cash_per_contract)
+    cash = exact_subtract(
+        Decimal("0"),
+        exact_multiply(direction, contract.exercise_cash_per_contract),
+    )
     return ExerciseObligation(
         asset_quantities=assets,
         settlement_cash=cash,
@@ -249,7 +259,7 @@ def require_physical_resources(
     """Fail closed when a physical obligation needs resources not evidenced."""
 
     cash = _decimal(cash_balance, "cash_balance")
-    if obligation.settlement_cash < 0 and cash < -obligation.settlement_cash:
+    if obligation.settlement_cash < 0 and cash < exact_abs(obligation.settlement_cash):
         raise OptionError("insufficient evidenced cash for physical option obligation")
     for asset_id, quantity in obligation.asset_quantities:
         if quantity >= 0:
@@ -257,7 +267,7 @@ def require_physical_resources(
         if asset_id not in asset_balances:
             raise OptionError(f"missing evidenced balance for deliverable asset {asset_id}")
         available = _decimal(asset_balances[asset_id], f"asset balance {asset_id}")
-        if available < -quantity:
+        if available < exact_abs(quantity):
             raise OptionError(f"insufficient evidenced balance for deliverable asset {asset_id}")
 
 
@@ -298,7 +308,7 @@ def interim_multi_leg_reservation(
     if not atomic_package_guaranteed:
         if package_worst_case_loss is not None:
             raise OptionError("package loss cannot override non-atomic interim leg risk")
-        return sum(losses, Decimal("0"))
+        return exact_sum(losses, start=Decimal("0"))
     if package_worst_case_loss is None:
         raise OptionError("atomic package requires an explicitly evidenced package loss")
     package = _decimal(package_worst_case_loss, "package_worst_case_loss")
@@ -323,7 +333,11 @@ def book_cash_option_settlement(
         cause_event_id=_text(cause_event_id, "cause_event_id"),
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(f"OPTION_SETTLEMENT_PNL:{currency}", currency, -value),
+            posting(
+                f"OPTION_SETTLEMENT_PNL:{currency}",
+                currency,
+                exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)
@@ -341,7 +355,11 @@ def book_physical_option_settlement(
         postings.extend(
             (
                 posting(f"POSITION:{asset_id}", asset_id, quantity),
-                posting(f"OPTION_DELIVERY_CLEARING:{asset_id}", asset_id, -quantity),
+                posting(
+                    f"OPTION_DELIVERY_CLEARING:{asset_id}",
+                    asset_id,
+                    exact_subtract(Decimal("0"), quantity),
+                ),
             )
         )
     if obligation.settlement_cash != 0:
@@ -352,7 +370,7 @@ def book_physical_option_settlement(
                 posting(
                     f"OPTION_DELIVERY_CLEARING:{currency}",
                     currency,
-                    -obligation.settlement_cash,
+                    exact_subtract(Decimal("0"), obligation.settlement_cash),
                 ),
             )
         )
@@ -616,15 +634,23 @@ def _verify_option_risk_evidence(
     evidence: OptionRiskEvidence,
     artifact_store: ArtifactStore,
 ) -> None:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise OptionError(
             "canonical ArtifactStore is required for option risk evidence"
         )
     artifact_id, digest, _ = _immutable_option_evidence_ref(evidence.evidence_ref)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        raw = artifact_store.read_bytes(artifact_id)
-    except Exception as error:
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise OptionError("option risk evidence artifact is missing or corrupt") from error
     if not isinstance(manifest, dict) or not isinstance(raw, bytes):
         raise OptionError("option risk evidence artifact representation is invalid")

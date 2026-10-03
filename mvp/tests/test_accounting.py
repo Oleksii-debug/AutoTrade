@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -661,6 +661,119 @@ class AccountingFoundationTests(unittest.TestCase):
             )
 
 
+    def test_exact_numeric_authority_rejects_decimal_subclass_before_virtual_dispatch(self):
+        class ForgedDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+            def as_tuple(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+            def __format__(self, spec):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            posting("CASH:USD", "USD", ForgedDecimal("1"))
+
+    def test_cash_and_fill_economics_ignore_hostile_ambient_decimal_context(self):
+        huge = "1000000000000000000000000000000"
+        tiny = "0.000000000000000000000000000001"
+        expected_trade = Decimal(
+            "-2.000000000000000000000000000004000000000000000000000000000002"
+        )
+
+        def exercise():
+            book = EconomicBook()
+            for index, amount in enumerate((huge, tiny, "-" + huge)):
+                book.append(
+                    book_external_cash_flow(
+                        transaction_id=f"cash-exact-{index}",
+                        cause_event_id=f"cash-exact-cause-{index}",
+                        currency="USD",
+                        amount=amount,
+                    )
+                )
+            self.assertEqual(book.cash("USD"), Decimal(tiny))
+
+            fill = book_equity_fill(
+                transaction_id="fill-exact-context",
+                cause_event_id="fill-exact-context-cause",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1.000000000000000000000000000001",
+                price="2.000000000000000000000000000002",
+            )
+            self.assertEqual(fill.postings[2].signed_amount, expected_trade)
+            return fill
+
+        baseline = exercise()
+        with localcontext() as context:
+            context.prec = 3
+            context.rounding = ROUND_DOWN
+            hostile = exercise()
+        self.assertEqual(hostile.postings, baseline.postings)
+
+    def test_fifo_projection_is_exact_under_hostile_decimal_context(self):
+        book = EconomicBook()
+        book.append(
+            book_equity_fill(
+                transaction_id="fifo-buy",
+                cause_event_id="fifo-buy-cause",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1000000000000000000000000000000.1",
+                price="2.000000000000000000000000000001",
+            )
+        )
+        book.append(
+            book_equity_fill(
+                transaction_id="fifo-sell",
+                cause_event_id="fifo-sell-cause",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="SELL",
+                quantity="1000000000000000000000000000000",
+                price="2.000000000000000000000000000002",
+            )
+        )
+        expected = project_equity_position(
+            book,
+            instrument="ABC",
+            settlement_currency="USD",
+            mark_price="2.000000000000000000000000000003",
+        )
+        with localcontext() as context:
+            context.prec = 4
+            context.rounding = ROUND_DOWN
+            actual = project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+                mark_price="2.000000000000000000000000000003",
+            )
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.quantity, Decimal("0.1"))
+        self.assertEqual(actual.realized_pnl, Decimal("1"))
+
+    def test_nonterminating_implied_fill_price_fails_closed(self):
+        malformed = JournalTransaction(
+            transaction_id="malformed-rational-price",
+            cause_event_id="malformed-rational-price-cause",
+            postings=(
+                Posting("POSITION:ABC", "ABC", Decimal("3")),
+                Posting("CLEARING:ABC", "ABC", Decimal("-3")),
+                Posting("CASH:USD", "USD", Decimal("-1")),
+                Posting("CLEARING:USD", "USD", Decimal("1")),
+            ),
+        )
+        with self.assertRaisesRegex(AccountingConflict, "exact terminating"):
+            project_equity_position(
+                EconomicBook((malformed,)),
+                instrument="ABC",
+                settlement_currency="USD",
+            )
 
 
 if __name__ == "__main__":

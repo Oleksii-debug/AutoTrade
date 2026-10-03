@@ -17,8 +17,8 @@ import re
 from typing import Iterable, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
-from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from autotrade_runtime.artifacts import trusted_authenticated_reader
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .provider_core import PROVIDERS, provider_definition
 from .qualification_attestation import (
@@ -82,6 +82,14 @@ _PROVIDER_FAMILY_LIFECYCLES: Mapping[
 def _text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CrosswalkError(f"{name} is required")
+    return value.strip()
+
+
+def _exact_text(value: object, name: str) -> str:
+    """Admit only non-polymorphic strings to the terminal crosswalk graph."""
+
+    if type(value) is not str or not value.strip():
+        raise CrosswalkError(f"{name} must be an exact non-empty string")
     return value.strip()
 
 
@@ -149,6 +157,91 @@ class LifecycleEvidence:
             raise CrosswalkError("economic_units_exact must be boolean")
         object.__setattr__(self, "artifact_id", _artifact_id(self.artifact_id))
         object.__setattr__(self, "artifact_sha256", _digest(self.artifact_sha256))
+
+
+def _snapshot_crosswalk_key(value: CrosswalkKey) -> CrosswalkKey:
+    """Detach one exact provider×asset key before any authority callback."""
+
+    if type(value) is not CrosswalkKey:
+        raise CrosswalkError("evidence key must be exact CrosswalkKey")
+    provider_id = _exact_text(
+        object.__getattribute__(value, "provider_id"), "provider_id"
+    )
+    product_family = _exact_text(
+        object.__getattribute__(value, "product_family"), "product_family"
+    )
+    lifecycle = object.__getattribute__(value, "lifecycle")
+    if type(lifecycle) is not Lifecycle:
+        raise CrosswalkError("lifecycle must be exact Lifecycle")
+    return CrosswalkKey(provider_id, product_family, lifecycle)
+
+
+def _snapshot_lifecycle_evidence(value: LifecycleEvidence) -> LifecycleEvidence:
+    """Freeze the full decision-relevant lifecycle graph once at entry."""
+
+    if type(value) is not LifecycleEvidence:
+        raise CrosswalkError("evidence entries must be exact LifecycleEvidence")
+    key = _snapshot_crosswalk_key(object.__getattribute__(value, "key"))
+    source_sha = _exact_text(
+        object.__getattribute__(value, "source_sha"), "source_sha"
+    )
+    adapter_sha = _exact_text(
+        object.__getattribute__(value, "adapter_sha"), "adapter_sha"
+    )
+    cases = object.__getattribute__(value, "cases")
+    if type(cases) is not frozenset or any(type(case) is not str for case in cases):
+        raise CrosswalkError("cases must be an exact frozenset of exact strings")
+    reconciliation_complete = object.__getattribute__(
+        value, "reconciliation_complete"
+    )
+    economic_units_exact = object.__getattribute__(value, "economic_units_exact")
+    if type(reconciliation_complete) is not bool:
+        raise CrosswalkError("reconciliation_complete must be exact boolean")
+    if type(economic_units_exact) is not bool:
+        raise CrosswalkError("economic_units_exact must be exact boolean")
+    artifact_id = _exact_text(
+        object.__getattribute__(value, "artifact_id"), "artifact_id"
+    )
+    artifact_sha256 = _exact_text(
+        object.__getattribute__(value, "artifact_sha256"), "artifact_sha256"
+    )
+    return LifecycleEvidence(
+        key=key,
+        source_sha=source_sha,
+        adapter_sha=adapter_sha,
+        cases=cases,
+        reconciliation_complete=reconciliation_complete,
+        economic_units_exact=economic_units_exact,
+        artifact_id=artifact_id,
+        artifact_sha256=artifact_sha256,
+    )
+
+
+def _snapshot_adapter_shas(
+    value: Mapping[tuple[str, str], str],
+) -> dict[tuple[str, str], str]:
+    """Detach caller adapter authority before filesystem or signer callbacks."""
+
+    if type(value) is not dict:
+        raise CrosswalkError("exact_adapter_shas must be an exact dict")
+    snapshot: dict[tuple[str, str], str] = {}
+    for key, adapter_sha in value.items():
+        if (
+            type(key) is not tuple
+            or len(key) != 2
+            or any(type(part) is not str for part in key)
+        ):
+            raise CrosswalkError(
+                "exact_adapter_shas keys must be exact (provider, family) string tuples"
+            )
+        provider_id = _exact_text(key[0], "adapter provider_id").upper()
+        product_family = _exact_text(key[1], "adapter product_family")
+        adapter = _sha(_exact_text(adapter_sha, "exact adapter sha"), "exact adapter sha")
+        normalized_key = (provider_id, product_family)
+        if normalized_key in snapshot:
+            raise CrosswalkError("duplicate exact adapter identity")
+        snapshot[normalized_key] = adapter
+    return snapshot
 
 
 def lifecycle_evidence_payload(item: LifecycleEvidence) -> dict[str, object]:
@@ -249,7 +342,14 @@ def qualify_asset_provider_crosswalk(
 ) -> CrosswalkVerdict:
     """Fail closed unless every advertised combination has exact complete evidence."""
 
-    source_sha = _sha(exact_source_sha, "exact_source_sha")
+    source_sha = _sha(
+        _exact_text(exact_source_sha, "exact_source_sha"), "exact_source_sha"
+    )
+    if type(evidence) not in (list, tuple):
+        raise CrosswalkError("evidence must be an exact list or tuple")
+    evidence_items = tuple(_snapshot_lifecycle_evidence(item) for item in evidence)
+    adapter_shas = _snapshot_adapter_shas(exact_adapter_shas)
+
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -275,11 +375,8 @@ def qualify_asset_provider_crosswalk(
     by_key: dict[CrosswalkKey, LifecycleEvidence] = {}
     invalid: set[CrosswalkKey] = set()
     reasons: list[str] = []
-    evidence_items = tuple(evidence)
 
     for item in evidence_items:
-        if not isinstance(item, LifecycleEvidence):
-            raise CrosswalkError("evidence entries must be LifecycleEvidence")
         if item.key not in expected_set:
             raise CrosswalkError("evidence contains a non-advertised lifecycle combination")
         if item.key in by_key:
@@ -288,13 +385,12 @@ def qualify_asset_provider_crosswalk(
         if trusted_read is None or not _stored_evidence_matches(trusted_read, item):
             invalid.add(item.key)
 
-        expected_adapter = exact_adapter_shas.get(
+        expected_adapter = adapter_shas.get(
             (item.key.provider_id, item.key.product_family)
         )
         if expected_adapter is None:
             invalid.add(item.key)
             continue
-        expected_adapter = _sha(expected_adapter, "exact adapter sha")
         missing_cases = required_cases(item.key.lifecycle) - item.cases
         if (
             item.source_sha != source_sha
@@ -326,18 +422,6 @@ def qualify_asset_provider_crosswalk(
             )
             for item in evidence_items
         }
-        observed_refs = {
-            (
-                ref.artifact_id,
-                ref.sha256,
-                ref.source_sha,
-                ref.media_type,
-                ref.evidence_kind,
-            )
-            for ref in qualification_receipt.attestation.evidence_refs
-        }
-        if observed_refs != expected_refs:
-            reasons.append("independent_evidence_set_mismatch")
         try:
             accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
@@ -358,6 +442,18 @@ def qualify_asset_provider_crosswalk(
                 reasons.append(
                     "independent_evidence_result_" + accepted.result.lower()
                 )
+            accepted_refs = {
+                (
+                    ref.artifact_id,
+                    ref.sha256,
+                    ref.source_sha,
+                    ref.media_type,
+                    ref.evidence_kind,
+                )
+                for ref in accepted.evidence_refs
+            }
+            if accepted_refs != expected_refs:
+                reasons.append("independent_evidence_set_mismatch")
 
     missing = tuple(sorted(expected_set - set(by_key)))
     invalid_keys = tuple(sorted(invalid))

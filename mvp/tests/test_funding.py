@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
@@ -10,6 +10,20 @@ from mvp.autotrade_mvp.funding import (
     book_funding_delta,
     canonical_funding_cash_flow,
 )
+
+
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile is_finite dispatch")
+
+    def as_tuple(self):
+        raise AssertionError("hostile as_tuple dispatch")
+
+    def __format__(self, format_spec):
+        raise AssertionError("hostile format dispatch")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile equality dispatch")
 
 
 def moment(hour: int):
@@ -126,6 +140,99 @@ class FundingTests(unittest.TestCase):
                 rate="0.0001",
                 sign_convention="POSITIVE_LONG_PAYS",
             )
+
+    def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("0.0001")
+        with self.assertRaisesRegex(
+            ValueError,
+            "bounded exact decimal input",
+        ):
+            canonical_funding_cash_flow(
+                signed_notional=Decimal("1000"),
+                rate=hostile,
+                sign_convention="POSITIVE_LONG_PAYS",
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "bounded exact decimal input",
+        ):
+            FundingEvent(
+                funding_id="hostile",
+                revision=1,
+                kind="FINAL",
+                effective_at=moment(8),
+                available_at=moment(8),
+                settlement_currency="USD",
+                signed_notional=hostile,
+                rate=Decimal("0.0001"),
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:hostile",
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "bounded exact decimal input",
+        ):
+            book_funding_delta(
+                transaction_id="hostile-tx",
+                cause_event_id="hostile-event",
+                settlement_currency="USD",
+                economic_delta=hostile,
+            )
+
+    def test_funding_economics_ignore_ambient_decimal_context(self):
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_CEILING
+            first = FundingEvent(
+                funding_id="context",
+                revision=1,
+                kind="FINAL",
+                effective_at=moment(8),
+                available_at=moment(8),
+                settlement_currency="USD",
+                signed_notional=Decimal("12345678901234567890.123456789"),
+                rate=Decimal("0.000000001"),
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:context-r1",
+            )
+            corrected = FundingEvent(
+                funding_id="context",
+                revision=2,
+                kind="FINAL",
+                effective_at=moment(8),
+                available_at=moment(9),
+                settlement_currency="USD",
+                signed_notional=Decimal("12345678901234567890.123456789"),
+                rate=Decimal("0.000000002"),
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:context-r2",
+            )
+            book = FundingRevisionBook()
+            first_update = book.record(first)
+            correction = book.record(corrected)
+            transaction = book_funding_delta(
+                transaction_id="context-tx",
+                cause_event_id="context-event",
+                settlement_currency="USD",
+                economic_delta=correction.economic_delta,
+            )
+
+        self.assertEqual(
+            first_update.economic_delta,
+            Decimal("-12345678901.234567890123456789"),
+        )
+        self.assertEqual(
+            correction.economic_delta,
+            Decimal("-12345678901.234567890123456789"),
+        )
+        self.assertEqual(
+            transaction.postings[0].signed_amount,
+            Decimal("-12345678901.234567890123456789"),
+        )
+        self.assertEqual(
+            transaction.postings[1].signed_amount,
+            Decimal("12345678901.234567890123456789"),
+        )
 
     def test_final_charge_cannot_be_known_before_effective_time(self):
         with self.assertRaises(ValueError):

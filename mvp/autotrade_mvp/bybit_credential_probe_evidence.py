@@ -29,6 +29,7 @@ from .provider_core import ProviderCoreError
 from .provider_response_limits import (
     DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    MAX_PROVIDER_JSON_DEPTH,
     require_provider_json_depth,
     require_provider_response_bytes,
 )
@@ -117,9 +118,18 @@ def _exact_recv_window(value: object) -> int:
     return value
 
 
-def _snapshot_exact_json_data(value: object, *, path: str = "$") -> object:
+def _snapshot_exact_json_data(
+    value: object,
+    *,
+    path: str = "$",
+    depth: int = 0,
+) -> object:
     """Detach one exact finite JSON tree from caller-owned mutable containers."""
 
+    if depth > MAX_PROVIDER_JSON_DEPTH:
+        raise ProviderCoreError(
+            "Bybit credential probe response exceeds structural depth budget"
+        )
     if value is None or type(value) in {str, int, bool}:
         return value
     if type(value) is float:
@@ -136,7 +146,11 @@ def _snapshot_exact_json_data(value: object, *, path: str = "$") -> object:
                 "Bybit credential probe response mutated during JSON snapshot"
             ) from error
         return [
-            _snapshot_exact_json_data(item, path=f"{path}[{index}]")
+            _snapshot_exact_json_data(
+                item,
+                path=f"{path}[{index}]",
+                depth=depth + 1,
+            )
             for index, item in enumerate(items)
         ]
     if type(value) is dict:
@@ -152,7 +166,11 @@ def _snapshot_exact_json_data(value: object, *, path: str = "$") -> object:
                 raise ProviderCoreError(
                     f"Bybit credential probe response key at {path} must be exact text"
                 )
-            result[key] = _snapshot_exact_json_data(item, path=f"{path}.{key}")
+            result[key] = _snapshot_exact_json_data(
+                item,
+                path=f"{path}.{key}",
+                depth=depth + 1,
+            )
         return result
     raise ProviderCoreError(
         f"Bybit credential probe response value at {path} is not exact JSON data"
@@ -509,7 +527,7 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeHttpRequest:
     url: str
-    headers: Mapping[str, str]
+    headers: Mapping[str, str] = field(repr=False)
     timeout_seconds: int
 
     def __post_init__(self) -> None:
@@ -533,7 +551,7 @@ class BybitCredentialProbeHttpRequest:
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeRawHttpResponse:
     http_status: int
-    body: bytes
+    body: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:

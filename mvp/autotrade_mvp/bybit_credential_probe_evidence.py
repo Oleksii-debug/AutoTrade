@@ -9,7 +9,7 @@ retirement, or recovery-takeover authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
@@ -117,30 +117,50 @@ def _exact_recv_window(value: object) -> int:
     return value
 
 
-def _require_exact_json_data(value: object, *, path: str = "$") -> None:
+def _snapshot_exact_json_data(value: object, *, path: str = "$") -> object:
+    """Detach one exact finite JSON tree from caller-owned mutable containers."""
+
     if value is None or type(value) in {str, int, bool}:
-        return
+        return value
     if type(value) is float:
         if not math.isfinite(value):
             raise ProviderCoreError(
                 f"Bybit credential probe response value at {path} must be finite"
             )
-        return
+        return value
     if type(value) is list:
-        for index, item in enumerate(value):
-            _require_exact_json_data(item, path=f"{path}[{index}]")
-        return
+        try:
+            items = tuple(value)
+        except RuntimeError as error:
+            raise ProviderCoreError(
+                "Bybit credential probe response mutated during JSON snapshot"
+            ) from error
+        return [
+            _snapshot_exact_json_data(item, path=f"{path}[{index}]")
+            for index, item in enumerate(items)
+        ]
     if type(value) is dict:
-        for key, item in value.items():
+        try:
+            items = tuple(value.items())
+        except RuntimeError as error:
+            raise ProviderCoreError(
+                "Bybit credential probe response mutated during JSON snapshot"
+            ) from error
+        result: dict[str, object] = {}
+        for key, item in items:
             if type(key) is not str:
                 raise ProviderCoreError(
                     f"Bybit credential probe response key at {path} must be exact text"
                 )
-            _require_exact_json_data(item, path=f"{path}.{key}")
-        return
+            result[key] = _snapshot_exact_json_data(item, path=f"{path}.{key}")
+        return result
     raise ProviderCoreError(
         f"Bybit credential probe response value at {path} is not exact JSON data"
     )
+
+
+def _require_exact_json_data(value: object, *, path: str = "$") -> None:
+    _snapshot_exact_json_data(value, path=path)
 
 
 def _response_digest(response: object) -> tuple[int, str]:
@@ -148,17 +168,21 @@ def _response_digest(response: object) -> tuple[int, str]:
         raise ProviderCoreError(
             "Bybit credential probe response must be an exact object"
         )
-    if "retCode" not in response:
+    snapshot = _snapshot_exact_json_data(response)
+    if type(snapshot) is not dict:
+        raise ProviderCoreError(
+            "Bybit credential probe response must be an exact object"
+        )
+    if "retCode" not in snapshot:
         raise ProviderCoreError("Bybit credential probe response must include retCode")
-    ret_code = response["retCode"]
+    ret_code = snapshot["retCode"]
     if type(ret_code) is not int:
         raise ProviderCoreError(
             "Bybit credential probe retCode must be an exact integer"
         )
-    _require_exact_json_data(response)
     try:
         encoded = json.dumps(
-            response,
+            snapshot,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -211,7 +235,9 @@ def _decode_wire_json(body: object) -> dict[str, Any]:
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
         )
-    except json.JSONDecodeError as error:
+    except ProviderCoreError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
         raise ProviderCoreError(
             "Bybit credential probe wire body must be valid JSON"
         ) from error
@@ -219,25 +245,31 @@ def _decode_wire_json(body: object) -> dict[str, Any]:
         raise ProviderCoreError(
             "Bybit credential probe wire JSON must be an exact object"
         )
-    _require_exact_json_data(value)
-    return value
+    snapshot = _snapshot_exact_json_data(value)
+    if type(snapshot) is not dict:
+        raise ProviderCoreError(
+            "Bybit credential probe wire JSON must be an exact object"
+        )
+    return snapshot
 
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeWireResponse:
-    http_status: int
-    response: dict[str, Any]
+    """Scrubbed HTTP result: raw provider JSON is consumed, not retained."""
 
-    def __post_init__(self) -> None:
+    http_status: int
+    response: InitVar[dict[str, Any]]
+    ret_code: int = field(init=False)
+    response_sha256: str = field(init=False)
+
+    def __post_init__(self, response: dict[str, Any]) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP status must be an exact three-digit integer"
             )
-        if type(self.response) is not dict:
-            raise ProviderCoreError(
-                "Bybit credential probe wire response must contain an exact JSON object"
-            )
-        _require_exact_json_data(self.response)
+        ret_code, response_sha256 = _response_digest(response)
+        object.__setattr__(self, "ret_code", ret_code)
+        object.__setattr__(self, "response_sha256", response_sha256)
 
 
 BybitCredentialProbeWireQuery = Callable[..., BybitCredentialProbeWireResponse]
@@ -757,7 +789,7 @@ def probe_bybit_credential_with_vault(
                 "Bybit credential probe non-200 HTTP result is not rejection evidence"
             )
         observed_at = _clock_utc_text(clock_utc())
-        return capture_bybit_credential_probe_evidence(
+        return BybitCredentialProbeEvidence(
             credential_handle=credential_handle,
             provider_environment=provider_environment,
             source_uri=source_uri,
@@ -766,7 +798,8 @@ def probe_bybit_credential_with_vault(
             request_timestamp_ms=request_timestamp_ms,
             recv_window_ms=recv_window_ms,
             http_status=wire_response.http_status,
-            response=wire_response.response,
+            ret_code=wire_response.ret_code,
+            response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
         )
 

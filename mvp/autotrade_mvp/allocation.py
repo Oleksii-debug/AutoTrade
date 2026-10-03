@@ -1661,55 +1661,95 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 
 
 _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
-_SEALED_ALLOCATION_PAYLOADS: dict[int, weakref.ReferenceType] = {}
 
 
-class _SealedAllocationPayload:
-    """Private read-only provenance owner for one canonical frozen mapping node."""
+def _make_allocation_payload_sealer():
+    """Create closure-private provenance for canonical frozen mapping nodes."""
 
-    __slots__ = ("_proxy", "_canonical_json", "__weakref__")
+    registry: dict[int, weakref.ReferenceType] = {}
 
-    def __init__(self, proxy, canonical_json: str) -> None:
-        object.__setattr__(self, "_proxy", proxy)
-        object.__setattr__(self, "_canonical_json", canonical_json)
+    class SealedAllocationPayload:
+        __slots__ = ("_proxy", "_canonical_json", "__weakref__")
 
-    @property
-    def proxy(self):
-        return self._proxy
+        def __init__(self, proxy, canonical_json: str) -> None:
+            object.__setattr__(self, "_proxy", proxy)
+            object.__setattr__(self, "_canonical_json", canonical_json)
 
-    @property
-    def canonical_json(self) -> str:
-        return self._canonical_json
+        @property
+        def proxy(self):
+            return self._proxy
 
-    def __setattr__(self, name, value) -> None:
-        raise AttributeError("sealed allocation payload provenance is read-only")
+        @property
+        def canonical_json(self) -> str:
+            return self._canonical_json
+
+        def __setattr__(self, name, value) -> None:
+            raise AttributeError(
+                "sealed allocation payload provenance is read-only"
+            )
+
+    def lookup(value):
+        if type(value) is not _MAPPING_PROXY_TYPE:
+            return None
+        reference = registry.get(id(value))
+        if reference is None:
+            return None
+        owner = reference()
+        if owner is None or owner.proxy is not value:
+            return None
+        return owner
+
+    def freeze(value):
+        if type(value) is dict:
+            frozen_items = {}
+            owners = []
+            for key, item in dict.items(value):
+                frozen_item, nested_owners = freeze(item)
+                frozen_items[key] = frozen_item
+                owners.extend(nested_owners)
+            proxy = MappingProxyType(frozen_items)
+            owner = SealedAllocationPayload(
+                proxy,
+                json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+            )
+            key = id(proxy)
+
+            def cleanup(reference, *, key=key) -> None:
+                if registry.get(key) is reference:
+                    registry.pop(key, None)
+
+            registry[key] = weakref.ref(owner, cleanup)
+            owners.append(owner)
+            return proxy, tuple(owners)
+        if type(value) is list:
+            frozen_items = []
+            owners = []
+            for item in value:
+                frozen_item, nested_owners = freeze(item)
+                frozen_items.append(frozen_item)
+                owners.extend(nested_owners)
+            return tuple(frozen_items), tuple(owners)
+        return value, ()
+
+    return lookup, freeze
 
 
-def _registered_allocation_payload(value):
-    """Return sealed provenance without invoking mapping-proxy operations."""
-
-    if type(value) is not _MAPPING_PROXY_TYPE:
-        return None
-    reference = _SEALED_ALLOCATION_PAYLOADS.get(id(value))
-    if reference is None:
-        return None
-    owner = reference()
-    if owner is None or owner.proxy is not value:
-        return None
-    return owner
+_registered_allocation_payload, _freeze_evidence_value = (
+    _make_allocation_payload_sealer()
+)
+del _make_allocation_payload_sealer
 
 
-def _register_allocation_payload(owner: _SealedAllocationPayload) -> None:
-    key = id(owner.proxy)
-
-    def _cleanup(reference, *, key=key) -> None:
-        if _SEALED_ALLOCATION_PAYLOADS.get(key) is reference:
-            _SEALED_ALLOCATION_PAYLOADS.pop(key, None)
-
-    _SEALED_ALLOCATION_PAYLOADS[key] = weakref.ref(owner, _cleanup)
-
-
-def _canonical_evidence_value(value):
+def _canonical_evidence_value(
+    value,
+    _sealed_lookup=_registered_allocation_payload,
+):
     """Reduce untrusted evidence to exact built-in JSON-domain values.
 
     Mapping provenance is checked before any mapping operation.  In particular,
@@ -1736,7 +1776,7 @@ def _canonical_evidence_value(value):
             normalized[key] = _canonical_evidence_value(raw_value)
         return normalized
     if type(value) is _MAPPING_PROXY_TYPE:
-        owner = _registered_allocation_payload(value)
+        owner = _sealed_lookup(value)
         if owner is None:
             raise TypeError(
                 "allocation evidence mappingproxy lacks sealed canonical provenance"
@@ -1748,41 +1788,6 @@ def _canonical_evidence_value(value):
     if type(value) is list or type(value) is tuple:
         return [_canonical_evidence_value(item) for item in value]
     raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
-
-
-def _freeze_evidence_value(value):
-    """Freeze exact canonical values and register every mapping node."""
-
-    if type(value) is dict:
-        frozen_items = {}
-        owners = []
-        for key, item in dict.items(value):
-            frozen_item, nested_owners = _freeze_evidence_value(item)
-            frozen_items[key] = frozen_item
-            owners.extend(nested_owners)
-        proxy = MappingProxyType(frozen_items)
-        owner = _SealedAllocationPayload(
-            proxy,
-            json.dumps(
-                value,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ),
-        )
-        _register_allocation_payload(owner)
-        owners.append(owner)
-        return proxy, tuple(owners)
-    if type(value) is list:
-        frozen_items = []
-        owners = []
-        for item in value:
-            frozen_item, nested_owners = _freeze_evidence_value(item)
-            frozen_items.append(frozen_item)
-            owners.extend(nested_owners)
-        return tuple(frozen_items), tuple(owners)
-    return value, ()
 
 
 def _canonical_evidence_json(value) -> str:
@@ -1834,7 +1839,7 @@ class ImmutableAllocationEvidence:
     valid_until: str
     payload: Mapping[str, object]
     digest: str
-    _payload_owners: tuple[_SealedAllocationPayload, ...] = field(
+    _payload_owners: tuple[object, ...] = field(
         init=False,
         repr=False,
         compare=False,
@@ -1955,13 +1960,14 @@ class ImmutableAllocationEvidence:
 
 def _allocation_payload_snapshot(
     evidence: ImmutableAllocationEvidence,
+    _sealed_lookup=_registered_allocation_payload,
 ) -> dict[str, object]:
     """Return a detached exact-dict snapshot only from this issuer's seal."""
 
     if type(evidence) is not ImmutableAllocationEvidence:
         raise TypeError("allocation evidence must use the canonical evidence type")
     payload = object.__getattribute__(evidence, "payload")
-    owner = _registered_allocation_payload(payload)
+    owner = _sealed_lookup(payload)
     owners = object.__getattribute__(evidence, "_payload_owners")
     if owner is None or not any(candidate is owner for candidate in owners):
         raise ValueError("allocation evidence payload provenance is not sealed")

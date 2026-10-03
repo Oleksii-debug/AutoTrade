@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 import unittest
 
+import mvp.autotrade_mvp.allocation as allocation_module
 from mvp.autotrade_mvp.allocation import ImmutableAllocationEvidence
 from mvp.autotrade_mvp.allocation_valuation import (
     AllocationValuationError,
@@ -134,6 +135,29 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             self.evidence(hostile)
 
         self.assertEqual(hostile.calls, [])
+
+    def test_module_globals_cannot_mint_foreign_payload_seals(self):
+        self.assertFalse(hasattr(allocation_module, "_SEALED_ALLOCATION_PAYLOADS"))
+        self.assertFalse(hasattr(allocation_module, "_register_allocation_payload"))
+        self.assertFalse(hasattr(allocation_module, "_SealedAllocationPayload"))
+
+        proxy = MappingProxyType({"symbol": "AAA"})
+        with self.assertRaisesRegex(TypeError, "lacks sealed canonical provenance"):
+            self.evidence(proxy)
+
+    def test_lookup_global_rebinding_cannot_admit_foreign_proxy(self):
+        original = allocation_module._registered_allocation_payload
+        proxy = MappingProxyType({"symbol": "AAA"})
+
+        class ForgedOwner:
+            canonical_json = '{"symbol":"AAA"}'
+
+        allocation_module._registered_allocation_payload = lambda value: ForgedOwner()
+        try:
+            with self.assertRaisesRegex(TypeError, "lacks sealed canonical provenance"):
+                self.evidence(proxy)
+        finally:
+            allocation_module._registered_allocation_payload = original
 
     def test_mappingproxy_over_hostile_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileMapping()

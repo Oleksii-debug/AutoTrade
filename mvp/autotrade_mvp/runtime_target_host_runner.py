@@ -201,6 +201,11 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
     journal_store_type = JournalStore
     threading_module = threading
     time_module = time
+    runtime_campaign_evidence_type = RuntimeCampaignEvidence
+    campaign_to_observation = runtime_campaign_evidence_type.to_observation
+    campaign_to_observation_state = _capture_python_function_state(
+        campaign_to_observation
+    )
     require_binding = _require_callable_binding
     require_binding_state = _capture_python_function_state(require_binding)
     names = (
@@ -211,6 +216,7 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
         "RESEARCH_INTERFERENCE_BASIS",
         "ResearchInterferenceSample",
         "ResourceTargetHostSample",
+        "RuntimeCampaignEvidence",
         "RuntimeLoadCampaignEvidence",
         "RuntimeTargetHostRunResult",
         "STALENESS_BASIS",
@@ -281,6 +287,13 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
                 function_state=state,
                 error_prefix=prefix,
             )
+        require_binding(
+            label="RuntimeCampaignEvidence.to_observation",
+            current=runtime_campaign_evidence_type.to_observation,
+            expected=campaign_to_observation,
+            function_state=campaign_to_observation_state,
+            error_prefix=prefix,
+        )
         current_resource_values = (
             journal_store_type.current_journal_sequence,
             journal_store_type.pending_outbox_count,
@@ -585,6 +598,7 @@ def run_declared_target_host_campaign(
     measurement_type = TargetHostMeasurementArtifact
     collect_campaign_evidence = collect_runtime_campaign_evidence_from_measurement_artifact
     evaluate_budget = evaluate_runtime_budget
+    campaign_to_observation = RuntimeCampaignEvidence.to_observation
     retained_campaign_type = RuntimeLoadCampaignEvidence
     parsed_campaign_type = ParsedRuntimeTargetHostCampaign
     result_type = RuntimeTargetHostRunResult
@@ -709,7 +723,7 @@ def run_declared_target_host_campaign(
         expected_release_artifact_id=release_artifact_id,
     )
     require_runner_callback_authority()
-    observation = campaign_evidence.to_observation(spec)
+    observation = campaign_to_observation(campaign_evidence, spec)
     require_runner_callback_authority()
     decision = evaluate_budget(spec, observation)
     require_runner_callback_authority()

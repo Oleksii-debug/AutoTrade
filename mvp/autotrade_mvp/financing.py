@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import exact_subtract
 
 
 class FinancingError(ValueError):
@@ -220,7 +221,7 @@ class FinancingRevisionBook:
         self._history.append(event)
         return FinancingUpdate(
             accepted=True,
-            economic_delta=new_final - old_final,
+            economic_delta=exact_subtract(new_final, old_final),
             current_revision=event.revision,
             current_final_charge=new_final,
         )
@@ -246,11 +247,12 @@ def book_financing_delta(
         raise FinancingError("zero financing delta has no economic posting")
     charge_unit = _text(unit, name="unit").upper()
     source = _text(source_account, name="source_account")
+    negative_delta = exact_subtract(Decimal("0"), delta)
     transaction = JournalTransaction(
         transaction_id=_text(transaction_id, name="transaction_id"),
         cause_event_id=_text(cause_event_id, name="cause_event_id"),
         postings=(
-            posting(source, charge_unit, -delta),
+            posting(source, charge_unit, negative_delta),
             posting(f"FINANCING_EXPENSE:{charge_unit}", charge_unit, delta),
         ),
     )

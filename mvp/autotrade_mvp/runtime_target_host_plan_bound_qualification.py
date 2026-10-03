@@ -24,6 +24,23 @@ from .runtime_target_host_qualification import (
 )
 
 
+def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
+    if type(value) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    return RuntimeBudgetSpec(
+        scenario_id=value.scenario_id,
+        release_sha=value.release_sha,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        strategy_horizon_us=value.strategy_horizon_us,
+        max_p95_financial_latency_us=value.max_p95_financial_latency_us,
+        max_financial_staleness_us=value.max_financial_staleness_us,
+        max_research_interference_us=value.max_research_interference_us,
+        min_financial_samples=value.min_financial_samples,
+        min_research_samples=value.min_research_samples,
+    )
+
+
 def verify_declared_plan_runtime_target_host_qualification(
     receipt: SignedQualificationAttestation,
     *,
@@ -46,8 +63,7 @@ def verify_declared_plan_runtime_target_host_qualification(
 
     if type(journal_store) is not JournalStore:
         raise TypeError("journal_store must be exact JournalStore")
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    spec = _snapshot_budget_spec(spec)
 
     plan = load_declared_runtime_event_plan(
         journal_store,

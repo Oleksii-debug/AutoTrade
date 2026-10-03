@@ -280,6 +280,21 @@ def measure_declared_financial_operation(
     measurement_event_type = _MEASUREMENT_EVENT_TYPE
     measurement_aggregate_type = _MEASUREMENT_AGGREGATE_TYPE
     measurement_schema_version = _MEASUREMENT_SCHEMA_VERSION
+    measurement_sha256 = sha256
+
+    digest_namespace = payload_digest_for.__globals__
+    digest_sha256 = digest_namespace.get("sha256")
+    canonical_json_for = digest_namespace.get("canonical_json")
+    if not callable(digest_sha256) or not callable(canonical_json_for):
+        raise error_type("payload digest authority is not canonical")
+    canonical_json_namespace = canonical_json_for.__globals__
+    json_module = canonical_json_namespace.get("json")
+
+    plan_digest_namespace = plan_digest_getter.__globals__
+    plan_payload_digest = plan_digest_namespace.get("payload_digest")
+    plan_schema_version = plan_digest_namespace.get("_PLAN_SCHEMA_VERSION")
+    if plan_payload_digest is not payload_digest_for:
+        raise error_type("declared plan digest authority is not canonical")
 
     module_namespace = globals()
     module_bindings = (
@@ -300,6 +315,34 @@ def measure_declared_financial_operation(
         ("_MEASUREMENT_EVENT_TYPE", measurement_event_type),
         ("_MEASUREMENT_AGGREGATE_TYPE", measurement_aggregate_type),
         ("_MEASUREMENT_SCHEMA_VERSION", measurement_schema_version),
+        ("sha256", measurement_sha256),
+    )
+    transitive_bindings = (
+        (digest_namespace, "sha256", digest_sha256, "payload_digest.sha256"),
+        (
+            digest_namespace,
+            "canonical_json",
+            canonical_json_for,
+            "payload_digest.canonical_json",
+        ),
+        (
+            canonical_json_namespace,
+            "json",
+            json_module,
+            "canonical_json.json",
+        ),
+        (
+            plan_digest_namespace,
+            "payload_digest",
+            plan_payload_digest,
+            "DeclaredRuntimeEventPlan.digest.payload_digest",
+        ),
+        (
+            plan_digest_namespace,
+            "_PLAN_SCHEMA_VERSION",
+            plan_schema_version,
+            "DeclaredRuntimeEventPlan.digest._PLAN_SCHEMA_VERSION",
+        ),
     )
     protected_functions = tuple(
         (
@@ -322,6 +365,7 @@ def measure_declared_financial_operation(
             ("_measurement_event_id", measurement_event_id_for),
             ("_non_negative_int", non_negative_int),
             ("payload_digest", payload_digest_for),
+            ("payload_digest.canonical_json", canonical_json_for),
             ("DurableFinancialLatencySample.__init__", sample_init),
             ("ExpectedJournalEvent.payload", expected_payload_getter),
             ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),
@@ -334,6 +378,12 @@ def measure_declared_financial_operation(
             if module_namespace.get(name, missing) is not expected_value:
                 raise error_type(
                     f"measurement authority changed during financial operation: {name}"
+                )
+        for namespace, dependency_name, expected_value, label in transitive_bindings:
+            if namespace.get(dependency_name, missing) is not expected_value:
+                raise error_type(
+                    "measurement transitive authority changed during financial "
+                    f"operation: {label}"
                 )
         if (
             JournalStore.get_event is not get_event
@@ -414,6 +464,7 @@ def measure_declared_financial_operation(
             )
 
         latency_us = (end_ns - start_ns + 999) // 1_000
+        require_operation_authority()
         payload = {
             "schema_version": measurement_schema_version,
             "plan_id": plan.plan_id,
@@ -427,6 +478,7 @@ def measure_declared_financial_operation(
             "monotonic_end_ns": end_ns,
             "latency_us": latency_us,
         }
+        require_operation_authority()
         append_event(
             store,
             {

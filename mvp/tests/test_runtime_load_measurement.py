@@ -284,6 +284,102 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                 event_types,
             )
 
+    def test_operation_cannot_replace_payload_digest_transitive_hash_authority(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-digest-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            digest_namespace = measurement_module.payload_digest.__globals__
+            original = digest_namespace["sha256"]
+
+            def operation():
+                _append(store, expected)
+                digest_namespace["sha256"] = lambda *_args, **_kwargs: None
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: payload_digest.sha256",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                digest_namespace["sha256"] = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_replace_plan_digest_binding(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-plan-digest-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            namespace = type(plan).digest.fget.__globals__
+            original = namespace["payload_digest"]
+
+            def operation():
+                _append(store, expected)
+                namespace["payload_digest"] = lambda *_args, **_kwargs: HASH
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: DeclaredRuntimeEventPlan.digest.payload_digest",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                namespace["payload_digest"] = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
     def test_operation_without_durable_financial_event_fails_closed(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

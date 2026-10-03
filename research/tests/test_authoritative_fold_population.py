@@ -763,6 +763,65 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertEqual(first.fingerprint, second.fingerprint)
         self.assertEqual(transformed_first, transformed_second)
 
+    def test_simultaneous_distinct_events_use_canonical_provider_order(self):
+        first = event(2, "105", event_id=_uuid(1, 200))
+        second = event(2, "106", event_id=_uuid(1, 201))
+        first["source_sequence"] = "40"
+        first["stream_generation"] = "2"
+        second["source_sequence"] = "41"
+        second["stream_generation"] = "2"
+        second["raw_evidence_ref"]["artifact_id"] = _uuid(3, 201)
+        rows = [event(0, "100"), event(1, "102"), first, second]
+        manifest_digest = self._register(rows)
+
+        points = resolve_authoritative_feature_points(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
+            events=rows,
+            cutoff=BASE + timedelta(days=2, minutes=2),
+            spec=self.spec,
+        )
+        simultaneous = [
+            point
+            for point in points
+            if point.decision_time == BASE + timedelta(days=2, minutes=2)
+        ]
+        self.assertEqual(len(simultaneous), 1)
+        point = simultaneous[0]
+        self.assertEqual(
+            point.input_ids,
+            (f"{first['event_id']}@r1", f"{second['event_id']}@r1"),
+        )
+        with localcontext() as context:
+            context.prec = 50
+            expected = (Decimal("106") / Decimal("105")) - Decimal("1")
+        self.assertEqual(point.value, expected)
+
+    def test_simultaneous_distinct_events_without_sequence_fail_closed(self):
+        first = event(2, "105", event_id=_uuid(1, 210))
+        second = event(2, "106", event_id=_uuid(1, 211))
+        second["raw_evidence_ref"]["artifact_id"] = _uuid(3, 211)
+        rows = [event(0, "100"), event(1, "102"), first, second]
+        manifest_digest = self._register(rows)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "simultaneous distinct market events require source_sequence",
+        ):
+            resolve_authoritative_feature_points(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                cutoff=BASE + timedelta(days=2, minutes=2),
+                spec=self.spec,
+            )
+
     def test_identical_authority_reproduces_exact_fit_identity(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)

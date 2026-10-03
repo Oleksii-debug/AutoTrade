@@ -413,9 +413,9 @@ def _authority_service_store_operations():
     """Seal one AuthorityService to one exact JournalStore generation.
 
     The selected store and physical identity live in closure-owned process state,
-    not in caller-writable AuthorityService instance/module data. Callback-free
-    weakrefs preserve one-shot binding without exposing a registry-removal
-    callback that could reopen explicit __init__ re-entry.
+    not in caller-writable AuthorityService instance/module data. Weakref cleanup
+    releases dead service bindings without weakening one-shot binding for a live
+    service or allowing explicit __init__ re-entry to retarget authority.
     """
 
     states: dict[
@@ -424,6 +424,12 @@ def _authority_service_store_operations():
     ] = {}
     state_lock = threading.RLock()
     missing = object()
+
+    def cleanup(object_id: int, service_ref: weakref.ReferenceType) -> None:
+        with state_lock:
+            current = states.get(object_id)
+            if current is not None and current[0] is service_ref:
+                states.pop(object_id, None)
 
     def register(service: object, store: JournalStore | None) -> None:
         identity = None
@@ -447,7 +453,11 @@ def _authority_service_store_operations():
                         "AuthorityService journal binding identity collision"
                     )
                 states.pop(object_id, None)
-            states[object_id] = (weakref.ref(service), store, identity)
+            service_ref = weakref.ref(
+                service,
+                lambda ref, object_id=object_id: cleanup(object_id, ref),
+            )
+            states[object_id] = (service_ref, store, identity)
 
     def binding(
         service: object,

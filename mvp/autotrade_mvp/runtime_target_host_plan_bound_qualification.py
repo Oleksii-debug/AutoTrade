@@ -17,6 +17,7 @@ attestation, provider authority, economic edge, or trading authority.
 from __future__ import annotations
 
 from copy import copy
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from autotrade_runtime.artifacts import ArtifactStore
@@ -36,6 +37,7 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 
 if TYPE_CHECKING:
     from .production_host import ProductionHostRuntime
@@ -44,6 +46,29 @@ if TYPE_CHECKING:
         AcceptedChronologyBoundRuntimeTargetHostQualification,
     )
     from .trusted_chronology_cut import TrustedChronologyCut
+
+
+_ACCEPTED_TEXT_FIELDS = (
+    "attestation_id",
+    "attestation_digest",
+    "source_sha",
+    "scenario_id",
+    "spec_digest",
+    "configuration_hash",
+    "host_fingerprint",
+    "workload_profile_hash",
+    "journal_store_identity_digest",
+    "release_artifact_id",
+    "release_artifact_sha256",
+    "binding_artifact_id",
+    "binding_sha256",
+)
+_ACCEPTED_MAPPING_FIELDS = (
+    "evidence_sha256_by_kind",
+    "payload_artifact_id_by_kind",
+    "payload_sha256_by_kind",
+    "collector_by_kind",
+)
 
 
 def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
@@ -106,103 +131,285 @@ def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
     return detached
 
 
-def _verify_declared_plan_runtime_target_host_qualification_without_chronology(
-    receipt: SignedQualificationAttestation,
+def _build_composed_acceptance_snapshotter(
     *,
-    evidence_store: ArtifactStore,
-    evidence_root: str,
-    journal_store: JournalStore,
-    plan_id: str,
-    spec: RuntimeBudgetSpec,
-    expected_release_artifact_id: str,
-    expected_release_artifact_sha256: str,
-    campaign_plan: RuntimeCampaignPlan | None = None,
-    campaign_cut: RuntimeCampaignCut | None = None,
-    measurement: TargetHostMeasurementArtifact | None = None,
-) -> AcceptedComposedRuntimeTargetHostQualification:
-    """Apply durable-plan + composed WP-65 fencing without granting terminal status."""
+    composed_type,
+    accepted_type,
+    composition_error_type,
+    mapping_proxy_type,
+    text_fields,
+    mapping_fields,
+):
+    """Build one output snapshotter with no module-global authority lookups."""
 
-    if type(journal_store) is not JournalStore:
-        raise TypeError("journal_store must be exact JournalStore")
-    spec = _snapshot_budget_spec(spec)
+    def exact_text(value: object, *, name: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise composition_error_type(f"{name} must remain exact non-empty text")
+        return value
 
-    selected_journal_identity = require_exact_journal_store_authority(
-        journal_store,
-        subject="runtime target-host qualification JournalStore",
-    )
-    with journal_store_authority_scope(
-        journal_store,
-        selected_journal_identity,
-    ):
-        plan = load_declared_runtime_event_plan(
-            journal_store,
-            plan_id=plan_id,
-            spec=spec,
-        )
-        if campaign_plan is None or campaign_cut is None or measurement is None:
-            raise RuntimeTargetHostCompositionError(
-                "terminal WP-65 qualification requires composed target-host measurement authority"
+    def snapshot_map(value: object, *, name: str) -> dict[str, str]:
+        if type(value) is not mapping_proxy_type:
+            raise composition_error_type(
+                f"{name} must remain constructor-owned immutable mapping state"
             )
-        durable_plan_digest = _canonical_sha256_text(
-            plan.digest,
-            name="durable pre-run plan digest",
-        )
-        if type(campaign_plan) is RuntimeCampaignPlan:
-            campaign_workload = _canonical_sha256_text(
-                campaign_plan.workload_profile_hash,
-                name="campaign workload identity",
-            )
-            if campaign_workload != durable_plan_digest:
-                raise RuntimeTargetHostCompositionError(
-                    "campaign workload identity does not match durable pre-run plan"
+        detached = dict(value)
+        for key, item in detached.items():
+            if type(key) is not str or not key or type(item) is not str or not item:
+                raise composition_error_type(
+                    f"{name} must contain exact non-empty text pairs"
                 )
-        if type(measurement) is TargetHostMeasurementArtifact:
-            measurement_workload = _canonical_sha256_text(
-                measurement.workload_profile_hash,
-                name="measurement workload identity",
+        return detached
+
+    def snapshot(value):
+        if type(value) is not composed_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical accepted qualification"
             )
-            if measurement_workload != durable_plan_digest:
-                raise RuntimeTargetHostCompositionError(
-                    "measurement workload identity does not match durable pre-run plan"
+        accepted = value.qualification
+        if type(accepted) is not accepted_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical signed acceptance"
+            )
+        accepted_snapshot = accepted_type(
+            **{
+                field: exact_text(
+                    getattr(accepted, field),
+                    name=f"accepted target-host {field}",
                 )
-        if type(campaign_cut) is RuntimeCampaignCut:
-            campaign_cut = _snapshot_campaign_cut(campaign_cut)
-        accepted = verify_composed_runtime_target_host_qualification(
-            receipt,
-            evidence_store=evidence_store,
-            evidence_root=evidence_root,
-            journal_store=journal_store,
-            spec=spec,
-            campaign_plan=campaign_plan,
-            campaign_cut=campaign_cut,
-            declared_plan_id=plan.plan_id,
-            measurement=measurement,
-            expected_release_artifact_id=expected_release_artifact_id,
-            expected_release_artifact_sha256=expected_release_artifact_sha256,
+                for field in text_fields
+            },
+            **{
+                field: snapshot_map(
+                    getattr(accepted, field),
+                    name=f"accepted target-host {field}",
+                )
+                for field in mapping_fields
+            },
+        )
+        return composed_type(
+            qualification=accepted_snapshot,
+            target_host_measurement_digest=exact_text(
+                value.target_host_measurement_digest,
+                name="accepted target-host measurement digest",
+            ),
+            durable_financial_binding_digest=exact_text(
+                value.durable_financial_binding_digest,
+                name="accepted durable financial binding digest",
+            ),
+            projection_sha256_by_kind=snapshot_map(
+                value.projection_sha256_by_kind,
+                name="accepted target-host projection map",
+            ),
         )
 
-        final_plan = load_declared_runtime_event_plan(
-            journal_store,
-            plan_id=plan.plan_id,
-            spec=spec,
+    return snapshot
+
+
+def _build_chronology_free_verifier(
+    *,
+    journal_store_type,
+    budget_spec_type,
+    campaign_plan_type,
+    campaign_cut_type,
+    measurement_type,
+    composition_error_type,
+    copy_value,
+    require_store_authority,
+    store_authority_scope,
+    plan_loader,
+    composed_verifier,
+    acceptance_snapshotter,
+):
+    """Capture the full chronology-free dependency graph before rebinding."""
+
+    def snapshot_budget_spec(value):
+        if type(value) is not budget_spec_type:
+            raise TypeError("spec must be exact RuntimeBudgetSpec")
+        return budget_spec_type(
+            scenario_id=value.scenario_id,
+            release_sha=value.release_sha,
+            configuration_hash=value.configuration_hash,
+            host_fingerprint=value.host_fingerprint,
+            strategy_horizon_us=value.strategy_horizon_us,
+            max_p95_financial_latency_us=value.max_p95_financial_latency_us,
+            max_financial_staleness_us=value.max_financial_staleness_us,
+            max_research_interference_us=value.max_research_interference_us,
+            min_financial_samples=value.min_financial_samples,
+            min_research_samples=value.min_research_samples,
         )
-        final_plan_digest = _canonical_sha256_text(
-            final_plan.digest,
-            name="revalidated durable pre-run plan digest",
-        )
-        if final_plan_digest != durable_plan_digest:
-            raise RuntimeTargetHostCompositionError(
-                "durable pre-run plan changed during terminal qualification"
+
+    def canonical_sha256_text(value: object, *, name: str) -> str:
+        if type(value) is not str:
+            raise composition_error_type(
+                f"{name} must remain exact canonical sha256 text"
             )
-        final_journal_identity = require_exact_journal_store_authority(
+        if (
+            not value.startswith("sha256:")
+            or len(value) != 71
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value[7:])
+        ):
+            raise composition_error_type(
+                f"{name} must remain exact canonical sha256 text"
+            )
+        return value
+
+    def snapshot_campaign_cut(value):
+        if type(value) is not campaign_cut_type:
+            raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
+        detached = copy_value(value)
+        if type(detached) is not campaign_cut_type or detached is value:
+            raise composition_error_type(
+                "campaign_cut could not be detached at terminal authority boundary"
+            )
+        for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
+            if type(getattr(detached, field)) is not str:
+                raise composition_error_type(
+                    f"campaign_cut {field} must remain exact inert text"
+                )
+        for field in ("start_journal_sequence", "started_monotonic_ns"):
+            field_value = getattr(detached, field)
+            if type(field_value) is not int or field_value < 0:
+                raise composition_error_type(
+                    f"campaign_cut {field} must remain a non-negative integer"
+                )
+        return detached
+
+    def verify_declared_plan_runtime_target_host_qualification_without_chronology(
+        receipt: SignedQualificationAttestation,
+        *,
+        evidence_store: ArtifactStore,
+        evidence_root: str,
+        journal_store: JournalStore,
+        plan_id: str,
+        spec: RuntimeBudgetSpec,
+        expected_release_artifact_id: str,
+        expected_release_artifact_sha256: str,
+        campaign_plan: RuntimeCampaignPlan | None = None,
+        campaign_cut: RuntimeCampaignCut | None = None,
+        measurement: TargetHostMeasurementArtifact | None = None,
+    ) -> AcceptedComposedRuntimeTargetHostQualification:
+        if type(journal_store) is not journal_store_type:
+            raise TypeError("journal_store must be exact JournalStore")
+        spec = snapshot_budget_spec(spec)
+
+        selected_journal_identity = require_store_authority(
             journal_store,
             subject="runtime target-host qualification JournalStore",
         )
-        if final_journal_identity != selected_journal_identity:
-            raise RuntimeError(
-                "journal operation authority changed during terminal qualification"
+        with store_authority_scope(journal_store, selected_journal_identity):
+            plan = plan_loader(journal_store, plan_id=plan_id, spec=spec)
+            if campaign_plan is None or campaign_cut is None or measurement is None:
+                raise composition_error_type(
+                    "terminal WP-65 qualification requires composed target-host measurement authority"
+                )
+            durable_plan_digest = canonical_sha256_text(
+                plan.digest,
+                name="durable pre-run plan digest",
             )
-        return accepted
+            if type(campaign_plan) is campaign_plan_type:
+                campaign_workload = canonical_sha256_text(
+                    campaign_plan.workload_profile_hash,
+                    name="campaign workload identity",
+                )
+                if campaign_workload != durable_plan_digest:
+                    raise composition_error_type(
+                        "campaign workload identity does not match durable pre-run plan"
+                    )
+            if type(measurement) is measurement_type:
+                measurement_workload = canonical_sha256_text(
+                    measurement.workload_profile_hash,
+                    name="measurement workload identity",
+                )
+                if measurement_workload != durable_plan_digest:
+                    raise composition_error_type(
+                        "measurement workload identity does not match durable pre-run plan"
+                    )
+            if type(campaign_cut) is campaign_cut_type:
+                campaign_cut = snapshot_campaign_cut(campaign_cut)
+            accepted = acceptance_snapshotter(
+                composed_verifier(
+                    receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    journal_store=journal_store,
+                    spec=spec,
+                    campaign_plan=campaign_plan,
+                    campaign_cut=campaign_cut,
+                    declared_plan_id=plan.plan_id,
+                    measurement=measurement,
+                    expected_release_artifact_id=expected_release_artifact_id,
+                    expected_release_artifact_sha256=expected_release_artifact_sha256,
+                )
+            )
+
+            final_plan = plan_loader(journal_store, plan_id=plan.plan_id, spec=spec)
+            final_plan_digest = canonical_sha256_text(
+                final_plan.digest,
+                name="revalidated durable pre-run plan digest",
+            )
+            if final_plan_digest != durable_plan_digest:
+                raise composition_error_type(
+                    "durable pre-run plan changed during terminal qualification"
+                )
+            final_journal_identity = require_store_authority(
+                journal_store,
+                subject="runtime target-host qualification JournalStore",
+            )
+            if final_journal_identity != selected_journal_identity:
+                raise RuntimeError(
+                    "journal operation authority changed during terminal qualification"
+                )
+            return accepted
+
+    return verify_declared_plan_runtime_target_host_qualification_without_chronology
+
+
+_PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
+    composed_type=AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=AcceptedRuntimeTargetHostQualification,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    mapping_proxy_type=type(MappingProxyType({})),
+    text_fields=_ACCEPTED_TEXT_FIELDS,
+    mapping_fields=_ACCEPTED_MAPPING_FIELDS,
+)
+
+
+def _build_chronology_free_verifier_for_tests():
+    """Build an explicitly injected verifier from current focused-test seams."""
+
+    return _build_chronology_free_verifier(
+        journal_store_type=JournalStore,
+        budget_spec_type=RuntimeBudgetSpec,
+        campaign_plan_type=RuntimeCampaignPlan,
+        campaign_cut_type=RuntimeCampaignCut,
+        measurement_type=TargetHostMeasurementArtifact,
+        composition_error_type=RuntimeTargetHostCompositionError,
+        copy_value=copy,
+        require_store_authority=require_exact_journal_store_authority,
+        store_authority_scope=journal_store_authority_scope,
+        plan_loader=load_declared_runtime_event_plan,
+        composed_verifier=verify_composed_runtime_target_host_qualification,
+        acceptance_snapshotter=lambda value: value,
+    )
+
+
+_verify_declared_plan_runtime_target_host_qualification_without_chronology = (
+    _build_chronology_free_verifier(
+        journal_store_type=JournalStore,
+        budget_spec_type=RuntimeBudgetSpec,
+        campaign_plan_type=RuntimeCampaignPlan,
+        campaign_cut_type=RuntimeCampaignCut,
+        measurement_type=TargetHostMeasurementArtifact,
+        composition_error_type=RuntimeTargetHostCompositionError,
+        copy_value=copy,
+        require_store_authority=require_exact_journal_store_authority,
+        store_authority_scope=journal_store_authority_scope,
+        plan_loader=load_declared_runtime_event_plan,
+        composed_verifier=verify_composed_runtime_target_host_qualification,
+        acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+    )
+)
 
 
 def _terminal_chronology_dispatch_authority():
@@ -223,8 +430,6 @@ def _terminal_chronology_dispatch_authority():
     def dispatch(*args, **kwargs):
         nonlocal verifier
         if verifier is None:
-            # Import for initialization side effects only. The chronology module
-            # binds the canonical verifier into this closure exactly once.
             from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
 
             del _chronology_bound
@@ -330,10 +535,6 @@ verify_declared_plan_runtime_target_host_qualification = _build_product_verifier
     chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
 )
 
-# Complete canonical terminal-verifier binding during module import. Leaving this
-# until the first product call creates a pre-initialization window where external
-# code can invoke the otherwise write-once private binder with a forged verifier.
-# Importing here closes that window before this module becomes externally usable.
 from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
 
 del _chronology_bound

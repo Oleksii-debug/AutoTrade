@@ -113,6 +113,32 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("op-1", html)
 
+    def test_hostile_top_level_snapshot_fails_closed_without_get(self):
+        class HostileSnapshot(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("malformed snapshot must not execute overridden get")
+
+        html = render_semantic_page(
+            HostileSnapshot(
+                {
+                    "state_version": "999",
+                    "event_cursor": "999",
+                    "operations": {"forged": "SUCCEEDED"},
+                }
+            ),
+            status_text="Status remains available",
+        )
+
+        self.assertIn("Status remains available", html)
+        self.assertIn("<dt>State version</dt><dd>0</dd>", html)
+        self.assertIn("<dt>Event cursor</dt><dd>0</dd>", html)
+        self.assertIn(
+            "Operation state is unavailable because the state shape is malformed.",
+            html,
+        )
+        self.assertNotIn("forged", html)
+
+
     def test_nonfinite_scalars_do_not_render_as_status_values(self):
         html = render_semantic_page(
             {

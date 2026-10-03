@@ -51,7 +51,7 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                 episode_id="prepared-crash",
                 now=BEFORE_LEASE,
             )
-            self.assertEqual(active["status"], "IN_PROGRESS")
+            self.assertEqual(active["status"], "UNKNOWN")
             self.assertEqual(
                 active["reason"], "prepared_owner_lease_active"
             )

@@ -114,6 +114,65 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
             authority.journal_store_identity_digest(renamed),
         )
 
+    def test_resolve_rejects_journal_cut_newer_than_durable_sequence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            current = store.current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "cannot be newer than the durable journal",
+            ):
+                registry.resolve_current(
+                    exact_scope,
+                    journal_sequence_cut=current + 1,
+                )
+
+    def test_resolve_rejects_journal_cut_scalar_subtypes(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+
+            for invalid in (True, -1):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(
+                        RiskPolicyAuthorityError,
+                        "non-negative integer",
+                    ):
+                        registry.resolve_current(
+                            exact_scope,
+                            journal_sequence_cut=invalid,
+                        )
+
     def test_resolved_policy_cannot_be_forged_by_direct_construction(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

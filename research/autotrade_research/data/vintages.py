@@ -30,6 +30,19 @@ class HistoricalConflict(HistoricalDataError):
 
 
 _MARKET_POPULATION_MEDIA_TYPE = "application/vnd.autotrade.market-event-population+json"
+_MARKET_EVENT_KINDS = frozenset(
+    {
+        "TRADE",
+        "QUOTE",
+        "BOOK_SNAPSHOT",
+        "BOOK_DELTA",
+        "BAR",
+        "FUNDING",
+        "MARK",
+        "INDEX",
+        "STATUS",
+    }
+)
 _MARKET_EVENT_CANONICAL_FIELDS = frozenset(
     {
         "event_id",
@@ -46,6 +59,11 @@ _MARKET_EVENT_CANONICAL_FIELDS = frozenset(
         "raw_evidence_ref",
     }
 )
+_MARKET_EVENT_REQUIRED_FIELDS = _MARKET_EVENT_CANONICAL_FIELDS - {"source_sequence"}
+_EVIDENCE_REF_CANONICAL_FIELDS = frozenset(
+    {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
+)
+_EVIDENCE_REF_REQUIRED_FIELDS = frozenset({"artifact_id", "sha256", "observed_at"})
 
 
 def _text(value: Any, name: str) -> str:
@@ -80,6 +98,15 @@ def _optional_non_negative_sequence(value: Any, name: str) -> int | None:
             f"{name} must be a canonical non-negative integer"
         ) from error
     if parsed < 0 or str(parsed) != str(value):
+        raise HistoricalDataError(
+            f"{name} must be a canonical non-negative integer"
+        )
+    return parsed
+
+
+def _non_negative_sequence(value: Any, name: str) -> int:
+    parsed = _optional_non_negative_sequence(value, name)
+    if parsed is None:
         raise HistoricalDataError(
             f"{name} must be a canonical non-negative integer"
         )
@@ -248,9 +275,15 @@ class FrozenMarketPopulation:
 def _evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise HistoricalDataError("source evidence must be an object")
-    required = {"artifact_id", "sha256", "observed_at"}
-    if not required.issubset(value):
+    fields = set(value)
+    if not _EVIDENCE_REF_REQUIRED_FIELDS.issubset(fields):
         raise HistoricalDataError("source evidence is incomplete")
+    unknown = fields - _EVIDENCE_REF_CANONICAL_FIELDS
+    if unknown:
+        raise HistoricalDataError(
+            "source evidence fields differ from canonical EvidenceRef contract; "
+            f"unknown={sorted(unknown)}"
+        )
     result: dict[str, Any] = {
         "artifact_id": _uuid(value["artifact_id"], "artifact_id"),
         "sha256": _digest(value["sha256"], "evidence sha256"),
@@ -286,20 +319,35 @@ def causal_market_event_history(
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event must be an object")
         event = dict(raw)
-        unknown_fields = set(event) - _MARKET_EVENT_CANONICAL_FIELDS
-        if unknown_fields:
+        event_fields = set(event)
+        missing_fields = _MARKET_EVENT_REQUIRED_FIELDS - event_fields
+        unknown_fields = event_fields - _MARKET_EVENT_CANONICAL_FIELDS
+        if missing_fields or unknown_fields:
             raise HistoricalDataError(
                 "market event fields differ from canonical MarketEvent contract; "
-                f"unknown={sorted(unknown_fields)}"
+                f"missing={sorted(missing_fields)}, unknown={sorted(unknown_fields)}"
             )
         event_id = _uuid(event.get("event_id"), "event_id")
         instrument_version = _text(event.get("instrument_version"), "instrument_version")
         event_kind = _text(event.get("kind"), "kind")
+        if event_kind not in _MARKET_EVENT_KINDS:
+            raise HistoricalDataError("market event kind is not canonical")
+        if type(event.get("payload")) is not dict:
+            raise HistoricalDataError("market event payload must be an object")
+        quality_flags = event.get("quality_flags")
+        if (
+            type(quality_flags) is not list
+            or any(type(flag) is not str or len(flag) < 1 for flag in quality_flags)
+            or len(quality_flags) != len(set(quality_flags))
+        ):
+            raise HistoricalDataError(
+                "market event quality_flags must be a unique array of non-empty strings"
+            )
         _optional_non_negative_sequence(
             event.get("source_sequence"),
             "source_sequence",
         )
-        revision = _sequence(event.get("revision"), "revision")
+        revision = _non_negative_sequence(event.get("revision"), "revision")
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")
         ingested = _utc(event.get("ingested_at"), "ingested_at")
@@ -383,7 +431,7 @@ def causal_market_event_history(
             _utc(row["available_at"], "available_at"),
             _utc(row["source_event_at"], "source_event_at"),
             row["event_id"],
-            _sequence(row["revision"], "revision"),
+            _non_negative_sequence(row["revision"], "revision"),
         )
     )
     return tuple(rows)
@@ -399,7 +447,7 @@ def point_in_time_market_events(
     selected: dict[str, tuple[int, bytes, dict[str, Any]]] = {}
     for event in history:
         event_id = _uuid(event.get("event_id"), "event_id")
-        revision = _sequence(event.get("revision"), "revision")
+        revision = _non_negative_sequence(event.get("revision"), "revision")
         canonical = _canonical_bytes(event)
         previous = selected.get(event_id)
         if previous is None or revision > previous[0]:
@@ -413,7 +461,7 @@ def point_in_time_market_events(
             _utc(row["available_at"], "available_at"),
             _utc(row["source_event_at"], "source_event_at"),
             row["event_id"],
-            _sequence(row["revision"], "revision"),
+            _non_negative_sequence(row["revision"], "revision"),
         )
     )
     return tuple(rows)
@@ -867,7 +915,7 @@ class HistoricalVintageRegistry:
                         row["instrument_version"],
                         "instrument_version",
                     ),
-                    "revision": _sequence(row["revision"], "revision"),
+                    "revision": _non_negative_sequence(row["revision"], "revision"),
                     "source_event_at": _utc_text(
                         _utc(row["source_event_at"], "source_event_at")
                     ),

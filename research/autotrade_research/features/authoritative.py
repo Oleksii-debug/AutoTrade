@@ -215,14 +215,14 @@ def authoritative_source_values(
             )
         revision = row.get("revision")
         if isinstance(revision, bool):
-            raise ValueError("historical event revision must be a positive integer")
+            raise ValueError("historical event revision must be a non-negative integer")
         try:
             revision_int = int(revision)
         except (TypeError, ValueError) as error:
             raise ValueError(
-                "historical event revision must be a positive integer"
+                "historical event revision must be a non-negative integer"
             ) from error
-        if revision_int < 1 or str(revision_int) != str(revision):
+        if revision_int < 0 or str(revision_int) != str(revision):
             raise ValueError("historical event revision must be canonical")
         event_id = _text(row.get("event_id"), name="event_id")
         result.append(

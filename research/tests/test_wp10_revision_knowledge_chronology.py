@@ -129,6 +129,49 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
             vintages_module._MARKET_EVENT_CANONICAL_FIELDS,
             frozenset(definition["properties"]),
         )
+        self.assertEqual(
+            vintages_module._MARKET_EVENT_REQUIRED_FIELDS,
+            frozenset(definition["required"]),
+        )
+        self.assertEqual(
+            vintages_module._MARKET_EVENT_KINDS,
+            frozenset(definition["properties"]["kind"]["enum"]),
+        )
+
+    def test_zero_revision_is_valid_canonical_market_sequence(self):
+        row = _event(0, available_minutes=1, ingested_minutes=3)
+        history = causal_market_event_history([row], BASE + timedelta(minutes=4))
+        self.assertEqual([item["revision"] for item in history], ["0"])
+
+    def test_market_event_schema_semantics_fail_closed(self):
+        cases = []
+        invalid_kind = _event(1, available_minutes=1, ingested_minutes=3)
+        invalid_kind["kind"] = "CUSTOM"
+        cases.append((invalid_kind, "kind is not canonical"))
+
+        invalid_payload = _event(1, available_minutes=1, ingested_minutes=3)
+        invalid_payload["payload"] = []
+        cases.append((invalid_payload, "payload must be an object"))
+
+        duplicate_flags = _event(1, available_minutes=1, ingested_minutes=3)
+        duplicate_flags["quality_flags"] = ["STALE", "STALE"]
+        cases.append((duplicate_flags, "quality_flags"))
+
+        empty_flag = _event(1, available_minutes=1, ingested_minutes=3)
+        empty_flag["quality_flags"] = [""]
+        cases.append((empty_flag, "quality_flags"))
+
+        extra_evidence = _event(1, available_minutes=1, ingested_minutes=3)
+        extra_evidence["raw_evidence_ref"]["research_only"] = True
+        cases.append((extra_evidence, "canonical EvidenceRef contract"))
+
+        for row, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(HistoricalDataError, message):
+                    causal_market_event_history(
+                        [row],
+                        BASE + timedelta(minutes=4),
+                    )
 
     def test_noncanonical_market_event_field_cannot_become_research_authority(self):
         row = _event(1, available_minutes=1, ingested_minutes=3)

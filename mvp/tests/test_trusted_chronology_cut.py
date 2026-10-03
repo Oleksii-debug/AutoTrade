@@ -1088,6 +1088,58 @@ class TrustedChronologyCutTests(unittest.TestCase):
                     expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                 )
 
+    def test_current_cut_rejects_rehashed_dynamic_requirement_splice(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            events = tuple(
+                store.load_events_by_aggregate_type("trusted_chronology")
+            )
+            accepted_event = dict(events[1])
+            payload = dict(accepted_event["payload"])
+            original_dynamic_requirement = payload["measurement_requirement_id"]
+            payload["measurement_requirement_id"] = "independent-utc-chronology-cut"
+            payload["cut_digest"] = chronology._cut_digest(payload)
+            accepted_event["payload"] = payload
+            accepted_event["payload_hash"] = payload_digest(payload)
+
+            self.assertNotEqual(
+                payload["measurement_requirement_id"],
+                original_dynamic_requirement,
+            )
+            self.assertIn(
+                payload["measurement_requirement_id"],
+                accepted.requirement_ids,
+            )
+            with patch.object(
+                chronology,
+                "_load_events",
+                return_value=(events[0], accepted_event),
+            ):
+                with self.assertRaisesRegex(
+                    TrustedChronologyError,
+                    "measurement requirement differs from durable subject",
+                ):
+                    self._require_current(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        accepted=accepted,
+                        artifact_store=artifacts,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                    )
+
     def test_validated_aggregate_rejects_rehashed_owner_splice(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)

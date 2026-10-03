@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.runtime_load_qualification import (
 )
 from mvp.autotrade_mvp.runtime_target_host_durable_financial import (
     CLOCK_CONTRACT_ID,
+    TARGET_HOST_SHARED_CLOCK_ID,
     RuntimeTargetHostDurableFinancialError,
     bind_durable_financial_latency_to_target_host_measurement,
 )
@@ -96,6 +97,7 @@ def target_measurement(
     end_journal_sequence,
     latency_start_ns=1_100_000_000,
     latency_end_ns=1_100_100_000,
+    monotonic_clock_id=TARGET_HOST_SHARED_CLOCK_ID,
 ):
     return TargetHostMeasurementArtifact(
         source_sha=SOURCE,
@@ -111,7 +113,7 @@ def target_measurement(
         journal_store_identity_digest=cut.journal_store_identity_digest,
         start_journal_sequence=cut.start_journal_sequence,
         end_journal_sequence=end_journal_sequence,
-        monotonic_clock_id="python-time.monotonic-perf-shared>=3.13",
+        monotonic_clock_id=monotonic_clock_id,
         staleness_basis="host-monotonic-financial-state-age",
         research_interference_basis="host-monotonic-contention-delay",
         financial_samples=(
@@ -238,6 +240,32 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
                 object(),
                 declared_plan_id="not-read",
                 measurement=object(),
+            )
+        load_plan.assert_not_called()
+
+    def test_target_must_declare_exact_shared_clock_contract(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+            monotonic_clock_id="unrelated-monotonic-clock",
+        )
+        with self._python_313(), patch(
+            "mvp.autotrade_mvp.runtime_target_host_durable_financial."
+            "load_declared_runtime_event_plan"
+        ) as load_plan, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "does not declare the shared",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
             )
         load_plan.assert_not_called()
 

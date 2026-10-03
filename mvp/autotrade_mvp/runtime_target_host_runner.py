@@ -2,14 +2,14 @@
 
 This module closes the gap between the already durable pre-run event plan,
 monotonic financial-operation measurement, raw target-host measurement artifact,
-and canonical runtime-budget evaluator.  It deliberately does not invent a
+and canonical runtime-budget evaluator. It deliberately does not invent a
 financial workload, provider/exchange input, signer, chronology source, release
 or trading authority.
 
 The caller supplies the exact product operations named by a *durably declared*
-event plan.  The runner owns timing and readback: operations cannot supply
+event plan. The runner owns timing and readback: operations cannot supply
 latency/staleness integers, and a planned event must actually appear in the exact
-JournalStore during its measured operation.  Research-pressure callbacks are
+JournalStore during its measured operation. Research-pressure callbacks are
 measured as explicit host-monotonic intervals; they may exercise CPU/model/disk
 pressure but cannot satisfy or hide financial event conservation.
 """
@@ -162,14 +162,17 @@ def _capture_resource_metrics(
     store: JournalStore,
     resource_probe: Callable[[], Mapping[str, int]] | None,
 ) -> dict[str, int]:
-    """Capture portable runner metrics plus optional target-host collector metrics.
+    """Capture one cut-consistent portable/optional resource observation.
 
-    A resource probe is observation-only: any JournalStore mutation during the
-    callback invalidates the sample.  Returned values must be exact non-negative
-    integers and cannot overwrite runner-owned metric keys.
+    All JournalStore-derived metrics are bracketed by one start/end sequence
+    equality check. A probe is observation-only; a mutation by the probe or an
+    unrelated concurrent journal writer anywhere while the sample is being read
+    invalidates the sample instead of producing mixed-cut resource evidence.
+    Returned optional values must be exact non-negative integers and cannot
+    replace runner-owned metric keys.
     """
 
-    before = JournalStore.current_journal_sequence(store)
+    sequence_before = JournalStore.current_journal_sequence(store)
     extras: dict[str, int] = {}
     if resource_probe is not None:
         raw = resource_probe()
@@ -180,17 +183,24 @@ def _capture_resource_metrics(
         for key, metric in raw.items():
             name = _text(key, name="resource metric")
             extras[name] = _non_negative_int(metric, name=f"resource metric {name}")
-    after = JournalStore.current_journal_sequence(store)
-    if after != before:
+
+    # Keep every observation inside the same journal-sequence bracket. The final
+    # sequence read is intentionally last: a write that races pending-outbox or
+    # the optional probe invalidates the complete resource sample.
+    pending_outbox = JournalStore.pending_outbox_count(store)
+    active_threads = threading.active_count()
+    process_cpu_time_ns = time.process_time_ns()
+    sequence_after = JournalStore.current_journal_sequence(store)
+    if sequence_after != sequence_before:
         raise RuntimeTargetHostRunnerError(
-            "resource probe mutated or raced the durable JournalStore"
+            "resource observation crossed a durable JournalStore cut"
         )
 
     builtins = {
-        "active_threads": threading.active_count(),
-        "journal_sequence": before,
-        "pending_outbox": JournalStore.pending_outbox_count(store),
-        "process_cpu_time_ns": time.process_time_ns(),
+        "active_threads": active_threads,
+        "journal_sequence": sequence_after,
+        "pending_outbox": pending_outbox,
+        "process_cpu_time_ns": process_cpu_time_ns,
     }
     for key, metric in builtins.items():
         _non_negative_int(metric, name=key)
@@ -206,7 +216,7 @@ def _capture_resource_metrics(
 def run_cpu_pressure_probe(*, iterations: int = 10_000) -> str:
     """Run a bounded provider-free CPU pressure quantum and return its digest.
 
-    The result is diagnostic only.  The runner measures the surrounding active
+    The result is diagnostic only. The runner measures the surrounding active
     interval; this helper creates no financial/provider state and performs no I/O.
     """
 
@@ -259,9 +269,9 @@ def run_declared_target_host_campaign(
 
     Every financial operation must publish exactly its predeclared durable event;
     latency is issued by ``measure_declared_financial_operation`` and is never
-    caller supplied.  For this internal provider-free runner, financial staleness
+    caller supplied. For this internal provider-free runner, financial staleness
     is the age of one declared work item from the same monotonic operation start
-    until its durable financial event is observed.  It is explicitly not market,
+    until its durable financial event is observed. It is explicitly not market,
     exchange or provider UTC freshness.
     """
 

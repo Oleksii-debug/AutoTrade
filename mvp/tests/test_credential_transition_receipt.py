@@ -143,6 +143,31 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
         self.assertNotIn("ciphertext", public.lower())
         self.assertEqual(receipt.handle_id, current.handle_id)
 
+    def test_receipt_digest_fields_require_canonical_lowercase_hex(self) -> None:
+        handle = self._register()
+        _, receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            handle,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+
+        for field_name in (
+            "owner_identity_sha256",
+            "vault_authority_sha256",
+            "record_state_sha256",
+        ):
+            with self.subTest(field_name=field_name), self.assertRaises(
+                CredentialTransitionReceiptError
+            ):
+                replace(receipt, **{field_name: "sha256:" + "g" * 64})
+
+        with self.assertRaises(CredentialTransitionReceiptError):
+            replace(
+                receipt,
+                receipt_id="credential-transition/sha256:" + "G" * 64,
+            )
+
     def test_self_authored_rehashed_receipt_is_not_vault_issued(self) -> None:
         handle = self._register()
         _, receipt = rotate_trade_credential_with_receipt(

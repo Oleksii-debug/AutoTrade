@@ -23,6 +23,16 @@ def _text(value: object, fallback: str = "Unavailable") -> str:
     return fallback
 
 
+def _canonical_sequence_text(value: object) -> str | None:
+    """Return the canonical host sequence representation or fail closed."""
+
+    if type(value) is not str or not value or not value.isascii() or not value.isdigit():
+        return None
+    if value != "0" and value.startswith("0"):
+        return None
+    return value
+
+
 def _rows(items: Iterable[tuple[str, object]]) -> str:
     return "".join(
         f"<dt>{escape(label)}</dt><dd>{escape(_text(value))}</dd>"
@@ -61,8 +71,10 @@ def render_semantic_page(
     if type(snapshot) is not dict:
         snapshot = {}
 
-    state_version = _text(snapshot.get("state_version"), "0")
-    event_cursor = _text(snapshot.get("event_cursor"), "0")
+    canonical_state_version = _canonical_sequence_text(snapshot.get("state_version"))
+    canonical_event_cursor = _canonical_sequence_text(snapshot.get("event_cursor"))
+    state_version = canonical_state_version or "Unavailable"
+    event_cursor = canonical_event_cursor or "Unavailable"
     operations = snapshot.get("operations")
     if type(operations) is not dict:
         operations = None
@@ -76,6 +88,27 @@ def render_semantic_page(
     status_html = "".join(f"<p>{escape(line)}</p>" for line in safe_status_lines)
     announcement_html = escape(_text(announcement, ""))
     command_html = escape(_text(command_message, ""))
+
+    if canonical_state_version is None:
+        command_controls = (
+            "<p role=\"alert\">Commands are unavailable because the current "
+            "state version is malformed or unavailable. Refresh or recover state "
+            "before issuing a command.</p>"
+        )
+    else:
+        command_controls = (
+            "<form method=\"post\" action=\"/v1/commands-ui\">"
+            f"<input type=\"hidden\" name=\"expected_state_version\" value=\"{escape(canonical_state_version)}\">"
+            "<fieldset><legend>Choose a host command</legend>"
+            "<label for=\"action\">Action</label>"
+            "<select id=\"action\" name=\"action\" required>"
+            "<option value=\"PAUSE_NEW_RISK\">Pause new risk</option>"
+            "<option value=\"RESUME_AFTER_RECOVERY\">Request resume after recovery</option>"
+            "<option value=\"REFRESH_STATE\">Refresh state</option>"
+            "</select>"
+            "<button type=\"submit\">Submit command</button>"
+            "</fieldset></form>"
+        )
 
     return (
         "<!doctype html>"
@@ -101,17 +134,7 @@ def render_semantic_page(
         "<section aria-labelledby=\"commands-heading\">"
         "<h2 id=\"commands-heading\">Commands</h2>"
         "<p>Command acceptance does not mean financial completion.</p>"
-        "<form method=\"post\" action=\"/v1/commands-ui\">"
-        f"<input type=\"hidden\" name=\"expected_state_version\" value=\"{escape(state_version)}\">"
-        "<fieldset><legend>Choose a host command</legend>"
-        "<label for=\"action\">Action</label>"
-        "<select id=\"action\" name=\"action\" required>"
-        "<option value=\"PAUSE_NEW_RISK\">Pause new risk</option>"
-        "<option value=\"RESUME_AFTER_RECOVERY\">Request resume after recovery</option>"
-        "<option value=\"REFRESH_STATE\">Refresh state</option>"
-        "</select>"
-        "<button type=\"submit\">Submit command</button>"
-        "</fieldset></form>"
+        f"{command_controls}"
         f"<div role=\"alert\" aria-live=\"assertive\">{command_html}</div>"
         "</section>"
         "</main>"

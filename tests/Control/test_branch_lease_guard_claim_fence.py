@@ -133,6 +133,13 @@ class BranchLeaseGuardClaimFenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "COLLISION")
         self.assertIn("stale or foreign", result["evidence"][0])
 
+    def test_mutation_record_claim_id_must_be_exact_canonical_text(self):
+        value = mutation()
+        value["mutations"][0]["claim_id"] = " " + CLAIM_ID
+        result = evaluate_guard(registry(), value, now=NOW)
+        self.assertEqual(result["status"], "AMBIGUOUS")
+        self.assertIn("non-canonical claim_id", result["evidence"][0])
+
     def test_branch_movement_is_frozen_after_review_submission(self):
         result = evaluate_guard(
             registry(generation=8, claim_generation=8, handoff_state="REVIEW_SUBMITTED"),

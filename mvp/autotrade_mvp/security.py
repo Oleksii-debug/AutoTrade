@@ -613,9 +613,11 @@ class SecurityBoundary:
                             result[safe_key] = "[REDACTED]"
                             continue
 
-                        safe_key = unique_key(
-                            _redact_embedded_secret_text(key)
-                        )
+                        try:
+                            sanitized_key = _redact_embedded_secret_text(key)
+                        except Exception:
+                            sanitized_key = "[REDACTED:KEY]"
+                        safe_key = unique_key(sanitized_key)
                         if _REDACT_RE.search(key):
                             result[safe_key] = "[REDACTED]"
                         else:

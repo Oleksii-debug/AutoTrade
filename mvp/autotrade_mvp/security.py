@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import math
 import re
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
@@ -92,6 +93,7 @@ class SecurityBoundary:
             raise ValueError("At least one authenticated origin is required")
         if not isinstance(credential_vault, ProtectedCredentialVault):
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
+        self._state_lock = threading.RLock()
         self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
         self._credential_vault = credential_vault
         if session_authorizer is not None and not callable(session_authorizer):
@@ -149,17 +151,21 @@ class SecurityBoundary:
     ) -> Session:
         idle_timeout = min(idle_timeout_seconds, ttl_seconds)
         expires_at = now + ttl_seconds
-        session = Session(
-            token=secrets.token_urlsafe(32),
-            subject=subject,
-            role=role,
-            origin=origin,
-            expires_at=expires_at,
-            idle_timeout_seconds=idle_timeout,
-            idle_expires_at=min(expires_at, now + idle_timeout),
-        )
-        self._sessions[session.token] = session
-        return session
+        with self._state_lock:
+            token = secrets.token_urlsafe(32)
+            while token in self._sessions:
+                token = secrets.token_urlsafe(32)
+            session = Session(
+                token=token,
+                subject=subject,
+                role=role,
+                origin=origin,
+                expires_at=expires_at,
+                idle_timeout_seconds=idle_timeout,
+                idle_expires_at=min(expires_at, now + idle_timeout),
+            )
+            self._sessions[session.token] = session
+            return session
 
     def create_session(
         self,
@@ -175,8 +181,9 @@ class SecurityBoundary:
         normalized_origin = _authenticated_origin(origin)
         if normalized_role not in self._ROLES:
             raise PermissionError("Unknown role")
-        if normalized_origin not in self._paired_origins:
-            raise PermissionError("Origin is not paired")
+        with self._state_lock:
+            if normalized_origin not in self._paired_origins:
+                raise PermissionError("Origin is not paired")
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
             min(300, ttl)
@@ -192,14 +199,17 @@ class SecurityBoundary:
             origin=normalized_origin,
         )
         now = self._now_value()
-        return self._issue_session(
-            subject=normalized_subject,
-            role=normalized_role,
-            origin=normalized_origin,
-            ttl_seconds=ttl,
-            idle_timeout_seconds=idle_timeout,
-            now=now,
-        )
+        with self._state_lock:
+            if normalized_origin not in self._paired_origins:
+                raise PermissionError("Origin is no longer paired")
+            return self._issue_session(
+                subject=normalized_subject,
+                role=normalized_role,
+                origin=normalized_origin,
+                ttl_seconds=ttl,
+                idle_timeout_seconds=idle_timeout,
+                now=now,
+            )
 
     def validate_session(
         self,
@@ -209,45 +219,51 @@ class SecurityBoundary:
         origin: str | None = None,
     ) -> Session:
         normalized_token = _required_text(token, name="session token")
-        session = self._sessions.get(normalized_token)
-        if session is None:
-            raise PermissionError("Unknown session")
-        if session.origin not in self._paired_origins:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session origin is no longer paired")
-        now = self._now_value()
-        if now >= session.expires_at:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session expired")
-        if now >= session.idle_expires_at:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session idle timeout expired")
-        if origin is not None and _authenticated_origin(origin) != session.origin:
-            raise PermissionError("Session origin mismatch")
+        normalized_origin = (
+            _authenticated_origin(origin) if origin is not None else None
+        )
+        normalized_roles = None
         if required_roles is not None:
             normalized_roles = {
                 _required_text(role, name="required role").upper() for role in required_roles
             }
             if not normalized_roles or not normalized_roles.issubset(self._ROLES):
                 raise PermissionError("Unknown required role")
-            if session.role not in normalized_roles:
+
+        with self._state_lock:
+            session = self._sessions.get(normalized_token)
+            if session is None:
+                raise PermissionError("Unknown session")
+            if session.origin not in self._paired_origins:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session origin is no longer paired")
+            now = self._now_value()
+            if now >= session.expires_at:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session expired")
+            if now >= session.idle_expires_at:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session idle timeout expired")
+            if normalized_origin is not None and normalized_origin != session.origin:
+                raise PermissionError("Session origin mismatch")
+            if normalized_roles is not None and session.role not in normalized_roles:
                 raise PermissionError("Role is not authorized")
-        refreshed_idle = min(
-            session.expires_at,
-            now + session.idle_timeout_seconds,
-        )
-        if refreshed_idle != session.idle_expires_at:
-            session = Session(
-                token=session.token,
-                subject=session.subject,
-                role=session.role,
-                origin=session.origin,
-                expires_at=session.expires_at,
-                idle_timeout_seconds=session.idle_timeout_seconds,
-                idle_expires_at=refreshed_idle,
+            refreshed_idle = min(
+                session.expires_at,
+                now + session.idle_timeout_seconds,
             )
-            self._sessions[normalized_token] = session
-        return session
+            if refreshed_idle != session.idle_expires_at:
+                session = Session(
+                    token=session.token,
+                    subject=session.subject,
+                    role=session.role,
+                    origin=session.origin,
+                    expires_at=session.expires_at,
+                    idle_timeout_seconds=session.idle_timeout_seconds,
+                    idle_expires_at=refreshed_idle,
+                )
+                self._sessions[normalized_token] = session
+            return session
 
     def refresh_session(
         self,
@@ -257,10 +273,11 @@ class SecurityBoundary:
         ttl_seconds: int = 900,
         idle_timeout_seconds: int | None = None,
     ) -> Session:
-        """Re-authenticate and rotate a session without changing its identity scope."""
+        """Re-authenticate and atomically rotate a still-current session."""
 
         normalized_token = _required_text(token, name="session token")
-        prior = self._sessions.get(normalized_token)
+        with self._state_lock:
+            prior = self._sessions.get(normalized_token)
         current = self.validate_session(normalized_token, origin=origin)
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
@@ -278,20 +295,30 @@ class SecurityBoundary:
                 origin=current.origin,
             )
         except PermissionError:
-            if prior is not None and normalized_token in self._sessions:
-                self._sessions[normalized_token] = prior
+            with self._state_lock:
+                if prior is not None and normalized_token in self._sessions:
+                    self._sessions[normalized_token] = prior
             raise
         now = self._now_value()
-        replacement = self._issue_session(
-            subject=current.subject,
-            role=current.role,
-            origin=current.origin,
-            ttl_seconds=ttl,
-            idle_timeout_seconds=idle_timeout,
-            now=now,
-        )
-        self._sessions.pop(current.token, None)
-        return replacement
+        with self._state_lock:
+            live = self.validate_session(normalized_token, origin=origin)
+            if (
+                live.subject != current.subject
+                or live.role != current.role
+                or live.origin != current.origin
+                or live.expires_at != current.expires_at
+            ):
+                raise PermissionError("Session changed during refresh")
+            replacement = self._issue_session(
+                subject=live.subject,
+                role=live.role,
+                origin=live.origin,
+                ttl_seconds=ttl,
+                idle_timeout_seconds=idle_timeout,
+                now=now,
+            )
+            self._sessions.pop(normalized_token, None)
+            return replacement
 
     def validate_host_session(
         self,
@@ -322,8 +349,9 @@ class SecurityBoundary:
 
     def revoke_session(self, token: str) -> None:
         normalized_token = _required_text(token, name="session token")
-        if self._sessions.pop(normalized_token, None) is None:
-            raise PermissionError("Unknown session")
+        with self._state_lock:
+            if self._sessions.pop(normalized_token, None) is None:
+                raise PermissionError("Unknown session")
 
     def pair_origin(
         self,
@@ -332,10 +360,11 @@ class SecurityBoundary:
         origin: str,
         new_origin: str,
     ) -> str:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized = _authenticated_origin(new_origin)
-        self._paired_origins.add(normalized)
-        return normalized
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            self._paired_origins.add(normalized)
+            return normalized
 
     def unpair_origin(
         self,
@@ -344,16 +373,21 @@ class SecurityBoundary:
         origin: str,
         paired_origin: str,
     ) -> None:
-        owner = self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized = _authenticated_origin(paired_origin)
-        if normalized not in self._paired_origins:
-            raise PermissionError("Origin is not paired")
-        if normalized == owner.origin and len(self._paired_origins) == 1:
-            raise PermissionError("Cannot remove the final authenticated origin")
-        self._paired_origins.remove(normalized)
-        for session_token, session in list(self._sessions.items()):
-            if session.origin == normalized:
-                self._sessions.pop(session_token, None)
+        with self._state_lock:
+            owner = self.validate_session(
+                token,
+                required_roles={"OWNER"},
+                origin=origin,
+            )
+            if normalized not in self._paired_origins:
+                raise PermissionError("Origin is not paired")
+            if normalized == owner.origin and len(self._paired_origins) == 1:
+                raise PermissionError("Cannot remove the final authenticated origin")
+            self._paired_origins.remove(normalized)
+            for session_token, session in list(self._sessions.items()):
+                if session.origin == normalized:
+                    self._sessions.pop(session_token, None)
 
     def register_secret(
         self,

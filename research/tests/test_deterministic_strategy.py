@@ -1354,9 +1354,6 @@ class DeterministicStrategyTests(unittest.TestCase):
 
 
     def test_numeric_ingress_rejects_oversized_text_before_decimal_construction(self):
-        class DecimalTrap:
-            called = False
-
         hostile = "9" * 260
         with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
             ReturnThresholdBaseline(

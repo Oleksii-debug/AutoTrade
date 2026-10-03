@@ -43,6 +43,8 @@
     sessionIdentity: null,
     accountId: null,
     environment: null,
+    renderedAccountId: null,
+    renderedEnvironment: null,
     snapshotReady: false,
     polling: false,
     stopped: false,
@@ -877,9 +879,12 @@
 
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
-    const scopeChanged = state.accountId !== null && (
-      parsed.accountId !== state.accountId ||
-      parsed.environment !== state.environment);
+    // Command authority is intentionally cleared on trust loss, but the last
+    // successfully rendered scope is retained only to prevent stale read-only
+    // evidence from crossing into a later account/environment view.
+    const scopeChanged = state.renderedAccountId !== null && (
+      parsed.accountId !== state.renderedAccountId ||
+      parsed.environment !== state.renderedEnvironment);
     if (scopeChanged) {
       state.cursor = 0n;
       state.version = 0n;
@@ -926,6 +931,8 @@
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.");
     renderJobs(parsed.jobs);
+    state.renderedAccountId = parsed.accountId;
+    state.renderedEnvironment = parsed.environment;
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);

@@ -104,9 +104,13 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function resetEventHistoryForScope()", js)
-        self.assertIn("const scopeChanged = state.accountId !== null", js)
-        self.assertIn("parsed.accountId !== state.accountId", js)
-        self.assertIn("parsed.environment !== state.environment", js)
+        self.assertIn("renderedAccountId: null", js)
+        self.assertIn("renderedEnvironment: null", js)
+        self.assertIn("const scopeChanged = state.renderedAccountId !== null", js)
+        self.assertIn("parsed.accountId !== state.renderedAccountId", js)
+        self.assertIn("parsed.environment !== state.renderedEnvironment", js)
+        self.assertIn("state.renderedAccountId = parsed.accountId", js)
+        self.assertIn("state.renderedEnvironment = parsed.environment", js)
         scope = js.index("if (scopeChanged)")
         cursor_reset = js.index("state.cursor = 0n", scope)
         version_reset = js.index("state.version = 0n", scope)
@@ -294,6 +298,20 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertIn(required, js[fence:build])
         self.assertIn("setCommandAvailability(false)", js[fence:build])
+
+    def test_display_scope_marker_survives_authority_trust_invalidation(self):
+        js = APP.read_text(encoding="utf-8")
+        pagehide = js.index('window.addEventListener("pagehide"')
+        pageshow = js.index('window.addEventListener("pageshow"')
+        invalidation = js[pagehide:pageshow]
+        self.assertIn("state.accountId = null", invalidation)
+        self.assertIn("state.environment = null", invalidation)
+        self.assertNotIn("state.renderedAccountId = null", invalidation)
+        self.assertNotIn("state.renderedEnvironment = null", invalidation)
+        self.assertIn(
+            "last successfully rendered scope is retained only to prevent stale read-only",
+            js,
+        )
 
     def test_snapshot_trust_invalidation_clears_account_and_environment_scope(self):
         js = APP.read_text(encoding="utf-8")

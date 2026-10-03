@@ -2981,6 +2981,75 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
             )
 
 
+    def test_competing_oms_writer_fences_all_financial_effects(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = self.prepare_state(store)
+            original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
+            injected = False
+
+            def race_order_writer(selected_book, transactions, **kwargs):
+                nonlocal injected
+                if selected_book is economics and not injected:
+                    injected = True
+                    orders.request_cancel(
+                        event_key="racing-cancel",
+                        client_order_id="client-order-1",
+                        command_id="racing-cancel-command",
+                        committed_at="2026-09-25T09:00:01Z",
+                    )
+                return original_prepare(selected_book, transactions, **kwargs)
+
+            DurableProviderEconomicBook.prepare_batch_mutation = race_order_writer
+            try:
+                with self.assertRaisesRegex(ValueError, "aggregate_version"):
+                    self.atomic_fill(orders, economics, reservations)
+            finally:
+                DurableProviderEconomicBook.prepare_batch_mutation = original_prepare
+
+            reopened = JournalStore(path)
+            ro, re, rr = self.books(reopened)
+            order = ro.order("client-order-1").snapshot()
+            self.assertTrue(order.cancel_requested)
+            self.assertEqual(order.filled_quantity, Decimal("0"))
+            self.assertEqual(rr.get("reservation-1").consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(re.transactions, ())
+
+    def test_order_and_financial_books_must_share_physical_store_generation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            financial_store = JournalStore(root / "financial.sqlite3")
+            orders_store = JournalStore(root / "orders.sqlite3")
+            _, economics, reservations = self.prepare_state(financial_store)
+            orders = order_book(orders_store, environment=self.ENVIRONMENT)
+            orders.create_order(
+                event_key="order-create-1",
+                client_order_id="client-order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at="2026-09-25T09:00:00Z",
+                parent_intent_id="intent-1",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "one physical JournalStore generation",
+            ):
+                self.atomic_fill(orders, economics, reservations)
+
+            self.assertEqual(
+                orders.order("client-order-1").snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+            self.assertEqual(economics.transactions, ())
+
+
 
 if __name__ == "__main__":
     unittest.main()

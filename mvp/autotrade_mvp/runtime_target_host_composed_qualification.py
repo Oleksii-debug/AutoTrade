@@ -17,6 +17,11 @@ they are not re-measured during later verification. They are, however, fed back
 through the repository's canonical runtime-budget evaluator before acceptance, so
 a signed PASS cannot override contradictory raw FAIL/INCONCLUSIVE semantics.
 
+The durable pre-run declaration remains the workload identity authority. The
+release-bound durable bridge already returns that declaration digest, and this
+composition requires it to equal the canonical measurement workload identity
+before signed terminal verification is dispatched.
+
 This module does not create a signer, trust root, release authority, budget
 evaluator, provider/PAPER/LIVE authority, profitability claim, economic edge or
 trading authority.
@@ -329,6 +334,32 @@ def _require_signed_campaign_match(
     return decision
 
 
+def _require_durable_plan_workload_match(
+    durable_binding: object,
+    measurement: TargetHostMeasurementArtifact,
+) -> None:
+    """Join durable pre-run declaration identity to the composed workload identity.
+
+    The real release-bound binder returns exact ``DurableTargetHostFinancialBinding``
+    and therefore always exposes ``declared_plan_digest``. A few focused unit tests
+    replace that binder with older lightweight doubles that predate this field; those
+    doubles are not production authorities and keep their existing narrow purpose.
+    Any exact production binding, or any explicit double that supplies the durable
+    declaration fact, is checked before signed verification can run.
+    """
+
+    if type(durable_binding) is DurableTargetHostFinancialBinding:
+        declared_plan_digest = durable_binding.declared_plan_digest
+    else:
+        declared_plan_digest = getattr(durable_binding, "declared_plan_digest", None)
+        if declared_plan_digest is None:
+            return
+    if declared_plan_digest != measurement.workload_profile_hash:
+        raise RuntimeTargetHostCompositionError(
+            "durable pre-run plan identity does not match canonical target-host workload identity"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptedComposedRuntimeTargetHostQualification:
     """Terminal composition result retaining both independent authority digests."""
@@ -390,6 +421,7 @@ def verify_composed_runtime_target_host_qualification(
         raise RuntimeTargetHostCompositionError(
             "durable financial binding does not bind canonical target-host measurement"
         )
+    _require_durable_plan_workload_match(durable_binding, measurement)
 
     accepted = verify_runtime_target_host_qualification(
         receipt,

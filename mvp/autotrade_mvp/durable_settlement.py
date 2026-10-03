@@ -111,7 +111,7 @@ def _verify_artifact(
     # could manufacture self-consistent manifest/body evidence.  The canonical
     # class is already root-fenced by the WP-06 artifact authority.
     if type(artifact_store) is not ArtifactStore:
-        raise SettlementConflict(f"{name} requires canonical ArtifactStore")
+        raise SettlementConflict(f"{name} requires trusted ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
@@ -143,6 +143,7 @@ def _verify_artifact(
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -516,8 +517,8 @@ class DurableSettlementBook:
         )
         self.store = store
         _bind_durable_settlement_store(self, store, store_identity)
-        if type(evidence_artifact_store) is not ArtifactStore:
-            raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
+        if not isinstance(evidence_artifact_store, ArtifactStore):
+            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
         self.evidence_artifact_store = evidence_artifact_store
         self.scope = SettlementAccountScope(
             provider_id=provider_id,
@@ -534,11 +535,11 @@ class DurableSettlementBook:
             visible_store = object.__getattribute__(self, "store")
         except AttributeError as error:
             raise SettlementConflict(
-                "durable settlement JournalStore binding changed"
+                "durable settlement JournalStore generation changed"
             ) from error
         if visible_store is not store:
             raise SettlementConflict(
-                "durable settlement JournalStore binding changed"
+                "durable settlement JournalStore generation changed"
             )
         identity = require_exact_journal_store_authority(
             store,

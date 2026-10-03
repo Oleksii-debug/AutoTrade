@@ -594,6 +594,69 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             1,
         )
 
+    def test_correction_rejects_changed_instrument_grid_authority_before_reversal(self):
+        self.seed_option_position("-2")
+        first = self.evidence(
+            external_event_id="assignment-grid-authority-r1",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+
+        before_transactions = tuple(self.book.transactions)
+        before_position = self.book.position(f"{OPTION_ID}@1")
+        before_cash = self.book.cash("USD")
+
+        changed_registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.5",
+                    minimum_quantity="0.5",
+                ),
+            )
+        )
+        restarted_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        changed_authority = self._authority(
+            registry=changed_registry,
+            economic_book=restarted_book,
+        )
+        correction = self.evidence(
+            external_event_id="assignment-grid-authority-r2",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            observed_at=utc(12, 18, 19, 2),
+            provider_revision="provider-r2",
+            corrects_external_event_id="assignment-grid-authority-r1",
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "instrument version authority",
+        ):
+            changed_authority.apply(correction)
+
+        self.assertEqual(tuple(restarted_book.transactions), before_transactions)
+        self.assertEqual(
+            restarted_book.position(f"{OPTION_ID}@1"),
+            before_position,
+        )
+        self.assertEqual(restarted_book.cash("USD"), before_cash)
+        self.assertEqual(
+            len(
+                self.store.load_events(
+                    "option_lifecycle",
+                    changed_authority.aggregate_id,
+                )
+            ),
+            1,
+        )
+
     def test_retry_under_changed_quantity_grid_is_not_equivalent(self):
         self.seed_option_position("1")
         reference = self.evidence()

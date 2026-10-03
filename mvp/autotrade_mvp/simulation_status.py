@@ -18,6 +18,7 @@ from autotrade_numeric import (
     MAX_INTEGER_DIGITS, MAX_SCALE,
 )
 
+from .authority import AuthorityService
 from .durable_reservations import DurableReservationBook
 from .accounting import book_external_cash_flow, canonical_transaction
 from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
@@ -306,6 +307,15 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
     else:
         episode_id = None
         started = {}
+
+    recorded = [event for event in events if event.get("event_type") == "AuthorityAdmissionRecorded"]
+    if recorded and recorded[0].get("payload", {}).get("outcome") == "REJECTED":
+        _require_recorded_admission(events, episode_id=episode_id, outcome="REJECTED")
+        authority = AuthorityService(store)
+        AuthorityService.historical_admission(authority, _uuid("admission", episode_id))
+    elif recorded and len(sessions) == 1:
+        # Incomplete chronology is not permission to display a forged admission.
+        _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
 
     book = DurableProviderEconomicBook(
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,

@@ -228,7 +228,7 @@ class SimulationOperatorTests(unittest.TestCase):
         def alter(event):
             if event["event_type"] == "AuthorityAdmissionRecorded":
                 event["payload"]["outcome"] = "ADMITTED"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='complete risk/reservation evidence')
 
     def test_risk_rejected_summary_requires_the_same_intent(self):
         for key in ("intent_id", "admission_id", "financial_command_id", "account_id"):
@@ -236,25 +236,25 @@ class SimulationOperatorTests(unittest.TestCase):
                 def alter(event):
                     if event["event_type"] == "AuthorityAdmissionRecorded":
                         event["payload"][key] = "another-identity"
-                self._invalid_journal(alter, ["1000", "1001", "1003"])
+                self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='durable admission identity differs')
 
     def test_risk_rejected_summary_requires_the_canonical_risk_owner(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["aggregate_type"] = "another-risk-owner"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='risk evidence is missing or ambiguous')
 
     def test_risk_rejected_summary_requires_the_bound_risk_verdict(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["payload"]["verdict"] = "ALLOW"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='historical risk decision does not match admission')
 
     def test_risk_rejected_summary_cannot_replace_risk_intent_hash(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["payload"]["intent_hash"] = "sha256:" + "0" * 64
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='historical risk decision does not match admission')
 
     def test_completed_hold_cannot_hide_extra_economic_units(self):
         for transaction in (

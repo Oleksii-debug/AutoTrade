@@ -560,6 +560,80 @@ def _hold_projection(
     return result, cut
 
 
+def _risk_rejected_projection(
+    store: JournalStore, *, episode_id: str, completed: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Recover a recorded zero-wire rejection, never grant new risk authority."""
+    cut = JournalStore.whole_store_state_cut(store)
+    if (JournalStore.load_events_by_aggregate_type(store, "submission_attempt")
+            or JournalStore.load_events_by_aggregate_type(store, "reservation_book")):
+        raise ValueError("RISK_REJECTED cannot contain submission or reservation exposure")
+    # Replay the canonical authority's historical evidence checks; no resolver,
+    # new admission, current-risk evaluation or provider instance is involved.
+    authority = AuthorityService(store)
+    state = AuthorityService.export_state(authority)
+    admissions = state["admissions"]
+    if (len(admissions) != 1 or len(state["policies"]) != 1
+            or state["epoch"] != 1 or state["revocations"]
+            or state["confirmations"] or state["used_confirmations"]
+            or state["new_exposure_blocks"]):
+        raise ValueError("RISK_REJECTED requires exact canonical authority history")
+    admission = admissions[0]
+    expected = {
+        "admission_id": _uuid("admission", episode_id),
+        "policy_id": _uuid("policy", episode_id),
+        "intent_id": _uuid("intent", episode_id),
+        "financial_command_id": _uuid("financial-command", episode_id),
+        "account_id": ACCOUNT, "environment": ENVIRONMENT,
+        "instrument": {"instrument_id": INSTRUMENT_ID, "version": 1},
+        "action": "ORDER.SUBMIT", "outcome": "REJECTED",
+        "reservation_id": None,
+    }
+    if any(admission.get(key) != value for key, value in expected.items()):
+        raise ValueError("RISK_REJECTED durable admission identity differs")
+    AuthorityService.historical_admission(authority, admission["admission_id"])
+    authority_events = JournalStore.load_events(store, "authority_state", "canonical")
+    risks = JournalStore.load_events_by_aggregate_type(store, "risk_decision")
+    if (len(authority_events) != 2 or len(risks) != 1
+            or [e.get("event_type") for e in authority_events]
+            != ["AuthorityPolicyRegistered", "AuthorityAdmissionRecorded"]
+            or [e.get("journal_sequence") for e in authority_events] != [5, 7]
+            or risks[0].get("journal_sequence") != 6
+            or risks[0].get("aggregate_id") != admission.get("risk_decision_id")
+            or risks[0].get("payload", {}).get("verdict") != "REJECT"):
+        raise ValueError("RISK_REJECTED durable chronology differs")
+    economic = DurableProviderEconomicBook(
+        store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+    )
+    seed = book_external_cash_flow(
+        transaction_id=_uuid("seed-transaction", episode_id),
+        cause_event_id=_uuid("seed-cause", episode_id),
+        currency="USD", amount=str(INITIAL_CASH),
+    )
+    if economic.transactions != (seed,):
+        raise ValueError("RISK_REJECTED requires exact seed economics")
+    checkpoint = _require_initial_reconciliation_checkpoint(store)
+    if checkpoint.get("journal_sequence") != 3:
+        raise ValueError("RISK_REJECTED initial reconciliation chronology differs")
+    expected_counts = {
+        "events": 8 if completed else 7, "outbox": 2, "command_dedupe": 2,
+        "projection_checkpoints": 0, "global_projection_checkpoints": 0,
+    }
+    if (cut.get("journal_sequence") != expected_counts["events"]
+            or cut.get("counts") != expected_counts
+            or JournalStore.whole_store_state_cut(store) != cut):
+        raise ValueError("RISK_REJECTED terminal durable state is not exact")
+    result = {
+        "status": "RISK_REJECTED", "decision": "BUY", "environment": ENVIRONMENT,
+        "episode_id": episode_id, "cash": str(economic.cash("USD")),
+        "position": str(economic.position(INSTRUMENT)), "reconciled": True,
+        "order_id": None, "fill_id": None,
+        "reconciliation_event_id": checkpoint["event_id"], "new_outbound_requests": 0,
+    }
+    result.update(_started_identity(store, episode_id=episode_id))
+    return result, cut
+
+
 def _zero_wire_blocked_projection(
     store: JournalStore,
     root: Path,
@@ -906,6 +980,14 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     raise ValueError(
                         "completed HOLD session does not match durable zero-wire facts"
                     )
+            elif result.get("status") == "RISK_REJECTED":
+                expected, _ = _risk_rejected_projection(
+                    store, episode_id=episode_id, completed=True,
+                )
+                if result != expected:
+                    raise ValueError("completed RISK_REJECTED differs from durable zero-wire facts")
+            elif result.get("status") != "FILL_RECONCILED_ORDER_UNCONFIRMED":
+                raise ValueError("unsupported completed simulation outcome")
             result["resumed"] = True
             result["new_outbound_requests"] = 0
             return result
@@ -925,6 +1007,16 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             )
             return {**result, "resumed": True}
         if decision.side == "BUY":
+            authority_events = JournalStore.load_events(store, "authority_state", "canonical")
+            if any(e.get("event_type") == "AuthorityAdmissionRecorded"
+                   and e.get("payload", {}).get("outcome") == "REJECTED"
+                   for e in authority_events):
+                result, terminal_cut = _risk_rejected_projection(
+                    store, episode_id=episode_id, completed=False,
+                )
+                _event(store, "SimulationSessionCompleted", episode_id, result,
+                       timestamp, expected_cut=terminal_cut)
+                return {**result, "resumed": True}
             attempt_id = _uuid("attempt", episode_id)
             attempt_events = JournalStore.load_events(
                 store,
@@ -990,6 +1082,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     else:
         economic.append(
             seed,
+            committed_at=timestamp,
             expected_journal_sequence=bootstrap_cut["journal_sequence"],
             expected_whole_store_counts=bootstrap_cut["counts"],
         )
@@ -1115,7 +1208,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
         max_notional="1000", expires_at=future, autonomous=True,
         protection_only=False, version=1,
-    ))
+    ), simulation_time=timestamp)
     reservations = DurableReservationBook(
         store, environment=ENVIRONMENT, account_id=ACCOUNT,
         resolution_artifact_store=ArtifactStore(root / "artifacts"),
@@ -1154,17 +1247,11 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         now=timestamp,
     )
     if admission.outcome != "ADMITTED":
-        result = {
-            "status": "RISK_REJECTED", "decision": "BUY", "environment": ENVIRONMENT,
-            "episode_id": episode_id, "cash": str(economic.cash("USD")),
-            "position": str(economic.position(INSTRUMENT)),
-            "protocol_identity": protocol_identity, "input_hash": input_hash,
-            "source_build_identity": source_build_identity, "reconciled": True,
-            "order_id": None, "fill_id": None,
-            "reconciliation_event_id": availability["event_id"],
-            "new_outbound_requests": 0,
-        }
-        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+        result, terminal_cut = _risk_rejected_projection(
+            store, episode_id=episode_id, completed=False,
+        )
+        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp,
+               expected_cut=terminal_cut)
         return {**result, "resumed": resumed_from_owner}
 
     def final_check(candidate_hash, current_time):

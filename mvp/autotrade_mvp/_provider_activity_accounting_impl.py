@@ -1236,11 +1236,13 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         self,
         transaction: JournalTransaction,
         *,
+        committed_at: str | None = None,
         expected_journal_sequence: int | None = None,
         expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> bool:
         return self.append_batch(
             (transaction,),
+            committed_at=committed_at,
             expected_journal_sequence=expected_journal_sequence,
             expected_whole_store_counts=expected_whole_store_counts,
         )
@@ -1249,10 +1251,11 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         self,
         transactions: Iterable[JournalTransaction],
         *,
+        committed_at: str | None = None,
         expected_journal_sequence: int | None = None,
         expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> bool:
-        plan = self.prepare_batch_mutation(transactions)
+        plan = self.prepare_batch_mutation(transactions, committed_at=committed_at)
         if plan.already_committed:
             self._reload()
             return False

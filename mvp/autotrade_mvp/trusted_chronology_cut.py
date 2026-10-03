@@ -21,7 +21,11 @@ from pathlib import Path
 import time
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_runtime.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 
 from .persistence import (
     JournalStore,
@@ -982,22 +986,27 @@ def prepare_durable_chronology_challenge(
         )
 
 
-def chronology_measurement_requirement(
-    attempt: DurableChronologyAttempt,
+def _measurement_requirement_for_challenge(
+    challenge: ChronologyChallenge,
     measurement_bytes: bytes,
 ) -> str:
-    """Derive the additional signed subject requirement for one exact response."""
+    """Derive the signed subject from one canonical challenge and raw measurement."""
 
-    attempt = _snapshot_attempt(attempt)
+    if type(challenge) is not ChronologyChallenge:
+        raise TypeError("challenge must be exact ChronologyChallenge")
+    challenge = _challenge_from_payload(
+        challenge.canonical_payload(),
+        expected_digest=challenge.challenge_digest,
+    )
     if type(measurement_bytes) is not bytes:
         raise TypeError("measurement_bytes must be exact bytes")
     transcript = parse_challenge_bound_measurement(
         measurement_bytes,
-        challenge=attempt.challenge,
+        challenge=challenge,
     )
     subject = {
-        "challenge": attempt.challenge.canonical_payload(),
-        "challenge_digest": attempt.challenge.challenge_digest,
+        "challenge": challenge.canonical_payload(),
+        "challenge_digest": challenge.challenge_digest,
         "external_authority_id": transcript.authority_id,
         "external_protocol_id": transcript.protocol_id,
         "external_protocol_version": transcript.protocol_version,
@@ -1010,6 +1019,19 @@ def chronology_measurement_requirement(
     return _DYNAMIC_REQUIREMENT_PREFIX + sha256(
         _canonical_json_bytes(subject)
     ).hexdigest()
+
+
+def chronology_measurement_requirement(
+    attempt: DurableChronologyAttempt,
+    measurement_bytes: bytes,
+) -> str:
+    """Derive the additional signed subject requirement for one exact response."""
+
+    attempt = _snapshot_attempt(attempt)
+    return _measurement_requirement_for_challenge(
+        attempt.challenge,
+        measurement_bytes,
+    )
 
 
 def _require_open_attempt(
@@ -1842,6 +1864,21 @@ def _reverify_durable_acceptance(
 ) -> None:
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")
+
+    # Pin the selected evidence-root generation before signature verification.
+    # The canonical verifier creates its own independently admitted reader; keeping
+    # this reader live across verification closes a root-generation swap between
+    # signature/evidence acceptance and dynamic-subject reconstruction.
+    try:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        raise TrustedChronologyError(
+            "trusted chronology evidence authority cannot be pinned"
+        ) from error
+
     receipt = _parse_persisted_receipt(payload)
     measurement_sha256 = _digest(
         payload.get("measurement_sha256"),
@@ -1874,6 +1911,43 @@ def _reverify_durable_acceptance(
             "reverified signed chronology authority differs from durable cut"
         )
 
+    try:
+        manifest, measurement_bytes = evidence_reader(measurement_ref.artifact_id)
+    except (ArtifactIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as error:
+        raise TrustedChronologyError(
+            "trusted chronology raw measurement cannot be reread with integrity"
+        ) from error
+    if type(manifest) is not dict or type(measurement_bytes) is not bytes:
+        raise TrustedChronologyError(
+            "trusted chronology authenticated measurement snapshot is non-canonical"
+        )
+    metadata = manifest.get("metadata")
+    source_refs = manifest.get("source_refs")
+    if (
+        manifest.get("artifact_id") != measurement_ref.artifact_id
+        or manifest.get("sha256") != measurement_ref.sha256
+        or manifest.get("media_type") != measurement_ref.media_type
+        or type(metadata) is not dict
+        or metadata.get("evidence_kind") != measurement_ref.evidence_kind
+        or type(source_refs) is not list
+        or f"git:{measurement_ref.source_sha}" not in source_refs
+    ):
+        raise TrustedChronologyError(
+            "trusted chronology reread measurement manifest differs from signed evidence"
+        )
+    observed_sha256 = "sha256:" + sha256(measurement_bytes).hexdigest()
+    if observed_sha256 != measurement_sha256 or observed_sha256 != measurement_ref.sha256:
+        raise TrustedChronologyError(
+            "trusted chronology reread measurement bytes differ from durable authority"
+        )
+    recomputed_requirement = _measurement_requirement_for_challenge(
+        challenge,
+        measurement_bytes,
+    )
+    if recomputed_requirement != dynamic_requirement:
+        raise TrustedChronologyError(
+            "trusted chronology dynamic requirement differs from raw measurement"
+        )
 
 def require_current_trusted_chronology_cut(
     *,

@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
-from weakref import WeakKeyDictionary
+import weakref
 
 from .accounting import (
     AccountingConflict,
@@ -1487,15 +1487,43 @@ def _economic_projection_digest(value: object) -> str:
 
 
 def _install_durable_provider_economic_book_authority():
-    """Keep original financial-book composition outside caller-writable module state."""
+    """Keep original composition behind callback-free weak process state."""
 
-    authorities: WeakKeyDictionary[
-        object, _DurableProviderEconomicBookAuthority
-    ] = WeakKeyDictionary()
+    authorities: dict[
+        int,
+        tuple[weakref.ReferenceType, _DurableProviderEconomicBookAuthority],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _authority) in authorities.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    def registered_authority(
+        value: object,
+    ) -> _DurableProviderEconomicBookAuthority | None:
+        entry = authorities.get(id(value))
+        if entry is None:
+            return None
+        value_ref, authority = entry
+        current = value_ref()
+        if current is value:
+            return authority
+        if current is None:
+            authorities.pop(id(value), None)
+            return None
+        raise AccountingConflict(
+            "durable economic-book binding identity collision"
+        )
 
     def is_registered(value: object) -> bool:
         try:
-            return authorities.get(value) is not None
+            prune_dead()
+            return registered_authority(value) is not None
         except TypeError:
             return False
 
@@ -1504,7 +1532,8 @@ def _install_durable_provider_economic_book_authority():
     ) -> _DurableProviderEconomicBookAuthority:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
-        authority = authorities.get(value)
+        prune_dead()
+        authority = registered_authority(value)
         if authority is None:
             raise AccountingConflict(
                 "durable economic-book authority is not established"
@@ -1558,8 +1587,6 @@ def _install_durable_provider_economic_book_authority():
         value: object,
     ) -> _DurableProviderEconomicBookAuthority:
         authority = bound_authority(value)
-        # Never expose the closure-owned record itself. A caller may mutate this
-        # snapshot, but cannot rewrite the original composition fact.
         return _DurableProviderEconomicBookAuthority(
             store=authority.store,
             store_identity=authority.store_identity,
@@ -1596,7 +1623,8 @@ def _install_durable_provider_economic_book_authority():
     ) -> None:
         if type(value) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
-        if authorities.get(value) is not None:
+        prune_dead()
+        if registered_authority(value) is not None:
             raise AccountingConflict(
                 "durable economic-book authority is already established"
             )
@@ -1628,19 +1656,25 @@ def _install_durable_provider_economic_book_authority():
             ),
         )
         state = object.__getattribute__(value, "__dict__")
-        authorities[value] = _DurableProviderEconomicBookAuthority(
-            store=store,
-            store_identity=identity,
-            provider_id=state["provider_id"],
-            account_id=state["account_id"],
-            environment=state["environment"],
-            book_id=state["book_id"],
-            projection_digest=_economic_projection_digest(state["_book"]),
+        object_id = id(value)
+        authorities[object_id] = (
+            weakref.ref(value),
+            _DurableProviderEconomicBookAuthority(
+                store=store,
+                store_identity=identity,
+                provider_id=state["provider_id"],
+                account_id=state["account_id"],
+                environment=state["environment"],
+                book_id=state["book_id"],
+                projection_digest=_economic_projection_digest(state["_book"]),
+            ),
         )
         try:
             reload_projection(value)
         except Exception:
-            authorities.pop(value, None)
+            entry = authorities.get(object_id)
+            if entry is not None and entry[0]() is value:
+                authorities.pop(object_id, None)
             raise
 
     return is_registered, detached_authority, initialize, reload_projection

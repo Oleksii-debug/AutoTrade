@@ -15,6 +15,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 GENESIS_HASH = "0" * 64
+_BUILD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
 REQUIRED_FIELDS = (
     "trace_id",
     "input_hash",
@@ -282,6 +283,22 @@ class DecisionTraceStore:
         ):
             raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
 
+        source_sha = trace.get("source_sha")
+        if source_sha is not None and (
+            not isinstance(source_sha, str)
+            or len(source_sha) not in {40, 64}
+            or source_sha != source_sha.lower()
+            or any(ch not in "0123456789abcdef" for ch in source_sha)
+        ):
+            raise ValueError("source_sha must be a canonical lowercase Git/object SHA")
+
+        build_id = trace.get("build_id")
+        if build_id is not None and (
+            not isinstance(build_id, str)
+            or _BUILD_ID_PATTERN.fullmatch(build_id) is None
+        ):
+            raise ValueError("build_id must be a canonical bounded build token")
+
         refs = trace["evidence_refs"]
         if (
             not isinstance(refs, list)
@@ -390,6 +407,40 @@ class DecisionTraceStore:
             )
         return _semantic_payload(record)
 
+    def reconstruct_exact(
+        self,
+        trace_id: str,
+        *,
+        expected_source_sha: str,
+        expected_build_id: str,
+        available_event_ids: Iterable[str],
+        available_evidence_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        """Reconstruct only when durable links and exact source/build identity match."""
+
+        candidate = {
+            "trace_id": "identity-check",
+            "input_hash": "0" * 64,
+            "strategy_version": "identity-check",
+            "decision": "identity-check",
+            "decision_reason": "identity-check",
+            "risk_outcome": "identity-check",
+            "evidence_refs": [],
+            "source_sha": expected_source_sha,
+            "build_id": expected_build_id,
+        }
+        self._validate_input(candidate)
+        record = self.reconstruct(
+            trace_id,
+            available_event_ids=available_event_ids,
+            available_evidence_ids=available_evidence_ids,
+        )
+        if record.get("source_sha") != expected_source_sha:
+            raise ValueError("trace source identity mismatch")
+        if record.get("build_id") != expected_build_id:
+            raise ValueError("trace build identity mismatch")
+        return record
+
     def accessible_export(self, trace_id: str) -> str:
         """Return a linear, screen-reader-friendly view of one verified trace."""
 
@@ -410,6 +461,10 @@ class DecisionTraceStore:
         correlation_id = record.get("correlation_id")
         if correlation_id:
             lines.append(f"Correlation: {correlation_id}")
+        source_sha = record.get("source_sha")
+        build_id = record.get("build_id")
+        lines.append(f"Source SHA: {source_sha or 'unavailable'}")
+        lines.append(f"Build: {build_id or 'unavailable'}")
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])

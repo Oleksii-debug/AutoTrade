@@ -132,8 +132,10 @@ class FuturesContract:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
-        if self.payoff not in {"LINEAR", "INVERSE"}:
+        payoff = _text(self.payoff, "payoff")
+        if payoff not in {"LINEAR", "INVERSE"}:
             raise FuturesError("payoff must be LINEAR or INVERSE")
+        object.__setattr__(self, "payoff", payoff)
         object.__setattr__(self, "multiplier", _decimal(self.multiplier, "multiplier", positive=True))
         object.__setattr__(self, "quote_currency", _text(self.quote_currency, "quote_currency"))
         object.__setattr__(
@@ -147,8 +149,10 @@ class FuturesContract:
             raise FuturesError("last_trade_at cannot be after expiry")
         if not self.delivery_cutoff <= self.expiry:
             raise FuturesError("delivery_cutoff cannot be after expiry")
-        if self.settlement_method not in {"CASH", "PHYSICAL"}:
+        settlement_method = _text(self.settlement_method, "settlement_method")
+        if settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        object.__setattr__(self, "settlement_method", settlement_method)
         if (
             self.settlement_method == "PHYSICAL"
             and self.delivery_cutoff > self.last_trade_at
@@ -174,8 +178,10 @@ class FuturesContract:
 
         if self.canonical_instrument is not None:
             version = self.canonical_instrument
-            if not isinstance(version, InstrumentVersion):
-                raise FuturesError("canonical_instrument must be an InstrumentVersion")
+            if type(version) is not InstrumentVersion:
+                raise FuturesError(
+                    "canonical_instrument must be exact InstrumentVersion"
+                )
             if version.asset_class != "FUTURE":
                 raise FuturesError("canonical instrument must have FUTURE asset_class")
             canonical_key = f"{version.instrument_id}@{version.version}"
@@ -212,8 +218,8 @@ class FuturesContract:
 
     @classmethod
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
-        if not isinstance(version, InstrumentVersion):
-            raise FuturesError("canonical InstrumentVersion is required")
+        if type(version) is not InstrumentVersion:
+            raise FuturesError("exact canonical InstrumentVersion is required")
         if version.asset_class != "FUTURE":
             raise FuturesError("canonical instrument must have FUTURE asset_class")
         if version.payoff not in {"LINEAR", "INVERSE"}:

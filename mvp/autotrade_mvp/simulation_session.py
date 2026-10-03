@@ -776,6 +776,65 @@ def _finalize_zero_wire_blocked(
     return {**result, "resumed": resumed}
 
 
+def _recover_existing_buy_attempt(
+    store: JournalStore,
+    *,
+    episode_id: str,
+    decision,
+    prepared_request_time: str,
+    recovery_now: str,
+):
+    """Advance only the durable recovery automaton for an existing BUY attempt.
+
+    Re-entering GuardedDispatcher with the exact original attempt/request is safe:
+    its existing-attempt path validates immutable submission identity and returns
+    before authority_check or transport_send. This advances Prepared/Sending
+    crash states without opening a second outbound-send path.
+    """
+
+    if decision.side != "BUY":
+        raise ValueError("submission recovery requires BUY decision")
+    quantity_text = canonical_decimal_text(decision.quantity)
+    price_text = canonical_decimal_text(decision.price)
+    intent_id = _uuid("intent", episode_id)
+    intent_hash = payload_digest({
+        "episode_id": episode_id,
+        "side": "BUY",
+        "quantity": quantity_text,
+        "price": price_text,
+        "instrument": INSTRUMENT,
+    })
+    attempt_id = _uuid("attempt", episode_id)
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError(
+            "existing submission recovery attempted fresh authority or wire I/O"
+        )
+
+    return GuardedDispatcher(
+        store,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        owner_token="canonical-simulation-owner",
+    ).dispatch(
+        attempt_id=attempt_id,
+        intent_id=intent_id,
+        intent_hash=intent_hash,
+        provider="simulated",
+        request={
+            "attempt_id": attempt_id,
+            "instrument_version": INSTRUMENT,
+            "side": "BUY",
+            "quantity": quantity_text,
+            "price": price_text,
+            "now": prepared_request_time,
+        },
+        now=recovery_now,
+        authority_check=_must_not_be_called,
+        transport_send=_must_not_be_called,
+    )
+
+
 def _risk_policy() -> RiskPolicy:
     return RiskPolicy.create(**dict(_RISK_POLICY_SPEC))
 
@@ -1039,6 +1098,50 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     timestamp=timestamp,
                     resumed=True,
                 )
+            if attempt_events:
+                attempt_types = [
+                    event.get("event_type") for event in attempt_events
+                ]
+                if attempt_types in (
+                    ["SubmissionPrepared"],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                ):
+                    recovery = _recover_existing_buy_attempt(
+                        store,
+                        episode_id=episode_id,
+                        decision=decision,
+                        prepared_request_time=timestamp,
+                        recovery_now=_now(now),
+                    )
+                    if recovery.status == "IN_PROGRESS":
+                        return {
+                            "status": "IN_PROGRESS",
+                            "environment": ENVIRONMENT,
+                            "episode_id": episode_id,
+                            "reason": recovery.reason,
+                            "protocol_identity": protocol_identity,
+                            "input_hash": input_hash,
+                            "source_build_identity": source_build_identity,
+                            "reconciled": False,
+                            "resumed": True,
+                            "new_outbound_requests": 0,
+                        }
+                    if recovery.status != "UNKNOWN":
+                        raise ValueError(
+                            "incomplete submission recovery produced invalid status"
+                        )
+                    return {
+                        "status": "UNKNOWN",
+                        "environment": ENVIRONMENT,
+                        "episode_id": episode_id,
+                        "reason": recovery.reason,
+                        "protocol_identity": protocol_identity,
+                        "input_hash": input_hash,
+                        "source_build_identity": source_build_identity,
+                        "reconciled": False,
+                        "resumed": True,
+                        "new_outbound_requests": 0,
+                    }
         return {
             "status": "UNKNOWN", "environment": ENVIRONMENT,
             "episode_id": episode_id, "reason": "incomplete_send_requires_reconciliation",

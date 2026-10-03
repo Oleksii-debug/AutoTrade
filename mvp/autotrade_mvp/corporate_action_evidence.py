@@ -612,13 +612,13 @@ class PreparedCorporateActionEvidenceMutation:
 
 
 def _durable_corporate_action_store_operations():
-    """Seal one durable corporate-action scope to one JournalStore generation."""
+    """Seal one durable scope without discoverable weakref callbacks."""
 
     states: dict[
         int,
         tuple[
             weakref.ReferenceType,
-            JournalStore,
+            weakref.ReferenceType,
             object,
             str,
             str,
@@ -628,15 +628,15 @@ def _durable_corporate_action_store_operations():
     ] = {}
     state_lock = threading.RLock()
 
-    def cleanup(object_id: int, store_ref: weakref.ReferenceType) -> None:
-        with state_lock:
-            current = states.get(object_id)
-            if current is not None and current[0] is store_ref:
-                states.pop(object_id, None)
+    def prune_dead() -> None:
+        dead = [key for key, state in states.items() if state[0]() is None]
+        for key in dead:
+            states.pop(key, None)
 
     def require_unbound(value: object) -> None:
         object_id = id(value)
         with state_lock:
+            prune_dead()
             current = states.get(object_id)
             if current is None:
                 return
@@ -663,6 +663,7 @@ def _durable_corporate_action_store_operations():
     ) -> None:
         object_id = id(value)
         with state_lock:
+            prune_dead()
             current = states.get(object_id)
             if current is not None:
                 current_value = current[0]()
@@ -675,13 +676,9 @@ def _durable_corporate_action_store_operations():
                         "corporate-action evidence binding identity collision"
                     )
                 states.pop(object_id, None)
-            value_ref = weakref.ref(
-                value,
-                lambda ref, object_id=object_id: cleanup(object_id, ref),
-            )
             states[object_id] = (
-                value_ref,
-                store,
+                weakref.ref(value),
+                weakref.ref(store),
                 store_identity,
                 provider_id,
                 account_id,
@@ -698,7 +695,12 @@ def _durable_corporate_action_store_operations():
             raise CorporateActionEvidenceConflict(
                 "corporate-action evidence process binding is unavailable"
             )
-        return state[1], state[2], state[3], state[4], state[5], state[6]
+        store = state[1]()
+        if store is None:
+            raise CorporateActionEvidenceConflict(
+                "corporate-action evidence selected JournalStore was lost"
+            )
+        return store, state[2], state[3], state[4], state[5], state[6]
 
     return require_unbound, register, binding
 
@@ -709,7 +711,6 @@ def _durable_corporate_action_store_operations():
     _durable_corporate_action_store_binding,
 ) = _durable_corporate_action_store_operations()
 del _durable_corporate_action_store_operations
-
 
 class DurableCorporateActionEvidenceStore:
     """Exactly-once durable history for admitted corporate-action evidence.

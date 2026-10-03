@@ -31,6 +31,9 @@ from .persistence import (
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_plan import load_declared_runtime_event_plan
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
+from .runtime_target_host_composed_authority import (
+    verify_sealed_composed_runtime_target_host_qualification,
+)
 from .runtime_target_host_composed_qualification import (
     AcceptedComposedRuntimeTargetHostQualification,
     RuntimeTargetHostCompositionError,
@@ -406,7 +409,7 @@ _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
         require_store_authority=require_exact_journal_store_authority,
         store_authority_scope=journal_store_authority_scope,
         plan_loader=load_declared_runtime_event_plan,
-        composed_verifier=verify_composed_runtime_target_host_qualification,
+        composed_verifier=verify_sealed_composed_runtime_target_host_qualification,
         acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
     )
 )

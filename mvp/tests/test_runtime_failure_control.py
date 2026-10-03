@@ -69,20 +69,15 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:test-account",
             )
-            new_owner = restarted.start("host-b")
-            self.assertGreater(new_owner.epoch, owner.epoch)
             with self.assertRaisesRegex(
                 PermissionError,
-                "bound to this recovery owner",
+                "explicit takeover evidence",
             ):
-                restarted.record_reconciliation_checkpoint(
-                    reconciliation_id="runtime-readiness",
-                    provider_id="TEST_PROVIDER",
-                    account_id="test-account",
-                    environment="PAPER",
-                )
-            self.assertEqual(restarted.state, HostState.RECOVERING)
+                restarted.start("host-b")
+            self.assertIsNone(restarted.owner)
+            self.assertEqual(restarted.state, HostState.STOPPED)
             self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.durable_owner_chain(), (owner,))
 
     def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
         with TemporaryDirectory() as directory:
@@ -436,7 +431,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         controller.record_reconciliation(consistent=True)
         controller.validate_sender(new_owner.owner_id, new_owner.epoch)
 
-    def test_durable_owner_epoch_survives_restart_and_fences_old_process(self):
+    def test_durable_owner_restart_cannot_mint_successor_without_takeover(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             first = RecoveryController(
@@ -448,31 +443,22 @@ class RuntimeRecoveryTests(unittest.TestCase):
             first.validate_sender(owner_one.owner_id, owner_one.epoch)
             self.assertEqual(owner_one.epoch, 1)
 
-            second = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:paper-account",
-            )
-            owner_two = second.start("host-b")
-            self.assertEqual(owner_two.epoch, 2)
-            self.assertEqual(second.state, HostState.RECOVERING)
+            for candidate in ("host-b", "host-c"):
+                restarted = RecoveryController(
+                    owner_store=JournalStore(path),
+                    owner_scope="PAPER:paper-account",
+                )
+                with self.subTest(candidate=candidate), self.assertRaisesRegex(
+                    PermissionError,
+                    "explicit takeover evidence",
+                ):
+                    restarted.start(candidate)
+                self.assertIsNone(restarted.owner)
+                self.assertEqual(restarted.state, HostState.STOPPED)
+                self.assertEqual(restarted.durable_owner_chain(), (owner_one,))
 
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                first.validate_sender(owner_one.owner_id, owner_one.epoch)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                first.validate_admission(owner_one.epoch)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                self._record_durable_ready(first)
-
-            self._record_durable_ready(second)
-            second.validate_sender(owner_two.owner_id, owner_two.epoch)
-
-            third = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:paper-account",
-            )
-            owner_three = third.start("host-c")
-            self.assertEqual(owner_three.epoch, 3)
-            self.assertEqual(third.state, HostState.RECOVERING)
+            first.validate_sender(owner_one.owner_id, owner_one.epoch)
+            first.validate_admission(owner_one.epoch)
 
     def test_durable_owner_scopes_are_independent(self):
         with TemporaryDirectory() as directory:
@@ -492,12 +478,16 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(live_owner.epoch, 1)
 
             self._record_durable_ready(paper)
-            transferred = paper.transfer_owner(
-                new_owner_id="paper-host-2",
-                old_sender_fenced=True,
-                reconciled=True,
-            )
-            self.assertEqual(transferred.epoch, 2)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued takeover evidence",
+            ):
+                paper.transfer_owner(
+                    new_owner_id="paper-host-2",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
+            self.assertEqual(paper.durable_owner_chain(), (paper_owner,))
             self._record_durable_ready(live)
             live.validate_sender(live_owner.owner_id, live_owner.epoch)
 
@@ -520,14 +510,17 @@ class RuntimeRecoveryTests(unittest.TestCase):
             stale.reason_codes.clear()
             stale.state = HostState.READY
 
-            transferred = first.transfer_owner(
-                new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
-            )
-            self.assertEqual(transferred.epoch, 2)
-            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
-                stale.validate_sender(owner.owner_id, owner.epoch)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independently issued takeover evidence",
+            ):
+                first.transfer_owner(
+                    new_owner_id="host-b",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
+            self.assertEqual(first.durable_owner_chain(), (owner,))
+            stale.validate_sender(owner.owner_id, owner.epoch)
 
     def test_owner_identity_is_normalized_before_start_and_transfer(self):
         controller = RecoveryController()

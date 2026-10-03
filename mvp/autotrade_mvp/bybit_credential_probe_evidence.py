@@ -415,9 +415,10 @@ class BybitCredentialProbeEvidence:
     response_sha256: str
     observed_at: str
     api_key_echo_confirmed: bool = False
+    _provider_echo_attestation: InitVar[object | None] = None
     classification: BybitCredentialNonAcceptance = field(init=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _provider_echo_attestation: object | None) -> None:
         if type(self.credential_handle) is not PersistentCredentialHandle:
             raise TypeError(
                 "credential_handle must be an exact PersistentCredentialHandle"
@@ -482,9 +483,17 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "successful Bybit credential evidence requires API key echo confirmation"
             )
+        if self.ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
+            raise ProviderCoreError(
+                "successful Bybit credential evidence requires provider-derived API key echo attestation"
+            )
         if self.ret_code != 0 and self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "API key echo confirmation is valid only for successful Bybit evidence"
+            )
+        if self.ret_code != 0 and _provider_echo_attestation is not None:
+            raise ProviderCoreError(
+                "provider echo attestation is valid only for successful Bybit evidence"
             )
         response_sha256 = _exact_text(self.response_sha256, name="response_sha256")
         if _SHA256.fullmatch(response_sha256) is None:
@@ -966,6 +975,11 @@ def probe_bybit_credential_with_vault(
             response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
             api_key_echo_confirmed=wire_response.api_key_echo_confirmed,
+            _provider_echo_attestation=(
+                _PROVIDER_ECHO_ATTESTATION
+                if wire_response.api_key_echo_confirmed
+                else None
+            ),
         )
 
 

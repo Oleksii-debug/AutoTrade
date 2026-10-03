@@ -36,7 +36,7 @@ def _expected() -> tuple[ExpectedJournalEvent, ...]:
         ExpectedJournalEvent(
             event_id="runtime-limit-financial-1",
             event_type="RuntimeQualificationFinancialEvent",
-            aggregate_type="runtime_load_limit_fixture",
+            aggregate_type="risk_decision",
             aggregate_id="runtime-load-limit",
             aggregate_version=1,
         ),

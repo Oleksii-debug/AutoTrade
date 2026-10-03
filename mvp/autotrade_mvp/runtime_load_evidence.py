@@ -8,8 +8,8 @@ authority.
 
 The collector reads one contiguous authenticated journal tail and derives the
 recovered set only from exact predeclared journal bindings. Missing identities,
-wrong event/aggregate semantics, or reordered expected events therefore cannot
-be hidden behind caller-supplied integer counts.
+wrong event/aggregate semantics, reordered expected events, or undeclared
+financial activity therefore cannot be hidden behind caller-supplied summaries.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from .journal_taxonomy import JournalTaxonomyError, is_financial_for_qualification
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetSpec,
@@ -53,6 +54,14 @@ def _positive_int(value: object, *, name: str) -> int:
     return value
 
 
+def _snapshot_metric_series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
+    """Freeze inert caller measurements before durable conservation is read."""
+
+    if type(values) not in (tuple, list):
+        raise RuntimeLoadEvidenceError(f"{name} must be an exact tuple or list")
+    return tuple(_non_negative_int(value, name=name) for value in values)
+
+
 def _validated_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
     if type(value) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
@@ -87,11 +96,18 @@ class ExpectedJournalEvent:
             "event_type",
             _text(self.event_type, name="event_type"),
         )
-        object.__setattr__(
-            self,
-            "aggregate_type",
-            _text(self.aggregate_type, name="aggregate_type"),
-        )
+        aggregate_type = _text(self.aggregate_type, name="aggregate_type")
+        try:
+            is_financial = is_financial_for_qualification(aggregate_type)
+        except JournalTaxonomyError as error:
+            raise RuntimeLoadEvidenceError(
+                "expected financial event uses an unclassified durable aggregate"
+            ) from error
+        if not is_financial:
+            raise RuntimeLoadEvidenceError(
+                "expected financial event aggregate is not qualification-financial"
+            )
+        object.__setattr__(self, "aggregate_type", aggregate_type)
         object.__setattr__(
             self,
             "aggregate_id",
@@ -225,8 +241,9 @@ def collect_journal_conservation_evidence(
     ``start_journal_sequence`` is the pre-campaign cut. Only exact predeclared
     events committed after it can satisfy the workload. The tail reader verifies
     global contiguity and fails when a bounded read is incomplete. Expected event
-    order is also preserved: a matching set in the wrong durable order is not
-    accepted as conservation evidence.
+    order is also preserved. Every non-declared durable event is classified by
+    the canonical journal taxonomy; undeclared financial/control activity and
+    unknown aggregate families fail closed instead of disappearing from the cut.
     """
 
     scenario = _text(scenario_id, name="scenario_id")
@@ -263,6 +280,18 @@ def collect_journal_conservation_evidence(
         end = sequence
         event_id = event.get("event_id")
         if event_id not in expected_by_id:
+            try:
+                is_financial = is_financial_for_qualification(
+                    event.get("aggregate_type")
+                )
+            except JournalTaxonomyError as error:
+                raise RuntimeLoadEvidenceError(
+                    "journal qualification contains an unclassified durable aggregate"
+                ) from error
+            if is_financial:
+                raise RuntimeLoadEvidenceError(
+                    "journal qualification contains an undeclared financial event"
+                )
             continue
         if type(event_id) is not str:
             raise RuntimeLoadEvidenceError("recovered journal event_id is invalid")
@@ -330,13 +359,29 @@ def evaluate_journal_backed_runtime_budget(
 ) -> tuple[RuntimeBudgetDecision, JournalConservationEvidence]:
     """Evaluate a runtime budget with conservation derived from durable truth.
 
-    Latency/staleness/interference samples remain measurement inputs owned by the
-    later target-host campaign harness. This bridge closes only financial-event
-    conservation: both counts come from exact predeclared bindings and one
-    contiguous JournalStore cut rather than caller-authored summary integers.
+    Caller-owned measurement containers are copied into exact inert tuples before
+    reading the journal cut, so iteration cannot mutate durable truth after the
+    conservation boundary has been selected. Latency/staleness/interference are
+    still measurement inputs owned by the later target-host campaign harness.
     """
 
     spec = _validated_spec(spec)
+    financial_latency_us = _snapshot_metric_series(
+        financial_latency_us,
+        name="financial_latency_us",
+    )
+    financial_staleness_us = _snapshot_metric_series(
+        financial_staleness_us,
+        name="financial_staleness_us",
+    )
+    research_interference_us = _snapshot_metric_series(
+        research_interference_us,
+        name="research_interference_us",
+    )
+    reconnect_backlog_remaining = _non_negative_int(
+        reconnect_backlog_remaining,
+        name="reconnect_backlog_remaining",
+    )
     evidence = collect_journal_conservation_evidence(
         store,
         scenario_id=spec.scenario_id,

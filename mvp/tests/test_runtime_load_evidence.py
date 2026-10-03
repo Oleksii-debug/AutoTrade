@@ -43,7 +43,7 @@ def _expected(
     return ExpectedJournalEvent(
         event_id=event_id,
         event_type=event_type,
-        aggregate_type="runtime_qualification_fixture",
+        aggregate_type="risk_decision",
         aggregate_id=aggregate_id,
         aggregate_version=version,
     )
@@ -73,6 +73,32 @@ def _append(
 class RuntimeLoadEvidenceTests(unittest.TestCase):
     def _store(self, root: str) -> JournalStore:
         return JournalStore(Path(root) / "runtime-load.sqlite")
+
+    def test_expected_event_rejects_nonfinancial_aggregate(self):
+        with self.assertRaisesRegex(
+            RuntimeLoadEvidenceError,
+            "not qualification-financial",
+        ):
+            ExpectedJournalEvent(
+                event_id="not-financial",
+                event_type=EVENT_TYPE,
+                aggregate_type="model_budget",
+                aggregate_id="journal-load",
+                aggregate_version=1,
+            )
+
+    def test_expected_event_rejects_unclassified_aggregate(self):
+        with self.assertRaisesRegex(
+            RuntimeLoadEvidenceError,
+            "unclassified durable aggregate",
+        ):
+            ExpectedJournalEvent(
+                event_id="unknown-financial",
+                event_type=EVENT_TYPE,
+                aggregate_type="future_unknown_runtime_writer",
+                aggregate_id="journal-load",
+                aggregate_version=1,
+            )
 
     def test_complete_declared_event_sequence_can_pass_existing_budget(self):
         with tempfile.TemporaryDirectory() as root:

@@ -20,7 +20,7 @@ class RuntimeBudgetError(ValueError):
 
 
 def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+    if type(value) is not int:
         raise RuntimeBudgetError(f"{name} must be an integer")
     minimum = 0 if allow_zero else 1
     if value < minimum:
@@ -30,7 +30,7 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 def _git_sha(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or value != value.lower()
         or len(value) not in {40, 64}
@@ -44,7 +44,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 def _sha256_identity(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or not value.startswith("sha256:")
     ):
@@ -93,7 +93,7 @@ class RuntimeBudgetSpec:
     min_research_samples: int = 1
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
+        if type(self.scenario_id) is not str or not self.scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         object.__setattr__(self, "scenario_id", self.scenario_id.strip())
         object.__setattr__(self, "release_sha", _git_sha(self.release_sha, name="release_sha"))
@@ -173,7 +173,7 @@ class RuntimeLoadObservation:
     observed_duration_us: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
+        if type(self.scenario_id) is not str or not self.scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         expected = _positive_int(
             self.expected_financial_events,
@@ -276,7 +276,7 @@ class RuntimeLoadObservation:
         declared_duration_us: int | None = None,
         observed_duration_us: int | None = None,
     ) -> "RuntimeLoadObservation":
-        if not isinstance(scenario_id, str) or not scenario_id.strip():
+        if type(scenario_id) is not str or not scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
         expected = _positive_int(
             expected_financial_events, name="expected_financial_events", allow_zero=True

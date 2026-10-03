@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from uuid import UUID
@@ -65,6 +66,9 @@ _EVIDENCE_REF_CANONICAL_FIELDS = frozenset(
     {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
 )
 _EVIDENCE_REF_REQUIRED_FIELDS = frozenset({"artifact_id", "sha256", "observed_at"})
+_UTC_INSTANT_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
+)
 
 
 def _text(value: Any, name: str) -> str:
@@ -119,11 +123,13 @@ def _utc(value: Any, name: str) -> datetime:
         if value.tzinfo is None:
             raise HistoricalDataError(f"{name} must be timezone-aware")
         return value.astimezone(timezone.utc)
-    if type(value) is not str or value != value.strip():
+    if (
+        type(value) is not str
+        or value != value.strip()
+        or _UTC_INSTANT_RE.fullmatch(value) is None
+    ):
         raise HistoricalDataError(f"{name} must be canonical UTC text")
     text = value
-    if not text.endswith("Z"):
-        raise HistoricalDataError(f"{name} must be UTC and end in Z")
     try:
         parsed = datetime.fromisoformat(text[:-1] + "+00:00")
     except ValueError as error:
@@ -291,6 +297,8 @@ def _evidence(value: Mapping[str, Any]) -> dict[str, Any]:
             "source evidence fields differ from canonical EvidenceRef contract; "
             f"unknown={sorted(unknown)}"
         )
+    if type(value["observed_at"]) is not str:
+        raise HistoricalDataError("observed_at must be canonical UTC text")
     result: dict[str, Any] = {
         "artifact_id": _uuid(value["artifact_id"], "artifact_id"),
         "sha256": _digest(value["sha256"], "evidence sha256"),
@@ -639,6 +647,15 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         unknown = set(manifest) - allowed
         raise HistoricalDataError(
             f"dataset manifest keys differ; missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+
+    if type(manifest["version"]) is not str:
+        raise HistoricalDataError(
+            "dataset manifest version must be canonical string Sequence"
+        )
+    if type(manifest["created_at"]) is not str:
+        raise HistoricalDataError(
+            "dataset manifest created_at must be canonical UTC text"
         )
 
     content_hashes = manifest["content_hashes"]

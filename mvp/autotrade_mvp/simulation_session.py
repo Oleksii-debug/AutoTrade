@@ -452,7 +452,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 # Multi-episode orchestration shares the existing financial authorities and OMS.
 # It owns no ledger, risk engine, strategy, transport or allocation algorithm.
 _LOOP_AGGREGATE = "canonical_autonomous_simulation"
-_LOOP_PROTOCOL = "provider-free-zero-loop-v2"
+_LOOP_PROTOCOL = "provider-free-zero-loop-v3"
 
 
 def _loop_event(store, run_id, kind, key, payload, now):
@@ -539,6 +539,178 @@ def run_autonomous_simulation(
         return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
 
 
+def _autonomous_reconciliation(store, provider, economic, protocol, timestamp, key):
+    # Every current simulator fill participates; an ACK alone contributes none.
+    snapshot = provider.account_snapshot(now=timestamp)
+    fills = tuple(ProviderFillEvidence.create(
+        provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+        provider_execution_id=f["provider_execution_id"],
+        client_order_id=next(o.client_order_id for o in provider.orders.values() if o.provider_order_id == f["order_ref"]),
+        instrument=f["instrument_version"], quantity=f["last_quantity"]["value"], price=f["last_price"],
+        fee_amount=f["fees"][0]["amount"], fee_currency=f["fees"][0]["currency"], trade_time=f["trade_time"],
+        side=f["side"], evidence_refs=(f"simulated:fill:{f['provider_execution_id']}",),
+    ) for f in provider.activity_fills())
+    result = reconcile_account(provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+        local_cash={"USD": economic.cash("USD")}, provider_cash={"USD": snapshot["balances"][0]["total"]},
+        local_positions={INSTRUMENT: economic.position(INSTRUMENT)},
+        provider_positions={item["instrument_version"]: item["quantity"]["value"] for item in snapshot["positions"]},
+        local_execution_ids=tuple(f.provider_execution_id for f in fills), provider_fills=fills,
+        snapshot_consistency=SnapshotConsistencyEvidence(provider_id=PROVIDER, account_id=ACCOUNT,
+            environment=ENVIRONMENT, mode="ATOMIC", query_started_at=timestamp, query_completed_at=timestamp),
+        coverage_start=protocol["start_time"], coverage_end=timestamp, pagination_complete=True,
+        provider_activity_provider_id=PROVIDER, provider_activity_account_id=ACCOUNT,
+        resource_availability=ResourceAvailabilityEvidence(provider_id=PROVIDER, account_id=ACCOUNT,
+            environment=ENVIRONMENT, snapshot_id=snapshot["snapshot_id"], query_started_at=timestamp,
+            query_completed_at=timestamp, valid_until=(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                + timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
+            available_resources={"CASH:USD": snapshot["balances"][0]["available"],
+                f"POSITION:{INSTRUMENT}": canonical_decimal_text(economic.position(INSTRUMENT))},
+            provider_as_of=snapshot["provider_as_of"], evidence_refs=(f"simulated:provider-snapshot:{snapshot['snapshot_id']}",)))
+    if not result.complete or result.blocks_new_risk:
+        raise ValueError("complete simulated economics did not reconcile")
+    checkpoint = record_reconciliation_checkpoint(store, reconciliation_id=key, result=result,
+        observed_at=timestamp, host_id="local-simulation", owner_epoch="1")
+    # Exact recovery can return an already-delivered checkpoint. Preserve that
+    # durable fact rather than requiring a second outbox publication.
+    for item in store.pending_outbox(limit=1000):
+        if item["event_id"] == checkpoint["event_id"]:
+            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+            break
+    return checkpoint, snapshot
+
+
+def _recover_autonomous_observed_fill(store, root, protocol, active, observed, prior_state):
+    """Finish retained SIMULATION facts; never derive a fill from an ACK/send.
+
+    An absent observation remains UNKNOWN. This consumes the historical
+    AuthorityService admission, exact dispatcher replay, existing OMS and the
+    canonical atomic economic/reservation writer. It creates no current risk
+    permission and never invokes transport.
+    """
+    from .durable_order_projection import DurableOrderBookProjection
+    from .exact_decimal import exact_abs, exact_subtract
+
+    run_id = protocol["run_id"]
+    proof_cut = store.current_journal_sequence()
+    episode = active["episode"]
+    key = f"{run_id}:{episode}"
+    digest = payload_digest(protocol)
+    if (set(observed) != {"episode", "protocol_digest", "provider_state", "fill"}
+            or observed["episode"] != episode or observed["protocol_digest"] != digest
+            or active["protocol_digest"] != digest):
+        raise ValueError("retained fill observation identity differs")
+    before = SimulatedProvider.from_state(prior_state)
+    provider = SimulatedProvider.from_state(observed["provider_state"])
+    decision = active["decision"]
+    if decision not in {"BUY", "REDUCE"}:
+        raise ValueError("retained fill lacks a trade decision")
+    side = "BUY" if decision == "BUY" else "SELL"
+    target = Decimal("1") if side == "BUY" else Decimal("0")
+    delta = exact_subtract(target, before.positions.get(INSTRUMENT, Decimal("0")))
+    quantity = exact_abs(delta)
+    price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
+    timestamp = (datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
+                 + timedelta(seconds=episode - 1)).isoformat().replace("+00:00", "Z")
+    intent_id = _uuid("loop-intent", key)
+    attempt_id = _uuid("loop-attempt", key)
+    order_id = stable_client_order_id("simulated", intent_id, environment=ENVIRONMENT, account_id=ACCOUNT)
+    order = provider.orders.get(order_id)
+    if order is None or quantity <= 0 or (side == "BUY") != (delta > 0):
+        raise ValueError("retained fill order/target differs")
+    fills = provider.activity_fills()
+    selected = [fill for fill in fills if fill["order_ref"] == order.provider_order_id]
+    if (len(selected) != 1 or selected[0] != observed["fill"]
+            or tuple(fill for fill in fills if fill["order_ref"] != order.provider_order_id) != before.activity_fills()
+            or set(provider.orders) != set(before.orders) | {order_id}
+            or any(provider.orders[name] != original for name, original in before.orders.items())
+            or provider.outbound_request_count != before.outbound_request_count + 1):
+        raise ValueError("retained simulator history differs")
+    fill = selected[0]
+    fee = exact_multiply(exact_multiply(quantity, price), FEE_RATE)
+    if (fill["instrument_version"] != INSTRUMENT or fill["side"] != side
+            or parse_bounded_exact_decimal(fill["last_quantity"]["value"]) != quantity
+            or parse_bounded_exact_decimal(fill["last_price"]) != price
+            or fill["trade_time"] != timestamp
+            or fill["fees"] != [{"amount": canonical_decimal_text(fee), "currency": "USD"}]):
+        raise ValueError("retained fill economics differ from frozen request")
+    intent_hash = payload_digest({"protocol_digest": digest, "episode": episode,
+        "side": side, "quantity": canonical_decimal_text(quantity), "price": canonical_decimal_text(price),
+        "instrument": INSTRUMENT, "allocation": {"target": canonical_decimal_text(target)}})
+    admission_id = _uuid("loop-admission", key)
+    reservation_id = _uuid("loop-reservation", key)
+    admission = AuthorityService(store).historical_admission(admission_id)
+    expected = {"outcome": "ADMITTED", "admission_id": admission_id,
+        "intent_id": intent_id, "intent_hash": intent_hash, "reservation_id": reservation_id,
+        "account_id": ACCOUNT, "environment": ENVIRONMENT, "action": "ORDER.SUBMIT",
+        "instrument": {"instrument_id": INSTRUMENT_ID, "version": 1},
+        "notional": canonical_decimal_text(exact_multiply(quantity, price)),
+        "financial_command_id": _uuid("loop-financial-command", key)}
+    if any(admission.get(name) != value for name, value in expected.items()):
+        raise ValueError("retained fill historical admission differs")
+
+    def forbidden(*_args, **_kwargs):
+        raise ValueError("observed-fill recovery cannot issue authority or send")
+
+    request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
+        "quantity": canonical_decimal_text(quantity), "price": canonical_decimal_text(price), "now": timestamp}
+    replay = GuardedDispatcher(store, environment=ENVIRONMENT, account_id=ACCOUNT,
+        owner_token="canonical-simulation-owner").dispatch(attempt_id=attempt_id, intent_id=intent_id,
+        intent_hash=intent_hash, provider="simulated", request=request, now=timestamp,
+        authority_check=forbidden, transport_send=forbidden)
+    if replay.status != "SENT" or replay.response.get("provider_order_id") != order.provider_order_id:
+        raise ValueError("retained fill lacks exact completed send evidence")
+    economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
+    financial_state = (economic.cash("USD"), economic.position(INSTRUMENT))
+    before_financial = (before.cash, before.positions.get(INSTRUMENT, Decimal("0")))
+    after_financial = (provider.cash, provider.positions.get(INSTRUMENT, Decimal("0")))
+    if financial_state not in (before_financial, after_financial):
+        raise ValueError("retained fill conflicts with canonical economic state")
+    expected_causes = {_uuid("loop-seed-cause", run_id),
+                       *(fill["provider_execution_id"] for fill in before.activity_fills())}
+    if financial_state == after_financial:
+        expected_causes.add(fill["provider_execution_id"])
+    if (len(economic.transactions) != len(expected_causes)
+            or {transaction.cause_event_id for transaction in economic.transactions} != expected_causes):
+        raise ValueError("retained fill conflicts with canonical economic history")
+    artifacts = ArtifactStore(root / "artifacts")
+    reservations = DurableReservationBook(store, environment=ENVIRONMENT, account_id=ACCOUNT,
+        resolution_artifact_store=artifacts, resolution_artifact_root=root / "artifacts")
+    oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
+        environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    # All evidence validation above precedes the first recovery mutation.
+    oms.sync_submission_attempt(attempt_id=attempt_id)
+    if store.current_journal_sequence() != proof_cut:
+        raise ValueError("journal changed while validating retained fill")
+    fill_id = fill["provider_execution_id"]
+    mutation = oms.record_fill(event_key=f"{key}:fill", client_order_id=order_id, fill_id=fill_id,
+        provider_execution_id=fill_id, quantity=fill["last_quantity"]["value"], price=fill["last_price"],
+        committed_at=timestamp, evidence_refs=fill["evidence"])
+    finance_cut = proof_cut + int(mutation.inserted)
+    if store.current_journal_sequence() != finance_cut:
+        raise ValueError("journal changed during retained OMS fill")
+    amount = exact_multiply(quantity, price)
+    required = exact_add(amount, fee) if side == "BUY" else fee
+    commit_economic_batch_with_reservation_consumption(economic, reservations,
+        command_id=_uuid("loop-fill-command", key), idempotency_key=_uuid("loop-fill-command", key),
+        reservation_id=reservation_id, usage={"CASH:USD": required}, transactions=(book_equity_fill(
+            transaction_id=_uuid("loop-fill-transaction", key), cause_event_id=fill_id, instrument=INSTRUMENT,
+            settlement_currency="USD", side=side, quantity=quantity, price=price,
+            fee=fee, fee_currency="USD"),), committed_at=timestamp,
+        expected_journal_sequence=finance_cut)
+    if (economic.cash("USD"), economic.position(INSTRUMENT)) != after_financial or oms.order(order_id).state != "FILLED":
+        raise ValueError("retained fill recovery did not reconcile financial owners")
+    checkpoint, _ = _autonomous_reconciliation(store, provider, economic, protocol, timestamp, f"{key}:after")
+    equity = exact_add(economic.cash("USD"), exact_multiply(economic.position(INSTRUMENT), price))
+    result = {"episode": episode, "status": "FILLED", "decision": decision,
+        "cash": canonical_decimal_text(economic.cash("USD")), "position": canonical_decimal_text(economic.position(INSTRUMENT)),
+        "equity": canonical_decimal_text(equity), "reconciled": True, "order_id": order_id, "fill_id": fill_id,
+        "reconciliation_event_id": checkpoint["event_id"], "protocol_digest": digest,
+        "provider_state": provider.export_state(), "emergency": False}
+    _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
+    for item in store.pending_outbox(limit=1000):
+        store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+
+
 def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
@@ -567,12 +739,18 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         raise ValueError("autonomous simulation protocol/input identity changed")
     completed = []
     active = None
+    observed = None
     for event in events[1:]:
         payload = event["payload"]
         if event["event_type"] == "AutonomousEpisodeStarted":
             if active is not None or payload["episode"] != len(completed) + 1:
                 raise ValueError("autonomous episode chronology conflicts")
             active = payload
+            observed = None
+        elif event["event_type"] == "AutonomousEpisodeFillObserved":
+            if active is None or observed is not None or payload["episode"] != active["episode"]:
+                raise ValueError("autonomous fill observation chronology conflicts")
+            observed = payload
         elif event["event_type"] == "AutonomousEpisodeCompleted":
             if active is None or payload["episode"] != active["episode"]:
                 raise ValueError("autonomous completion lacks matching start")
@@ -581,6 +759,10 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         else:
             raise ValueError("unsupported autonomous simulation event")
     if active is not None:
+        if observed is not None:
+            prior_state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
+            _recover_autonomous_observed_fill(store, root, protocol, active, observed, prior_state)
+            return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
         return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO",
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
@@ -611,38 +793,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     end = len(values) if stop_after_episodes is None else stop_after_episodes
 
     def reconciliation_at(timestamp, key):
-        # Every current simulator fill participates; an ACK alone contributes none.
-        snapshot = provider.account_snapshot(now=timestamp)
-        fills = tuple(ProviderFillEvidence.create(
-            provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
-            provider_execution_id=f["provider_execution_id"],
-            client_order_id=next(o.client_order_id for o in provider.orders.values() if o.provider_order_id == f["order_ref"]),
-            instrument=f["instrument_version"], quantity=f["last_quantity"]["value"], price=f["last_price"],
-            fee_amount=f["fees"][0]["amount"], fee_currency=f["fees"][0]["currency"], trade_time=f["trade_time"],
-            side=f["side"], evidence_refs=(f"simulated:fill:{f['provider_execution_id']}",),
-        ) for f in provider.activity_fills())
-        result = reconcile_account(provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
-            local_cash={"USD": economic.cash("USD")}, provider_cash={"USD": snapshot["balances"][0]["total"]},
-            local_positions={INSTRUMENT: economic.position(INSTRUMENT)},
-            provider_positions={item["instrument_version"]: item["quantity"]["value"] for item in snapshot["positions"]},
-            local_execution_ids=tuple(f.provider_execution_id for f in fills), provider_fills=fills,
-            snapshot_consistency=SnapshotConsistencyEvidence(provider_id=PROVIDER, account_id=ACCOUNT,
-                environment=ENVIRONMENT, mode="ATOMIC", query_started_at=timestamp, query_completed_at=timestamp),
-            coverage_start=protocol["start_time"], coverage_end=timestamp, pagination_complete=True,
-            provider_activity_provider_id=PROVIDER, provider_activity_account_id=ACCOUNT,
-            resource_availability=ResourceAvailabilityEvidence(provider_id=PROVIDER, account_id=ACCOUNT,
-                environment=ENVIRONMENT, snapshot_id=snapshot["snapshot_id"], query_started_at=timestamp,
-                query_completed_at=timestamp, valid_until=(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                    + timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
-                available_resources={"CASH:USD": snapshot["balances"][0]["available"],
-                    f"POSITION:{INSTRUMENT}": canonical_decimal_text(economic.position(INSTRUMENT))},
-                provider_as_of=snapshot["provider_as_of"], evidence_refs=(f"simulated:provider-snapshot:{snapshot['snapshot_id']}",)))
-        if not result.complete or result.blocks_new_risk:
-            raise ValueError("complete simulated economics did not reconcile")
-        checkpoint = record_reconciliation_checkpoint(store, reconciliation_id=key, result=result,
-            observed_at=timestamp, host_id="local-simulation", owner_epoch="1")
-        _deliver_event(store, checkpoint["event_id"])
-        return checkpoint, snapshot
+        return _autonomous_reconciliation(store, provider, economic, protocol, timestamp, key)
 
     for index in range(len(completed), end):
         episode = index + 1
@@ -805,6 +956,10 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     raise ValueError("ACK is not fill evidence")
                 fill = fresh_fills[0]
                 fill_id = fill["provider_execution_id"]
+                _loop_event(store, run_id, "AutonomousEpisodeFillObserved", str(episode), {
+                    "episode": episode, "protocol_digest": protocol_digest,
+                    "provider_state": provider.export_state(), "fill": fill,
+                }, timestamp)
                 orders.record_fill(event_key=f"{key}:fill", client_order_id=order_id, fill_id=fill_id,
                     provider_execution_id=fill_id, quantity=fill["last_quantity"]["value"], price=fill["last_price"],
                     committed_at=timestamp, evidence_refs=fill["evidence"])

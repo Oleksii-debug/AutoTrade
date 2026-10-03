@@ -2114,6 +2114,7 @@ def commit_economic_batch_with_reservation_consumption(
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
     provider_fill_binding: PreparedProviderFillBinding | None = None,
+    expected_journal_sequence: int | None = None,
 ) -> bool:
     """Atomically commit canonical economics and reservation consumption.
 
@@ -2353,6 +2354,7 @@ def commit_economic_batch_with_reservation_consumption(
         _, inserted, _ = _economic_store_commit_command(economic_book,
             command_id=command_identity,
             actor="atomic-fill-financial-integration",
+            expected_journal_sequence=expected_journal_sequence,
             environment=economic_book.environment,
             idempotency_key=journal_idempotency_key,
             request=request,

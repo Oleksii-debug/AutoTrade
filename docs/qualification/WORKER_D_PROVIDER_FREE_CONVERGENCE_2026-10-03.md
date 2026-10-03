@@ -174,3 +174,33 @@ rejects foreign command responses without journal mutation, checks duplicate
 and conflicting response replay after restart, and freezes changed policy
 content before resume mutation. Exact-head full qualification is recorded in
 the associated continuation PR; none of the five sections is CLOSED.
+
+## Provider-free observed-fill recovery continuation
+
+Protocol v3 durably retains the canonical simulator restart image and exact fill
+observation after a completed send and before OMS/economic projection. This is
+simulation-only retained evidence, never a fill inferred from ACK. A restart
+with this observation validates the frozen target/request, previous simulator
+history, one exact new order/fill, fees, canonical economic history and the
+original AuthorityService admission before recovery mutation. The narrow
+`historical_admission` adapter consumes #1341's existing historical validator.
+No fresh admission, strategy/risk evaluation or transport occurs for recovery.
+
+The existing OMS fill event and canonical atomic economics/reservation command
+are replayed idempotently. A journal-cut CAS forwarded to the existing financial
+writer rejects a concurrent owner advance. Complete reconciliation and the
+episode checkpoint then allow subsequent observations to proceed. Repeated
+recovery does not add exposure. Read-only status exposes an unfinished observed
+fill without performing recovery.
+
+Crash coverage spans before/after OMS, before/after finance and before completed
+checkpoint; SELL commit acknowledgement loss; continuation to later BUY; forged
+retained fill; offsetting foreign economics with unchanged cash; and a writer
+advance during financial preparation. Missing observation, ambiguous outbound
+send, missing fill or incomplete provenance remains UNKNOWN with no resend.
+
+This narrows the earlier provider-free recovery blocker only where a complete
+retained simulator observation exists. OMS and economics remain separate
+transactions, general concurrent accounting/settlement/replacement correction
+composition is still incomplete, and no section/release/provider authority is
+closed. Earlier protocol journals are not silently migrated or relabelled.

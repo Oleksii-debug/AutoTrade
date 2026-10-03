@@ -487,12 +487,17 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         raise ValueError("autonomous frozen protocol identity differs")
     completed = []
     active = None
+    observed = False
     for event in loops[1:]:
         payload = event["payload"]
         if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
             raise ValueError("autonomous episode protocol identity differs")
         if event["event_type"] == "AutonomousEpisodeStarted" and active is None and payload["episode"] == len(completed) + 1:
             active = payload
+            observed = False
+        elif event["event_type"] == "AutonomousEpisodeFillObserved" and active is not None and not observed and payload["episode"] == active["episode"]:
+            # Read-only status does not commit/recover a retained observation.
+            observed = True
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
             active = None

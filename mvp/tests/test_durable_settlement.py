@@ -42,8 +42,12 @@ ACCOUNT = "acct-1"
 ENVIRONMENT = "PAPER"
 
 
+def artifact_root_for(store: JournalStore) -> Path:
+    return Path(store.path).parent / "settlement-evidence"
+
+
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
-    return ArtifactStore(Path(store.path).parent / "settlement-evidence")
+    return ArtifactStore(artifact_root_for(store))
 
 
 def raw_rule() -> SettlementRuleBinding:
@@ -132,6 +136,7 @@ def durable(store: JournalStore) -> DurableSettlementBook:
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root_for(store),
         evidence_artifact_store=artifact_store_for(store),
     )
 
@@ -257,6 +262,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                 provider_id=PROVIDER,
                 account_id=ACCOUNT,
                 environment=ENVIRONMENT,
+                evidence_artifact_root=artifact_root_for(store),
                 evidence_artifact_store=selected,
             )
             item = obligation(store)
@@ -294,25 +300,16 @@ class DurableSettlementBookTests(unittest.TestCase):
             hostile = HostileArtifactStore(
                 Path(store.path).parent / "settlement-evidence"
             )
-            settlements = DurableSettlementBook(
-                store,
-                provider_id=PROVIDER,
-                account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-                evidence_artifact_store=hostile,
-            )
-            with self.assertRaisesRegex(
-                SettlementConflict,
-                "requires trusted ArtifactStore",
-            ):
-                settlements.register_obligations(
-                    (item,),
-                    command_id="hostile-rule",
-                    idempotency_key="hostile-rule",
-                    committed_at="2026-09-25T09:00:02Z",
+            with self.assertRaises(TypeError):
+                DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_root=artifact_root_for(store),
+                    evidence_artifact_store=hostile,
                 )
             self.assertFalse(HostileArtifactStore.called)
-            self.assertEqual(settlements.obligations, ())
 
     def test_snapshot_oserror_fails_before_rule_or_completion_mutation(self):
         with TemporaryDirectory() as directory:
@@ -320,9 +317,9 @@ class DurableSettlementBookTests(unittest.TestCase):
             settlements = durable(store)
             item = obligation(store)
 
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
                 side_effect=OSError("simulated snapshot failure"),
             ):
                 with self.assertRaisesRegex(
@@ -346,9 +343,9 @@ class DurableSettlementBookTests(unittest.TestCase):
                 )
             )
             evidence = bind_evidence(store, item)
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
                 side_effect=OSError("simulated completion snapshot failure"),
             ):
                 with self.assertRaisesRegex(

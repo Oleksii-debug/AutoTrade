@@ -363,6 +363,103 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "0.000000000000000000123456789",
         )
 
+    def test_authority_rejects_registry_subclass_before_virtual_dispatch(self):
+        class HostileRegistry(InstrumentRegistry):
+            def exact(self, _instrument_version):
+                raise AssertionError("hostile registry exact dispatch")
+
+            def at(self, _instrument_id, _instant):
+                raise AssertionError("hostile registry at dispatch")
+
+        hostile = HostileRegistry(versions=(option_version(),))
+        with self.assertRaisesRegex(
+            TypeError,
+            "registry must be exact InstrumentRegistry",
+        ):
+            self._authority(
+                registry=hostile,
+                economic_book=self.book,
+            )
+
+    def test_authority_rejects_economic_book_subclass_before_virtual_dispatch(self):
+        class HostileEconomicBook(DurableProviderEconomicBook):
+            def read_cut(self):
+                raise AssertionError("hostile economic read-cut dispatch")
+
+        hostile = HostileEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "economic_book must be exact DurableProviderEconomicBook",
+        ):
+            self._authority(
+                registry=self.registry,
+                economic_book=hostile,
+            )
+
+    def test_lifecycle_rejects_post_construction_authority_method_shadow(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="shadowed-owners")
+        self.registry.exact = lambda _ref: (_ for _ in ()).throw(
+            AssertionError("shadowed registry exact dispatch")
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "InstrumentRegistry authority is shadowed",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            self.book.position(f"{OPTION_ID}@1"),
+            Decimal("1"),
+        )
+
+        del self.registry.exact
+        self.book.read_cut = lambda: (_ for _ in ()).throw(
+            AssertionError("shadowed economic cut dispatch")
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "DurableProviderEconomicBook authority is shadowed",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            self.book.position(f"{OPTION_ID}@1"),
+            Decimal("1"),
+        )
+
+    def test_evidence_callback_cannot_retarget_economic_book_scope(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="retarget-owner")
+        original_resolver = self.authority.evidence_resolver
+
+        def hostile_resolver(reference):
+            source = original_resolver(reference)
+            self.book.account_id = "attacker-account"
+            return source
+
+        self.authority.evidence_resolver = hostile_resolver
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "economic-book scope changed after lifecycle construction",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
     def test_correction_position_projection_is_context_independent(self):
         instrument = f"{OPTION_ID}@1"
         current = book_equity_fill(

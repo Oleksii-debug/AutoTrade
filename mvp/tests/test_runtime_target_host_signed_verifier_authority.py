@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+from autotrade_runtime.artifacts import _root_authority as artifact_root_module
 from mvp.autotrade_mvp import qualification_attestation as qualification_module
 from mvp.autotrade_mvp import runtime_target_host_composed_authority as composed_authority
 from mvp.autotrade_mvp import runtime_target_host_qualification as signed_module
@@ -33,11 +34,15 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
         signed_verifier,
         signed_dependency_guard,
         signed_external_dependency_guard=None,
+        artifact_reader_dependency_guard=None,
         signed_campaign_matcher=None,
+        projection_digest_builder=None,
     ):
         measurement = cls._measurement()
         if signed_campaign_matcher is None:
             signed_campaign_matcher = lambda *_args, **_kwargs: None
+        if projection_digest_builder is None:
+            projection_digest_builder = lambda _measurement: {}
 
         def durable_binder(**_kwargs):
             return SimpleNamespace(
@@ -60,10 +65,11 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             signed_verifier=signed_verifier,
             accepted_type=object,
             signed_campaign_matcher=signed_campaign_matcher,
-            projection_digest_builder=lambda _measurement: {},
+            projection_digest_builder=projection_digest_builder,
             composed_type=lambda **kwargs: kwargs,
             signed_dependency_guard=signed_dependency_guard,
             signed_external_dependency_guard=signed_external_dependency_guard,
+            artifact_reader_dependency_guard=artifact_reader_dependency_guard,
         )
         return verifier, measurement
 
@@ -250,6 +256,125 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
 
         composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD()
 
+    def test_artifact_guard_runs_at_all_reader_boundaries(self) -> None:
+        artifact_guard = Mock()
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=Mock(),
+            artifact_reader_dependency_guard=artifact_guard,
+        )
+
+        self._invoke(verifier, measurement)
+
+        self.assertEqual(artifact_guard.call_count, 5)
+
+    def test_artifact_reader_guard_rejects_transitive_rebinding(self) -> None:
+        signed_verifier = Mock(return_value=object())
+        verifier, measurement = self._build(
+            signed_verifier=signed_verifier,
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            artifact_reader_dependency_guard=(
+                composed_authority._PRODUCTION_ARTIFACT_READER_GUARD
+            ),
+        )
+        original = artifact_root_module._canonical_authoritative_root
+        artifact_root_module._canonical_authoritative_root = lambda root: root
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "authenticated artifact reader sealed dependency changed: _canonical_authoritative_root",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            artifact_root_module._canonical_authoritative_root = original
+
+        signed_verifier.assert_not_called()
+        composed_authority._PRODUCTION_ARTIFACT_READER_GUARD()
+
+    def test_artifact_reader_guard_rechecks_after_signed_callback(self) -> None:
+        original = artifact_root_module._canonical_authoritative_root
+
+        def mutating_signed_verifier(*_args, **_kwargs):
+            artifact_root_module._canonical_authoritative_root = lambda root: root
+            return object()
+
+        verifier, measurement = self._build(
+            signed_verifier=mutating_signed_verifier,
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            artifact_reader_dependency_guard=(
+                composed_authority._PRODUCTION_ARTIFACT_READER_GUARD
+            ),
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "authenticated artifact reader sealed dependency changed: _canonical_authoritative_root",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            artifact_root_module._canonical_authoritative_root = original
+
+        composed_authority._PRODUCTION_ARTIFACT_READER_GUARD()
+
+    def test_artifact_reader_guard_rechecks_after_campaign_callback(self) -> None:
+        original = artifact_root_module._canonical_authoritative_root
+
+        def mutating_campaign_matcher(*_args, **_kwargs):
+            artifact_root_module._canonical_authoritative_root = lambda root: root
+
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            artifact_reader_dependency_guard=(
+                composed_authority._PRODUCTION_ARTIFACT_READER_GUARD
+            ),
+            signed_campaign_matcher=mutating_campaign_matcher,
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "authenticated artifact reader sealed dependency changed: _canonical_authoritative_root",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            artifact_root_module._canonical_authoritative_root = original
+
+        composed_authority._PRODUCTION_ARTIFACT_READER_GUARD()
+
+    def test_artifact_reader_guard_rechecks_after_projection_callback(self) -> None:
+        original = artifact_root_module._canonical_authoritative_root
+
+        def mutating_projection_builder(_measurement):
+            artifact_root_module._canonical_authoritative_root = lambda root: root
+            return {}
+
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            artifact_reader_dependency_guard=(
+                composed_authority._PRODUCTION_ARTIFACT_READER_GUARD
+            ),
+            projection_digest_builder=mutating_projection_builder,
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "authenticated artifact reader sealed dependency changed: _canonical_authoritative_root",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            artifact_root_module._canonical_authoritative_root = original
+
+        composed_authority._PRODUCTION_ARTIFACT_READER_GUARD()
+
     def test_stable_signed_graph_reaches_composed_result(self) -> None:
         accepted = object()
         signed_verifier = Mock(return_value=accepted)
@@ -260,6 +385,9 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             ),
             signed_external_dependency_guard=(
                 composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD
+            ),
+            artifact_reader_dependency_guard=(
+                composed_authority._PRODUCTION_ARTIFACT_READER_GUARD
             ),
         )
 

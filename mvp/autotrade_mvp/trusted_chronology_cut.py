@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 
 from . import _trusted_chronology_cut_impl as _impl
+from .recovery import RecoveryController
 
 
 _original_require_current_trusted_chronology_cut = (
@@ -29,6 +30,25 @@ def _require_current_trusted_chronology_cut_with_horizon(
     if type(claimed_instants) is not tuple:
         raise TypeError("claimed_instants must be exact tuple")
     durable = _original_require_current_trusted_chronology_cut(**kwargs)
+
+    # The implementation validates the in-process recovery owner against the cut,
+    # but another independently authorized process can advance the durable owner
+    # epoch while this controller still retains the stale OwnerFence. Re-read the
+    # journal-backed fence after all cut/signature/runtime checks and bind terminal
+    # horizon authority to the latest durable owner, not merely local object state.
+    recovery = kwargs["recovery"]
+    if type(recovery) is not RecoveryController:
+        raise TypeError("recovery must be exact RecoveryController")
+    owner_chain = RecoveryController.durable_owner_chain(recovery)
+    if not owner_chain:
+        raise PermissionError("trusted chronology durable recovery owner is unavailable")
+    latest_owner = owner_chain[-1]
+    if (
+        latest_owner.owner_id != durable.owner_id
+        or latest_owner.epoch != durable.owner_epoch
+    ):
+        raise PermissionError("trusted chronology durable recovery owner changed")
+
     _original_require_chronology_horizon(durable, *claimed_instants)
     return durable
 

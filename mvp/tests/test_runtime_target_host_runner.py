@@ -380,7 +380,8 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeLoadMeasurementError,
-                "financial latency clock authority changed",
+                "measurement authority changed during financial operation: "
+                "perf_counter_ns",
             ):
                 self._run(
                     journal,

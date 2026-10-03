@@ -75,6 +75,17 @@ class DurableSettlementScopeUnforgeabilityTests(unittest.TestCase):
             with self.assertRaises(SettlementConflict):
                 book.refresh()
 
+    def test_caller_cannot_mutate_visible_scope_object_in_place(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            book = self._book(store, root)
+
+            object.__setattr__(book.scope, "account_id", "acct-other")
+
+            with self.assertRaises(SettlementConflict):
+                book.refresh()
+
     def test_caller_cannot_retarget_scope_id_while_scope_value_stays_selected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

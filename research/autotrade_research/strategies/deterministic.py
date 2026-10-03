@@ -17,10 +17,10 @@ from uuid import UUID
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact built-in Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -29,13 +29,15 @@ def _decimal(value, *, name: str) -> Decimal:
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    if type(value) is not datetime or value.tzinfo is None:
+        raise ValueError(f"{name} must be an exact timezone-aware datetime")
+    if type(value.tzinfo) is not timezone:
+        raise ValueError(f"{name} must use a built-in timezone")
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -194,6 +196,19 @@ class CausalObservation:
         )
 
 
+def _readmit_causal_observation(value: CausalObservation) -> CausalObservation:
+    """Detach and revalidate one observation at the semantic use boundary."""
+
+    if type(value) is not CausalObservation:
+        raise TypeError("observation must be CausalObservation")
+    return CausalObservation(
+        event_id=value.event_id,
+        symbol=value.symbol,
+        available_at=value.available_at,
+        price=value.price,
+    )
+
+
 @dataclass(frozen=True)
 class DeterministicProposal:
     symbol: str
@@ -322,6 +337,31 @@ class DeterministicProposal:
                 raise ValueError(
                     "registered strategy identity requires cutoff, horizon and expiry"
                 )
+
+
+def _readmit_deterministic_proposal(
+    value: DeterministicProposal,
+) -> DeterministicProposal:
+    """Detach and re-run proposal invariants before economics can consume it."""
+
+    if type(value) is not DeterministicProposal:
+        raise TypeError("proposal must be DeterministicProposal")
+    return DeterministicProposal(
+        symbol=value.symbol,
+        action=value.action,
+        quantity=value.quantity,
+        decision_time=value.decision_time,
+        evidence_event_ids=value.evidence_event_ids,
+        model_calls=value.model_calls,
+        economic_edge_claim=value.economic_edge_claim,
+        reason=value.reason,
+        information_cutoff=value.information_cutoff,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        strategy_version=value.strategy_version,
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+    )
 
 
 @dataclass(frozen=True)
@@ -550,6 +590,38 @@ class StrategyEconomicsBinding:
         ).hexdigest()
 
 
+def _readmit_strategy_economics_binding(
+    value: StrategyEconomicsBinding,
+) -> StrategyEconomicsBinding:
+    """Detach and re-run ex-ante economics invariants at the decision boundary."""
+
+    if type(value) is not StrategyEconomicsBinding:
+        raise TypeError("economics must be StrategyEconomicsBinding")
+    return StrategyEconomicsBinding(
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+        instrument_version=value.instrument_version,
+        information_cutoff=value.information_cutoff,
+        decision_time=value.decision_time,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        available_at=value.available_at,
+        input_manifest_refs=value.input_manifest_refs,
+        gross_return_distribution_sha256=value.gross_return_distribution_sha256,
+        after_cost_return_distribution_sha256=value.after_cost_return_distribution_sha256,
+        after_cost_lower_bound=value.after_cost_lower_bound,
+        execution_model_fingerprint=value.execution_model_fingerprint,
+        execution_calibration_sha256=value.execution_calibration_sha256,
+        execution_fidelity=value.execution_fidelity,
+        capacity_assessment_sha256=value.capacity_assessment_sha256,
+        max_feasible_quantity=value.max_feasible_quantity,
+        lot_size=value.lot_size,
+        required_evidence_dimensions=value.required_evidence_dimensions,
+        dimension_evidence=value.dimension_evidence,
+        status=value.status,
+    )
+
+
 @dataclass(frozen=True)
 class EconomicsBoundProposal:
     """Gross deterministic signal plus a non-expansive ex-ante economics gate."""
@@ -598,10 +670,8 @@ def bind_strategy_economics(
 ) -> EconomicsBoundProposal:
     """Bind frozen decision-time economics without expanding the gross signal."""
 
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
-    if not isinstance(economics, StrategyEconomicsBinding):
-        raise TypeError("economics must be StrategyEconomicsBinding")
+    proposal = _readmit_deterministic_proposal(proposal)
+    economics = _readmit_strategy_economics_binding(economics)
     instrument = _text(instrument_version, name="instrument_version")
     if (
         proposal.information_cutoff is None
@@ -790,6 +860,7 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
+        observation = _readmit_causal_observation(observation)
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")

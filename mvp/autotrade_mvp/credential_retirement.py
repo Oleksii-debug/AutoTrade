@@ -73,6 +73,7 @@ def _same_scope(
         and left.account_id == right.account_id
         and left.provider == right.provider
         and left.environment == right.environment
+        and left.provider_environment == right.provider_environment
         and left.purpose == right.purpose
     )
 

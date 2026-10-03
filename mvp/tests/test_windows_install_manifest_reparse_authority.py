@@ -34,6 +34,9 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
             )
 
             with patch.object(
+                installer_manifest,
+                "_assert_windows_path_chain_is_not_reparse",
+            ), patch.object(
                 installer_manifest.os,
                 "fstat",
                 return_value=reparse,
@@ -52,6 +55,38 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
                     installer_manifest.verify_release_bundle(bundle)
 
             parser.assert_not_called()
+
+    def test_reparse_ancestor_is_rejected_before_open_or_zip_parser(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = Path(directory) / "nested" / "release.zip"
+            bundle.parent.mkdir()
+            bundle.write_bytes(b"data")
+            reparse_parent = bundle.parent.absolute()
+
+            def observed(path, *, follow_symlinks=False):
+                attributes = (
+                    installer_manifest._WINDOWS_REPARSE_POINT
+                    if Path(path) == reparse_parent
+                    else 0
+                )
+                return SimpleNamespace(st_file_attributes=attributes)
+
+            with patch.object(
+                installer_manifest.os,
+                "stat",
+                side_effect=observed,
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+            ) as parser:
+                with self.assertRaisesRegex(
+                    installer_manifest.InstallerManifestError,
+                    "path must not contain a Windows reparse point",
+                ):
+                    installer_manifest.verify_release_bundle(bundle)
+
+            parser.assert_not_called()
+
 
     def test_invalid_windows_attribute_shape_fails_closed_before_zip_parser(self) -> None:
         with TemporaryDirectory() as directory:

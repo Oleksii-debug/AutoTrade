@@ -284,6 +284,66 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                     resource_metrics={"cpu_peak_millis": 1},
                 )
 
+    def test_collect_snapshots_plan_before_journal_io(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
+            journal.append_event(_envelope("fin-expected"))
+            journal.append_event(_envelope("fin-extra"))
+
+            original_pending = JournalStore.pending_outbox_count
+            mutated = False
+
+            def pending_with_plan_mutation(store: JournalStore) -> int:
+                nonlocal mutated
+                if store is journal and not mutated:
+                    mutated = True
+                    object.__setattr__(
+                        current_plan,
+                        "expected_financial_event_ids",
+                        ("fin-expected", "fin-extra"),
+                    )
+                return original_pending(store)
+
+            with patch.object(
+                JournalStore,
+                "pending_outbox_count",
+                new=pending_with_plan_mutation,
+            ), patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_001_000,
+            ), self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "undeclared financial event identities.*fin-extra",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100, 100),
+                    financial_staleness_us=(100, 100),
+                    research_interference_us=(100,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 1},
+                )
+
+            self.assertTrue(mutated)
+            self.assertEqual(
+                current_plan.expected_financial_event_ids,
+                ("fin-expected", "fin-extra"),
+            )
+
     def test_terminal_clock_shadow_cannot_hide_undeclared_financial_event(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

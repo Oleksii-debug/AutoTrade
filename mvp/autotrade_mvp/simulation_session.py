@@ -335,6 +335,54 @@ def _require_initial_reconciliation_checkpoint(store: JournalStore) -> dict:
     return checkpoint
 
 
+def _hold_projection(
+    store: JournalStore,
+    *,
+    episode_id: str,
+    completed: bool,
+) -> dict[str, object]:
+    if JournalStore.load_events_by_aggregate_type(store, "submission_attempt"):
+        raise ValueError("HOLD terminal projection cannot contain submission attempts")
+    if JournalStore.load_events_by_aggregate_type(store, "reservation_book"):
+        raise ValueError("HOLD terminal projection cannot contain reservations")
+    economic = DurableProviderEconomicBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+    )
+    economic_events = JournalStore.load_events(
+        store,
+        "economic_book",
+        economic.book_id,
+    )
+    if len(economic_events) != 1:
+        raise ValueError("HOLD terminal projection requires exact seed economics")
+    checkpoint = _require_initial_reconciliation_checkpoint(store)
+    expected_counts = {
+        "events": 5 if completed else 4,
+        "outbox": 2,
+        "command_dedupe": 1,
+        "projection_checkpoints": 0,
+        "global_projection_checkpoints": 0,
+    }
+    if JournalStore.whole_store_state_counts(store) != expected_counts:
+        raise ValueError("HOLD terminal durable state is not exact")
+    return {
+        "status": "HOLD",
+        "decision": "HOLD",
+        "environment": ENVIRONMENT,
+        "episode_id": episode_id,
+        "cash": str(economic.cash("USD")),
+        "position": str(economic.position(INSTRUMENT)),
+        "reconciled": True,
+        "order_id": None,
+        "fill_id": None,
+        "reconciliation_event_id": checkpoint["event_id"],
+        "new_outbound_requests": 0,
+    }
+
+
 def _zero_wire_blocked_projection(
     store: JournalStore,
     root: Path,
@@ -644,9 +692,33 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     raise ValueError(
                         "completed BLOCKED session does not match durable zero-wire facts"
                     )
+            elif result.get("status") == "HOLD":
+                expected = _hold_projection(
+                    store,
+                    episode_id=episode_id,
+                    completed=True,
+                )
+                if result != expected:
+                    raise ValueError(
+                        "completed HOLD session does not match durable zero-wire facts"
+                    )
             result["resumed"] = True
             result["new_outbound_requests"] = 0
             return result
+        if decision.side == "HOLD":
+            result = _hold_projection(
+                store,
+                episode_id=episode_id,
+                completed=False,
+            )
+            _event(
+                store,
+                "SimulationSessionCompleted",
+                episode_id,
+                result,
+                timestamp,
+            )
+            return {**result, "resumed": True}
         if decision.side == "BUY":
             attempt_id = _uuid("attempt", episode_id)
             attempt_events = JournalStore.load_events(
@@ -769,14 +841,11 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "episode_id": episode_id, "environment": ENVIRONMENT,
     }, timestamp)
     if decision.side == "HOLD":
-        result = {
-            "status": "HOLD", "decision": "HOLD", "environment": ENVIRONMENT,
-            "episode_id": episode_id, "cash": str(economic.cash("USD")),
-            "position": str(economic.position(INSTRUMENT)), "reconciled": True,
-            "order_id": None, "fill_id": None,
-            "reconciliation_event_id": availability["event_id"],
-            "new_outbound_requests": 0,
-        }
+        result = _hold_projection(
+            store,
+            episode_id=episode_id,
+            completed=False,
+        )
         _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
         return {**result, "resumed": resumed_from_owner}
 

@@ -387,6 +387,7 @@ class RuntimeCampaignEvidence:
     resource_metrics: Mapping[str, int]
     journal_taxonomy_digest: str = ""
     journal_store_identity_digest: str = ""
+    ended_monotonic_ns: int = 0
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -406,6 +407,15 @@ class RuntimeCampaignEvidence:
             _sha256_identity(
                 self.journal_store_identity_digest,
                 name="journal_store_identity_digest",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "ended_monotonic_ns",
+            _positive_int(
+                self.ended_monotonic_ns,
+                name="ended_monotonic_ns",
+                allow_zero=True,
             ),
         )
         if (
@@ -554,6 +564,7 @@ class RuntimeCampaignEvidence:
                 "host_fingerprint": self.host_fingerprint,
                 "declared_duration_us": self.declared_duration_us,
                 "observed_duration_us": self.observed_duration_us,
+                "ended_monotonic_ns": self.ended_monotonic_ns,
                 "start_journal_sequence": self.start_journal_sequence,
                 "end_journal_sequence": self.end_journal_sequence,
                 "expected_financial_event_ids": list(self.expected_financial_event_ids),
@@ -734,6 +745,10 @@ def collect_runtime_campaign_evidence(
             raise RuntimeBudgetError(
                 "monotonic clock moved backwards during runtime campaign"
             )
+        if JournalStore.current_journal_sequence(journal) != end_sequence:
+            raise RuntimeBudgetError(
+                "campaign journal changed while sampling terminal state"
+            )
         elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
         observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
         declared_duration_us = plan.declared_duration_ms * 1000
@@ -810,6 +825,7 @@ def collect_runtime_campaign_evidence(
         resource_metrics=resource_metrics,
         journal_taxonomy_digest=plan.journal_taxonomy_digest,
         journal_store_identity_digest=identity_digest,
+        ended_monotonic_ns=ended_monotonic_ns,
         _token=_EVIDENCE_TOKEN,
     )
 

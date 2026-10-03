@@ -504,14 +504,39 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_operation_timestamps_cannot_move_backwards(self):
         js = APP.read_text(encoding="utf-8")
+        self.assertIn("function compareCanonicalUtcInstants(", js)
+        self.assertIn('leftFraction.padEnd(width, "0")', js)
+        self.assertIn('rightFraction.padEnd(width, "0")', js)
+        operation = js[
+            js.index("function parseOperationResult(value, expectedOperationId)"):
+            js.index("function setCommandAvailability")
+        ]
         self.assertIn(
-            "if (Date.parse(updatedAt) < Date.parse(startedAt))",
-            js,
+            "if (compareCanonicalUtcInstants(",
+            operation,
+        )
+        self.assertNotIn("Date.parse(", operation)
+        self.assertIn(
+            '"updated_at",\n        "started_at") < 0',
+            operation,
         )
         self.assertIn(
             "OperationResult updated_at cannot precede started_at",
-            js,
+            operation,
         )
+
+    def test_exact_utc_comparator_preserves_submillisecond_ordering(self):
+        js = APP.read_text(encoding="utf-8")
+        compare = js[
+            js.index("function compareCanonicalUtcInstants("):
+            js.index("function requiredStringArray")
+        ]
+        self.assertIn("if (leftBase < rightBase) return -1", compare)
+        self.assertIn("if (leftBase > rightBase) return 1", compare)
+        self.assertIn('leftFraction.padEnd(width, "0")', compare)
+        self.assertIn('rightFraction.padEnd(width, "0")', compare)
+        self.assertIn("if (normalizedLeft < normalizedRight) return -1", compare)
+        self.assertIn("if (normalizedLeft > normalizedRight) return 1", compare)
 
     def test_accepted_command_tracks_canonical_operation_without_claiming_fill(self):
         html = INDEX.read_text(encoding="utf-8")

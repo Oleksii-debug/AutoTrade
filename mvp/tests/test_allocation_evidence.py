@@ -1114,6 +1114,59 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         repeated = self.allocate(bundle=bundle)
         self.assertEqual(result.decision_digest, repeated.decision_digest)
 
+    def test_revalidation_rejects_forecast_after_its_economic_horizon(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        horizon_end = "2026-09-25T18:45:00Z"
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind=objective.kind,
+            payload={
+                **objective.payload,
+                "forecast_horizon_end": horizon_end,
+            },
+        )
+        valuation = resolved["valuation:aaa:v1"]
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind=valuation.kind,
+            payload={
+                **valuation.payload,
+                "holding_cost_horizon_end": horizon_end,
+            },
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        bundle = (objective, market, capital, stress, resolved)
+        result = self.allocate(bundle=bundle)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "forecast horizon expired before admission",
+        ):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                as_of="2026-09-25T18:50:00Z",
+                current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
+
     def test_same_evidence_identity_cannot_hide_changed_expected_return(self):
         bundle = self.bundle(objective_rate="0.10")
         with self.assertRaisesRegex(ValueError, "expected_return_rate mismatch"):

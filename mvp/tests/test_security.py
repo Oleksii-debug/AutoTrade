@@ -390,6 +390,61 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(still_valid.subject, session.subject)
 
+    def test_concurrent_refreshes_mint_at_most_one_successor(self):
+        barrier = threading.Barrier(2)
+        block_refresh = [False]
+
+        def authorize(subject, role, origin):
+            if block_refresh[0]:
+                barrier.wait(timeout=2)
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-double-refresh",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        block_refresh[0] = True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    boundary.refresh_session,
+                    session.token,
+                    origin=session.origin,
+                )
+                for _ in range(2)
+            ]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(("ok", future.result(timeout=2)))
+                except PermissionError as error:
+                    outcomes.append(("denied", str(error)))
+
+        winners = [value for status, value in outcomes if status == "ok"]
+        denied = [value for status, value in outcomes if status == "denied"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(denied), 1)
+        self.assertIn("Unknown session", denied[0])
+        self.assertNotEqual(winners[0].token, session.token)
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+        self.assertEqual(
+            boundary.validate_session(
+                winners[0].token,
+                required_roles={"OPERATOR"},
+                origin=winners[0].origin,
+            ).subject,
+            session.subject,
+        )
+
     def test_refresh_cannot_revive_a_concurrently_revoked_session(self):
         entered = threading.Event()
         release = threading.Event()

@@ -59,6 +59,13 @@ def _envelope(event_id: str) -> dict[str, object]:
     }
 
 
+def _rebind_store(target: JournalStore, source: JournalStore) -> None:
+    """Simulate hostile same-object rebinding to another otherwise-valid store."""
+
+    target.path = source.path
+    target._store_identity = source.store_identity
+
+
 class _ForgedJournalStore(JournalStore):
     def current_journal_sequence(self) -> int:
         return 0
@@ -91,6 +98,60 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                     monotonic_ns=clock,
                 )
             self.assertFalse(clock_called)
+
+    def test_start_clock_cannot_rebind_campaign_to_another_journal_generation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal-a.sqlite3")
+            other = JournalStore(f"{directory}/journal-b.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+
+            def starting_clock() -> int:
+                _rebind_store(journal, other)
+                return 1_000_000_000
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "journal operation authority changed before connection",
+            ):
+                begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    monotonic_ns=starting_clock,
+                )
+
+    def test_collect_rejects_cut_from_another_journal_generation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal-a.sqlite3")
+            other = JournalStore(f"{directory}/journal-b.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            other.append_event(_envelope("fin-expected"))
+            _rebind_store(journal, other)
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "campaign cut belongs to another journal generation",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(100,),
+                    research_interference_us=(100,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 1},
+                    monotonic_ns=lambda: 1_000_001_000,
+                )
 
     def test_terminal_clock_shadow_cannot_hide_undeclared_financial_event(self):
         with TemporaryDirectory() as directory:

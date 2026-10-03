@@ -2079,10 +2079,11 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             real_load_events = JournalStore.load_events
 
             def load_events_with_inflated_initial_usage(
+                store_self,
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(self, aggregate_type, aggregate_id)
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
                 if aggregate_type != "provider_fill_financial_binding" or not events:
                     return events
                 forged = deepcopy(events)
@@ -2207,10 +2208,11 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             real_load_events = JournalStore.load_events
 
             def load_events_with_inflated_correction_high_water(
+                store_self,
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(self, aggregate_type, aggregate_id)
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2346,10 +2348,11 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             real_load_events = JournalStore.load_events
 
             def load_events_with_retargeted_revision(
+                store_self,
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(self, aggregate_type, aggregate_id)
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2502,10 +2505,11 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             real_load_events = JournalStore.load_events
 
             def load_events_with_rehashed_semantic_transplant(
+                store_self,
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(self, aggregate_type, aggregate_id)
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2602,10 +2606,11 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             )
 
             def load_events_with_hostile_nested_container(
+                store_self,
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(self, aggregate_type, aggregate_id)
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"

@@ -413,9 +413,9 @@ def _authority_service_store_operations():
     """Seal one AuthorityService to one exact JournalStore generation.
 
     The selected store and physical identity live in closure-owned process state,
-    not in caller-writable AuthorityService instance/module data. Weakref cleanup
-    releases dead service bindings without weakening one-shot binding for a live
-    service or allowing explicit __init__ re-entry to retarget authority.
+    not in caller-writable AuthorityService instance/module data. Callback-free
+    weakrefs let dead services/stores be reclaimed; stale object-id entries are
+    discarded lazily on reuse without reopening a live one-shot binding.
     """
 
     states: dict[

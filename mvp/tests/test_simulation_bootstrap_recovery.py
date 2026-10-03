@@ -168,23 +168,12 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             store = JournalStore(path)
             before_sequence = store.current_journal_sequence()
             with sqlite3.connect(path) as connection:
-                connection.execute(
-                    "DELETE FROM outbox WHERE event_id = ?",
-                    (
-                        simulation_session._uuid(
-                            "EconomicTransactionBatchBooked",
-                            "missing-outbox",
-                        ),
-                    ),
-                )
-                # The economic event ID is content-derived by the economic
-                # authority rather than the session helper. Delete the sole
-                # bootstrap outbox row regardless of that internal identity.
-                connection.execute("DELETE FROM outbox")
+                deleted = connection.execute("DELETE FROM outbox")
+                self.assertEqual(deleted.rowcount, 1)
                 connection.commit()
 
             with self.assertRaisesRegex(
-                ValueError, "durable outbox publication is missing"
+                ValueError, "bootstrap durable state is not exact"
             ):
                 run_canonical_simulation(
                     HOLD, directory, episode_id="missing-outbox"
@@ -196,6 +185,76 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(
                 store.load_events_by_aggregate_type("submission_attempt"), []
+            )
+
+    def test_foreign_command_after_owner_blocks_before_bootstrap_mutation(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                DurableProviderEconomicBook,
+                "append",
+                side_effect=RuntimeError("crash-after-owner"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="foreign-command", now=NOW
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            store.record_command(
+                command_id="foreign-command-id",
+                actor="foreign",
+                environment=ENVIRONMENT,
+                idempotency_key="foreign-command-key",
+                request={"operation": "foreign"},
+                result={"ok": True},
+                state_version=0,
+            )
+            before_sequence = store.current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError, "bootstrap durable state is not exact"
+            ):
+                run_canonical_simulation(
+                    HOLD, directory, episode_id="foreign-command"
+                )
+
+            self.assertEqual(store.current_journal_sequence(), before_sequence)
+            self.assertEqual(
+                store.load_events_by_aggregate_type("economic_book"), []
+            )
+
+    def test_foreign_projection_after_owner_blocks_before_bootstrap_mutation(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                DurableProviderEconomicBook,
+                "append",
+                side_effect=RuntimeError("crash-after-owner"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="foreign-projection", now=NOW
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="foreign-projection",
+                    journal_sequence=1,
+                    state={"foreign": True},
+                )
+            )
+            before_sequence = store.current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError, "bootstrap durable state is not exact"
+            ):
+                run_canonical_simulation(
+                    HOLD, directory, episode_id="foreign-projection"
+                )
+
+            self.assertEqual(store.current_journal_sequence(), before_sequence)
+            self.assertEqual(
+                store.load_events_by_aggregate_type("economic_book"), []
             )
 
     def test_foreign_event_after_owner_blocks_before_bootstrap_continuation(self):

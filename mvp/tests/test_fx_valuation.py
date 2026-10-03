@@ -631,5 +631,87 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+    def test_exact_quote_instance_cannot_bypass_nested_scalar_admission(self):
+        touched = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                touched.append("is_finite")
+                raise AssertionError("hostile quote Decimal dispatch")
+
+            def as_tuple(self):
+                touched.append("as_tuple")
+                raise AssertionError("hostile quote Decimal dispatch")
+
+        forged = FxQuote(
+            base_currency="EUR",
+            quote_currency="USD",
+            bid=HostileDecimal("1"),
+            ask=Decimal("1"),
+            available_at=NOW,
+            source_id="provider:fx",
+            evidence_sha256=DIGEST,
+        )
+
+        with self.assertRaisesRegex(FxValuationError, "exact decimal"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=forged,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_exact_quote_instance_cannot_bypass_quote_invariants(self):
+        forged = FxQuote(
+            base_currency="EUR",
+            quote_currency="USD",
+            bid=Decimal("2"),
+            ask=Decimal("1"),
+            available_at=NOW,
+            source_id="provider:fx",
+            evidence_sha256=DIGEST,
+        )
+
+        with self.assertRaisesRegex(FxValuationError, "cannot exceed"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=forged,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+    def test_forged_exact_rounding_policy_is_resealed_before_use(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile policy text dispatch")
+
+        forged = object.__new__(FxRoundingPolicy)
+        object.__setattr__(forged, "reporting_currency", HostileText("EUR"))
+        object.__setattr__(forged, "quantum", Decimal("0.01"))
+        object.__setattr__(forged, "version", "1")
+
+        with self.assertRaisesRegex(FxValuationError, "reporting_currency"):
+            value_amount(
+                "1",
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=eurusd(bid="1.1", ask="1.1"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=forged,
+            )
+
+        self.assertEqual(touched, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -349,6 +349,47 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
                 version="1.2.3",
             )
 
+    def test_windows_output_snapshot_uses_digest_across_split_identity_domains(self):
+        output = self.root / "split-identity.exe"
+        payload = b"stable output bytes"
+        output.write_bytes(payload)
+        real_stat = velopack_module.os.stat
+
+        def stat_with_distinct_windows_identity(path, *args, **kwargs):
+            observed = real_stat(path, *args, **kwargs)
+            if Path(path) == output and kwargs.get("follow_symlinks") is False:
+                class StatProxy:
+                    def __getattr__(self, name):
+                        return getattr(observed, name)
+
+                    st_dev = observed.st_dev + 17
+                    st_ino = observed.st_ino + 101
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns
+                    st_ctime_ns = observed.st_ctime_ns
+
+                return StatProxy()
+            return observed
+
+        with (
+            patch.object(
+                velopack_module,
+                "_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY",
+                True,
+            ),
+            patch.object(
+                velopack_module.os,
+                "stat",
+                side_effect=stat_with_distinct_windows_identity,
+            ),
+        ):
+            digest, size = velopack_module._snapshot_vpk_output(output)
+
+        self.assertEqual(digest, "sha256:" + sha256(payload).hexdigest())
+        self.assertEqual(size, len(payload))
+
     def test_output_becoming_reparse_after_read_fails_validation(self):
         output = self.root / "becomes-reparse.exe"
         output.write_bytes(b"stable")

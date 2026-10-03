@@ -53,6 +53,7 @@ BUILD_MANIFEST_NAME = "autotrade-velopack-build.json"
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY = os.name == "nt"
 EXPECTED_INSTALLER_FIELDS = {
     "schema_version",
     "product",
@@ -94,6 +95,66 @@ def _nonreparse_path_metadata(path: Path, *, name: str):
     ):
         raise VelopackPackagingError(f"{name} must not be a Windows reparse point")
     return metadata
+
+
+def _open_vpk_output_snapshot(path: Path, *, name: str):
+    """Open one vpk output without cross-comparing split Windows stat identities.
+
+    On Windows, pathname and descriptor inode representations are not a stable
+    cross-API generation authority.  The caller therefore binds bytes through
+    the held descriptor and an exact SHA-256/size cut.  POSIX keeps the stronger
+    pathname/descriptor inode equality fence.
+    """
+
+    before_path = _nonreparse_path_metadata(path, name=name)
+    if not stat.S_ISREG(before_path.st_mode) or before_path.st_nlink != 1:
+        raise VelopackPackagingError(
+            f"{name} must be a regular file without hard-link aliases"
+        )
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise VelopackPackagingError(f"{name} could not be opened safely") from error
+    try:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != before_path.st_size
+            or (
+                not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+                and (opened.st_dev, opened.st_ino)
+                != (before_path.st_dev, before_path.st_ino)
+            )
+        ):
+            raise VelopackPackagingError(f"{name} identity changed during admission")
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
+def _assert_vpk_output_snapshot(path: Path, stream, *, name: str):
+    """Revalidate one held vpk output within supported metadata domains."""
+
+    try:
+        opened = os.fstat(stream.fileno())
+    except OSError as error:
+        raise VelopackPackagingError(f"{name} identity cannot be verified") from error
+    current = _nonreparse_path_metadata(path, name=name)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or opened.st_size != current.st_size
+        or (
+            not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+            and (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        )
+    ):
+        raise VelopackPackagingError(f"{name} changed after validation")
+    return opened
 
 
 def _strict_object(pairs):
@@ -433,28 +494,20 @@ def _snapshot_vpk_output(path: Path) -> tuple[str, int]:
     """Bind one generated artifact to exact bytes before final publication."""
 
     name = f"Velopack output {path.name}"
-    _nonreparse_path_metadata(path, name=name)
-    try:
-        with _open_stable_regular_file(path, name=name) as stream:
-            before = os.fstat(stream.fileno())
-            digest = "sha256:" + _sha256_stream(stream)
-            after = _assert_open_file_identity(path, stream, name=name)
-            after_path = _nonreparse_path_metadata(path, name=name)
-            if (
-                (after_path.st_dev, after_path.st_ino)
-                != (after.st_dev, after.st_ino)
-                or
-                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-                or before.st_size != after.st_size
-                or before.st_mtime_ns != after.st_mtime_ns
-                or before.st_ctime_ns != after.st_ctime_ns
-            ):
-                raise VelopackPackagingError(
-                    f"Velopack output changed during validation: {path.name}"
-                )
-            return digest, before.st_size
-    except InstallerManifestError as error:
-        raise VelopackPackagingError(str(error)) from error
+    with _open_vpk_output_snapshot(path, name=name) as stream:
+        before = os.fstat(stream.fileno())
+        digest = "sha256:" + _sha256_stream(stream)
+        after = _assert_vpk_output_snapshot(path, stream, name=name)
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise VelopackPackagingError(
+                f"Velopack output changed during validation: {path.name}"
+            )
+        return digest, before.st_size
 
 
 def _validate_vpk_outputs(
@@ -546,11 +599,7 @@ def _stage_validated_vpk_output(
     """Freeze one validated vpk artifact before touching final output paths."""
 
     name = f"Velopack output {source.name}"
-    _nonreparse_path_metadata(source, name=name)
-    try:
-        input_stream = _open_stable_regular_file(source, name=name)
-    except InstallerManifestError as error:
-        raise VelopackPackagingError(str(error)) from error
+    input_stream = _open_vpk_output_snapshot(source, name=name)
 
     staged = False
     try:
@@ -569,18 +618,15 @@ def _stage_validated_vpk_output(
                     observed_size += len(chunk)
 
                 try:
-                    after = _assert_open_file_identity(
+                    after = _assert_vpk_output_snapshot(
                         source,
                         input_stream,
                         name=name,
                     )
-                    after_path = _nonreparse_path_metadata(source, name=name)
-                except InstallerManifestError as error:
-                    raise VelopackPackagingError(str(error)) from error
+                except VelopackPackagingError:
+                    raise
                 if (
-                    (after_path.st_dev, after_path.st_ino)
-                    != (after.st_dev, after.st_ino)
-                    or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                     or before.st_size != after.st_size
                     or before.st_mtime_ns != after.st_mtime_ns
                     or before.st_ctime_ns != after.st_ctime_ns

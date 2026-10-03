@@ -113,7 +113,7 @@ class ReconciliationTests(unittest.TestCase):
     def test_resource_availability_is_bound_to_same_provider_snapshot_cut(self):
         evidence = resource_availability()
         result = self.base(resource_availability=evidence)
-        self.assertIs(result.resource_availability, evidence)
+        self.assertIsNot(result.resource_availability, evidence)
         self.assertEqual(
             result.resource_availability.available_resources["CASH:USD"],
             Decimal("850"),

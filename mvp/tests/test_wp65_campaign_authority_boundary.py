@@ -1,7 +1,7 @@
 import unittest
 from tempfile import TemporaryDirectory
 
-from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
+from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.runtime_load_qualification import (
     RuntimeCampaignCut,
@@ -167,9 +167,59 @@ class RuntimeCampaignAuthorityBoundaryTests(unittest.TestCase):
         polymorphic = object.__new__(RuntimeCampaignEvidenceSubclass)
         with self.assertRaisesRegex(
             TypeError,
-            "evidence must be RuntimeCampaignEvidence",
+            "exact RuntimeCampaignEvidence",
         ):
             evaluate_runtime_campaign(runtime_spec(), polymorphic)
+
+    def test_begin_revalidates_post_construction_plan_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            plan = runtime_plan(spec)
+            object.__setattr__(plan, "declared_duration_ms", 0)
+            with self.assertRaisesRegex(RuntimeBudgetError, "declared_duration_ms"):
+                begin_runtime_campaign(journal=journal, spec=spec, plan=plan)
+
+    def test_collect_revalidates_post_construction_cut_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            plan = runtime_plan(spec)
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=plan)
+            object.__setattr__(cut, "start_journal_sequence", -1)
+            with self.assertRaisesRegex(RuntimeBudgetError, "start_journal_sequence"):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=plan,
+                    cut=cut,
+                    financial_latency_us=(),
+                    financial_staleness_us=(),
+                    research_interference_us=(1,),
+                    resource_evidence_hash="sha256:" + ("e" * 64),
+                    resource_metrics={"cpu_peak_millis": 1},
+                )
+
+    def test_evaluate_revalidates_post_construction_evidence_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            plan = runtime_plan(spec)
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=plan)
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=plan,
+                cut=cut,
+                financial_latency_us=(),
+                financial_staleness_us=(),
+                research_interference_us=(1,),
+                resource_evidence_hash="sha256:" + ("e" * 64),
+                resource_metrics={"cpu_peak_millis": 1},
+            )
+            object.__setattr__(evidence, "reconnect_backlog_remaining", -1)
+            with self.assertRaisesRegex(RuntimeBudgetError, "reconnect_backlog_remaining"):
+                evaluate_runtime_campaign(spec, evidence)
 
 
 if __name__ == "__main__":

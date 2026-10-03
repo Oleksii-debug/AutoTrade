@@ -8,8 +8,99 @@ revalidation so no standalone caller-owned chronology horizon can authorize PASS
 from __future__ import annotations
 
 import sys
+from types import MappingProxyType
 
 from . import _runtime_target_host_chronology_bound_qualification_impl as _impl
+
+
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
+_ACCEPTED_TEXT_FIELDS = (
+    "attestation_id",
+    "attestation_digest",
+    "source_sha",
+    "scenario_id",
+    "spec_digest",
+    "configuration_hash",
+    "host_fingerprint",
+    "workload_profile_hash",
+    "journal_store_identity_digest",
+    "release_artifact_id",
+    "release_artifact_sha256",
+    "binding_artifact_id",
+    "binding_sha256",
+)
+_ACCEPTED_MAPPING_FIELDS = (
+    "evidence_sha256_by_kind",
+    "payload_artifact_id_by_kind",
+    "payload_sha256_by_kind",
+    "collector_by_kind",
+)
+
+
+def _snapshot_inert_text_map(value: object, *, name: str) -> dict[str, str]:
+    """Detach one constructor-owned mapping without invoking caller callbacks."""
+
+    if type(value) is not _MAPPING_PROXY_TYPE:
+        raise _impl.RuntimeTargetHostChronologyBindingError(
+            f"{name} must remain exact immutable mapping state"
+        )
+    detached = dict(value)
+    for key, item in detached.items():
+        if type(key) is not str or not key or type(item) is not str or not item:
+            raise _impl.RuntimeTargetHostChronologyBindingError(
+                f"{name} must contain only exact non-empty text pairs"
+            )
+    return detached
+
+
+def _snapshot_terminal_qualification(
+    value: _impl.AcceptedComposedRuntimeTargetHostQualification,
+) -> _impl.AcceptedComposedRuntimeTargetHostQualification:
+    """Detach verifier-owned terminal authority before returning it to consumers."""
+
+    if type(value) is not _impl.AcceptedComposedRuntimeTargetHostQualification:
+        raise _impl.RuntimeTargetHostChronologyBindingError(
+            "WP-65 verifier returned non-canonical composed acceptance"
+        )
+    accepted = value.qualification
+    if type(accepted) is not _impl.AcceptedRuntimeTargetHostQualification:
+        raise _impl.RuntimeTargetHostChronologyBindingError(
+            "WP-65 verifier returned non-canonical signed acceptance"
+        )
+
+    accepted_text = {
+        field: _impl._exact_text(
+            getattr(accepted, field),
+            name=f"signed WP-65 {field}",
+        )
+        for field in _ACCEPTED_TEXT_FIELDS
+    }
+    accepted_maps = {
+        field: _snapshot_inert_text_map(
+            getattr(accepted, field),
+            name=f"signed WP-65 {field}",
+        )
+        for field in _ACCEPTED_MAPPING_FIELDS
+    }
+    accepted_snapshot = _impl.AcceptedRuntimeTargetHostQualification(
+        **accepted_text,
+        **accepted_maps,
+    )
+    return _impl.AcceptedComposedRuntimeTargetHostQualification(
+        qualification=accepted_snapshot,
+        target_host_measurement_digest=_impl._exact_text(
+            value.target_host_measurement_digest,
+            name="signed WP-65 target_host_measurement_digest",
+        ),
+        durable_financial_binding_digest=_impl._exact_text(
+            value.durable_financial_binding_digest,
+            name="signed WP-65 durable_financial_binding_digest",
+        ),
+        projection_sha256_by_kind=_snapshot_inert_text_map(
+            value.projection_sha256_by_kind,
+            name="signed WP-65 projection_sha256_by_kind",
+        ),
+    )
 
 
 def _horizon_observer(_chronology: object, *_claimed_instants: str) -> None:
@@ -114,6 +205,7 @@ def verify_chronology_bound_runtime_target_host_qualification(
         campaign_cut=campaign_cut,
         measurement=measurement_for_verifier,
     )
+    qualification = _snapshot_terminal_qualification(qualification)
     _impl._require_cross_binding(
         qualification,
         chronology,
@@ -164,6 +256,7 @@ def verify_chronology_bound_runtime_target_host_qualification(
 # Retain the existing seam name only as an observer. Actual horizon authority is
 # already enforced inside each current-cut call via claimed_instants.
 _impl.require_chronology_horizon = _horizon_observer
+_impl._snapshot_terminal_qualification = _snapshot_terminal_qualification
 _impl.verify_chronology_bound_runtime_target_host_qualification = (
     verify_chronology_bound_runtime_target_host_qualification
 )

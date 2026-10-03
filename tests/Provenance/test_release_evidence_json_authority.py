@@ -80,6 +80,15 @@ class ReleaseEvidenceJsonAuthorityTests(unittest.TestCase):
         )
         self.assert_unqualified(raw, "unsupported_schema_version")
 
+    def test_noncanonical_artifact_id_fails_closed(self):
+        for artifact_id in (" release-evidence", "release-evidence "):
+            with self.subTest(artifact_id=artifact_id):
+                raw = valid_evidence_json().replace(
+                    b'"artifact_id":"release-evidence"',
+                    f'"artifact_id":"{artifact_id}"'.encode("utf-8"),
+                )
+                self.assert_unqualified(raw, "invalid_evidence_refs")
+
     def test_duplicate_top_level_authority_key_fails_closed(self):
         raw = (
             "{"

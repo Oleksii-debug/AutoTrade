@@ -205,54 +205,102 @@ def _verify_declared_plan_runtime_target_host_qualification_without_chronology(
         return accepted
 
 
-def verify_declared_plan_runtime_target_host_qualification(
-    receipt: SignedQualificationAttestation,
-    *,
-    evidence_store: ArtifactStore,
-    evidence_root: str,
-    journal_store: JournalStore,
-    plan_id: str,
-    spec: RuntimeBudgetSpec,
-    expected_release_artifact_id: str,
-    expected_release_artifact_sha256: str,
-    campaign_plan: RuntimeCampaignPlan | None = None,
-    campaign_cut: RuntimeCampaignCut | None = None,
-    measurement: TargetHostMeasurementArtifact | None = None,
-    recovery: RecoveryController | None = None,
-    runtime: ProductionHostRuntime | None = None,
-    chronology_cut: TrustedChronologyCut | None = None,
-) -> (
-    AcceptedComposedRuntimeTargetHostQualification
-    | AcceptedChronologyBoundRuntimeTargetHostQualification
-):
-    """Verify product-facing WP-65 admission, requiring chronology for real receipts.
+def _terminal_chronology_dispatch_authority():
+    """Return one write-once binder and one closure-private terminal dispatcher."""
 
-    Exact canonical signed receipts are terminal authority candidates and therefore
-    fail closed unless all three RELEASE_RUNTIME chronology inputs are supplied.
-    Non-canonical receipt objects can only reach the private lower-level path used
-    by focused fencing tests; the canonical signed verifier rejects such objects.
-    """
+    verifier = None
 
-    chronology_values = (recovery, runtime, chronology_cut)
-    chronology_supplied = any(value is not None for value in chronology_values)
-    if chronology_supplied and any(value is None for value in chronology_values):
-        raise RuntimeTargetHostCompositionError(
-            "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
-        )
+    def bind(candidate) -> None:
+        nonlocal verifier
+        if not callable(candidate):
+            raise TypeError("terminal chronology verifier must be callable")
+        if verifier is None:
+            verifier = candidate
+            return
+        if verifier is not candidate:
+            raise RuntimeError("terminal chronology verifier is already bound")
 
-    if chronology_supplied:
-        from .runtime_target_host_chronology_bound_qualification import (
-            verify_chronology_bound_runtime_target_host_qualification,
-        )
+    def dispatch(*args, **kwargs):
+        nonlocal verifier
+        if verifier is None:
+            # Import for initialization side effects only. The chronology module
+            # binds the canonical verifier into this closure exactly once.
+            from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
 
-        return verify_chronology_bound_runtime_target_host_qualification(
+            del _chronology_bound
+        selected = verifier
+        if selected is None:
+            raise RuntimeError("terminal chronology verifier is unavailable")
+        return selected(*args, **kwargs)
+
+    return bind, dispatch
+
+
+_bind_terminal_chronology_verifier, _terminal_chronology_dispatch = (
+    _terminal_chronology_dispatch_authority()
+)
+
+
+def _build_product_verifier(terminal_chronology_dispatch):
+    """Capture the product terminal dispatcher so later module rebinding is inert."""
+
+    def verify_declared_plan_runtime_target_host_qualification(
+        receipt: SignedQualificationAttestation,
+        *,
+        evidence_store: ArtifactStore,
+        evidence_root: str,
+        journal_store: JournalStore,
+        plan_id: str,
+        spec: RuntimeBudgetSpec,
+        expected_release_artifact_id: str,
+        expected_release_artifact_sha256: str,
+        campaign_plan: RuntimeCampaignPlan | None = None,
+        campaign_cut: RuntimeCampaignCut | None = None,
+        measurement: TargetHostMeasurementArtifact | None = None,
+        recovery: RecoveryController | None = None,
+        runtime: ProductionHostRuntime | None = None,
+        chronology_cut: TrustedChronologyCut | None = None,
+    ) -> (
+        AcceptedComposedRuntimeTargetHostQualification
+        | AcceptedChronologyBoundRuntimeTargetHostQualification
+    ):
+        """Verify product-facing WP-65 admission, requiring chronology for real receipts."""
+
+        chronology_values = (recovery, runtime, chronology_cut)
+        chronology_supplied = any(value is not None for value in chronology_values)
+        if chronology_supplied and any(value is None for value in chronology_values):
+            raise RuntimeTargetHostCompositionError(
+                "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
+            )
+
+        if chronology_supplied:
+            return terminal_chronology_dispatch(
+                receipt,
+                evidence_store=evidence_store,
+                evidence_root=evidence_root,
+                journal_store=journal_store,
+                recovery=recovery,
+                runtime=runtime,
+                chronology_cut=chronology_cut,
+                plan_id=plan_id,
+                spec=spec,
+                expected_release_artifact_id=expected_release_artifact_id,
+                expected_release_artifact_sha256=expected_release_artifact_sha256,
+                campaign_plan=campaign_plan,
+                campaign_cut=campaign_cut,
+                measurement=measurement,
+            )
+
+        if type(receipt) is SignedQualificationAttestation:
+            raise RuntimeTargetHostCompositionError(
+                "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
+            )
+
+        return _verify_declared_plan_runtime_target_host_qualification_without_chronology(
             receipt,
             evidence_store=evidence_store,
             evidence_root=evidence_root,
             journal_store=journal_store,
-            recovery=recovery,
-            runtime=runtime,
-            chronology_cut=chronology_cut,
             plan_id=plan_id,
             spec=spec,
             expected_release_artifact_id=expected_release_artifact_id,
@@ -262,21 +310,9 @@ def verify_declared_plan_runtime_target_host_qualification(
             measurement=measurement,
         )
 
-    if type(receipt) is SignedQualificationAttestation:
-        raise RuntimeTargetHostCompositionError(
-            "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
-        )
+    return verify_declared_plan_runtime_target_host_qualification
 
-    return _verify_declared_plan_runtime_target_host_qualification_without_chronology(
-        receipt,
-        evidence_store=evidence_store,
-        evidence_root=evidence_root,
-        journal_store=journal_store,
-        plan_id=plan_id,
-        spec=spec,
-        expected_release_artifact_id=expected_release_artifact_id,
-        expected_release_artifact_sha256=expected_release_artifact_sha256,
-        campaign_plan=campaign_plan,
-        campaign_cut=campaign_cut,
-        measurement=measurement,
-    )
+
+verify_declared_plan_runtime_target_host_qualification = _build_product_verifier(
+    _terminal_chronology_dispatch
+)

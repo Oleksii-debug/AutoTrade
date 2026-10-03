@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 import unittest
 
@@ -104,6 +105,28 @@ class RuntimeTargetHostPayloadIndependenceTests(unittest.TestCase):
 
         self.assertEqual(result, RAW)
         self.assertEqual(reads, [PAYLOAD_ID])
+
+    def test_verifier_rejects_top_level_release_artifact_alias(self) -> None:
+        raw_by_id, evidence_refs, _binding = fixtures.material()
+        aliased = list(evidence_refs)
+        aliased[0] = replace(aliased[0], artifact_id=fixtures.RELEASE_ID)
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "evidence artifact cannot alias delivered release artifact",
+        ):
+            _fixture_verifier()._verify(raw_by_id, tuple(aliased))
+
+    def test_verifier_rejects_top_level_release_bytes_alias(self) -> None:
+        raw_by_id, evidence_refs, _binding = fixtures.material()
+        aliased = list(evidence_refs)
+        aliased[0] = replace(aliased[0], sha256=fixtures.RELEASE_SHA)
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "evidence bytes cannot alias delivered release bytes",
+        ):
+            _fixture_verifier()._verify(raw_by_id, tuple(aliased))
 
     def test_verifier_rejects_release_artifact_as_raw_payload(self) -> None:
         raw_by_id, evidence_refs, _binding = fixtures.material(

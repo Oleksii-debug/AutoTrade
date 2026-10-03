@@ -133,6 +133,12 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             )
             self.assertEqual(str(book.cash("USD")), first["cash"])
             self.assertEqual(str(book.position(INSTRUMENT)), first["position"])
+            bootstrap_events = reopened.load_events("economic_book", book.book_id)
+            self.assertGreaterEqual(len(bootstrap_events), 1)
+            self.assertEqual(
+                bootstrap_events[0]["committed_at"],
+                "2026-09-30T11:59:59.999999Z",
+            )
 
             bindings = reopened.load_events_by_aggregate_type(
                 "provider_fill_financial_binding"

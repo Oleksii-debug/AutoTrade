@@ -259,11 +259,19 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "episode_id": episode_id, "reason": "orphaned_durable_state_requires_reconciliation",
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
-    economic.append(book_external_cash_flow(
-        transaction_id=_uuid("seed-transaction", episode_id),
-        cause_event_id=_uuid("seed-cause", episode_id),
-        currency="USD", amount=str(INITIAL_CASH),
-    ))
+    bootstrap_committed_at = (
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        - timedelta(microseconds=1)
+    ).isoformat().replace("+00:00", "Z")
+    economic.append(
+        book_external_cash_flow(
+            transaction_id=_uuid("seed-transaction", episode_id),
+            cause_event_id=_uuid("seed-cause", episode_id),
+            currency="USD",
+            amount=str(INITIAL_CASH),
+        ),
+        committed_at=bootstrap_committed_at,
+    )
     bootstrap = store.load_events("economic_book", economic.book_id)
     _deliver_event(store, bootstrap[-1]["event_id"])
     admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)

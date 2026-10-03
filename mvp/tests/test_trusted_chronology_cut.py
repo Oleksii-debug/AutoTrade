@@ -317,7 +317,7 @@ class TrustedChronologyCutTests(unittest.TestCase):
                     ),
                     expected_release_artifact_sha256=RELEASE_SHA,
                 )
-            with self.assertRaisesRegex(PermissionError, "source chronology"):
+            with self.assertRaisesRegex(PermissionError, "source/scope"):
                 require_current_trusted_chronology_cut(
                     store=store,
                     recovery=recovery,

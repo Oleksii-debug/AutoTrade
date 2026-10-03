@@ -4,7 +4,8 @@ The lower-level signed target-host verifier accepts exact expected identities so
 it can validate independently produced evidence. Product admission must not let a
 caller invent the workload-profile or JournalStore-generation digests used at
 that boundary. This adapter reloads the immutable pre-run declaration from the
-canonical JournalStore and derives those identities from durable authority.
+canonical JournalStore and derives those identities from durable authority, then
+requires retained raw measurement semantics to reconcile to the accepted campaign.
 
 This module creates no measurements, trusted chronology, signer policy, release
 attestation, provider authority, or trading authority.
@@ -22,6 +23,9 @@ from .persistence import (
 )
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_plan import load_declared_runtime_event_plan
+from .runtime_target_host_measurement_evidence import (
+    verify_runtime_target_host_measurement_evidence,
+)
 from .runtime_target_host_qualification import (
     AcceptedRuntimeTargetHostQualification,
     verify_runtime_target_host_qualification,
@@ -62,7 +66,9 @@ def verify_declared_plan_runtime_target_host_qualification(
     intentionally absent from this API. Both are reloaded from the canonical
     immutable plan, which itself is verified against the supplied exact budget
     spec and current physical JournalStore generation before signed target-host
-    evidence is consulted.
+    evidence is consulted. The accepted signed profile is then semantically
+    reconciled against its retained campaign/staleness/interference/pressure raw
+    payloads before product-facing authority can be returned.
     """
 
     if type(journal_store) is not JournalStore:
@@ -82,7 +88,7 @@ def verify_declared_plan_runtime_target_host_qualification(
             plan_id=plan_id,
             spec=spec,
         )
-    return verify_runtime_target_host_qualification(
+    accepted = verify_runtime_target_host_qualification(
         receipt,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
@@ -95,4 +101,9 @@ def verify_declared_plan_runtime_target_host_qualification(
         expected_journal_store_identity_digest=plan.store_identity_digest,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
+    )
+    return verify_runtime_target_host_measurement_evidence(
+        accepted,
+        evidence_store=evidence_store,
+        evidence_root=evidence_root,
     )

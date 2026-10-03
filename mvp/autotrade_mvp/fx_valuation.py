@@ -10,18 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import re
-from typing import Mapping
-
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction as _exact_as_fraction,
     bounded_fraction as _exact_bounded_fraction,
     canonical_decimal_text as _exact_canonical_decimal_text,
     exact_sum as _exact_sum,
+    parse_bounded_exact_decimal as _exact_parse_bounded_exact_decimal,
     round_fraction_to_quantum as _exact_round_fraction_to_quantum,
     terminating_decimal as _exact_terminating_decimal,
 )
@@ -71,37 +70,40 @@ def _canonical_decimal_text(value: Decimal, *, name: str) -> str:
 
 
 def _decimal(value, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise FxValuationError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FxValuationError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FxValuationError(f"{name} must be a finite decimal")
-    if result == 0:
-        return Decimal("0")
-    _as_fraction(result, name=name)
-    return result
+        return _exact_parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise FxValuationError(
+            f"{name} must be a finite decimal within the supported resource envelope"
+        ) from error
 
 
 def _text(value, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise FxValuationError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise FxValuationError(f"{name} is required")
+    return normalized
 
 
 def _currency(value, name: str) -> str:
-    currency = _text(value, name).upper()
+    currency = str.upper(_text(value, name))
     if re.fullmatch(r"[A-Z0-9]{2,12}", currency) is None:
         raise FxValuationError(f"{name} must be a canonical currency/asset code")
     return currency
 
 
 def _instant(value, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise FxValuationError(
+            f"{name} must use an exact datetime with a built-in timezone"
+        )
+    if datetime.utcoffset(value) is None:
         raise FxValuationError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _digest(value, name: str) -> str:
@@ -112,8 +114,8 @@ def _digest(value, name: str) -> str:
 
 
 def _age_limit(value: timedelta) -> timedelta:
-    if not isinstance(value, timedelta) or value < timedelta(0):
-        raise FxValuationError("max_age must be a non-negative timedelta")
+    if type(value) is not timedelta or value < timedelta(0):
+        raise FxValuationError("max_age must be a non-negative exact timedelta")
     return value
 
 
@@ -317,8 +319,10 @@ def value_amount(
     if haircut_value < 0 or haircut_value >= 1:
         raise FxValuationError("haircut must be in [0, 1)")
     if rounding_policy is not None:
-        if not isinstance(rounding_policy, FxRoundingPolicy):
-            raise FxValuationError("rounding_policy must be FxRoundingPolicy or None")
+        if type(rounding_policy) is not FxRoundingPolicy:
+            raise FxValuationError(
+                "rounding_policy must be exact FxRoundingPolicy or None"
+            )
         if rounding_policy.reporting_currency != reporting:
             raise FxValuationError("FX rounding policy reporting currency mismatch")
 
@@ -369,8 +373,8 @@ def value_amount(
             haircut=haircut_value,
             reason="direct or inverse one-hop FX quote is missing",
         )
-    if not isinstance(quote, FxQuote):
-        raise FxValuationError("quote must be FxQuote or None")
+    if type(quote) is not FxQuote:
+        raise FxValuationError("quote must be exact FxQuote or None")
 
     if quote.available_at > point:
         return _unavailable(
@@ -506,10 +510,10 @@ def value_amount(
 
 
 def value_cash_balances(
-    balances: Mapping[str, object],
+    balances: dict[str, object],
     *,
     reporting_currency: str,
-    quotes: Mapping[str, FxQuote],
+    quotes: dict[str, FxQuote],
     as_of: datetime,
     max_age: timedelta,
     haircut=Decimal("0"),
@@ -517,10 +521,16 @@ def value_cash_balances(
 ) -> PortfolioFxValuation:
     """Value separated currency balances without ever summing unlike units first."""
 
-    if not isinstance(balances, Mapping):
-        raise FxValuationError("balances must be a mapping")
-    if not isinstance(quotes, Mapping):
-        raise FxValuationError("quotes must be a mapping")
+    if type(balances) is not dict:
+        raise FxValuationError("balances must be an exact dict")
+    if type(quotes) is not dict:
+        raise FxValuationError("quotes must be an exact dict")
+    for raw_currency in balances:
+        if type(raw_currency) is not str:
+            raise FxValuationError("balance currency keys must be exact strings")
+    for raw_currency in quotes:
+        if type(raw_currency) is not str:
+            raise FxValuationError("quote currency keys must be exact strings")
     reporting = _currency(reporting_currency, "reporting_currency")
 
     components: list[FxValuation] = []

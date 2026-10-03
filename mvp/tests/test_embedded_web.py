@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.embedded_web import (
     EmbeddedWebHostApplication,
     ImmutableWebAsset,
     ImmutableWebAssetBundle,
+    load_immutable_web_bundle,
 )
 from mvp.autotrade_mvp.host_network import (
     header_principal_resolver,
@@ -232,6 +233,81 @@ class EmbeddedWebTests(unittest.TestCase):
                 host_api_contract_version="v3",
                 assets=(duplicate,),
             )
+
+    def test_canonical_manifest_round_trip_rejects_missing_extra_or_mutated_bytes(self):
+        bodies = {item.path: item.body for item in self.web_bundle.assets}
+        loaded = load_immutable_web_bundle(
+            self.web_bundle.manifest_bytes,
+            dict(bodies),
+        )
+        self.assertEqual(loaded.bundle_sha256, self.web_bundle.bundle_sha256)
+        self.assertEqual(loaded.manifest_bytes, self.web_bundle.manifest_bytes)
+
+        missing = dict(bodies)
+        missing.pop("app.js")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            load_immutable_web_bundle(self.web_bundle.manifest_bytes, missing)
+
+        extra = dict(bodies)
+        extra["extra.js"] = b"extra"
+        with self.assertRaisesRegex(ValueError, "undeclared"):
+            load_immutable_web_bundle(self.web_bundle.manifest_bytes, extra)
+
+        mutated = dict(bodies)
+        mutated["app.js"] = b"tampered"
+        with self.assertRaisesRegex(ValueError, "(size|sha256)"):
+            load_immutable_web_bundle(self.web_bundle.manifest_bytes, mutated)
+
+    def test_manifest_requires_strict_unique_and_canonical_json(self):
+        bodies = {item.path: item.body for item in self.web_bundle.assets}
+        pretty = json.dumps(
+            json.loads(self.web_bundle.manifest_bytes.decode("utf-8")),
+            indent=2,
+        ).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "canonical JSON"):
+            load_immutable_web_bundle(pretty, dict(bodies))
+
+        duplicate = self.web_bundle.manifest_bytes.replace(
+            b'{"assets":',
+            b'{"schema_version":"1","assets":',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "(strict JSON|duplicate)"):
+            load_immutable_web_bundle(duplicate, dict(bodies))
+
+    def test_manifest_size_field_is_authoritative(self):
+        manifest = json.loads(self.web_bundle.manifest_bytes.decode("utf-8"))
+        manifest["assets"][0]["size"] += 1
+        mutated = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        bodies = {item.path: item.body for item in self.web_bundle.assets}
+        with self.assertRaisesRegex(ValueError, "size"):
+            load_immutable_web_bundle(mutated, bodies)
+
+    def test_current_canonical_web_bytes_fit_the_immutable_bundle_contract(self):
+        root = Path(__file__).resolve().parents[2] / "web" / "src"
+        names = ("index.html", "app.js", "host-api-routes.js", "styles.css")
+        canonical_assets = tuple(
+            asset(name, (root / name).read_bytes())
+            for name in names
+        )
+        current = ImmutableWebAssetBundle(
+            source_revision="c" * 40,
+            host_api_contract_version="3.0.1",
+            assets=canonical_assets,
+        )
+        loaded = load_immutable_web_bundle(
+            current.manifest_bytes,
+            {item.path: item.body for item in canonical_assets},
+        )
+        self.assertEqual(loaded.bundle_sha256, current.bundle_sha256)
+        index = loaded.asset_for_path("/index.html").body.decode("utf-8")
+        self.assertIn('src="/host-api-routes.js"', index)
+        self.assertIn('src="/app.js"', index)
+        self.assertIn('href="/styles.css"', index)
 
     def test_root_and_asset_routes_return_exact_immutable_bytes(self):
         root = self.app.dispatch(method="GET", target="/", headers={})

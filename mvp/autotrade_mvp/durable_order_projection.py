@@ -229,10 +229,13 @@ class DurableOrderBookProjection:
         self.environment = _environment(environment)
         self.host_id = _text(host_id, name="host_id")
         self.owner_epoch = _text(owner_epoch, name="owner_epoch")
-        if evidence_artifact_store is not None and not isinstance(
-            evidence_artifact_store, ArtifactStore
+        if (
+            evidence_artifact_store is not None
+            and type(evidence_artifact_store) is not ArtifactStore
         ):
-            raise TypeError("evidence_artifact_store must be ArtifactStore")
+            raise TypeError(
+                "evidence_artifact_store must be the exact canonical ArtifactStore"
+            )
         self.evidence_artifact_store = evidence_artifact_store
         self.aggregate_id = _scope_id(
             self.provider_id,
@@ -310,10 +313,9 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest, artifact_bytes = (
-                    self.evidence_artifact_store.read_authenticated_snapshot(
-                        ref["artifact_id"]
-                    )
+                manifest, artifact_bytes = ArtifactStore.read_authenticated_snapshot(
+                    self.evidence_artifact_store,
+                    ref["artifact_id"],
                 )
             except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
                 raise OrderProjectionConflict(

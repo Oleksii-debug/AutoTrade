@@ -10,9 +10,11 @@ from control.tools.reconvergence_integrity import (
     Change,
     PROTECTED_SENTINELS,
     SELF_PROTECTING_TRUST_ROOTS,
+    TRUSTED_SCOPE_APPROVAL_MARKER,
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_trusted_scope_approval,
 )
 
 

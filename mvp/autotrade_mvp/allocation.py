@@ -2790,6 +2790,15 @@ def revalidate_evidence_bound_allocation(
             raise ValueError(f"allocation evidence {evidence_id} environment changed")
         if not evidence.valid_at(point):
             raise ValueError(f"allocation evidence {evidence_id} is stale at admission")
+        if evidence.kind == "OBJECTIVE":
+            forecast_horizon_end = _instant(
+                _payload_text(evidence, "forecast_horizon_end"),
+                name="objective forecast_horizon_end",
+            )
+            if point_instant >= forecast_horizon_end:
+                raise ValueError(
+                    f"allocation objective forecast horizon expired before admission: {evidence_id}"
+                )
 
     expected_digest = _allocation_decision_digest(
         result.objective,

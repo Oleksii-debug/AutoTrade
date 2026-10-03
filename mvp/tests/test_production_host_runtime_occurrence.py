@@ -259,6 +259,35 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_module_global_binding_replacement_cannot_retarget_runtime(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                bound = runtime.runtime_occurrence
+                successor = production_host._issue_production_host_runtime_occurrence(
+                    runtime.journal,
+                    config,
+                )
+                self.assertNotEqual(
+                    successor.runtime_occurrence_id,
+                    bound.runtime_occurrence_id,
+                )
+
+                with patch.object(
+                    production_host,
+                    "_RUNTIME_OCCURRENCE_BINDINGS",
+                    {runtime: successor.runtime_occurrence_id},
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "latest durable occurrence",
+                    ):
+                        _ = runtime.runtime_occurrence
+            finally:
+                runtime.close()
+
     def test_newer_durable_occurrence_invalidates_bound_runtime_property(self) -> None:
         with TemporaryDirectory() as directory:
             config = self._config(directory)

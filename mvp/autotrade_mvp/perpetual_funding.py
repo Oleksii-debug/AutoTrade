@@ -376,8 +376,40 @@ class DurablePerpetualFundingAuthority:
             economic_book.account_id,
             economic_book.environment,
         )
+        self._bound_store = store
+        self._bound_economic_book = economic_book
+        self._bound_economic_scope = (
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            economic_book.book_id,
+        )
+
+    def _require_bound_financial_authority(self) -> None:
+        if (
+            self.store is not self._bound_store
+            or self.economic_book is not self._bound_economic_book
+            or self._bound_economic_book.store is not self._bound_store
+        ):
+            raise PerpetualFundingConflict(
+                "funding authority durable store binding changed after construction"
+            )
+        current_scope = (
+            self._bound_economic_book.provider_id,
+            self._bound_economic_book.account_id,
+            self._bound_economic_book.environment,
+            self._bound_economic_book.book_id,
+        )
+        if (
+            any(type(value) is not str for value in current_scope)
+            or current_scope != self._bound_economic_scope
+        ):
+            raise PerpetualFundingConflict(
+                "funding authority economic-book scope changed after construction"
+            )
 
     def _events(self) -> list[dict[str, object]]:
+        self._require_bound_financial_authority()
         return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
 
     @staticmethod
@@ -390,6 +422,7 @@ class DurablePerpetualFundingAuthority:
     def _observation(
         self, evidence_ref: str
     ) -> tuple[PerpetualFundingObservation, ProviderResponseObservation]:
+        self._require_bound_financial_authority()
         reference = _text(evidence_ref, "evidence_ref")
         try:
             source = self.evidence_resolver(reference)
@@ -507,6 +540,7 @@ class DurablePerpetualFundingAuthority:
         owns the original visibility and evidence-observation boundaries.
         """
 
+        self._require_bound_financial_authority()
         DurableProviderEconomicBook.refresh(self.economic_book)
         journal_sequence = JournalStore.current_journal_sequence(self.store)
         observed_cut = observation.observed_at

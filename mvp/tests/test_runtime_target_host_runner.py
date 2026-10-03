@@ -439,6 +439,48 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             self.assertEqual(HostileOperationKey.calls, 0)
             self.assertEqual(journal.current_journal_sequence(), before)
 
+    def test_input_budget_spec_rejects_executable_state_keys_before_guard_dispatch(self):
+        class HostileSpecKey(str):
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return super().__hash__()
+
+            def __eq__(self, other):
+                type(self).calls += 1
+                return super().__eq__(other)
+
+            def __lt__(self, other):
+                type(self).calls += 1
+                return super().__lt__(other)
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            hostile_key = HostileSpecKey("callback-poison")
+
+            def poison_input_spec_keys() -> None:
+                spec.__dict__[hostile_key] = 1
+                HostileSpecKey.calls = 0
+
+            with self.assertRaisesRegex(
+                RuntimeTargetHostRunnerError,
+                "input RuntimeBudgetSpec state changed during campaign callback",
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": lambda: append_expected(journal, "fin-1")},
+                    clock=clock,
+                    research=(("poison-budget-spec-keys", poison_input_spec_keys),),
+                )
+
+            self.assertEqual(HostileSpecKey.calls, 0)
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_research_callback_cannot_mutate_input_budget_spec_instance(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

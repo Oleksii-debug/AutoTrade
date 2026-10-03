@@ -98,19 +98,12 @@ def _verify_artifact(
     expected_metadata: Mapping[str, object],
     name: str,
 ) -> str:
-    # Settlement evidence can release durable capital.  Do not accept a
-    # caller-polymorphic ArtifactStore at this financial boundary: a subclass
-    # could manufacture self-consistent manifest/body evidence.  The canonical
-    # class is already root-fenced by the WP-06 artifact authority.
     if type(artifact_store) is not ArtifactStore:
-        raise SettlementConflict(f"{name} requires canonical ArtifactStore")
+        raise SettlementConflict(f"{name} requires trusted ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
     try:
-        # One authenticated snapshot is the complete storage observation for
-        # this decision.  Calling the class method deliberately avoids virtual
-        # dispatch after the exact-type fence above.
         manifest, raw = ArtifactStore.read_authenticated_snapshot(
             artifact_store,
             artifact_id,
@@ -135,6 +128,7 @@ def _verify_artifact(
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,

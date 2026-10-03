@@ -1,6 +1,6 @@
 # AutoTrade — canonical contracts
 
-Contract baseline `autotrade.contracts/1.0.0`. Normative design, not production source. JSON Schema 2020-12 plus OpenAPI 3.1 are the implementation artifacts to commit first. C# and Python/TypeScript bindings are generated from the same schemas; examples are not alternative schemas.
+Contract baseline `autotrade.contracts/6.0.0`. Normative design, not production source. JSON Schema 2020-12 plus OpenAPI 3.1 are the implementation artifacts to commit first. C# and Python/TypeScript bindings are generated from the same schemas; examples are not alternative schemas.
 
 ## 1. Common types and compatibility
 
@@ -34,7 +34,7 @@ Only VERIFIED and unexpired evidence can authorize the relevant action. Refresh 
 
 `InformationEvent`: `information_id`, `source_id`, `source_event_at?`, `published_at`, `available_at`, `ingested_at`, `revision`, `supersedes?`, `entities[]`, `claims[]`, `content_hash`, `rights_id`, `trust_features`, `language`, `evidence[]`. Store disagreements as claims from separate sources. A revised macro series does not replace its historical vintages.
 
-`DatasetManifest`: `dataset_id`, `version`, `content_hashes[]`, `instrument_universe_version`, `calendar_version`, `coverage`, `availability_policy`, `revision_policy`, `normalization_version`, `adjustment_policy`, `rights`, `missingness_report`, `source_evidence[]`, `created_at`. Frozen experiments reference a manifest digest, not a folder name that can later change.
+`DatasetManifest`: `dataset_id`, `version`, `content_hashes[]`, `instrument_universe_version`, `calendar_version`, `coverage`, `availability_policy`, `revision_policy`, `normalization_version`, `adjustment_policy`, `rights`, `missingness_report`, non-empty `source_evidence[]`, `created_at`. Contract 6.0.0 makes at least one canonical `EvidenceRef` mandatory so a schema-valid dataset cannot claim a historical/data authority surface with no retained source evidence; consumers may impose stricter role/digest relationships for their own qualified use without extending the manifest shape. Frozen experiments reference a manifest digest, not a folder name that can later change.
 
 ## 5. Decisions and portfolio targets
 

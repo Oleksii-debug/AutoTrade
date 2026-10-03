@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import weakref
 import unittest
 
 from mvp.autotrade_mvp.replay import (
@@ -102,6 +103,36 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
+
+    def test_runtime_trust_registries_expose_no_removal_callbacks(self):
+        replay = CausalReplay(
+            [_event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        components = _components()
+
+        def trusted_cut():
+            return "cut:trusted", replay.checkpoint(), components
+
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=trusted_cut,
+        )
+        verifier = _trusted_verifier()
+
+        authority_callbacks = [
+            item.__callback__
+            for item in weakref.getweakrefs(authority)
+            if item.__callback__ is not None
+        ]
+        verifier_callbacks = [
+            item.__callback__
+            for item in weakref.getweakrefs(verifier)
+            if item.__callback__ is not None
+        ]
+        self.assertEqual(authority_callbacks, [])
+        self.assertEqual(verifier_callbacks, [])
 
     def test_trusted_verifier_binding_is_one_shot(self):
         events = [_event(1, "2026-09-24T10:00:00Z", 1)]

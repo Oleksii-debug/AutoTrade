@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import threading
+import weakref
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from weakref import WeakKeyDictionary
 
 
 class ReplayError(ValueError):
@@ -199,8 +200,41 @@ RuntimeStateSignatureVerifier = Callable[[bytes, str], bool]
 
 
 def _runtime_authority_state_operations():
-    authority_states = WeakKeyDictionary()
-    verifier_states = WeakKeyDictionary()
+    # Deliberately avoid WeakKeyDictionary here. Its key weakrefs carry a
+    # caller-discoverable removal callback; invoking that callback manually can
+    # erase a live one-shot trust binding and make explicit __init__ re-entry
+    # look like first composition. Callback-free weakrefs preserve fail-closed
+    # identity while still allowing dead object ids to be reclaimed lazily.
+    authority_states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            str,
+            RuntimeStateSigner,
+            RuntimeStateCutResolver,
+        ],
+    ] = {}
+    verifier_states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            str,
+            str,
+            RuntimeStateSignatureVerifier,
+        ],
+    ] = {}
+    state_lock = threading.RLock()
+
+    def authority_state(
+        authority: "RuntimeStateAuthority",
+    ) -> tuple[str, RuntimeStateSigner, RuntimeStateCutResolver]:
+        with state_lock:
+            state = authority_states.get(id(authority))
+        if state is None or state[0]() is not authority:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            )
+        return state[1], state[2], state[3]
 
     def register_authority(
         authority: "RuntimeStateAuthority",
@@ -208,38 +242,38 @@ def _runtime_authority_state_operations():
         signer: RuntimeStateSigner,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
-        if authority in authority_states:
-            raise ReplayError(
-                "runtime state authority composition is already initialized"
+        object_id = id(authority)
+        with state_lock:
+            current = authority_states.get(object_id)
+            if current is not None:
+                current_authority = current[0]()
+                if current_authority is authority:
+                    raise ReplayError(
+                        "runtime state authority composition is already initialized"
+                    )
+                if current_authority is not None:
+                    raise ReplayError(
+                        "runtime state authority binding identity collision"
+                    )
+                authority_states.pop(object_id, None)
+            authority_states[object_id] = (
+                weakref.ref(authority),
+                authority_id,
+                signer,
+                cut_resolver,
             )
-        authority_states[authority] = (authority_id, signer, cut_resolver)
 
     def authority_id(authority: "RuntimeStateAuthority") -> str:
-        try:
-            return authority_states[authority][0]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
+        return authority_state(authority)[0]
 
     def resolve_cut(
         authority: "RuntimeStateAuthority",
     ) -> tuple[str, "ReplayCheckpoint", Mapping[str, str]]:
-        try:
-            resolver = authority_states[authority][2]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
+        resolver = authority_state(authority)[2]
         return resolver()
 
     def sign(authority: "RuntimeStateAuthority", material: bytes) -> str:
-        try:
-            signer = authority_states[authority][1]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
+        signer = authority_state(authority)[1]
         try:
             signature = signer(material)
         except Exception as error:
@@ -249,49 +283,56 @@ def _runtime_authority_state_operations():
             field="runtime authority signature",
         )
 
+    def verifier_state(
+        verifier: "RuntimeStateVerifier",
+    ) -> tuple[str, str, RuntimeStateSignatureVerifier]:
+        with state_lock:
+            state = verifier_states.get(id(verifier))
+        if state is None or state[0]() is not verifier:
+            raise ReplayError(
+                "runtime state verifier process state is unavailable"
+            )
+        return state[1], state[2], state[3]
+
     def register_verifier(
         verifier: "RuntimeStateVerifier",
         authority_id_value: str,
         verifier_id_value: str,
         verify_signature: RuntimeStateSignatureVerifier,
     ) -> None:
-        if verifier in verifier_states:
-            raise ReplayError(
-                "runtime state verifier composition is already initialized"
+        object_id = id(verifier)
+        with state_lock:
+            current = verifier_states.get(object_id)
+            if current is not None:
+                current_verifier = current[0]()
+                if current_verifier is verifier:
+                    raise ReplayError(
+                        "runtime state verifier composition is already initialized"
+                    )
+                if current_verifier is not None:
+                    raise ReplayError(
+                        "runtime state verifier binding identity collision"
+                    )
+                verifier_states.pop(object_id, None)
+            verifier_states[object_id] = (
+                weakref.ref(verifier),
+                authority_id_value,
+                verifier_id_value,
+                verify_signature,
             )
-        verifier_states[verifier] = (
-            authority_id_value,
-            verifier_id_value,
-            verify_signature,
-        )
 
     def verifier_authority_id(verifier: "RuntimeStateVerifier") -> str:
-        try:
-            return verifier_states[verifier][0]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state verifier process state is unavailable"
-            ) from error
+        return verifier_state(verifier)[0]
 
     def verifier_id(verifier: "RuntimeStateVerifier") -> str:
-        try:
-            return verifier_states[verifier][1]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state verifier process state is unavailable"
-            ) from error
+        return verifier_state(verifier)[1]
 
     def verify_signature(
         verifier: "RuntimeStateVerifier",
         material: bytes,
         signature: str,
     ) -> None:
-        try:
-            verify = verifier_states[verifier][2]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state verifier process state is unavailable"
-            ) from error
+        verify = verifier_state(verifier)[2]
         signature = _signature_hex(
             signature,
             field="runtime authority signature",

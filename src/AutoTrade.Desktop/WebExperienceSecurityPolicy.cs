@@ -26,17 +26,27 @@ public sealed class WebExperienceSecurityPolicy
     /// AutoTrade host origin. External schemes, hosts and ports stay outside
     /// the trusted desktop surface.
     /// </summary>
-    public bool AllowsTopLevelNavigation(Uri target) =>
-        IsSameHostOrigin(target);
+    public bool AllowsTopLevelNavigation(Uri target)
+    {
+        if (!IsSameHostOrigin(target) || !string.IsNullOrEmpty(target.Query))
+        {
+            return false;
+        }
+
+        return target.AbsolutePath is "/" or "/index.html";
+    }
 
     /// <summary>
     /// Session/actor headers may be attached only to canonical versioned Host API
     /// requests on the exact paired host origin. Static assets and all other
     /// origins must remain credential-free.
     /// </summary>
-    public bool AllowsSessionHeaderForwarding(Uri target)
+    public bool AllowsSessionHeaderForwarding(
+        Uri target,
+        Uri topLevelDocument)
     {
-        if (!IsSameHostOrigin(target))
+        if (!AllowsTopLevelNavigation(topLevelDocument)
+            || !IsSameHostOrigin(target))
         {
             return false;
         }

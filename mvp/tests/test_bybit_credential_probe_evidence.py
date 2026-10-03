@@ -786,6 +786,69 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     response=response,
                 )
 
+    def test_wire_response_consumes_provider_payload_into_scrubbed_digest(self):
+        raw_api_key = "WIRE-RAW-API-KEY-MUST-NOT-SURVIVE"
+        payload = {
+            "retCode": 10003,
+            "retMsg": "invalid",
+            "result": {
+                "apiKey": raw_api_key,
+                "permissions": {"ContractTrade": ["Order"]},
+            },
+        }
+        wire_response = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response=payload,
+        )
+        digest = wire_response.response_sha256
+
+        payload["retCode"] = 0
+        payload["result"]["apiKey"] = "mutated-after-wire"
+
+        self.assertFalse(hasattr(wire_response, "response"))
+        self.assertNotIn(raw_api_key, repr(wire_response))
+        self.assertNotIn("permissions", repr(wire_response))
+        self.assertEqual(wire_response.ret_code, 10003)
+        self.assertEqual(wire_response.response_sha256, digest)
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+
+    def test_clock_callback_cannot_rewrite_scrubbed_wire_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+            payload = {
+                "retCode": 10003,
+                "retMsg": "invalid",
+                "result": {"marker": "wire-observation"},
+            }
+            wire_response = BybitCredentialProbeWireResponse(
+                http_status=200,
+                response=payload,
+            )
+            expected_digest = wire_response.response_sha256
+
+            def wire_query(**kwargs):
+                del kwargs
+                return wire_response
+
+            def mutating_clock():
+                payload["retCode"] = 0
+                payload["result"]["marker"] = "rewritten-by-clock"
+                return datetime(2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc)
+
+            evidence = _probe(
+                vault=vault,
+                handle=handle,
+                wire_query=wire_query,
+                clock_utc=mutating_clock,
+            )
+
+            self.assertEqual(evidence.ret_code, 10003)
+            self.assertEqual(evidence.response_sha256, expected_digest)
+            self.assertIs(
+                evidence.classification,
+                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+            )
+
     def test_shared_wire_probe_builds_exact_empty_query_get_request(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
@@ -901,6 +964,32 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         )
         for body in bodies:
             with self.subTest(body=body):
+                client = _FakeProbeWireClient(
+                    BybitCredentialProbeRawHttpResponse(
+                        http_status=200,
+                        body=body,
+                    )
+                )
+                with self.assertRaises(ProviderCoreError):
+                    execute_bybit_credential_probe_wire_query(
+                        source_uri="https://api.bybit.com/v5/user/query-api",
+                        headers=_wire_headers(),
+                        timeout_seconds=15,
+                        wire_client=client,
+                    )
+                self.assertEqual(len(client.requests), 1)
+
+    def test_shared_wire_json_depth_and_large_integer_fail_closed(self):
+        deep_body = (
+            b'{"retCode":0,"nested":'
+            + (b"[" * 80)
+            + b"0"
+            + (b"]" * 80)
+            + b"}"
+        )
+        large_integer_body = b'{"retCode":' + (b"9" * 5000) + b"}"
+        for body in (deep_body, large_integer_body):
+            with self.subTest(length=len(body)):
                 client = _FakeProbeWireClient(
                     BybitCredentialProbeRawHttpResponse(
                         http_status=200,

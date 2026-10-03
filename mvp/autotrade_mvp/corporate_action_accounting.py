@@ -31,7 +31,13 @@ from .corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_activity_accounting import DurableProviderEconomicBook
 
 
@@ -471,8 +477,10 @@ def commit_authoritative_corporate_action(
     qualified host clock/scheduler boundary.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    store_identity = require_exact_journal_store_authority(
+        store,
+        subject="corporate-action financial JournalStore",
+    )
     if not isinstance(evidence_store, DurableCorporateActionEvidenceStore):
         raise TypeError(
             "evidence_store must be DurableCorporateActionEvidenceStore"
@@ -568,7 +576,8 @@ def commit_authoritative_corporate_action(
 
     # Fresh economic authority must be derived from one durable global journal
     # cut and CAS that exact cut at commit.
-    source_journal_sequence = store.current_journal_sequence()
+    with journal_store_authority_scope(store, store_identity):
+        source_journal_sequence = JournalStore.current_journal_sequence(store)
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
@@ -690,20 +699,22 @@ def commit_authoritative_corporate_action(
         accepted.provenance_digest,
     )
     try:
-        _, inserted, _ = store.commit_command(
-            command_id=command_id,
-            actor="corporate-action-financial-integration",
-            environment=accepted.environment,
-            idempotency_key=idempotency_key,
-            request=request,
-            result=result,
-            state_version=max(
-                evidence_plan.aggregate_version,
-                0 if economic_plan is None else economic_plan.aggregate_version,
-            ),
-            events=events,
-            expected_journal_sequence=source_journal_sequence,
-        )
+        with journal_store_authority_scope(store, store_identity):
+            _, inserted, _ = JournalStore.commit_command(
+                store,
+                command_id=command_id,
+                actor="corporate-action-financial-integration",
+                environment=accepted.environment,
+                idempotency_key=idempotency_key,
+                request=request,
+                result=result,
+                state_version=max(
+                    evidence_plan.aggregate_version,
+                    0 if economic_plan is None else economic_plan.aggregate_version,
+                ),
+                events=events,
+                expected_journal_sequence=source_journal_sequence,
+            )
     except Exception:
         economic_book.refresh()
         raise

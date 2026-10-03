@@ -131,3 +131,17 @@ jobs:
           tests.Control.test_reconvergence_integrity_security_regressions
           tests.Control.test_reconvergence_workflow_authority
           -v
+      - name: Reverify event base is still live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          live_base="$(
+            git ls-remote --refs origin \
+              "refs/heads/${BASE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test -n "${live_base}"
+          test "${live_base}" = "${BASE_SHA}"

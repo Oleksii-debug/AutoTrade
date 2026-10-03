@@ -14,6 +14,7 @@ from mvp.autotrade_mvp import (
     runtime_target_host_measurement_authority as measurement_authority,
 )
 from mvp.autotrade_mvp.runtime_target_host_durable_financial_authority import (
+    _build_module_authority_guard,
     _build_release_bound_durable_financial_authority,
     bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement,
 )
@@ -37,6 +38,9 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         parent = Mock()
         expected = object()
         mechanics = Mock(return_value=expected)
+        measurement_guard = Mock()
+        parent_guard = Mock()
+        durable_guard = Mock()
 
         binder = _build_release_bound_durable_financial_authority(
             measurement_type=Measurement,
@@ -46,6 +50,9 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
             parent_collector=parent,
             parent_error_types=(ValueError,),
             durable_binder=mechanics,
+            measurement_dependency_guard=measurement_guard,
+            parent_dependency_guard=parent_guard,
+            durable_dependency_guard=durable_guard,
         )
 
         result = binder(
@@ -60,8 +67,11 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         )
 
         self.assertIs(result, expected)
+        measurement_guard.assert_called_once_with()
         snapshotter.assert_called_once_with(current)
+        parent_guard.assert_called_once_with()
         parent.assert_called_once()
+        durable_guard.assert_called_once_with()
         mechanics.assert_called_once()
 
     def test_invalid_release_identity_fails_before_parent_or_mechanics(self) -> None:
@@ -179,6 +189,68 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         forged_snapshotter.assert_not_called()
         forged_parent.assert_not_called()
         forged_mechanics.assert_not_called()
+
+
+    def test_module_guard_rejects_root_code_replacement(self) -> None:
+        class DurableError(Exception):
+            pass
+
+        def root():
+            return 1
+
+        def forged():
+            return 2
+
+        guard = _build_module_authority_guard(
+            root=root,
+            error_type=DurableError,
+            label="root",
+        )
+        original_code = root.__code__
+        try:
+            root.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                DurableError,
+                "root sealed executable changed",
+            ):
+                guard()
+        finally:
+            root.__code__ = original_code
+
+        guard()
+
+    def test_production_guards_reject_transitive_module_global_rebinds(self) -> None:
+        closure = getclosurevars(
+            bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement
+        ).nonlocals
+        measurement_guard = closure["measurement_dependency_guard"]
+        parent_guard = closure["parent_dependency_guard"]
+        durable_guard = closure["durable_dependency_guard"]
+
+        with patch.object(measurement_module, "_text", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "target-host measurement snapshotter sealed dependency changed",
+            ):
+                measurement_guard()
+
+        with patch.object(measurement_authority, "_canonical_uuid", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "release-bound target-host evidence collector sealed dependency changed",
+            ):
+                parent_guard()
+
+        with patch.object(durable, "_text", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "durable-financial binder sealed dependency changed",
+            ):
+                durable_guard()
+
+        measurement_guard()
+        parent_guard()
+        durable_guard()
 
 
 if __name__ == "__main__":

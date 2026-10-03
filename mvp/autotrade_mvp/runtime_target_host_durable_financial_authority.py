@@ -11,6 +11,7 @@ authority, trading authority, profitability, or economic edge.
 
 from __future__ import annotations
 
+from types import FunctionType
 from uuid import UUID
 
 from .performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
@@ -31,6 +32,126 @@ from .runtime_target_host_measurement_authority import (
 )
 
 
+
+def _build_module_authority_guard(*, root, error_type, label: str):
+    """Freeze one callable's same-module executable dependency graph.
+
+    Capturing a function object alone does not freeze names resolved through its
+    module globals. This guard snapshots the root code object, every same-module
+    function reachable through executable globals, executable methods on
+    same-module classes, and every global binding those functions resolve.
+    Runtime qualification fails closed if any captured edge is rebound.
+    """
+
+    if type(root) is not FunctionType:
+        raise TypeError("root must be an exact Python function")
+    if type(label) is not str or not label:
+        raise TypeError("label must be non-empty exact text")
+
+    module_name = root.__module__
+    missing = object()
+    function_states = []
+    global_bindings = []
+    class_bindings = []
+    seen_functions = set()
+    seen_classes = set()
+    seen_globals = set()
+    seen_class_bindings = set()
+
+    def visit_function(function):
+        if type(function) is not FunctionType or function.__module__ != module_name:
+            return
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+
+        kwdefaults = function.__kwdefaults__
+        frozen_kwdefaults = None if kwdefaults is None else dict(kwdefaults)
+        function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                frozen_kwdefaults,
+            )
+        )
+
+        namespace = function.__globals__
+        for name in function.__code__.co_names:
+            if name not in namespace:
+                continue
+            expected = namespace[name]
+            key = (id(namespace), name)
+            if key not in seen_globals:
+                seen_globals.add(key)
+                global_bindings.append((namespace, name, expected))
+            if type(expected) is FunctionType and expected.__module__ == module_name:
+                visit_function(expected)
+            elif isinstance(expected, type) and expected.__module__ == module_name:
+                visit_class(expected)
+
+    def visit_class(cls):
+        identity = id(cls)
+        if identity in seen_classes:
+            return
+        seen_classes.add(identity)
+
+        for name, raw in cls.__dict__.items():
+            functions = ()
+            if type(raw) is FunctionType:
+                functions = (raw,)
+            elif isinstance(raw, staticmethod):
+                functions = (raw.__func__,)
+            elif isinstance(raw, classmethod):
+                functions = (raw.__func__,)
+            elif isinstance(raw, property):
+                functions = tuple(
+                    function
+                    for function in (raw.fget, raw.fset, raw.fdel)
+                    if function is not None
+                )
+            else:
+                continue
+
+            key = (id(cls), name)
+            if key not in seen_class_bindings:
+                seen_class_bindings.add(key)
+                class_bindings.append((cls, name, raw))
+            for function in functions:
+                visit_function(function)
+
+    visit_function(root)
+
+    frozen_function_states = tuple(function_states)
+    frozen_global_bindings = tuple(global_bindings)
+    frozen_class_bindings = tuple(class_bindings)
+
+    def require_intact():
+        for function, code, defaults, kwdefaults in frozen_function_states:
+            if function.__code__ is not code or function.__defaults__ is not defaults:
+                raise error_type(f"{label} sealed executable changed")
+            current_kwdefaults = function.__kwdefaults__
+            if kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise error_type(f"{label} sealed defaults changed")
+            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                raise error_type(f"{label} sealed defaults changed")
+
+        for namespace, name, expected in frozen_global_bindings:
+            if namespace.get(name, missing) is not expected:
+                raise error_type(f"{label} sealed dependency changed: {name}")
+
+        for cls, name, expected in frozen_class_bindings:
+            if cls.__dict__.get(name, missing) is not expected:
+                raise error_type(
+                    f"{label} sealed class executable changed: "
+                    f"{cls.__name__}.{name}"
+                )
+
+    return require_intact
+
+
 def _build_release_bound_durable_financial_authority(
     *,
     measurement_type,
@@ -40,6 +161,9 @@ def _build_release_bound_durable_financial_authority(
     parent_collector,
     parent_error_types,
     durable_binder,
+    measurement_dependency_guard=None,
+    parent_dependency_guard=None,
+    durable_dependency_guard=None,
 ):
     """Build one release-bound binder with immutable direct dependency captures."""
 
@@ -78,6 +202,8 @@ def _build_release_bound_durable_financial_authority(
     ) -> DurableTargetHostFinancialBinding:
         if type(measurement) is not measurement_type:
             raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
+        if measurement_dependency_guard is not None:
+            measurement_dependency_guard()
         measurement_authority = measurement_snapshotter(measurement)
         frozen_release_artifact_id = canonical_uuid(
             expected_release_artifact_id,
@@ -99,6 +225,8 @@ def _build_release_bound_durable_financial_authority(
                 "target-host measurement belongs to another delivered release digest"
             )
 
+        if parent_dependency_guard is not None:
+            parent_dependency_guard()
         try:
             parent_collector(
                 journal=store,
@@ -112,6 +240,8 @@ def _build_release_bound_durable_financial_authority(
         except parent_error_types as error:
             raise durable_error_type(str(error)) from error
 
+        if durable_dependency_guard is not None:
+            durable_dependency_guard()
         return durable_binder(
             store,
             spec,
@@ -120,6 +250,24 @@ def _build_release_bound_durable_financial_authority(
         )
 
     return bind
+
+
+
+_PRODUCTION_MEASUREMENT_SNAPSHOT_GUARD = _build_module_authority_guard(
+    root=snapshot_target_host_measurement,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="target-host measurement snapshotter",
+)
+_PRODUCTION_PARENT_EVIDENCE_GUARD = _build_module_authority_guard(
+    root=collect_release_bound_target_host_evidence,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="release-bound target-host evidence collector",
+)
+_PRODUCTION_DURABLE_BINDER_GUARD = _build_module_authority_guard(
+    root=bind_durable_financial_latency_to_target_host_measurement,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="durable-financial binder",
+)
 
 
 bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement = (
@@ -131,5 +279,8 @@ bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement =
         parent_collector=collect_release_bound_target_host_evidence,
         parent_error_types=(RuntimeTargetHostMeasurementError, RuntimeBudgetError),
         durable_binder=bind_durable_financial_latency_to_target_host_measurement,
+        measurement_dependency_guard=_PRODUCTION_MEASUREMENT_SNAPSHOT_GUARD,
+        parent_dependency_guard=_PRODUCTION_PARENT_EVIDENCE_GUARD,
+        durable_dependency_guard=_PRODUCTION_DURABLE_BINDER_GUARD,
     )
 )

@@ -2,8 +2,10 @@
 
 This module captures only stable runtime/host facts already used by the WP-65
 load campaign. It does not create qualification, chronology, release, provider,
-or trading authority. In particular, it records no local wall-clock timestamp:
-terminal chronology is a separate independently authenticated boundary.
+or trading authority. In particular, the raw payload records no local wall-clock
+timestamp: terminal chronology is a separate independently authenticated boundary.
+ArtifactStore may retain its own publication timestamp as storage metadata; that
+timestamp is not target-host chronology evidence.
 """
 
 from __future__ import annotations
@@ -15,15 +17,19 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from autotrade_runtime.artifacts import ArtifactStore
 from .runtime_load_campaign import capture_runtime_host_identity
 
 
 SCHEMA_VERSION = "1.0.0"
 EVIDENCE_TYPE = "AUTOTRADE_RUNTIME_TARGET_HOST_INVENTORY"
+RAW_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_INVENTORY_RAW"
 COLLECTOR_ID = "autotrade-runtime-target-host-inventory"
 COLLECTOR_VERSION = "1.0.0"
+JSON_MEDIA_TYPE = "application/json"
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HOST_IDENTITY_KEYS = frozenset(
     {
         "system",
@@ -67,6 +73,15 @@ def _digest(value: object, *, name: str) -> str:
     if _SHA256_RE.fullmatch(text) is None:
         raise RuntimeTargetHostInventoryError(
             f"{name} must be canonical sha256:<64 lowercase hex>"
+        )
+    return text
+
+
+def _source_sha(value: object) -> str:
+    text = _text(value, name="expected_source_sha")
+    if _GIT_SHA_RE.fullmatch(text) is None:
+        raise RuntimeTargetHostInventoryError(
+            "expected_source_sha must be a lowercase 40-character Git SHA"
         )
     return text
 
@@ -219,6 +234,15 @@ class RuntimeTargetHostInventory:
         return inventory
 
 
+@dataclass(frozen=True, slots=True)
+class PublishedRuntimeTargetHostInventory:
+    artifact_id: str
+    payload_sha256: str
+    host_fingerprint: str
+    collector_id: str
+    collector_version: str
+
+
 def collect_runtime_target_host_inventory(
     *,
     expected_host_fingerprint: str,
@@ -238,4 +262,60 @@ def collect_runtime_target_host_inventory(
     return RuntimeTargetHostInventory(
         host_identity=identity,
         host_fingerprint=observed,
+    )
+
+
+def publish_runtime_target_host_inventory(
+    evidence_store: ArtifactStore,
+    *,
+    artifact_id: str,
+    expected_source_sha: str,
+    expected_host_fingerprint: str,
+) -> PublishedRuntimeTargetHostInventory:
+    """Capture and immutably retain raw inventory for later signed provenance.
+
+    Publication creates no qualification authority. The immutable manifest's
+    created_at field is storage metadata only and must never substitute for the
+    independently authenticated RELEASE_RUNTIME chronology required by terminal
+    WP-65 qualification.
+    """
+
+    if type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be exact ArtifactStore")
+    source_sha = _source_sha(expected_source_sha)
+    inventory = collect_runtime_target_host_inventory(
+        expected_host_fingerprint=expected_host_fingerprint,
+    )
+    raw = inventory.canonical_bytes()
+    manifest = evidence_store.publish_bytes(
+        artifact_id=artifact_id,
+        data=raw,
+        media_type=JSON_MEDIA_TYPE,
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{source_sha}"],
+        metadata={
+            "evidence_kind": RAW_EVIDENCE_KIND,
+            "collector_id": inventory.collector_id,
+            "collector_version": inventory.collector_version,
+            "host_fingerprint": inventory.host_fingerprint,
+        },
+    )
+    if manifest.get("artifact_id") != artifact_id:
+        raise RuntimeTargetHostInventoryError(
+            "retained inventory artifact identity changed during publication"
+        )
+    if manifest.get("sha256") != inventory.payload_sha256:
+        raise RuntimeTargetHostInventoryError(
+            "retained inventory digest changed during publication"
+        )
+    if manifest.get("media_type") != JSON_MEDIA_TYPE:
+        raise RuntimeTargetHostInventoryError(
+            "retained inventory media type changed during publication"
+        )
+    return PublishedRuntimeTargetHostInventory(
+        artifact_id=artifact_id,
+        payload_sha256=inventory.payload_sha256,
+        host_fingerprint=inventory.host_fingerprint,
+        collector_id=inventory.collector_id,
+        collector_version=inventory.collector_version,
     )

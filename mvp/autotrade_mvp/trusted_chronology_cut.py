@@ -986,39 +986,92 @@ def prepare_durable_chronology_challenge(
         )
 
 
+def _measurement_requirement_from_parts(
+    challenge: ChronologyChallenge,
+    *,
+    measurement_sha256: object,
+    external_authority_id: object,
+    external_protocol_id: object,
+    external_protocol_version: object,
+    external_response_id: object,
+    utc_lower_bound: object,
+    utc_upper_bound: object,
+) -> str:
+    """Derive one canonical signed chronology subject from durable inert parts."""
+
+    challenge = _snapshot_challenge(challenge)
+    measurement_sha256 = _digest(
+        measurement_sha256,
+        name="measurement_sha256",
+    )
+    external_authority_id = _token(
+        external_authority_id,
+        name="external_authority_id",
+    )
+    external_protocol_id = _token(
+        external_protocol_id,
+        name="external_protocol_id",
+    )
+    external_protocol_version = _token(
+        external_protocol_version,
+        name="external_protocol_version",
+    )
+    external_response_id = _token(
+        external_response_id,
+        name="external_response_id",
+    )
+    lower_text, lower = _instant(
+        utc_lower_bound,
+        name="utc_lower_bound",
+    )
+    upper_text, upper = _instant(
+        utc_upper_bound,
+        name="utc_upper_bound",
+    )
+    if upper < lower:
+        raise TrustedChronologyError(
+            "trusted chronology measurement UTC interval is reversed"
+        )
+    subject = {
+        "challenge": challenge.canonical_payload(),
+        "challenge_digest": challenge.challenge_digest,
+        "external_authority_id": external_authority_id,
+        "external_protocol_id": external_protocol_id,
+        "external_protocol_version": external_protocol_version,
+        "external_response_id": external_response_id,
+        "limits": _limits_payload(),
+        "measurement_sha256": measurement_sha256,
+        "utc_lower_bound": lower_text,
+        "utc_upper_bound": upper_text,
+    }
+    return _DYNAMIC_REQUIREMENT_PREFIX + sha256(
+        _canonical_json_bytes(subject)
+    ).hexdigest()
+
+
 def _measurement_requirement_for_challenge(
     challenge: ChronologyChallenge,
     measurement_bytes: bytes,
 ) -> str:
     """Derive the signed subject from one canonical challenge and raw measurement."""
 
-    if type(challenge) is not ChronologyChallenge:
-        raise TypeError("challenge must be exact ChronologyChallenge")
-    challenge = _challenge_from_payload(
-        challenge.canonical_payload(),
-        expected_digest=challenge.challenge_digest,
-    )
+    challenge = _snapshot_challenge(challenge)
     if type(measurement_bytes) is not bytes:
         raise TypeError("measurement_bytes must be exact bytes")
     transcript = parse_challenge_bound_measurement(
         measurement_bytes,
         challenge=challenge,
     )
-    subject = {
-        "challenge": challenge.canonical_payload(),
-        "challenge_digest": challenge.challenge_digest,
-        "external_authority_id": transcript.authority_id,
-        "external_protocol_id": transcript.protocol_id,
-        "external_protocol_version": transcript.protocol_version,
-        "external_response_id": transcript.response_id,
-        "limits": _limits_payload(),
-        "measurement_sha256": "sha256:" + sha256(measurement_bytes).hexdigest(),
-        "utc_lower_bound": transcript.utc_lower_bound,
-        "utc_upper_bound": transcript.utc_upper_bound,
-    }
-    return _DYNAMIC_REQUIREMENT_PREFIX + sha256(
-        _canonical_json_bytes(subject)
-    ).hexdigest()
+    return _measurement_requirement_from_parts(
+        challenge,
+        measurement_sha256="sha256:" + sha256(measurement_bytes).hexdigest(),
+        external_authority_id=transcript.authority_id,
+        external_protocol_id=transcript.protocol_id,
+        external_protocol_version=transcript.protocol_version,
+        external_response_id=transcript.response_id,
+        utc_lower_bound=transcript.utc_lower_bound,
+        utc_upper_bound=transcript.utc_upper_bound,
+    )
 
 
 def chronology_measurement_requirement(
@@ -1722,6 +1775,28 @@ def _validated_aggregate(
         )
     cut = _cut_from_event(events[1])
     _require_cut_challenge_binding(challenge, cut)
+    expected_requirement = _measurement_requirement_from_parts(
+        challenge,
+        measurement_sha256=accepted_payload.get("measurement_sha256"),
+        external_authority_id=accepted_payload.get("external_authority_id"),
+        external_protocol_id=accepted_payload.get("external_protocol_id"),
+        external_protocol_version=accepted_payload.get(
+            "external_protocol_version"
+        ),
+        external_response_id=accepted_payload.get("external_response_id"),
+        utc_lower_bound=accepted_payload.get("utc_lower_bound"),
+        utc_upper_bound=accepted_payload.get("utc_upper_bound"),
+    )
+    if (
+        _token(
+            accepted_payload.get("measurement_requirement_id"),
+            name="measurement_requirement_id",
+        )
+        != expected_requirement
+    ):
+        raise TrustedChronologyError(
+            "trusted chronology measurement requirement differs from durable subject"
+        )
     return challenge, cut, accepted_payload
 
 

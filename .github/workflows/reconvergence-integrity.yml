@@ -163,6 +163,25 @@ jobs:
               "tests/Control/test_reconvergence_integrity_security_regressions.py",
               "tests/Control/test_reconvergence_workflow_authority.py",
           }
+          frozen_authority_paths = {
+              "control/__init__.py",
+              "control/tools/__init__.py",
+              "control/tools/registry_state.py",
+              "Directory.Build.props",
+              "Directory.Build.targets",
+              "global.json",
+              "requirements-dev.txt",
+              "contracts/fixtures/common-scalars.corpus.json",
+              "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+              "tests/Contracts.DotNet/Program.cs",
+              "tests/Desktop.Client/Desktop.Client.csproj",
+              "tests/Desktop.Client/Program.cs",
+              "tools/baseline.py",
+              "tools/build_provenance_manifest.py",
+              "tools/check_nvda_qualification.py",
+              "tools/verify.py",
+              "tools/write_ci_evidence.py",
+          }
           base_sha = os.environ["BASE_SHA"]
           changed = {
               line
@@ -184,6 +203,23 @@ jobs:
           }
           for path in changed:
               canonical_path(path)
+          other_authority = {
+              path
+              for path in changed
+              if (
+                  (
+                      path.startswith(".github/workflows/")
+                      and path not in bootstrap_paths
+                  )
+                  or path in frozen_authority_paths
+              )
+          }
+          if other_authority:
+              raise RuntimeError(
+                  "non-bootstrap trust authority is frozen until terminal guard "
+                  "integration: " + ", ".join(sorted(other_authority))
+              )
+
           sensitive = changed.intersection(bootstrap_paths)
           approved_set = set(approved)
           if sensitive:
@@ -346,6 +382,25 @@ jobs:
               "tests/Control/test_reconvergence_integrity_security_regressions.py",
               "tests/Control/test_reconvergence_workflow_authority.py",
           }
+          frozen_authority_paths = {
+              "control/__init__.py",
+              "control/tools/__init__.py",
+              "control/tools/registry_state.py",
+              "Directory.Build.props",
+              "Directory.Build.targets",
+              "global.json",
+              "requirements-dev.txt",
+              "contracts/fixtures/common-scalars.corpus.json",
+              "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+              "tests/Contracts.DotNet/Program.cs",
+              "tests/Desktop.Client/Desktop.Client.csproj",
+              "tests/Desktop.Client/Program.cs",
+              "tools/baseline.py",
+              "tools/build_provenance_manifest.py",
+              "tools/check_nvda_qualification.py",
+              "tools/verify.py",
+              "tools/write_ci_evidence.py",
+          }
           base_sha = os.environ["BASE_SHA"]
           changed = {
               line
@@ -367,6 +422,23 @@ jobs:
           }
           for path in changed:
               canonical_path(path)
+          other_authority = {
+              path
+              for path in changed
+              if (
+                  (
+                      path.startswith(".github/workflows/")
+                      and path not in bootstrap_paths
+                  )
+                  or path in frozen_authority_paths
+              )
+          }
+          if other_authority:
+              raise RuntimeError(
+                  "non-bootstrap trust authority is frozen until terminal guard "
+                  "integration: " + ", ".join(sorted(other_authority))
+              )
+
           sensitive = changed.intersection(bootstrap_paths)
           approved_set = set(approved)
           if sensitive:

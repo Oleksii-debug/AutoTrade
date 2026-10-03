@@ -204,6 +204,18 @@ def _require_prestart_cut(
         raise ValueError("canonical simulation bootstrap prefix is not contiguous")
     if JournalStore.current_journal_sequence(store) != 1 + len(events):
         raise ValueError("state directory contains foreign durable journal authority")
+    counts = JournalStore.whole_store_state_counts(store)
+    expected_counts = {
+        "events": 1 + len(events),
+        "outbox": len(events),
+        "command_dedupe": 1 if economic_events else 0,
+        "projection_checkpoints": 0,
+        "global_projection_checkpoints": 0,
+    }
+    if counts != expected_counts:
+        raise ValueError(
+            "canonical simulation bootstrap durable state is not exact"
+        )
 
 
 def _deliver_event(store: JournalStore, event_id: str, *, topic: str) -> None:

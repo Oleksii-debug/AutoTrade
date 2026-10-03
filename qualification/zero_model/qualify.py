@@ -288,6 +288,7 @@ def qualify(source_sha: str) -> dict[str, object]:
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
             "observed_source_sha": source_sha,
+            "source_checkout_clean": True,
             "qualifier_sha256": qualifier_sha256,
             "model_route": {
                 "status": route.status.value,

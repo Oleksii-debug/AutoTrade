@@ -107,7 +107,8 @@ def format_accessible_status(
     if state == "needs_recovery":
         lines.append("Action required: recovery or reconciliation is needed before trusting current state")
 
-    if status.get("state_format") == "canonical_journal":
+    state_format = _safe_text(status.get("state_format"), "")
+    if state_format == "canonical_journal":
         lines.extend([
             f"Episode: {_value(status, 'episode_id')}",
             f"Session outcome: {_value(status, 'session_status')}",
@@ -196,7 +197,11 @@ def format_accessible_status(
                     f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
                 ]
             )
-            if economic_report.get("valuation_status") == "MARK_UNAVAILABLE":
+            valuation_status = _safe_text(
+                economic_report.get("valuation_status"),
+                "",
+            )
+            if valuation_status == "MARK_UNAVAILABLE":
                 lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
 
     lines.append("Economic edge: unproven")

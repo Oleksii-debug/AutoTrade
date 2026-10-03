@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -101,6 +101,14 @@ class FeaturePoint:
             _time(self.decision_time, name="decision_time"),
         )
         object.__setattr__(self, "value", _decimal(self.value, name="value"))
+        if isinstance(self.input_ids, (str, bytes)) or not isinstance(
+            self.input_ids, tuple
+        ):
+            raise ValueError("input_ids must be a tuple")
+        if isinstance(self.source_revisions, (str, bytes)) or not isinstance(
+            self.source_revisions, tuple
+        ):
+            raise ValueError("source_revisions must be a tuple")
         input_ids = tuple(_text(value, name="input_id") for value in self.input_ids)
         revisions = tuple(
             _text(value, name="source_revision") for value in self.source_revisions
@@ -199,6 +207,9 @@ class LabelPoint:
         object.__setattr__(self, "provenance_hash", provenance)
 
 
+_NORMALIZER_FIT_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class Normalizer:
     mean: Decimal
@@ -206,6 +217,39 @@ class Normalizer:
     fit_cutoff: datetime
     fit_input_ids: tuple[str, ...]
     provenance_hash: str
+    _fit_token: InitVar[object | None] = None
+
+    def __post_init__(self, _fit_token: object | None) -> None:
+        if _fit_token is not _NORMALIZER_FIT_TOKEN:
+            raise ValueError(
+                "Normalizer must come from canonical causal fit_normalizer"
+            )
+        mean = _decimal(self.mean, name="mean")
+        scale = _decimal(self.scale, name="scale")
+        if scale <= 0:
+            raise ValueError("normalizer scale must be positive")
+        cutoff = _time(self.fit_cutoff, name="fit_cutoff")
+        if isinstance(self.fit_input_ids, (str, bytes)) or not isinstance(
+            self.fit_input_ids, tuple
+        ):
+            raise ValueError("fit_input_ids must be a tuple")
+        input_ids = tuple(
+            _text(value, name="fit_input_id") for value in self.fit_input_ids
+        )
+        if not input_ids:
+            raise ValueError("Normalizer requires at least one fit_input_id")
+        provenance = _text(self.provenance_hash, name="provenance_hash")
+        if not provenance.startswith("sha256:") or len(provenance) != 71:
+            raise ValueError("provenance_hash must be sha256:<64 hex>")
+        try:
+            int(provenance[7:], 16)
+        except ValueError as error:
+            raise ValueError("provenance_hash must be sha256:<64 hex>") from error
+        object.__setattr__(self, "mean", mean)
+        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "fit_cutoff", cutoff)
+        object.__setattr__(self, "fit_input_ids", input_ids)
+        object.__setattr__(self, "provenance_hash", provenance)
 
     def transform(self, value) -> Decimal:
         item = _decimal(value, name="value")
@@ -313,12 +357,17 @@ def fit_normalizer(
     *,
     fit_cutoff: datetime,
 ) -> Normalizer:
+    if any(not isinstance(point, FeaturePoint) for point in feature_points):
+        raise TypeError("feature_points must contain FeaturePoint values")
     cutoff = _time(fit_cutoff, name="fit_cutoff")
     eligible = [point for point in feature_points if point.decision_time <= cutoff]
     if not eligible:
         raise ValueError("no feature points are available at fit_cutoff")
     if len(eligible) != len(feature_points):
         raise ValueError("normalizer fit input contains observations after fit_cutoff")
+    feature_names = {point.feature_name for point in eligible}
+    if len(feature_names) != 1:
+        raise ValueError("normalizer fit cannot mix different feature_name values")
     values = [point.value for point in eligible]
     mean = sum(values, Decimal("0")) / Decimal(len(values))
     variance = sum(((value - mean) ** 2 for value in values), Decimal("0")) / Decimal(len(values))
@@ -347,6 +396,7 @@ def fit_normalizer(
         fit_cutoff=cutoff,
         fit_input_ids=ids,
         provenance_hash=digest,
+        _fit_token=_NORMALIZER_FIT_TOKEN,
     )
 
 
@@ -510,9 +560,23 @@ def require_universe_members(
     *,
     decision_time: datetime,
 ) -> Mapping[str, SourceValue]:
+    if isinstance(required_symbols, (str, bytes)) or not isinstance(
+        required_symbols, Sequence
+    ):
+        raise ValueError("required_symbols must be a sequence of symbol strings")
+    normalized_symbols = tuple(
+        _text(symbol, name="required_symbol") for symbol in required_symbols
+    )
+    if not normalized_symbols:
+        raise ValueError("required_symbols must be non-empty")
+    if len(set(normalized_symbols)) != len(normalized_symbols):
+        raise ValueError("required_symbols contains duplicates")
     cutoff = _time(decision_time, name="decision_time")
+    population = tuple(observations)
+    if any(not isinstance(item, SourceValue) for item in population):
+        raise TypeError("observations must contain SourceValue values")
     by_symbol: dict[str, list[SourceValue]] = {}
-    for item in observations:
+    for item in population:
         if item.available_at <= cutoff:
             by_symbol.setdefault(item.symbol, []).append(item)
 
@@ -543,10 +607,10 @@ def require_universe_members(
             contemporaneous,
             key=lambda item: item.observation_id,
         )
-    missing = [symbol for symbol in required_symbols if symbol not in latest]
+    missing = [symbol for symbol in normalized_symbols if symbol not in latest]
     if missing:
         raise ValueError("missing required universe members: " + ", ".join(sorted(missing)))
-    return {symbol: latest[symbol] for symbol in required_symbols}
+    return {symbol: latest[symbol] for symbol in normalized_symbols}
 
 
 
@@ -652,6 +716,32 @@ class CausalFold:
         ).hexdigest()
 
 
+def _fold_training_feature_points(
+    feature_points: Sequence[FeaturePoint],
+    *,
+    fold: CausalFold,
+    feature_name: str,
+) -> tuple[FeaturePoint, ...]:
+    if not isinstance(fold, CausalFold):
+        raise TypeError("fold must be CausalFold")
+    if any(not isinstance(point, FeaturePoint) for point in feature_points):
+        raise TypeError("feature_points must contain FeaturePoint values")
+    name = _text(feature_name, name="feature_name")
+    selected = tuple(
+        point
+        for point in feature_points
+        if point.feature_name == name
+        and fold.train_start
+        <= point.decision_time
+        <= fold.training_information_cutoff
+    )
+    if len(selected) < 2:
+        raise ValueError(
+            "at least two purged training feature points are required"
+        )
+    return selected
+
+
 @dataclass(frozen=True)
 class FoldNormalizer:
     fold_id: str
@@ -665,6 +755,7 @@ class FoldNormalizer:
         point: FeaturePoint,
         *,
         fold: CausalFold,
+        feature_points: Sequence[FeaturePoint],
     ) -> Decimal:
         if fold.fold_id != self.fold_id or fold.fingerprint != self.fold_fingerprint:
             raise ValueError("normalizer was fitted for a different fold")
@@ -676,7 +767,29 @@ class FoldNormalizer:
             <= fold.validation_end
         ):
             raise ValueError("validation feature lies outside the frozen fold")
-        return self.normalizer.transform(point.value)
+
+        # A Python construction sentinel is only an accidental-misuse guard.
+        # It is not scientific authority: an in-process caller can import it.
+        # Re-derive the fit from the canonical population at the downstream use
+        # boundary and require every fitted field/lineage digest to match.
+        selected = _fold_training_feature_points(
+            feature_points,
+            fold=fold,
+            feature_name=self.feature_name,
+        )
+        if len(selected) != self.training_point_count:
+            raise ValueError(
+                "normalizer training_point_count does not match canonical training population"
+            )
+        canonical = fit_normalizer(
+            selected,
+            fit_cutoff=fold.training_information_cutoff,
+        )
+        if canonical != self.normalizer:
+            raise ValueError(
+                "normalizer does not match canonical training population"
+            )
+        return canonical.transform(point.value)
 
 
 def fit_fold_normalizer(
@@ -692,21 +805,12 @@ def fit_fold_normalizer(
     the fitted mean/scale.
     """
 
-    if not isinstance(fold, CausalFold):
-        raise TypeError("fold must be CausalFold")
     name = _text(feature_name, name="feature_name")
-    selected = [
-        point
-        for point in feature_points
-        if point.feature_name == name
-        and fold.train_start
-        <= point.decision_time
-        <= fold.training_information_cutoff
-    ]
-    if len(selected) < 2:
-        raise ValueError(
-            "at least two purged training feature points are required"
-        )
+    selected = _fold_training_feature_points(
+        feature_points,
+        fold=fold,
+        feature_name=name,
+    )
     normalizer = fit_normalizer(
         selected,
         fit_cutoff=fold.training_information_cutoff,

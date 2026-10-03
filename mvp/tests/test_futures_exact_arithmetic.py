@@ -261,6 +261,78 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                 )
         self.assertEqual(outputs, [expected] * len(outputs))
 
+    def test_vm_authority_rejects_polymorphic_state_and_settlement_before_dispatch(self):
+        contract = self._contract()
+        settlement = self._settlement(
+            contract,
+            settlement_id="authority-vm",
+            price="2",
+        )
+        state_calls = []
+
+        class HostileState(VariationMarginState):
+            def __getattribute__(self, name):
+                if name in {
+                    "contract",
+                    "settlement_scope",
+                    "settlement_history",
+                    "signed_contracts",
+                    "last_settlement_price",
+                    "cumulative_variation_margin",
+                }:
+                    state_calls.append(name)
+                return super().__getattribute__(name)
+
+        hostile_state = HostileState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("1"),
+            settlement_scope=self._scope(),
+        )
+        state_calls.clear()
+        with self.assertRaisesRegex(FuturesError, "linear variation-margin state"):
+            apply_variation_margin(hostile_state, settlement)
+        self.assertEqual(state_calls, [])
+
+        evidence_calls = []
+
+        class HostileSettlement(FuturesSettlementEvidence):
+            def __getattribute__(self, name):
+                if name in {
+                    "settlement_id",
+                    "observation_id",
+                    "instrument_id",
+                    "instrument_version",
+                    "scope",
+                    "settlement_price",
+                }:
+                    evidence_calls.append(name)
+                return super().__getattribute__(name)
+
+        hostile_settlement = HostileSettlement(
+            settlement_id=settlement.settlement_id,
+            observation_id=settlement.observation_id,
+            instrument_id=settlement.instrument_id,
+            instrument_version=settlement.instrument_version,
+            scope=settlement.scope,
+            effective_at=settlement.effective_at,
+            sequence=settlement.sequence,
+            revision=settlement.revision,
+            settlement_price=settlement.settlement_price,
+            price_currency=settlement.price_currency,
+            settlement_currency=settlement.settlement_currency,
+        )
+        evidence_calls.clear()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("1"),
+            settlement_scope=self._scope(),
+        )
+        with self.assertRaisesRegex(FuturesError, "immutable FuturesSettlementEvidence"):
+            apply_variation_margin(opening, hostile_settlement)
+        self.assertEqual(evidence_calls, [])
+
     def test_settlement_rounding_policy_rejects_polymorphic_string(self):
         calls = []
 

@@ -38,3 +38,30 @@ Publication creates persistent hidden `.lock` sidecars next to bundle, digest an
 This lineage is still not a qualified installer or updater. Terminal WP-50 still requires the final converged runtime/host composition; one selected and pinned installer/update technology; generation and qualified signing of installer and executable artifacts; prerequisites; executable migration/update/rollback orchestration through WP-48/WP-49; clean Windows 11 install/update/interrupted-update/rollback/uninstall matrices; split-brain fencing; durable-state preserve/delete-choice semantics; final supply-chain trust; and real keyboard/NVDA evidence bound to the delivered signed artifact digest and exact internal source SHA.
 
 WP-50 must consume a release candidate accepted by the canonical release/trust authority; it must not self-authorize a structurally plausible FROZEN manifest. Until those gates pass, these artifacts remain implementation foundations rather than release qualification.
+
+
+## Selected Velopack + Artifact Signing candidate
+
+The current WP-50 successor selects the repository-pinned Velopack CLI as the
+single installer/update packaging candidate and Azure Artifact Signing as the
+single production Authenticode backend. This is a source-level selection, not
+release qualification.
+
+`packaging/windows/authenticode-policy.json` remains deliberately disabled.
+Enabling it requires a separately reviewed real Artifact Signing account,
+certificate profile, credential/RBAC boundary and exact regional endpoint.
+Signer policy is loaded from the exact release Git object through a reviewed
+absolute system Git executable with replacement/config injection disabled; a
+mutable checkout policy is not signer authority.
+
+Before publication, signed Setup, packaged `AutoTrade.Desktop.exe`, packaged
+`Update.exe` and the exact full package remain inside the verification
+boundary. Windows reparse points, symlinks/special files, hard-link aliases,
+identity drift and digest drift are rejected at the relevant file-admission
+boundaries.
+
+Even a valid Authenticode result remains
+`AUTHENTICODE_VERIFIED_REQUIRES_WP64`: it grants no trading authority and does
+not replace WP-64 independent trust, target Windows install/update/rollback
+evidence, recovery qualification, or keyboard/NVDA qualification on the same
+delivered artifact.

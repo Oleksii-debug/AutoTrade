@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
 from mvp.autotrade_mvp.whitebit import (
+    WhiteBitAdapterError,
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
     prepare_order_request,
@@ -55,6 +56,133 @@ def non_admitting_capability() -> CapabilitySnapshot:
 
 
 class WhiteBitMarketRuleAuthorityTests(unittest.TestCase):
+    def test_direct_market_rules_enforce_canonical_financial_invariants(self):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "step_size must be positive"):
+            WhiteBitMarketRules(
+                market="BTC_USDT",
+                market_type="SPOT",
+                is_tradfi_futures=False,
+                is_collateral=False,
+                trades_enabled=True,
+                step_size=Decimal("0"),
+                tick_size=Decimal("1"),
+                min_amount=Decimal("1"),
+                min_total=Decimal("1"),
+                max_total=Decimal("1000"),
+                delisted_at=None,
+            )
+
+        with self.assertRaisesRegex(WhiteBitAdapterError, "must be boolean"):
+            WhiteBitMarketRules(
+                market="BTC_USDT",
+                market_type="SPOT",
+                is_tradfi_futures=False,
+                is_collateral=1,
+                trades_enabled=True,
+                step_size=Decimal("1"),
+                tick_size=Decimal("1"),
+                min_amount=Decimal("1"),
+                min_total=Decimal("1"),
+                max_total=Decimal("1000"),
+                delisted_at=None,
+            )
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "is_tradfi_futures must be true exactly",
+        ):
+            WhiteBitMarketRules(
+                market="RIVN_PERP",
+                market_type="TRADFIFUTURES",
+                is_tradfi_futures=False,
+                is_collateral=False,
+                trades_enabled=True,
+                step_size=Decimal("1"),
+                tick_size=Decimal("1"),
+                min_amount=Decimal("1"),
+                min_total=Decimal("1"),
+                max_total=None,
+                delisted_at=None,
+            )
+
+    def test_provider_market_rules_reject_mapping_subclass_before_virtual_reads(self):
+        calls = []
+
+        class HostilePayload(dict):
+            def __getitem__(self, key):
+                calls.append(key)
+                if key == "tradesEnabled":
+                    return True
+                return super().__getitem__(key)
+
+        payload = HostilePayload(
+            {
+                "name": "BTC_USDT",
+                "type": "SPOT",
+                "isTradFiFutures": False,
+                "isCollateral": False,
+                "tradesEnabled": False,
+                "stepSize": "1",
+                "tickSize": "1",
+                "minAmount": "1",
+                "minTotal": "1",
+                "maxTotal": "1000",
+                "delistedAt": None,
+            }
+        )
+        with self.assertRaises(TypeError):
+            WhiteBitMarketRules.from_provider(payload)
+        self.assertEqual(calls, [])
+
+    def test_prepare_rejects_market_rule_subclass_before_virtual_fields(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="1",
+            price="10",
+        )
+        calls = []
+
+        class HostileRules(WhiteBitMarketRules):
+            def __getattribute__(self, name):
+                if name in {
+                    "market",
+                    "market_type",
+                    "trades_enabled",
+                    "step_size",
+                    "tick_size",
+                }:
+                    calls.append(name)
+                return super().__getattribute__(name)
+
+        rules = HostileRules(
+            market="BTC_USDT",
+            market_type="SPOT",
+            is_tradfi_futures=False,
+            is_collateral=False,
+            trades_enabled=True,
+            step_size=Decimal("1"),
+            tick_size=Decimal("1"),
+            min_amount=Decimal("1"),
+            min_total=Decimal("1"),
+            max_total=Decimal("1000"),
+            delisted_at=None,
+        )
+        with self.assertRaises(TypeError):
+            prepare_order_request(
+                intent,
+                client_order_id="cid-1",
+                account_id="account-1",
+                environment="PAPER",
+                capability=non_admitting_capability(),
+                market_rules=rules,
+                at=NOW,
+            )
+        self.assertEqual(calls, [])
+
     def test_market_rule_subclass_cannot_virtualize_provider_admission(self):
         intent = WhiteBitOrderIntent.create(
             instrument_version="BTC_USDT:v1",

@@ -46,8 +46,17 @@ class ZeroModelQualificationTests(unittest.TestCase):
 
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()
-        evidence = qualify(observed)
+        with patch(
+            "qualification.zero_model.qualify._require_exact_checkout",
+            wraps=_require_exact_checkout,
+        ) as exact_checkout:
+            evidence = qualify(observed)
 
+        self.assertEqual(exact_checkout.call_count, 2)
+        self.assertEqual(
+            [entry.args for entry in exact_checkout.call_args_list],
+            [(observed,), (observed,)],
+        )
         self.assertEqual(evidence["qualification"], "WP-62_ZERO_MODEL_FOUNDATION")
         self.assertEqual(
             evidence["execution_platform"],

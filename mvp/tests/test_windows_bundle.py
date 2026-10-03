@@ -250,6 +250,23 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             )
         self.assertFalse((self.root / "uppercase-provenance.zip").exists())
 
+    def test_composition_source_sha_must_be_canonical_lowercase(self):
+        composition = self.composition(source_sha=SOURCE_SHA.upper())
+        with self.assertRaisesRegex(
+            BundleError,
+            "composition source_sha must be an exact 40-character lowercase Git SHA",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-composition.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=composition,
+            )
+        self.assertFalse((self.root / "uppercase-composition.zip").exists())
+
     def test_diagnostics_bundle_is_byte_reproducible(self):
         provenance = self.provenance(eligible=False)
         first = self.root / "first.zip"

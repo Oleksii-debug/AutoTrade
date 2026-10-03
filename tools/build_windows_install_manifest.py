@@ -8,7 +8,7 @@ policies instead of trusting an arbitrary staging directory.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 import json
 import os
@@ -275,23 +275,32 @@ def _open_stable_regular_file(path: Path, *, name: str):
 
     if sys.platform == "win32":
         candidate = Path(os.path.abspath(os.fspath(path)))
+        authority_stack = ExitStack()
         try:
-            with retain_windows_parent_namespace(
-                candidate,
-                create=False,
-            ) as parent_authority:
-                with retain_windows_regular_file(
+            parent_authority = authority_stack.enter_context(
+                retain_windows_parent_namespace(
+                    candidate,
+                    create=False,
+                )
+            )
+            descriptor = authority_stack.enter_context(
+                retain_windows_regular_file(
                     parent_authority,
                     target_name=candidate.name,
                     subject=name,
-                ) as descriptor:
-                    with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                        _assert_open_file_identity(candidate, stream, name=name)
-                        yield stream
+                )
+            )
+            stream = authority_stack.enter_context(
+                os.fdopen(descriptor, "rb", closefd=False)
+            )
+            _assert_open_file_identity(candidate, stream, name=name)
         except (OSError, RuntimeError, TypeError) as error:
+            authority_stack.close()
             raise InstallerManifestError(
                 f"{name} retained Windows namespace authority failed"
             ) from error
+        with authority_stack:
+            yield stream
         return
 
     try:

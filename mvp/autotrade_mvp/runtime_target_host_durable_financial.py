@@ -23,7 +23,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .performance_qualification import RuntimeBudgetSpec
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 from .runtime_load_measurement import (
     DurableFinancialLatencySample,
     load_declared_financial_latency_samples,
@@ -310,16 +314,51 @@ def bind_durable_financial_latency_to_target_host_measurement(
             "target-host measurement host conflicts with runtime budget"
         )
 
-    declared_plan = load_declared_runtime_event_plan(
+    store_identity = require_exact_journal_store_authority(
         store,
-        plan_id=declared_plan_id,
-        spec=spec,
+        subject="runtime qualification JournalStore",
     )
-    durable_samples = load_declared_financial_latency_samples(
-        store,
-        spec,
-        plan_id=declared_plan_id,
-    )
+    # Select one physical JournalStore generation before either durable
+    # projection is read. Nested helper scopes stay defense-in-depth; the
+    # post-read identity and plan-digest checks prevent accepted splices.
+    with journal_store_authority_scope(store, store_identity):
+        declared_plan = load_declared_runtime_event_plan(
+            store,
+            plan_id=declared_plan_id,
+            spec=spec,
+        )
+        if (
+            measurement.journal_store_identity_digest
+            != declared_plan.store_identity_digest
+        ):
+            raise RuntimeTargetHostDurableFinancialError(
+                "target-host measurement belongs to another JournalStore generation"
+            )
+        durable_samples = load_declared_financial_latency_samples(
+            store,
+            spec,
+            plan_id=declared_plan_id,
+        )
+        if (
+            require_exact_journal_store_authority(
+                store,
+                subject="runtime qualification JournalStore",
+            )
+            != store_identity
+        ):
+            raise RuntimeTargetHostDurableFinancialError(
+                "JournalStore generation changed during durable financial binding"
+            )
+
+    for durable in durable_samples:
+        if (
+            durable.plan_id != declared_plan.plan_id
+            or durable.plan_digest != declared_plan.digest
+        ):
+            raise RuntimeTargetHostDurableFinancialError(
+                "durable latency sample plan identity conflicts with declared plan"
+            )
+
     target_samples = measurement.financial_samples
     if len(durable_samples) != len(target_samples):
         raise RuntimeTargetHostDurableFinancialError(
@@ -340,6 +379,15 @@ def bind_durable_financial_latency_to_target_host_measurement(
         if target.journal_sequence != durable.event_journal_sequence:
             raise RuntimeTargetHostDurableFinancialError(
                 "target-host financial journal sequence conflicts with durable latency"
+            )
+        if not (
+            measurement.start_journal_sequence
+            < durable.event_journal_sequence
+            < durable.measurement_journal_sequence
+            <= measurement.end_journal_sequence
+        ):
+            raise RuntimeTargetHostDurableFinancialError(
+                "durable latency dependency lies outside target-host journal cut"
             )
         if target.latency_start_monotonic_ns != durable.monotonic_start_ns or (
             target.latency_end_monotonic_ns != durable.monotonic_end_ns

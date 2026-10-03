@@ -9,6 +9,13 @@ from __future__ import annotations
 
 import json
 
+from autotrade_runtime.strict_json import (
+    DuplicateJsonKeyError,
+    InvalidJsonDomainError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
+)
+
 from .runtime_target_host_durable_financial import (
     DurableFinancialIdentityBinding,
     DurableTargetHostFinancialBinding,
@@ -43,18 +50,6 @@ _IDENTITY_FIELDS = frozenset(
     }
 )
 
-
-def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeTargetHostDurableFinancialError(
-                "durable financial binding contains duplicate JSON object key"
-            )
-        result[key] = value
-    return result
-
-
 def parse_durable_target_host_financial_binding(
     raw: bytes,
 ) -> DurableTargetHostFinancialBinding:
@@ -65,16 +60,25 @@ def parse_durable_target_host_financial_binding(
             "durable financial binding must be non-empty bytes"
         )
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                RuntimeTargetHostDurableFinancialError(
-                    f"durable financial binding contains invalid JSON constant {token}"
-                )
-            ),
-        )
-    except (UnicodeError, json.JSONDecodeError) as error:
+        text = raw.decode("utf-8")
+        value = strict_json_loads(text)
+    except UnicodeError as error:
+        raise RuntimeTargetHostDurableFinancialError(
+            "durable financial binding is not valid UTF-8 JSON"
+        ) from error
+    except DuplicateJsonKeyError as error:
+        raise RuntimeTargetHostDurableFinancialError(
+            "durable financial binding contains duplicate JSON object key"
+        ) from error
+    except NonStandardJsonConstantError as error:
+        raise RuntimeTargetHostDurableFinancialError(
+            "durable financial binding contains invalid JSON constant"
+        ) from error
+    except InvalidJsonDomainError as error:
+        raise RuntimeTargetHostDurableFinancialError(
+            "durable financial binding exceeds bounded JSON domain"
+        ) from error
+    except json.JSONDecodeError as error:
         raise RuntimeTargetHostDurableFinancialError(
             "durable financial binding is not valid UTF-8 JSON"
         ) from error

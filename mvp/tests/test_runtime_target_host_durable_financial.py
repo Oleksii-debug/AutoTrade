@@ -98,6 +98,7 @@ def target_measurement(
     latency_start_ns=1_100_000_000,
     latency_end_ns=1_100_100_000,
     monotonic_clock_id=TARGET_HOST_SHARED_CLOCK_ID,
+    journal_store_identity_digest=None,
 ):
     return TargetHostMeasurementArtifact(
         source_sha=SOURCE,
@@ -110,7 +111,11 @@ def target_measurement(
         workload_profile_hash=WORKLOAD,
         plan_digest=current_plan.digest,
         journal_taxonomy_digest=current_plan.journal_taxonomy_digest,
-        journal_store_identity_digest=cut.journal_store_identity_digest,
+        journal_store_identity_digest=(
+            cut.journal_store_identity_digest
+            if journal_store_identity_digest is None
+            else journal_store_identity_digest
+        ),
         start_journal_sequence=cut.start_journal_sequence,
         end_journal_sequence=end_journal_sequence,
         monotonic_clock_id=monotonic_clock_id,
@@ -223,6 +228,79 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             durable.event_payload_hash,
         )
         self.assertTrue(binding.digest.startswith("sha256:"))
+
+    def test_target_measurement_must_bind_exact_journal_store_generation(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+            journal_store_identity_digest="sha256:" + "9" * 64,
+        )
+        with self._python_313(), self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "another JournalStore generation",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
+
+    def test_cross_generation_latency_sample_splice_is_rejected(self):
+        first = self._prepared()
+        second = self._prepared()
+        first_temporary, store, current_spec, current_plan, cut, declared, durable = first
+        second_temporary, _store2, _spec2, _plan2, _cut2, _declared2, durable2 = second
+        self.addCleanup(first_temporary.cleanup)
+        self.addCleanup(second_temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        with self._python_313(), patch(
+            "mvp.autotrade_mvp.runtime_target_host_durable_financial."
+            "load_declared_financial_latency_samples",
+            return_value=(durable2,),
+        ), self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "plan identity conflicts",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
+
+    def test_post_cut_durable_latency_record_cannot_validate_measurement(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+            end_journal_sequence=durable.event_journal_sequence,
+        )
+        self.assertGreater(
+            durable.measurement_journal_sequence,
+            measurement.end_journal_sequence,
+        )
+        with self._python_313(), self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "outside target-host journal cut",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
 
     def test_python_312_clock_domain_is_rejected_before_journal_read(self):
         with patch(

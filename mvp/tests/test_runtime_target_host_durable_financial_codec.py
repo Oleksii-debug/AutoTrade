@@ -90,6 +90,34 @@ class RuntimeTargetHostDurableFinancialCodecTests(unittest.TestCase):
         ):
             parse_durable_target_host_financial_binding(raw)
 
+    def test_oversized_json_document_is_rejected_before_decode(self):
+        raw = b"[" + (b" " * 1_000_001) + b"]"
+        with self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "bounded JSON domain",
+        ):
+            parse_durable_target_host_financial_binding(raw)
+
+    def test_excessive_json_nesting_is_rejected_before_recursive_decode(self):
+        raw = (b"[" * 129) + b"0" + (b"]" * 129)
+        with self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "bounded JSON domain",
+        ):
+            parse_durable_target_host_financial_binding(raw)
+
+    def test_huge_integer_is_rejected_by_bounded_integer_parser(self):
+        raw = binding().canonical_bytes()
+        raw = raw.replace(
+            b'"event_journal_sequence":7',
+            b'"event_journal_sequence":' + (b"9" * 641),
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "bounded JSON domain",
+        ):
+            parse_durable_target_host_financial_binding(raw)
+
 
 if __name__ == "__main__":
     unittest.main()

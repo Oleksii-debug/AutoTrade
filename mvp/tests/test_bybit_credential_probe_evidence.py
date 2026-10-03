@@ -194,6 +194,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             {"retCode": True},
             {"retCode": _IntSubclass(10003)},
             {"retCode": 10003, "bad": object()},
+            {"retCode": 10003, "bad": ("tuple", "is-not-json")},
+            {"retCode": 10003, "bad": _DictSubclass(value=1)},
+            {"retCode": 10003, "bad": {"nested": _IntSubclass(1)}},
+            {"retCode": 10003, "bad": {1: "non-text-key"}},
             {"retCode": 10003, "bad": math.nan},
         )
         for response in bad_responses:
@@ -201,6 +205,21 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 ProviderCoreError
             ):
                 _capture(response=response)
+
+    def test_exact_json_lists_and_scalars_remain_digestible(self):
+        evidence = _capture(
+            response={
+                "retCode": 10003,
+                "retMsg": "invalid",
+                "result": {
+                    "flags": [True, False, None],
+                    "counts": [0, 1, 2],
+                    "ratio": 1.25,
+                    "labels": ["a", "b"],
+                },
+            }
+        )
+        self.assertRegex(evidence.response_sha256, r"^sha256:[0-9a-f]{64}$")
 
     def test_success_payload_is_scrubbed_to_digest_and_still_accepted(self):
         raw_api_key = "RAW-API-KEY-MUST-NOT-PERSIST"

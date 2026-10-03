@@ -65,6 +65,28 @@ def _utc_text(value: object, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _require_exact_json_data(value: object, *, path: str = "$") -> None:
+    """Reject Python-only or polymorphic values before hashing provider JSON."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return
+    if type(value) is list:
+        for index, item in enumerate(value):
+            _require_exact_json_data(item, path=f"{path}[{index}]")
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ProviderCoreError(
+                    f"Bybit credential probe response key at {path} must be exact text"
+                )
+            _require_exact_json_data(item, path=f"{path}.{key}")
+        return
+    raise ProviderCoreError(
+        f"Bybit credential probe response value at {path} is not exact JSON data"
+    )
+
+
 def _response_digest(response: object) -> tuple[int, str]:
     """Return exact retCode plus a digest without retaining provider payload."""
 
@@ -79,6 +101,7 @@ def _response_digest(response: object) -> tuple[int, str]:
         raise ProviderCoreError(
             "Bybit credential probe retCode must be an exact integer"
         )
+    _require_exact_json_data(response)
     try:
         encoded = json.dumps(
             response,

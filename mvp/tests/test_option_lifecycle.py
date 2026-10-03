@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleConflict,
     OptionLifecycleError,
     OptionLifecycleObservation,
+    canonical_option_lifecycle_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -57,6 +58,7 @@ def option_version(
     quantity_unit: str = "contract",
     quantity_step: str = "1",
     minimum_quantity: str = "1",
+    maximum_quantity: str | None = None,
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
@@ -73,6 +75,9 @@ def option_version(
         price_tick=Decimal("0.01"),
         quantity_step=Decimal(quantity_step),
         minimum_quantity=Decimal(minimum_quantity),
+        maximum_quantity=(
+            None if maximum_quantity is None else Decimal(maximum_quantity)
+        ),
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
         effective_from=effective_from,
@@ -458,27 +463,79 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(self.book.position("ABC"), Decimal("50"))
 
-    def test_ambiguous_non_contract_lifecycle_quantity_unit_fails_closed(self):
+    def test_lifecycle_quantity_does_not_inherit_order_entry_minimum(self):
         registry = InstrumentRegistry(
-            versions=(option_version(quantity_unit="share"),)
+            versions=(
+                option_version(
+                    quantity_step="0.25",
+                    minimum_quantity="1",
+                ),
+            )
         )
         authority = self._authority(
             registry=registry,
             economic_book=self.book,
         )
-        self.seed_option_position("1")
-        before_transactions = tuple(self.book.transactions)
+        self.seed_option_position("0.5")
 
-        with self.assertRaisesRegex(
-            OptionLifecycleError,
-            "ambiguous lifecycle quantity units fail closed",
-        ):
-            authority.apply(self.evidence())
+        result = authority.apply(self.evidence(signed_contracts="0.5"))
 
-        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("50"))
+
+    def test_lifecycle_quantity_does_not_inherit_order_entry_maximum(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="1",
+                    minimum_quantity="1",
+                    maximum_quantity="2",
+                ),
+            )
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("3")
+
+        result = authority.apply(self.evidence(signed_contracts="3"))
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("300"))
+
+    def test_lifecycle_observation_decimal_identity_ignores_ambient_context(self):
+        observation = OptionLifecycleObservation(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            venue_id="OPTIONS",
+            instrument_version=f"{OPTION_ID}@1",
+            external_event_id="identity-context",
+            event_kind="EXERCISE",
+            signed_contracts=Decimal("12345678901234567890.125"),
+            effective_at=utc(12, 18, 19),
+            observed_at=utc(12, 18, 19, 1),
+            raw_evidence_digest="sha256:" + "c" * 64,
+            provider_revision="provider-context-r1",
+            underlying_price=Decimal("98765432109876543210.375"),
+        )
+        payloads = []
+        for precision in (6, 10, 28, 80):
+            with localcontext() as context:
+                context.prec = precision
+                payloads.append(canonical_option_lifecycle_observation(observation))
+
+        self.assertTrue(all(payload == payloads[0] for payload in payloads[1:]))
         self.assertEqual(
-            self.store.load_events("option_lifecycle", authority.aggregate_id),
-            [],
+            payloads[0]["signed_contracts"],
+            "12345678901234567890.125",
+        )
+        self.assertEqual(
+            payloads[0]["underlying_price"],
+            "98765432109876543210.375",
         )
 
     def test_quantity_grid_admission_is_independent_of_ambient_decimal_context(self):

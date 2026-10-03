@@ -143,10 +143,11 @@
           </select>
           <div id="authority-policy-fields" hidden>
             <p>
-              Owner-only policy activation. The account and environment are copied from the
+              Owner-only policy activation. The host, account and environment are copied from the
               current authenticated host snapshot; no browser-authored scope is accepted.
             </p>
             <dl>
+              <dt>Host</dt><dd><output id="authority-policy-host">Unavailable</output></dd>
               <dt>Account</dt><dd><output id="authority-policy-account">Unavailable</output></dd>
               <dt>Environment</dt><dd><output id="authority-policy-environment">Unavailable</output></dd>
             </dl>
@@ -182,7 +183,7 @@
             </label>
             <label>
               <input id="authority-policy-confirm" name="authority_policy_confirm" type="checkbox">
-              I reviewed the exact account, environment, instrument, actions, notional and validity window above.
+              I reviewed the exact host, account, environment, instrument, actions, notional and validity window above.
             </label>
           </div>
           <button id="submit-command" type="submit" disabled>Submit command</button>

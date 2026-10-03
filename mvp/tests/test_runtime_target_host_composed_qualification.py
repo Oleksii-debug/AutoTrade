@@ -90,6 +90,15 @@ def measurement() -> TargetHostMeasurementArtifact:
     )
 
 
+def durable_binding_for(current: TargetHostMeasurementArtifact):
+    return SimpleNamespace(
+        digest=DURABLE,
+        target_host_measurement_digest=current.digest,
+        source_sha=current.source_sha,
+        spec_digest=current.spec_digest,
+    )
+
+
 def accepted_for(
     current: TargetHostMeasurementArtifact,
     *,
@@ -221,6 +230,40 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         durable.assert_called_once()
         signed.assert_not_called()
 
+    def test_durable_binding_substitution_prevents_signed_verifier_dispatch(self):
+        current = measurement()
+        substituted = SimpleNamespace(
+            digest=DURABLE,
+            target_host_measurement_digest=OTHER,
+            source_sha=current.source_sha,
+            spec_digest=current.spec_digest,
+        )
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
+            "bind_release_bound_durable_financial_latency_to_target_host_measurement",
+            return_value=substituted,
+        ), patch(
+            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
+            "verify_runtime_target_host_qualification",
+        ) as signed, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "durable financial binding does not bind canonical target-host measurement",
+        ):
+            verify_composed_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root="unused",
+                journal_store=object(),
+                spec=object(),
+                campaign_plan=object(),
+                campaign_cut=object(),
+                declared_plan_id="plan-1",
+                measurement=current,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        signed.assert_not_called()
+
     def test_signed_opaque_measurement_payload_is_rejected_after_authority_validation(self):
         current = measurement()
         accepted = accepted_for(
@@ -230,7 +273,7 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         with patch(
             "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
             "bind_release_bound_durable_financial_latency_to_target_host_measurement",
-            return_value=SimpleNamespace(digest=DURABLE),
+            return_value=durable_binding_for(current),
         ), patch(
             "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
             "verify_runtime_target_host_qualification",
@@ -259,7 +302,7 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         with patch(
             "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
             "bind_release_bound_durable_financial_latency_to_target_host_measurement",
-            return_value=SimpleNamespace(digest=DURABLE),
+            return_value=durable_binding_for(current),
         ) as durable, patch(
             "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
             "verify_runtime_target_host_qualification",
@@ -316,7 +359,7 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
             snapshotted = kwargs["measurement"]
             self.assertIsNot(snapshotted, current)
             object.__setattr__(current, "configuration_hash", OTHER)
-            return SimpleNamespace(digest=DURABLE)
+            return durable_binding_for(snapshotted)
 
         with patch(
             "mvp.autotrade_mvp.runtime_target_host_composed_qualification."

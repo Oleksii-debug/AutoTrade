@@ -15,7 +15,13 @@ from types import FunctionType
 from uuid import UUID
 
 from .performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
+from .runtime_load_measurement import load_declared_financial_latency_samples
+from .runtime_load_plan import load_declared_runtime_event_plan
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_durable_financial import (
     DurableTargetHostFinancialBinding,
@@ -36,10 +42,11 @@ def _build_module_authority_guard(*, root, error_type, label: str):
     """Freeze one callable's same-module executable dependency graph.
 
     Capturing a function object alone does not freeze names resolved through its
-    module globals. This guard snapshots the root code object, every same-module
-    function reachable through executable globals, executable methods on
-    same-module classes, and every global binding those functions resolve.
-    Runtime qualification fails closed if any captured edge is rebound.
+    module globals or closure cells. This guard snapshots the root code object,
+    every same-module function reachable through executable globals, executable
+    methods on same-module classes, every global binding those functions resolve,
+    and closure-cell identities. Runtime qualification fails closed if any
+    captured edge is rebound.
     """
 
     if type(root) is not FunctionType:
@@ -51,10 +58,12 @@ def _build_module_authority_guard(*, root, error_type, label: str):
     missing = object()
     function_states = []
     global_bindings = []
+    closure_bindings = []
     class_bindings = []
     seen_functions = set()
     seen_classes = set()
     seen_globals = set()
+    seen_closures = set()
     seen_class_bindings = set()
 
     def visit_function(function):
@@ -75,6 +84,19 @@ def _build_module_authority_guard(*, root, error_type, label: str):
                 frozen_kwdefaults,
             )
         )
+
+        closure = function.__closure__
+        if closure is not None:
+            for cell in closure:
+                key = id(cell)
+                if key in seen_closures:
+                    continue
+                seen_closures.add(key)
+                try:
+                    expected = cell.cell_contents
+                except ValueError:
+                    expected = missing
+                closure_bindings.append((cell, expected))
 
         namespace = function.__globals__
         for name in function.__code__.co_names:
@@ -124,6 +146,7 @@ def _build_module_authority_guard(*, root, error_type, label: str):
 
     frozen_function_states = tuple(function_states)
     frozen_global_bindings = tuple(global_bindings)
+    frozen_closure_bindings = tuple(closure_bindings)
     frozen_class_bindings = tuple(class_bindings)
 
     def require_intact():
@@ -140,6 +163,14 @@ def _build_module_authority_guard(*, root, error_type, label: str):
         for namespace, name, expected in frozen_global_bindings:
             if namespace.get(name, missing) is not expected:
                 raise error_type(f"{label} sealed dependency changed: {name}")
+
+        for cell, expected in frozen_closure_bindings:
+            try:
+                current = cell.cell_contents
+            except ValueError:
+                current = missing
+            if current is not expected:
+                raise error_type(f"{label} sealed closure changed")
 
         for cls, name, expected in frozen_class_bindings:
             if cls.__dict__.get(name, missing) is not expected:
@@ -163,8 +194,18 @@ def _build_release_bound_durable_financial_authority(
     measurement_dependency_guard=None,
     parent_dependency_guard=None,
     durable_dependency_guard=None,
+    durable_external_dependency_guards=(),
 ):
     """Build one release-bound binder with immutable direct dependency captures."""
+
+    if type(durable_external_dependency_guards) is not tuple:
+        raise TypeError("durable_external_dependency_guards must be an exact tuple")
+    if any(not callable(guard) for guard in durable_external_dependency_guards):
+        raise TypeError("durable external dependency guards must be callable")
+
+    def require_durable_external_dependencies() -> None:
+        for guard in durable_external_dependency_guards:
+            guard()
 
     def canonical_uuid(value: object, *, name: str) -> str:
         if type(value) is not str or not value or value != value.strip():
@@ -247,12 +288,20 @@ def _build_release_bound_durable_financial_authority(
             measurement_dependency_guard()
         if durable_dependency_guard is not None:
             durable_dependency_guard()
-        return durable_binder(
+        # The durable binder dispatches imported plan/sample loaders and JournalStore
+        # authority helpers. Freeze those external executable graphs immediately
+        # before dispatch, then recheck them before accepting the returned binding.
+        # A loader/helper side effect therefore cannot retarget a later dependency
+        # and still produce an accepted terminal result.
+        require_durable_external_dependencies()
+        result = durable_binder(
             store,
             spec,
             declared_plan_id=declared_plan_id,
             measurement=measurement_authority,
         )
+        require_durable_external_dependencies()
+        return result
 
     return bind
 
@@ -272,6 +321,33 @@ _PRODUCTION_DURABLE_BINDER_GUARD = _build_module_authority_guard(
     error_type=RuntimeTargetHostDurableFinancialError,
     label="durable-financial binder",
 )
+_PRODUCTION_DURABLE_EXTERNAL_DEPENDENCY_GUARDS = (
+    _build_module_authority_guard(
+        root=load_declared_runtime_event_plan,
+        error_type=RuntimeTargetHostDurableFinancialError,
+        label="durable runtime-plan loader",
+    ),
+    _build_module_authority_guard(
+        root=load_declared_financial_latency_samples,
+        error_type=RuntimeTargetHostDurableFinancialError,
+        label="durable latency-sample loader",
+    ),
+    _build_module_authority_guard(
+        root=require_exact_journal_store_authority,
+        error_type=RuntimeTargetHostDurableFinancialError,
+        label="JournalStore authority validator",
+    ),
+    _build_module_authority_guard(
+        root=journal_store_authority_scope,
+        error_type=RuntimeTargetHostDurableFinancialError,
+        label="JournalStore authority scope wrapper",
+    ),
+    _build_module_authority_guard(
+        root=journal_store_authority_scope.__wrapped__,
+        error_type=RuntimeTargetHostDurableFinancialError,
+        label="JournalStore authority scope body",
+    ),
+)
 
 
 bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement = (
@@ -286,5 +362,8 @@ bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement =
         measurement_dependency_guard=_PRODUCTION_MEASUREMENT_SNAPSHOT_GUARD,
         parent_dependency_guard=_PRODUCTION_PARENT_EVIDENCE_GUARD,
         durable_dependency_guard=_PRODUCTION_DURABLE_BINDER_GUARD,
+        durable_external_dependency_guards=(
+            _PRODUCTION_DURABLE_EXTERNAL_DEPENDENCY_GUARDS
+        ),
     )
 )

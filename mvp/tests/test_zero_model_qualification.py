@@ -1,4 +1,5 @@
 from decimal import Decimal
+import os
 from pathlib import Path
 import platform
 from types import SimpleNamespace
@@ -6,10 +7,12 @@ import unittest
 from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
+    _git,
     _observed_source_sha,
     _require_clean_checkout,
     _require_exact_checkout,
     _require_source_sha,
+    _trusted_git_environment,
     qualify,
 )
 
@@ -126,14 +129,69 @@ class ZeroModelQualificationTests(unittest.TestCase):
             _require_exact_checkout(different)
         self.assertEqual(_require_exact_checkout(observed), observed)
 
-    def test_source_identity_is_read_from_qualifier_checkout_root(self):
+    def test_source_identity_is_read_from_exact_qualifier_checkout_root(self):
         expected = "a" * 40
         with patch(
-            "qualification.zero_model.qualify.subprocess.run",
-            return_value=SimpleNamespace(stdout=expected + "\n"),
-        ) as run:
+            "qualification.zero_model.qualify._git",
+            side_effect=(
+                SimpleNamespace(stdout=str(ROOT) + "\n"),
+                SimpleNamespace(stdout=expected + "\n"),
+            ),
+        ) as git:
             self.assertEqual(_observed_source_sha(), expected)
+        self.assertEqual(git.call_args_list[0].args, ("rev-parse", "--show-toplevel"))
+        self.assertEqual(git.call_args_list[1].args, ("rev-parse", "HEAD"))
+
+    def test_parent_repository_cannot_supply_qualifier_source_identity(self):
+        with patch(
+            "qualification.zero_model.qualify._git",
+            return_value=SimpleNamespace(stdout=str(ROOT.parent) + "\n"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exact Git top-level"):
+                _observed_source_sha()
+
+    def test_git_inspection_drops_caller_repository_path_and_config_authority(self):
+        completed = SimpleNamespace(stdout="a" * 40 + "\n")
+        poisoned = {
+            "PATH": str(ROOT / "attacker-bin"),
+            "GIT_DIR": str(ROOT / "attacker.git"),
+            "GIT_WORK_TREE": str(ROOT / "attacker-worktree"),
+            "GIT_CONFIG_GLOBAL": str(ROOT / "attacker.gitconfig"),
+        }
+        with patch.dict(os.environ, poisoned, clear=False):
+            with patch(
+                "qualification.zero_model.qualify._trusted_git_executable",
+                return_value="/usr/bin/git",
+            ), patch(
+                "qualification.zero_model.qualify.subprocess.run",
+                return_value=completed,
+            ) as run:
+                self.assertIs(_git("rev-parse", "HEAD"), completed)
+
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(command[0], "/usr/bin/git")
+        self.assertEqual(command[1:], ["rev-parse", "HEAD"])
         self.assertEqual(run.call_args.kwargs["cwd"], ROOT)
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
+        self.assertNotIn("PATH", environment)
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertNotIn("GIT_WORK_TREE", environment)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+
+    def test_trusted_git_environment_is_minimal(self):
+        environment = _trusted_git_environment()
+        self.assertNotIn("PATH", environment)
+        for forbidden in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            self.assertNotIn(forbidden, environment)
 
     def test_dirty_checkout_cannot_issue_zero_model_qualification(self):
         with patch(

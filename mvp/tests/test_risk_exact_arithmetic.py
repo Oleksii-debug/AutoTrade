@@ -5,6 +5,7 @@ from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskIntent,
     RiskPolicy,
+    RISK_ARITHMETIC_POLICY_ID,
     evaluate_risk,
     risk_decision_fingerprint,
     tail_scenario_set_digest,
@@ -227,6 +228,18 @@ class RiskExactArithmeticTests(unittest.TestCase):
                     self.assertFalse(gross_rule.passed)
                     self.assertFalse(net_rule.passed)
                     self.assertFalse(decision.admitted)
+                    self.assertEqual(
+                        decision.gross_leverage,
+                        Decimal("0.333333333333333334"),
+                    )
+                    self.assertEqual(
+                        gross_rule.observed,
+                        "0.333333333333333334",
+                    )
+                    self.assertEqual(
+                        decision.arithmetic_policy_id,
+                        RISK_ARITHMETIC_POLICY_ID,
+                    )
                     fingerprints.add(risk_decision_fingerprint(decision))
                     observed.add(
                         (
@@ -289,6 +302,14 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 )
                 self.assertFalse(rule.passed)
                 self.assertFalse(decision.admitted)
+                self.assertEqual(
+                    rule.observed,
+                    "0.333333333333333334",
+                )
+                self.assertEqual(
+                    decision.arithmetic_policy_id,
+                    RISK_ARITHMETIC_POLICY_ID,
+                )
                 results.add(
                     (
                         rule.observed,

@@ -516,6 +516,9 @@ def _required_refs(
 def _read_artifact_bytes(
     reader: Callable[[str], tuple[dict[str, object], bytes]],
     ref: EvidenceArtifactRef,
+    *,
+    digest_factory,
+    post_read_authority_guard,
 ) -> bytes:
     try:
         _manifest, raw = reader(ref.artifact_id)
@@ -523,11 +526,12 @@ def _read_artifact_bytes(
         raise RuntimeTargetHostQualificationError(
             "target-host artifact cannot be read with integrity"
         ) from error
+    post_read_authority_guard()
     if type(raw) is not bytes:
         raise RuntimeTargetHostQualificationError(
             "target-host artifact reader returned non-bytes"
         )
-    if "sha256:" + sha256(raw).hexdigest() != ref.sha256:
+    if "sha256:" + digest_factory(raw).hexdigest() != ref.sha256:
         raise RuntimeTargetHostQualificationError(
             "target-host artifact bytes do not match accepted evidence digest"
         )
@@ -540,6 +544,8 @@ def _read_bound_payload(
     *,
     forbidden_artifact_ids: set[str],
     forbidden_sha256: set[str],
+    digest_factory,
+    post_read_authority_guard,
 ) -> bytes:
     if provenance.payload_artifact_id in forbidden_artifact_ids:
         raise RuntimeTargetHostQualificationError(
@@ -555,11 +561,12 @@ def _read_bound_payload(
         raise RuntimeTargetHostQualificationError(
             f"retained raw payload is unavailable for {provenance.evidence_kind}"
         ) from error
+    post_read_authority_guard()
     if type(raw) is not bytes or not raw:
         raise RuntimeTargetHostQualificationError(
             f"retained raw payload is empty or non-bytes for {provenance.evidence_kind}"
         )
-    if "sha256:" + sha256(raw).hexdigest() != provenance.payload_sha256:
+    if "sha256:" + digest_factory(raw).hexdigest() != provenance.payload_sha256:
         raise RuntimeTargetHostQualificationError(
             f"retained raw payload digest mismatch for {provenance.evidence_kind}"
         )
@@ -704,6 +711,7 @@ def verify_runtime_target_host_qualification(
     inventory_payload_verifier = _verify_host_inventory_payload
     canonical_uuid = _uuid
     canonical_digest = _digest
+    digest_factory = sha256
     binding_parser = RuntimeTargetHostBinding.parse
     provenance_parser = RuntimeTargetHostProvenance.parse
     campaign_parser = ParsedRuntimeTargetHostCampaign.parse
@@ -732,9 +740,25 @@ def verify_runtime_target_host_qualification(
             label="target-host strict JSON parser",
         ),
     )
+    read_helper_guards = (
+        _build_module_authority_guard(
+            root=read_artifact_bytes,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host evidence read helper",
+        ),
+        _build_module_authority_guard(
+            root=read_bound_payload,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host retained-payload read helper",
+        ),
+    )
 
     def require_parser_authority() -> None:
         for guard in parser_guards:
+            guard()
+
+    def require_read_helper_authority() -> None:
+        for guard in read_helper_guards:
             guard()
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
@@ -787,6 +811,7 @@ def verify_runtime_target_host_qualification(
         expected_release_artifact_id=release_artifact_id,
         expected_release_artifact_sha256=release_artifact_sha256,
     )
+    require_read_helper_authority()
     require_parser_authority()
     if type(accepted) is not AcceptedQualificationAttestation:
         raise RuntimeTargetHostQualificationError(
@@ -833,10 +858,16 @@ def verify_runtime_target_host_qualification(
         raise RuntimeTargetHostQualificationError(
             "target-host evidence authority cannot be bound"
         ) from error
+    require_read_helper_authority()
     require_parser_authority()
 
     binding_ref = refs[BINDING_EVIDENCE_KIND]
-    binding_raw = read_artifact_bytes(reader, binding_ref)
+    binding_raw = read_artifact_bytes(
+        reader,
+        binding_ref,
+        digest_factory=digest_factory,
+        post_read_authority_guard=require_read_helper_authority,
+    )
     require_parser_authority()
     binding = binding_parser(binding_raw)
     require_parser_authority()
@@ -876,7 +907,12 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host binding does not match {kind} artifact"
             )
-        provenance_raw = read_artifact_bytes(reader, ref)
+        provenance_raw = read_artifact_bytes(
+            reader,
+            ref,
+            digest_factory=digest_factory,
+            post_read_authority_guard=require_read_helper_authority,
+        )
         require_parser_authority()
         provenance = provenance_parser(provenance_raw)
         require_parser_authority()
@@ -897,6 +933,8 @@ def verify_runtime_target_host_qualification(
             forbidden_sha256=(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
+            digest_factory=digest_factory,
+            post_read_authority_guard=require_read_helper_authority,
         )
         require_parser_authority()
         if kind == CAMPAIGN_EVIDENCE_KIND:
@@ -925,6 +963,7 @@ def verify_runtime_target_host_qualification(
         payload_digest_by_kind[kind] = provenance.payload_sha256
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
+    require_read_helper_authority()
     require_parser_authority()
     return AcceptedRuntimeTargetHostQualification(
         attestation_id=attestation_id,

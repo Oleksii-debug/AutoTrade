@@ -182,6 +182,8 @@ def _require_cross_binding(
     qualification: AcceptedComposedRuntimeTargetHostQualification,
     chronology: TrustedChronologyCut,
     *,
+    receipt_attestation_id: str,
+    receipt_attestation_digest: str,
     source_sha: str,
     journal_store_identity_digest: str,
     measurement_digest: str,
@@ -205,6 +207,12 @@ def _require_cross_binding(
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
     bindings = (
+        ("attestation id", accepted.attestation_id, receipt_attestation_id),
+        (
+            "attestation digest",
+            accepted.attestation_digest,
+            receipt_attestation_digest,
+        ),
         ("source SHA", accepted.source_sha, source_sha),
         (
             "release artifact id",
@@ -274,6 +282,14 @@ def verify_chronology_bound_runtime_target_host_qualification(
     measurement_authority = _snapshot_measurement(measurement)
     measurement_for_verifier = _snapshot_measurement(measurement_authority)
 
+    receipt_attestation_id = _exact_text(
+        receipt_authority.attestation.attestation_id,
+        name="signed qualification attestation_id",
+    )
+    receipt_attestation_digest = _exact_text(
+        receipt_authority.attestation.content_digest,
+        name="signed qualification attestation digest",
+    )
     completed_at = _exact_text(
         receipt_authority.attestation.completed_at,
         name="signed qualification completed_at",
@@ -339,6 +355,8 @@ def verify_chronology_bound_runtime_target_host_qualification(
     _require_cross_binding(
         qualification,
         chronology,
+        receipt_attestation_id=receipt_attestation_id,
+        receipt_attestation_digest=receipt_attestation_digest,
         source_sha=source_sha,
         journal_store_identity_digest=journal_store_identity_digest,
         measurement_digest=measurement_digest,
@@ -366,6 +384,8 @@ def verify_chronology_bound_runtime_target_host_qualification(
     _require_cross_binding(
         qualification,
         final_chronology,
+        receipt_attestation_id=receipt_attestation_id,
+        receipt_attestation_digest=receipt_attestation_digest,
         source_sha=source_sha,
         journal_store_identity_digest=journal_store_identity_digest,
         measurement_digest=measurement_digest,

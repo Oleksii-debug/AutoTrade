@@ -1095,7 +1095,7 @@ class SecurityBoundaryTests(unittest.TestCase):
 
         self.assertEqual(
             redacted,
-            {"[REDACTED:KEY]": "must-not-be-retained-under-failed-key"},
+            {"[REDACTED:KEY]": "[REDACTED]"},
         )
 
     def test_diagnostic_redaction_preserves_synthetic_key_collisions(self):

@@ -309,7 +309,12 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("--pull-request-event", workflow)
-        self.assertNotIn("--allowed-scope", workflow)
+        self.assertNotIn("github.event.pull_request.body", workflow)
+        self.assertNotIn("github.event.pull_request.title", workflow)
+        self.assertIn("author_association", workflow)
+        self.assertIn('"OWNER"', workflow)
+        self.assertIn("issues/{pr_number}/comments", workflow)
+        self.assertIn('args+=(--allowed-scope "$scope")', workflow)
         self.assertNotIn("edited", workflow)
 
 

@@ -336,6 +336,35 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_replace_budget_transitive_dependency(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            namespace = runner_module.evaluate_runtime_budget.__globals__
+            original = namespace["nearest_rank_percentile"]
+
+            def poison_budget_dependency() -> None:
+                namespace["nearest_rank_percentile"] = lambda *_args, **_kwargs: 0
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "budget evaluator global dependency changed.*nearest_rank_percentile",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget-dependency", poison_budget_dependency),),
+                    )
+            finally:
+                namespace["nearest_rank_percentile"] = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_financial_operation_cannot_replace_latency_clock_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

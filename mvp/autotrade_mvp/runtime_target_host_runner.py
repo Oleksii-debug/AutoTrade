@@ -160,27 +160,94 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
     return value
 
 
-def _callable_authority_state(
-    value: object,
-) -> tuple[
+def _callable_authority_state(value: object) -> tuple[
     object,
-    object | None,
-    object | None,
-    object | None,
-    tuple[tuple[object, object], ...] | None,
+    tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+    tuple[tuple[dict[str, object], str, object], ...],
+    tuple[tuple[object, bool, object | None], ...],
 ]:
-    """Capture exact executable state for a callback-adjacent authority callable."""
+    """Capture callback-adjacent callable plus first-party transitive dependencies."""
 
     target = value.__func__ if type(value) is MethodType else value
     if type(target) is not FunctionType:
-        return (target, None, None, None, None)
-    kwdefaults = target.__kwdefaults__
+        return (target, (), (), ())
+
+    function_states: list[
+        tuple[
+            FunctionType,
+            object,
+            object,
+            object,
+            tuple[tuple[object, object], ...] | None,
+        ]
+    ] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    closure_bindings: list[tuple[object, bool, object | None]] = []
+    seen_functions: set[int] = set()
+
+    def capture(function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        kwdefaults = function.__kwdefaults__
+        function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                kwdefaults,
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+            )
+        )
+        namespace = function.__globals__
+        for dependency_name in function.__code__.co_names:
+            if dependency_name not in namespace:
+                continue
+            expected_dependency = namespace[dependency_name]
+            global_bindings.append(
+                (namespace, dependency_name, expected_dependency)
+            )
+            dependency_target = (
+                expected_dependency.__func__
+                if type(expected_dependency) is MethodType
+                else expected_dependency
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+        for cell in function.__closure__ or ():
+            try:
+                expected_value = cell.cell_contents
+            except ValueError:
+                closure_bindings.append((cell, False, None))
+                continue
+            closure_bindings.append((cell, True, expected_value))
+            dependency_target = (
+                expected_value.__func__
+                if type(expected_value) is MethodType
+                else expected_value
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+
+    capture(target)
     return (
         target,
-        target.__code__,
-        target.__defaults__,
-        kwdefaults,
-        None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+        tuple(function_states),
+        tuple(global_bindings),
+        tuple(closure_bindings),
     )
 
 
@@ -188,35 +255,52 @@ def _require_callable_authority(
     value: object,
     state: tuple[
         object,
-        object | None,
-        object | None,
-        object | None,
-        tuple[tuple[object, object], ...] | None,
+        tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+        tuple[tuple[dict[str, object], str, object], ...],
+        tuple[tuple[object, bool, object | None], ...],
     ],
     *,
     name: str,
 ) -> None:
     target = value.__func__ if type(value) is MethodType else value
-    expected_target, code, defaults, kwdefaults, kwdefault_items = state
+    expected_target, function_states, global_bindings, closure_bindings = state
     if target is not expected_target:
         raise RuntimeTargetHostRunnerError(
             f"{name} callable authority changed during campaign callback"
         )
-    if code is None:
-        return
-    if (
-        target.__code__ is not code
-        or target.__defaults__ is not defaults
-        or target.__kwdefaults__ is not kwdefaults
-        or (
-            kwdefaults is not None
-            and tuple(sorted(kwdefaults.items())) != kwdefault_items
-        )
-    ):
-        raise RuntimeTargetHostRunnerError(
-            f"{name} executable authority changed during campaign callback"
-        )
-
+    for function, code, defaults, kwdefaults, kwdefault_items in function_states:
+        if (
+            function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or (
+                kwdefaults is not None
+                and tuple(sorted(kwdefaults.items())) != kwdefault_items
+            )
+        ):
+            raise RuntimeTargetHostRunnerError(
+                f"{name} executable authority changed during campaign callback"
+            )
+    missing = object()
+    for namespace, dependency_name, expected_dependency in global_bindings:
+        if namespace.get(dependency_name, missing) is not expected_dependency:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} global dependency changed during campaign callback: "
+                f"{dependency_name}"
+            )
+    for cell, had_value, expected_value in closure_bindings:
+        try:
+            current_value = cell.cell_contents
+        except ValueError:
+            if had_value:
+                raise RuntimeTargetHostRunnerError(
+                    f"{name} closure dependency changed during campaign callback"
+                )
+            continue
+        if not had_value or current_value is not expected_value:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} closure dependency changed during campaign callback"
+            )
 
 def _class_member_executables(value: object) -> tuple[FunctionType, ...]:
     if type(value) is FunctionType:
@@ -240,16 +324,7 @@ def _class_authority_state(
         str,
         object,
         tuple[
-            tuple[
-                FunctionType,
-                tuple[
-                    object,
-                    object | None,
-                    object | None,
-                    object | None,
-                    tuple[tuple[object, object], ...] | None,
-                ],
-            ],
+            tuple[FunctionType, tuple],
             ...,
         ],
     ],

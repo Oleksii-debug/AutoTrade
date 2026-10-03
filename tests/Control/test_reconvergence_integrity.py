@@ -12,6 +12,8 @@ from control.tools.reconvergence_integrity import (
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_trusted_scope_approval,
+    TRUSTED_SCOPE_APPROVAL_MARKER,
 )
 
 
@@ -129,19 +131,51 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(result.protected_deletions, (sentinel,))
         self.assertIn("protected canonical sentinel damage", result.reasons[0])
 
-    def test_rename_is_not_counted_as_deletion(self):
+    def test_small_rename_away_counts_as_disappearance_without_mass_block(self):
         changes = parse_name_status(["R100\told.py\tnew.py"])
 
         result = assess_reconvergence(
             base_paths=["old.py", "other.py"],
             changes=changes,
-            max_deletions=1,
-            max_deleted_fraction=0.1,
+            max_deletions=2,
+            max_deleted_fraction=1.0,
             protected_sentinels=frozenset(),
         )
 
         self.assertTrue(result.allowed)
-        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.deletion_count, 1)
+
+    def test_mass_rename_away_fails_but_mass_copy_does_not(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        renames = [
+            Change(status="R100", previous_path=path, path=f"moved/{path}")
+            for path in base[:60]
+        ]
+        copies = [
+            Change(status="C100", previous_path=path, path=f"copies/{path}")
+            for path in base[:60]
+        ]
+
+        renamed = assess_reconvergence(
+            base_paths=base,
+            changes=renames,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+        copied = assess_reconvergence(
+            base_paths=base,
+            changes=copies,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertFalse(renamed.allowed)
+        self.assertEqual(renamed.deletion_count, 60)
+        self.assertIn("mass base-tree deletion/rename-away", renamed.reasons[0])
+        self.assertTrue(copied.allowed)
+        self.assertEqual(copied.deletion_count, 0)
 
     def test_parser_rejects_malformed_records(self):
         with self.assertRaises(ValueError):
@@ -254,7 +288,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual(
             result.protected_violations,
-            (f"{sentinel} (modified)",),
+            (f"{sentinel} (unauthorized trust-root modification)",),
         )
         self.assertEqual(result.scope_violations, ())
         self.assertIn("protected canonical sentinel damage", result.reasons[0])
@@ -283,7 +317,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual(
             result.protected_violations,
-            (f"{sentinel} (modified)",),
+            (f"{sentinel} (unauthorized trust-root modification)",),
         )
 
     def test_protected_authorization_rejects_directory_or_non_sentinel(self):
@@ -297,80 +331,82 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                         authorized_protected_paths=(unauthorized,),
                     )
 
-    def test_copy_into_protected_path_requires_destination_authorization(self):
-        sentinel = "control/INDEX.json"
+    def test_new_workflow_creation_requires_exact_authorization(self):
+        path = ".github/workflows/spoof-verify.yml"
         blocked = assess_reconvergence(
-            base_paths=["template/INDEX.json", "README.md"],
-            changes=[
-                Change(
-                    status="C100",
-                    previous_path="template/INDEX.json",
-                    path=sentinel,
-                )
-            ],
+            base_paths=[".github/workflows/verify.yml", "README.md"],
+            changes=[Change(status="A", path=path)],
         )
         allowed = assess_reconvergence(
-            base_paths=["template/INDEX.json", "README.md"],
-            changes=[
-                Change(
-                    status="C100",
-                    previous_path="template/INDEX.json",
-                    path=sentinel,
-                )
-            ],
-            authorized_protected_paths=(sentinel,),
+            base_paths=[".github/workflows/verify.yml", "README.md"],
+            changes=[Change(status="A", path=path)],
+            authorized_protected_paths=(path,),
         )
 
         self.assertFalse(blocked.allowed)
         self.assertEqual(
             blocked.protected_violations,
-            (f"{sentinel} (copy destination)",),
+            (f"{path} (unauthorized workflow-authority creation)",),
         )
         self.assertTrue(allowed.allowed)
 
-    def test_rename_into_protected_path_requires_destination_authorization(self):
-        sentinel = "control/qualification.json"
-        blocked = assess_reconvergence(
-            base_paths=["candidate.json", "README.md"],
-            changes=[
-                Change(
-                    status="R100",
-                    previous_path="candidate.json",
-                    path=sentinel,
+    def test_copy_or_rename_into_new_workflow_requires_exact_authorization(self):
+        for status in ("C100", "R100"):
+            with self.subTest(status=status):
+                path = f".github/workflows/spoof-{status[0].lower()}.yml"
+                change = Change(
+                    status=status,
+                    previous_path="templates/check.yml",
+                    path=path,
                 )
-            ],
-        )
-        allowed = assess_reconvergence(
-            base_paths=["candidate.json", "README.md"],
-            changes=[
-                Change(
-                    status="R100",
-                    previous_path="candidate.json",
-                    path=sentinel,
+                blocked = assess_reconvergence(
+                    base_paths=["templates/check.yml", ".github/workflows/verify.yml"],
+                    changes=[change],
                 )
-            ],
-            authorized_protected_paths=(sentinel,),
-        )
+                allowed = assess_reconvergence(
+                    base_paths=["templates/check.yml", ".github/workflows/verify.yml"],
+                    changes=[change],
+                    authorized_protected_paths=(path,),
+                )
+                self.assertFalse(blocked.allowed)
+                self.assertTrue(allowed.allowed)
 
-        self.assertFalse(blocked.allowed)
-        self.assertEqual(
-            blocked.protected_violations,
-            (f"{sentinel} (rename destination)",),
-        )
-        self.assertTrue(allowed.allowed)
-
-    def test_exact_authorization_can_cover_intentional_sentinel_rename(self):
-        sentinel = "control/INDEX.json"
+    def test_exact_authorization_never_allows_sentinel_rename_away(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[sentinel, "README.md"],
             changes=[
                 Change(
                     status="R100",
                     previous_path=sentinel,
-                    path="control/INDEX.retired.json",
+                    path="control/tools/reconvergence_integrity.retired.py",
                 )
             ],
             authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            f"{sentinel} -> control/tools/reconvergence_integrity.retired.py (rename)",
+            result.protected_violations,
+        )
+
+    def test_exact_authorization_never_allows_sentinel_type_change(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="T", path=sentinel)],
+            authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(f"{sentinel} (type change)", result.protected_violations)
+
+    def test_non_executable_control_metadata_can_evolve_without_protected_approval(self):
+        path = "control/qualification.json"
+        result = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[Change(status="M", path=path)],
         )
 
         self.assertTrue(result.allowed)
@@ -506,22 +542,76 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 allowed_scopes=("web/*",),
             )
 
-    def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):
+    def test_trusted_scope_approval_is_exact_head_bound(self):
+        head = "a" * 40
+        body = "\n".join(
+            (
+                TRUSTED_SCOPE_APPROVAL_MARKER,
+                f"head: {head}",
+                "path: .github/workflows/verify.yml",
+                "path: tools/verify.py",
+            )
+        )
+
+        self.assertEqual(
+            parse_trusted_scope_approval(body, expected_head_sha=head),
+            (".github/workflows/verify.yml", "tools/verify.py"),
+        )
+        self.assertIsNone(
+            parse_trusted_scope_approval(body, expected_head_sha="b" * 40)
+        )
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                "ordinary review comment",
+                expected_head_sha=head,
+            )
+        )
+
+    def test_current_head_malformed_approval_fails_closed(self):
+        head = "a" * 40
+        malformed = (
+            TRUSTED_SCOPE_APPROVAL_MARKER,
+            "\n".join((TRUSTED_SCOPE_APPROVAL_MARKER, f"head: {head}")),
+            "\n".join(
+                (
+                    TRUSTED_SCOPE_APPROVAL_MARKER,
+                    f"head: {head}",
+                    "path: tools/verify.py",
+                    "path: tools/verify.py",
+                )
+            ),
+            "\n".join(
+                (
+                    TRUSTED_SCOPE_APPROVAL_MARKER,
+                    f"head: {head}",
+                    "not-path: tools/verify.py",
+                )
+            ),
+        )
+        for body in malformed:
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    parse_trusted_scope_approval(body, expected_head_sha=head)
+
+    def test_canonical_workflow_uses_owner_exact_head_authority_only(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("pull_request_target:", workflow)
+        self.assertIn("issues: read", workflow)
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
-        self.assertNotIn("--allow-protected-path", workflow)
-        self.assertNotIn("edited", workflow)
+        self.assertIn("--allow-protected-path", workflow)
+        self.assertNotIn("pull_request.body", workflow)
+        self.assertNotIn("pull_request.title", workflow)
         self.assertIn("Require event base to match live target branch tip", workflow)
         self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", workflow)
-        self.assertIn("EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}", workflow)
-        self.assertIn(
-            'refs/remotes/origin/${BASE_REF}^{commit}',
-            workflow,
-        )
+        self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", workflow)
+        self.assertIn('comment.get("author_association") != "OWNER"', workflow)
+        self.assertIn("parse_trusted_scope_approval", workflow)
+        self.assertIn("expected_head_sha=head_sha", workflow)
+        self.assertIn("/issues/{pr_number}/comments", workflow)
+        self.assertIn('args+=(--allow-protected-path "$path")', workflow)
 
 
 

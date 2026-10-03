@@ -17,8 +17,16 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
         "source_sha": "2" * 40,
         "build_id": "autotrade-observability-test-1",
         "evidence_refs": ["dataset-1", "risk-evidence-1"],
+        "evidence_digests": {
+            "dataset-1": "5" * 64,
+            "risk-evidence-1": "6" * 64,
+        },
         "correlation_id": "corr-1",
         "event_ids": ["event-market", "event-decision"],
+        "event_digests": {
+            "event-market": "3" * 64,
+            "event-decision": "4" * 64,
+        },
         "attributes": {
             "strategy": "baseline",
             "token": "super-secret",
@@ -77,7 +85,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertIn("Decision trace: decision-1", exported)
             self.assertIn("Source SHA: " + "2" * 40, exported)
             self.assertIn("Build: autotrade-observability-test-1", exported)
-            self.assertIn("- event-decision", exported)
+            self.assertIn("- event-decision sha256 " + "4" * 64, exported)
             self.assertIn("- dataset-1", exported)
             self.assertIn("[REDACTED]", exported)
             self.assertNotIn("super-secret", exported)
@@ -286,8 +294,14 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 "decision-exact",
                 expected_source_sha="2" * 40,
                 expected_build_id="autotrade-observability-test-1",
-                available_event_ids=["event-market", "event-decision"],
-                available_evidence_ids=["dataset-1", "risk-evidence-1"],
+                available_event_digests={
+                    "event-market": "3" * 64,
+                    "event-decision": "4" * 64,
+                },
+                available_evidence_digests={
+                    "dataset-1": "5" * 64,
+                    "risk-evidence-1": "6" * 64,
+                },
             )
             self.assertEqual(result["trace_id"], "decision-exact")
 
@@ -300,8 +314,29 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                     "decision-legacy",
                     expected_source_sha="2" * 40,
                     expected_build_id="autotrade-observability-test-1",
-                    available_event_ids=["event-market", "event-decision"],
-                    available_evidence_ids=["dataset-1", "risk-evidence-1"],
+                    available_event_digests={
+                        "event-market": "3" * 64,
+                        "event-decision": "4" * 64,
+                    },
+                    available_evidence_digests={
+                        "dataset-1": "5" * 64,
+                        "risk-evidence-1": "6" * 64,
+                    },
+                )
+
+            with self.assertRaisesRegex(ValueError, "event digest mismatch"):
+                store.reconstruct_exact(
+                    "decision-exact",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-observability-test-1",
+                    available_event_digests={
+                        "event-market": "9" * 64,
+                        "event-decision": "4" * 64,
+                    },
+                    available_evidence_digests={
+                        "dataset-1": "5" * 64,
+                        "risk-evidence-1": "6" * 64,
+                    },
                 )
 
 

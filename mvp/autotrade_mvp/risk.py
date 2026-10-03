@@ -1288,6 +1288,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     if not isinstance(decision, RiskDecision):
         raise TypeError("decision must be a RiskDecision")
     payload = {
+        "arithmetic_policy": RISK_ARITHMETIC_POLICY_ID,
         "admitted": decision.admitted,
         "resulting_position": _canonical_decimal_text(decision.resulting_position),
         "gross_leverage": _canonical_decimal_text(decision.gross_leverage),

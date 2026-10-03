@@ -520,6 +520,50 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
             )
 
 
+    def test_paper_low_level_barrier_rejects_unbound_finance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id=ACCOUNT,
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+            )
+            reservations.reserve(
+                command_id="paper-low-level-reserve",
+                idempotency_key="paper-low-level-reserve",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "PAPER/LIVE economic batches require provider fill binding",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="paper-low-level-fill",
+                    idempotency_key="paper-low-level-fill",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USD": "100"},
+                    transactions=(transaction(),),
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
     def test_paper_wrapper_rejects_caller_authored_finance_without_provider_binding(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

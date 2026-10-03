@@ -13,9 +13,15 @@ from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeWireResponse,
     bybit_credential_probe_receipt_metadata,
     capture_bybit_credential_probe_evidence,
+    execute_bybit_credential_probe_wire_query,
+    probe_bybit_credential_with_shared_wire,
     probe_bybit_credential_with_vault,
 )
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
+from mvp.autotrade_mvp.provider_transport import (
+    AuthenticatedReadHttpRequest,
+    AuthenticatedReadWireResponse,
+)
 from mvp.autotrade_mvp.windows_secrets import (
     PersistentCredentialHandle,
     ProtectedCredentialVault,
@@ -42,6 +48,16 @@ class _PassthroughProtector:
     def unprotect(self, ciphertext, *, entropy):
         del entropy
         return ciphertext
+
+
+class _FakeReadWireClient:
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    def send(self, request):
+        self.requests.append(request)
+        return self.response
 
 
 def _handle(
@@ -149,6 +165,16 @@ def _probe(
         clock_utc=clock_utc,
         recv_window_ms=recv_window_ms,
     )
+
+
+def _wire_headers():
+    return {
+        "Accept": "application/json",
+        "X-BAPI-API-KEY": "probe-key",
+        "X-BAPI-TIMESTAMP": "1791064800123",
+        "X-BAPI-RECV-WINDOW": "5000",
+        "X-BAPI-SIGN": "0" * 64,
+    }
 
 
 class BybitCredentialProbeEvidenceTests(unittest.TestCase):
@@ -758,6 +784,168 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     http_status=http_status,
                     response=response,
                 )
+
+    def test_shared_wire_probe_builds_exact_read_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+            client = _FakeReadWireClient(
+                AuthenticatedReadWireResponse(
+                    http_status=200,
+                    body=b'{"retCode":10003,"retMsg":"API key is invalid"}',
+                )
+            )
+
+            evidence = probe_bybit_credential_with_shared_wire(
+                vault=vault,
+                credential_handle=handle,
+                execution_identity="operator-1",
+                product_family="SPOT",
+                clock_millis=lambda: 1791064800123,
+                clock_utc=lambda: datetime(
+                    2026,
+                    10,
+                    3,
+                    22,
+                    1,
+                    2,
+                    tzinfo=timezone.utc,
+                ),
+                wire_client=client,
+            )
+
+            self.assertEqual(len(client.requests), 1)
+            request = client.requests[0]
+            self.assertIs(type(request), AuthenticatedReadHttpRequest)
+            self.assertEqual(request.method, "GET")
+            self.assertEqual(request.body, b"")
+            self.assertEqual(
+                request.url,
+                "https://api.bybit.com/v5/user/query-api",
+            )
+            self.assertEqual(request.headers["X-BAPI-API-KEY"], "probe-key")
+            self.assertNotIn("probe-secret", repr(request.headers))
+            self.assertIs(
+                evidence.classification,
+                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+            )
+
+    def test_shared_wire_adapter_rejects_origin_escape_before_send(self):
+        client = _FakeReadWireClient(
+            AuthenticatedReadWireResponse(
+                http_status=200,
+                body=b'{"retCode":0}',
+            )
+        )
+        hostile = (
+            "https://evil.example/v5/user/query-api",
+            "https://api.bybit.com.evil.example/v5/user/query-api",
+            "http://api.bybit.com/v5/user/query-api",
+            "https://api.bybit.com/v5/order/create",
+        )
+        for source_uri in hostile:
+            with self.subTest(source_uri=source_uri), self.assertRaises(
+                ProviderCoreError
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri=source_uri,
+                    headers=_wire_headers(),
+                    timeout_seconds=15,
+                    wire_client=client,
+                )
+        self.assertEqual(client.requests, [])
+
+    def test_shared_wire_adapter_rejects_header_shape_before_send(self):
+        client = _FakeReadWireClient(
+            AuthenticatedReadWireResponse(
+                http_status=200,
+                body=b'{"retCode":0}',
+            )
+        )
+        bad_headers = []
+        missing = _wire_headers()
+        del missing["X-BAPI-SIGN"]
+        bad_headers.append(missing)
+        extra = _wire_headers()
+        extra["Authorization"] = "unexpected"
+        bad_headers.append(extra)
+        bad_signature = _wire_headers()
+        bad_signature["X-BAPI-SIGN"] = "A" * 64
+        bad_headers.append(bad_signature)
+        bad_window = _wire_headers()
+        bad_window["X-BAPI-RECV-WINDOW"] = "05000"
+        bad_headers.append(bad_window)
+
+        for headers in bad_headers:
+            with self.subTest(headers=headers), self.assertRaises(
+                ProviderCoreError
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=headers,
+                    timeout_seconds=15,
+                    wire_client=client,
+                )
+        self.assertEqual(client.requests, [])
+
+    def test_shared_wire_json_parser_rejects_ambiguous_or_non_object_payload(self):
+        bodies = (
+            b'{"retCode":0,"retCode":10003}',
+            b'[]',
+            b'{"retCode":NaN}',
+            b'not-json',
+            b'\xff',
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                client = _FakeReadWireClient(
+                    AuthenticatedReadWireResponse(
+                        http_status=200,
+                        body=body,
+                    )
+                )
+                with self.assertRaises(ProviderCoreError):
+                    execute_bybit_credential_probe_wire_query(
+                        source_uri="https://api.bybit.com/v5/user/query-api",
+                        headers=_wire_headers(),
+                        timeout_seconds=15,
+                        wire_client=client,
+                    )
+                self.assertEqual(len(client.requests), 1)
+
+    def test_shared_wire_requires_typed_status_preserving_response(self):
+        class UntypedClient:
+            def send(self, request):
+                del request
+                return b'{"retCode":0}'
+
+        with self.assertRaisesRegex(TypeError, "AuthenticatedReadWireResponse"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=_wire_headers(),
+                timeout_seconds=15,
+                wire_client=UntypedClient(),
+            )
+
+    def test_shared_wire_non_200_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+            client = _FakeReadWireClient(
+                AuthenticatedReadWireResponse(
+                    http_status=401,
+                    body=b'{"retCode":10003,"retMsg":"invalid"}',
+                )
+            )
+            with self.assertRaisesRegex(ProviderCoreError, "non-200"):
+                probe_bybit_credential_with_shared_wire(
+                    vault=vault,
+                    credential_handle=handle,
+                    execution_identity="operator-1",
+                    product_family="SPOT",
+                    clock_millis=lambda: 1791064800123,
+                    clock_utc=lambda: datetime.now(timezone.utc),
+                    wire_client=client,
+                )
+            self.assertEqual(len(client.requests), 1)
 
     def test_wire_exception_produces_no_evidence_and_propagates(self):
         with tempfile.TemporaryDirectory() as directory:

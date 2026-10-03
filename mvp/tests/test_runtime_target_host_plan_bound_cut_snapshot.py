@@ -15,6 +15,12 @@ from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as te
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
 )
+from mvp.autotrade_mvp.runtime_target_host_measurement import (
+    FinancialTargetHostSample,
+    ResearchInterferenceSample,
+    ResourceTargetHostSample,
+    TargetHostMeasurementArtifact,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -23,6 +29,7 @@ HOST = "sha256:" + "c" * 64
 OTHER_WORKLOAD = "sha256:" + "d" * 64
 RELEASE_ID = "60000000-0000-4000-8000-000000000001"
 RELEASE_SHA = "sha256:" + "e" * 64
+JOURNAL = "sha256:" + "f" * 64
 
 
 def _spec() -> RuntimeBudgetSpec:
@@ -47,6 +54,58 @@ def _event() -> ExpectedJournalEvent:
         aggregate_type="risk_decision",
         aggregate_id="plan-bound-cut-snapshot",
         aggregate_version=1,
+    )
+
+
+def _measurement(
+    spec: RuntimeBudgetSpec,
+    declared,
+    campaign_plan: RuntimeCampaignPlan,
+) -> TargetHostMeasurementArtifact:
+    return TargetHostMeasurementArtifact(
+        source_sha=SOURCE_SHA,
+        release_artifact_id=RELEASE_ID,
+        release_artifact_sha256=RELEASE_SHA,
+        scenario_id=spec.scenario_id,
+        spec_digest=spec.digest,
+        configuration_hash=CONFIG,
+        host_fingerprint=HOST,
+        workload_profile_hash=declared.digest,
+        plan_digest=campaign_plan.digest,
+        journal_taxonomy_digest=campaign_plan.journal_taxonomy_digest,
+        journal_store_identity_digest=JOURNAL,
+        start_journal_sequence=0,
+        end_journal_sequence=1,
+        monotonic_clock_id="python-time.monotonic_ns",
+        staleness_basis="host-monotonic-financial-state-age",
+        research_interference_basis="host-monotonic-contention-delay",
+        financial_samples=(
+            FinancialTargetHostSample(
+                sample_id="financial-1",
+                event_id="cut-snapshot-financial-1",
+                journal_sequence=1,
+                latency_start_monotonic_ns=1_100_000_000,
+                latency_end_monotonic_ns=1_100_100_000,
+                staleness_source_monotonic_ns=1_799_900_000,
+                staleness_observed_monotonic_ns=1_800_000_000,
+            ),
+        ),
+        research_samples=(
+            ResearchInterferenceSample(
+                sample_id="research-1",
+                phase="contention",
+                start_monotonic_ns=1_900_000_000,
+                end_monotonic_ns=1_900_050_000,
+            ),
+        ),
+        resource_samples=(
+            ResourceTargetHostSample(
+                sample_id="resource-1",
+                monotonic_ns=1_950_000_000,
+                phase="steady",
+                metrics={"memory_rss_bytes": 4096},
+            ),
+        ),
     )
 
 
@@ -178,6 +237,85 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 campaign_cut=cut,
                 measurement=object(),
             )
+        verifier.assert_not_called()
+
+    def test_executable_campaign_workload_field_is_never_compared(self):
+        root, store, spec, declared, campaign_plan, cut = self._prepared()
+
+        class ExecutableHash:
+            invoked = False
+
+            def __eq__(self, other):
+                self.invoked = True
+                raise AssertionError("campaign workload equality executed caller code")
+
+            def __ne__(self, other):
+                self.invoked = True
+                raise AssertionError("campaign workload inequality executed caller code")
+
+        hostile = ExecutableHash()
+        object.__setattr__(campaign_plan, "workload_profile_hash", hostile)
+        with patch.object(
+            terminal_module,
+            "verify_composed_runtime_target_host_qualification",
+        ) as verifier, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "campaign workload identity must remain exact canonical sha256 text",
+        ):
+            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root=root,
+                journal_store=store,
+                plan_id=declared.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=campaign_plan,
+                campaign_cut=cut,
+                measurement=object(),
+            )
+        self.assertFalse(hostile.invoked)
+        verifier.assert_not_called()
+
+    def test_executable_measurement_workload_field_is_never_compared(self):
+        root, store, spec, declared, campaign_plan, cut = self._prepared()
+        current_measurement = _measurement(spec, declared, campaign_plan)
+
+        class ExecutableHash:
+            invoked = False
+
+            def __eq__(self, other):
+                self.invoked = True
+                raise AssertionError("measurement workload equality executed caller code")
+
+            def __ne__(self, other):
+                self.invoked = True
+                raise AssertionError("measurement workload inequality executed caller code")
+
+        hostile = ExecutableHash()
+        object.__setattr__(current_measurement, "workload_profile_hash", hostile)
+        with patch.object(
+            terminal_module,
+            "verify_composed_runtime_target_host_qualification",
+        ) as verifier, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "measurement workload identity must remain exact canonical sha256 text",
+        ):
+            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root=root,
+                journal_store=store,
+                plan_id=declared.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=campaign_plan,
+                campaign_cut=cut,
+                measurement=current_measurement,
+            )
+        self.assertFalse(hostile.invoked)
         verifier.assert_not_called()
 
 

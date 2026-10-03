@@ -2,18 +2,22 @@
 
 The lower-level signed target-host verifier accepts exact expected identities so
 it can validate independently produced evidence. Product admission must not let a
-caller invent the workload-profile or JournalStore-generation digests used at
-that boundary. This adapter reloads the immutable pre-run declaration from the
-canonical JournalStore and then requires the composed signed + raw measurement
-authority. A legacy signed PASS alone is intentionally insufficient.
+caller invent workload, JournalStore, release, or chronology authority. Canonical
+signed terminal admission therefore requires the composed raw measurement path
+plus an accepted RELEASE_RUNTIME trusted chronology cut.
 
-This module creates no measurements, trusted chronology, signer policy, release
-attestation, provider authority, or trading authority.
+The chronology-free implementation remains private so focused unit tests can
+exercise durable-plan fencing with non-canonical test doubles. An exact canonical
+SignedQualificationAttestation can never return through that path.
+
+This module creates no measurements, chronology source, signer policy, release
+attestation, provider authority, economic edge, or trading authority.
 """
 
 from __future__ import annotations
 
 from copy import copy
+from typing import TYPE_CHECKING
 
 from autotrade_runtime.artifacts import ArtifactStore
 
@@ -32,6 +36,14 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+
+if TYPE_CHECKING:
+    from .production_host import ProductionHostRuntime
+    from .recovery import RecoveryController
+    from .runtime_target_host_chronology_bound_qualification import (
+        AcceptedChronologyBoundRuntimeTargetHostQualification,
+    )
+    from .trusted_chronology_cut import TrustedChronologyCut
 
 
 def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
@@ -71,7 +83,7 @@ def _canonical_sha256_text(value: object, *, name: str) -> str:
 
 
 def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
-    """Detach one issued cut before composed code performs any caller-visible work."""
+    """Detach one issued cut before composed code performs caller-visible work."""
 
     if type(value) is not RuntimeCampaignCut:
         raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
@@ -80,9 +92,6 @@ def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
         raise RuntimeTargetHostCompositionError(
             "campaign_cut could not be detached at terminal authority boundary"
         )
-    # Validate the detached copy, not the caller object. A hostile concurrent
-    # mutation that lands while ``copy`` runs therefore cannot smuggle executable
-    # or rewritten scalar state across this terminal boundary.
     for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
         if type(getattr(detached, field)) is not str:
             raise RuntimeTargetHostCompositionError(
@@ -97,7 +106,7 @@ def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
     return detached
 
 
-def verify_declared_plan_runtime_target_host_qualification(
+def _verify_declared_plan_runtime_target_host_qualification_without_chronology(
     receipt: SignedQualificationAttestation,
     *,
     evidence_store: ArtifactStore,
@@ -111,14 +120,7 @@ def verify_declared_plan_runtime_target_host_qualification(
     campaign_cut: RuntimeCampaignCut | None = None,
     measurement: TargetHostMeasurementArtifact | None = None,
 ) -> AcceptedComposedRuntimeTargetHostQualification:
-    """Verify terminal WP-65 evidence through the composed raw/signed authority.
-
-    The durable pre-run plan remains the source of the canonical plan identity.
-    Legacy callers that provide only a signed receipt are failed closed: terminal
-    acceptance additionally requires the exact campaign plan/cut and canonical
-    ``TargetHostMeasurementArtifact`` so the #1228 composition authority can bind
-    signed payloads to durable raw financial evidence.
-    """
+    """Apply durable-plan + composed WP-65 fencing without granting terminal status."""
 
     if type(journal_store) is not JournalStore:
         raise TypeError("journal_store must be exact JournalStore")
@@ -141,11 +143,6 @@ def verify_declared_plan_runtime_target_host_qualification(
             raise RuntimeTargetHostCompositionError(
                 "terminal WP-65 qualification requires composed target-host measurement authority"
             )
-        # The durable pre-run declaration remains the workload identity authority.
-        # Frozen dataclasses are still mutable through object.__setattr__, so no
-        # caller-owned field participates in equality until exact inert SHA-256
-        # text has been validated. This prevents hostile __eq__/__ne__ execution
-        # while the JournalStore authority scope is active.
         durable_plan_digest = _canonical_sha256_text(
             plan.digest,
             name="durable pre-run plan digest",
@@ -168,11 +165,6 @@ def verify_declared_plan_runtime_target_host_qualification(
                 raise RuntimeTargetHostCompositionError(
                     "measurement workload identity does not match durable pre-run plan"
                 )
-        # ``RuntimeCampaignCut`` is a frozen issued object but Python callers can
-        # still abuse ``object.__setattr__``. Detach its inert scalar state before
-        # the composed verifier reaches measurement/campaign-window prechecks.
-        # Invalid non-cut inputs remain delegated to the composed authority's
-        # existing exact-type checks rather than becoming accepted here.
         if type(campaign_cut) is RuntimeCampaignCut:
             campaign_cut = _snapshot_campaign_cut(campaign_cut)
         accepted = verify_composed_runtime_target_host_qualification(
@@ -189,12 +181,6 @@ def verify_declared_plan_runtime_target_host_qualification(
             expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
 
-        # External signed/artifact verification above can execute after the first
-        # durable-plan read. Re-read the same declaration under the still-selected
-        # physical-generation scope before returning terminal acceptance. The
-        # second read is intentionally plan-specific rather than sequence-frozen:
-        # unrelated append-only journal progress is allowed, while a backing-file
-        # rebound/replacement or changed durable declaration fails closed.
         final_plan = load_declared_runtime_event_plan(
             journal_store,
             plan_id=plan.plan_id,
@@ -217,3 +203,80 @@ def verify_declared_plan_runtime_target_host_qualification(
                 "journal operation authority changed during terminal qualification"
             )
         return accepted
+
+
+def verify_declared_plan_runtime_target_host_qualification(
+    receipt: SignedQualificationAttestation,
+    *,
+    evidence_store: ArtifactStore,
+    evidence_root: str,
+    journal_store: JournalStore,
+    plan_id: str,
+    spec: RuntimeBudgetSpec,
+    expected_release_artifact_id: str,
+    expected_release_artifact_sha256: str,
+    campaign_plan: RuntimeCampaignPlan | None = None,
+    campaign_cut: RuntimeCampaignCut | None = None,
+    measurement: TargetHostMeasurementArtifact | None = None,
+    recovery: RecoveryController | None = None,
+    runtime: ProductionHostRuntime | None = None,
+    chronology_cut: TrustedChronologyCut | None = None,
+) -> (
+    AcceptedComposedRuntimeTargetHostQualification
+    | AcceptedChronologyBoundRuntimeTargetHostQualification
+):
+    """Verify product-facing WP-65 admission, requiring chronology for real receipts.
+
+    Exact canonical signed receipts are terminal authority candidates and therefore
+    fail closed unless all three RELEASE_RUNTIME chronology inputs are supplied.
+    Non-canonical receipt objects can only reach the private lower-level path used
+    by focused fencing tests; the canonical signed verifier rejects such objects.
+    """
+
+    chronology_values = (recovery, runtime, chronology_cut)
+    chronology_supplied = any(value is not None for value in chronology_values)
+    if chronology_supplied and any(value is None for value in chronology_values):
+        raise RuntimeTargetHostCompositionError(
+            "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
+        )
+
+    if chronology_supplied:
+        from .runtime_target_host_chronology_bound_qualification import (
+            verify_chronology_bound_runtime_target_host_qualification,
+        )
+
+        return verify_chronology_bound_runtime_target_host_qualification(
+            receipt,
+            evidence_store=evidence_store,
+            evidence_root=evidence_root,
+            journal_store=journal_store,
+            recovery=recovery,
+            runtime=runtime,
+            chronology_cut=chronology_cut,
+            plan_id=plan_id,
+            spec=spec,
+            expected_release_artifact_id=expected_release_artifact_id,
+            expected_release_artifact_sha256=expected_release_artifact_sha256,
+            campaign_plan=campaign_plan,
+            campaign_cut=campaign_cut,
+            measurement=measurement,
+        )
+
+    if type(receipt) is SignedQualificationAttestation:
+        raise RuntimeTargetHostCompositionError(
+            "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
+        )
+
+    return _verify_declared_plan_runtime_target_host_qualification_without_chronology(
+        receipt,
+        evidence_store=evidence_store,
+        evidence_root=evidence_root,
+        journal_store=journal_store,
+        plan_id=plan_id,
+        spec=spec,
+        expected_release_artifact_id=expected_release_artifact_id,
+        expected_release_artifact_sha256=expected_release_artifact_sha256,
+        campaign_plan=campaign_plan,
+        campaign_cut=campaign_cut,
+        measurement=measurement,
+    )

@@ -250,6 +250,8 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
 
             def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -281,6 +283,8 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
                 result = original_commit(selected_store, **kwargs)
+                if selected_store is not store:
+                    return result
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected acknowledgement loss")
@@ -449,6 +453,8 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
                 result = original_commit(selected_store, **kwargs)
+                if selected_store is not store:
+                    return result
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected settlement acknowledgement loss")
@@ -531,6 +537,8 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
 
             def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected three-way pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -1052,6 +1060,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
 
             def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected provider-fill binding failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -2084,6 +2094,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_id,
             ):
                 events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
                 if aggregate_type != "provider_fill_financial_binding" or not events:
                     return events
                 forged = deepcopy(events)
@@ -2213,6 +2225,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_id,
             ):
                 events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2353,6 +2367,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_id,
             ):
                 events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2510,6 +2526,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_id,
             ):
                 events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2611,6 +2629,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_id,
             ):
                 events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2697,6 +2717,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
 
             def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected correction pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit

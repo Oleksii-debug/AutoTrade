@@ -611,10 +611,10 @@ def assess_bounded_real_qualification(
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
-    if not isinstance(envelope, BoundedRealEnvelope):
-        raise TypeError("envelope must be BoundedRealEnvelope")
-    if not isinstance(observations, BoundedRealObservations):
-        raise TypeError("observations must be BoundedRealObservations")
+    if type(envelope) is not BoundedRealEnvelope:
+        raise TypeError("envelope must be exact BoundedRealEnvelope")
+    if type(observations) is not BoundedRealObservations:
+        raise TypeError("observations must be exact BoundedRealObservations")
 
     reasons: list[str] = []
     scope_matches = (
@@ -631,9 +631,9 @@ def assess_bounded_real_qualification(
     all_refs: list[tuple[str, ImmutableEvidenceRef]] = []
     evidence_ids: set[str] = set()
     for evidence in prerequisite_evidence:
-        if not isinstance(evidence, QualificationEvidence):
+        if type(evidence) is not QualificationEvidence:
             raise TypeError(
-                "prerequisite_evidence must contain QualificationEvidence"
+                "prerequisite_evidence must contain exact QualificationEvidence"
             )
         if evidence.evidence_id in evidence_ids:
             raise ValueError("evidence_id must be unique")
@@ -706,22 +706,30 @@ def assess_bounded_real_qualification(
     accepted: AcceptedQualificationAttestation | None = None
     if evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
-        reasons.append("untrusted_immutable_evidence_verifier")
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
+        raise TypeError(
+            "evidence_verifier must be exact ArtifactStoreEvidenceVerifier"
+        )
     else:
-        verifier_identity = evidence_verifier.identity
+        verifier_identity = ArtifactStoreEvidenceVerifier.identity.__get__(
+            evidence_verifier,
+            ArtifactStoreEvidenceVerifier,
+        )
         for label, ref in all_refs:
             try:
-                verification = evidence_verifier.verify(ref)
+                verification = ArtifactStoreEvidenceVerifier.verify(
+                    evidence_verifier,
+                    ref,
+                )
             except Exception:
                 verification = EvidenceVerification(
                     valid=False,
                     conflicted=True,
                     reason="trusted immutable evidence verifier raised",
                 )
-            if not isinstance(verification, EvidenceVerification):
+            if type(verification) is not EvidenceVerification:
                 raise TypeError(
-                    "trusted evidence verifier must return EvidenceVerification"
+                    "trusted evidence verifier must return exact EvidenceVerification"
                 )
             if not verification.valid:
                 suffix = "conflicted" if verification.conflicted else "unverified"
@@ -737,7 +745,7 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_unavailable")
     elif any(value is None for value in trust_inputs):
         reasons.append("independent_evidence_trust_incomplete")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
@@ -756,8 +764,14 @@ def assess_bounded_real_qualification(
             accepted = verify_qualification_attestation(
                 qualification_receipt,
                 policy=qualification_policy,
-                evidence_store=evidence_verifier.store,
-                evidence_root=evidence_verifier.evidence_root,
+                evidence_store=ArtifactStoreEvidenceVerifier.store.__get__(
+                    evidence_verifier,
+                    ArtifactStoreEvidenceVerifier,
+                ),
+                evidence_root=ArtifactStoreEvidenceVerifier.evidence_root.__get__(
+                    evidence_verifier,
+                    ArtifactStoreEvidenceVerifier,
+                ),
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,

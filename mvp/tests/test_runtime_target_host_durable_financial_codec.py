@@ -118,6 +118,33 @@ class RuntimeTargetHostDurableFinancialCodecTests(unittest.TestCase):
         ):
             parse_durable_target_host_financial_binding(raw)
 
+    def test_retained_binding_rejects_noncanonical_source_sha(self):
+        payload = json.loads(binding().canonical_bytes().decode("utf-8"))
+        payload["source_sha"] = "not-a-git-object"
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "source_sha must be a lowercase",
+        ):
+            parse_durable_target_host_financial_binding(raw)
+
+    def test_authority_binding_rejects_executable_bindings_container(self):
+        value = binding()
+        with self.assertRaisesRegex(TypeError, "bindings must be an exact tuple"):
+            DurableTargetHostFinancialBinding(
+                target_host_measurement_digest=value.target_host_measurement_digest,
+                source_sha=value.source_sha,
+                spec_digest=value.spec_digest,
+                declared_plan_id=value.declared_plan_id,
+                declared_plan_digest=value.declared_plan_digest,
+                clock_contract_id=value.clock_contract_id,
+                bindings=list(value.bindings),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

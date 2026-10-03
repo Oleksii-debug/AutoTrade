@@ -133,6 +133,51 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 permission_effect="EXECUTION",
             )
 
+    def test_privileged_tool_argument_fields_are_rejected_on_normal_admission(self):
+        for arguments in (
+            {"authorization": "Bearer injected"},
+            {"nested": {"api-key": "secret"}},
+            {"steps": [{"executionAuthority": "TRADE_ALLOWED"}]},
+            {"credential_handle_id": "trade-handle-1"},
+            {"session_token": "session-secret"},
+            {"owner_token": "durable-sender-token"},
+            {"client_secret": "provider-secret"},
+            {"secret_ref": "vault:trade"},
+            {"headers": {"X-API-Key": "provider-secret"}},
+            {"headers": {"X-TXC-APIKEY": "whitebit-key"}},
+            {"headers": {"X-TXC-PAYLOAD": "signed-payload"}},
+            {"headers": {"X-TXC-SIGNATURE": "signed-secret"}},
+            {"headers": {"Proxy-Authorization": "Basic secret"}},
+            {"headers": {"Authorization-Header": "Bearer injected"}},
+            {"headers": {"Cookie": "session=secret"}},
+        ):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                self.boundary().admit(
+                    ResearchToolRequest(
+                        request_id="privileged-arguments",
+                        tool_name="statistics",
+                        requested_capabilities=("COMPUTE_STATISTICS",),
+                        arguments=arguments,
+                    )
+                )
+
+    def test_direct_admitted_request_cannot_bypass_privileged_argument_scan(self):
+        with self.assertRaisesRegex(PermissionError, "privileged fields"):
+            AdmittedResearchToolRequest(
+                request_id="direct-privileged",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={
+                    "analysis": {
+                        "credential_handle": "trade-handle-opaque",
+                    }
+                },
+                evidence_refs=("artifact:1",),
+            )
+
     def test_tool_arguments_are_deeply_immutable_across_admission(self):
         nested = {"window": {"size": 20}, "fields": ["price"]}
         request = ResearchToolRequest(
@@ -209,17 +254,104 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 arguments=payload,
             )
 
-    def test_oversized_text_is_rejected_without_materializing_utf8_copy(self):
+    def test_scalar_subclass_is_rejected_before_overridden_encode_runs(self):
         class EncodeMustNotRun(str):
             def encode(self, *args, **kwargs):
-                raise AssertionError("oversized text must be rejected before encode")
+                raise AssertionError("untrusted scalar method must not execute")
 
         hostile = EncodeMustNotRun("x" * 1_048_577)
-        with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
             ResearchModelResult(
-                result_id="oversized-no-encode",
+                result_id="subclass-no-encode",
                 proposal={"text": hostile},
                 evidence_refs=("evidence:1",),
+            )
+
+    def test_executable_container_subclasses_are_rejected_before_callbacks(self):
+        class HostileDict(dict):
+            def items(self):
+                raise AssertionError("untrusted mapping callback must not execute")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("untrusted list callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact object"):
+            ResearchToolRequest(
+                request_id="hostile-top-level-mapping",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments=HostileDict({"safe": 1}),
+            )
+        for hostile in (
+            HostileDict({"safe": 1}),
+            HostileList([1, 2, 3]),
+        ):
+            with self.subTest(hostile=type(hostile).__name__), self.assertRaisesRegex(
+                ResearchBoundaryError,
+                "JSON-compatible",
+            ):
+                ResearchToolRequest(
+                    request_id="hostile-nested-container",
+                    tool_name="statistics",
+                    requested_capabilities=("COMPUTE_STATISTICS",),
+                    arguments={"nested": hostile},
+                )
+
+    def test_boundary_rejects_request_subclass_before_attribute_dispatch(self):
+        class RequestSubclass(ResearchToolRequest):
+            pass
+
+        forged = RequestSubclass(
+            request_id="request-subclass",
+            tool_name="statistics",
+            requested_capabilities=("COMPUTE_STATISTICS",),
+            arguments={},
+        )
+        with self.assertRaisesRegex(TypeError, "exact ResearchToolRequest"):
+            self.boundary().admit(forged)
+
+    def test_metadata_subclasses_are_rejected_before_callbacks(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("untrusted string callback must not execute")
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("untrusted tuple callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "request_id is required"):
+            ResearchToolRequest(
+                request_id=HostileText("request"),
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact collection"):
+            ResearchToolRequest(
+                request_id="hostile-capabilities",
+                tool_name="statistics",
+                requested_capabilities=HostileTuple(("COMPUTE_STATISTICS",)),
+                arguments={},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact collection"):
+            ResearchModelResult(
+                result_id="hostile-evidence-refs",
+                proposal={"safe": True},
+                evidence_refs=HostileTuple(("evidence:1",)),
+            )
+
+    def test_string_key_subclass_is_rejected_before_encode_callback(self):
+        class HostileKey(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError("untrusted key callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact strings"):
+            ResearchToolRequest(
+                request_id="hostile-key",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={HostileKey("safe"): 1},
             )
 
     def test_aggregate_text_budget_blocks_many_individually_valid_strings(self):
@@ -506,6 +638,94 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                     "COMPUTE_STATISTICS",
                     "COMPUTE_STATISTICS",
                 ),
+                arguments={},
+            )
+
+
+    def test_permission_effect_rejects_executable_equality_objects(self):
+        class EqualityMustNotRun:
+            def __eq__(self, other):
+                raise AssertionError("permission equality callback must not execute")
+
+            def __ne__(self, other):
+                raise AssertionError("permission inequality callback must not execute")
+
+        probe = EqualityMustNotRun()
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            ResearchEvidence(
+                evidence_id="permission-evidence",
+                source_id="source",
+                source_revision="r1",
+                content="fact",
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+                permission_effect=probe,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            AdmittedResearchToolRequest(
+                request_id="permission-admitted",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={},
+                evidence_refs=(),
+                permission_effect=probe,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            ResearchModelResult(
+                result_id="permission-model",
+                proposal={"safe": True},
+                evidence_refs=("evidence:1",),
+                permission_effect=probe,
+            )
+
+    def test_canonical_export_digest_rejects_executable_container_subclasses(self):
+        class ItemsMustNotRun(dict):
+            def items(self):
+                raise AssertionError("mapping callback must not execute")
+
+        hostile = ItemsMustNotRun({"safe": 1})
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            canonical_export_digest(hostile)
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
+            canonical_export_digest({"nested": hostile})
+
+    def test_canonical_export_digest_rejects_scalar_subclass_before_encode(self):
+        class EncodeMustNotRun(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError("scalar encode callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
+            canonical_export_digest({"text": EncodeMustNotRun("safe")})
+
+
+    def test_evidence_and_metadata_text_share_utf8_resource_boundary(self):
+        invalid = "\ud800"
+        with self.assertRaisesRegex(ResearchBoundaryError, "valid UTF-8 text"):
+            ResearchEvidence(
+                evidence_id="invalid-utf8",
+                source_id="source",
+                source_revision="r1",
+                content=invalid,
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+            )
+
+        oversized = "x" * 1_048_577
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum text size"):
+            ResearchEvidence(
+                evidence_id="oversized-content",
+                source_id="source",
+                source_revision="r1",
+                content=oversized,
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "maximum text size"):
+            ResearchToolRequest(
+                request_id="oversized-tool-name",
+                tool_name=oversized,
+                requested_capabilities=("COMPUTE_STATISTICS",),
                 arguments={},
             )
 

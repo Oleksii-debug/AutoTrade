@@ -14,6 +14,8 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
         "decision": "NO_TRADE",
         "decision_reason": "insufficient_after_cost_edge",
         "risk_outcome": "not_applicable",
+        "source_sha": "2" * 40,
+        "build_id": "autotrade-observability-test-1",
         "evidence_refs": ["dataset-1", "risk-evidence-1"],
         "correlation_id": "corr-1",
         "event_ids": ["event-market", "event-decision"],
@@ -73,6 +75,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             store.append(evidence_trace())
             exported = store.accessible_export("decision-1")
             self.assertIn("Decision trace: decision-1", exported)
+            self.assertIn("Source SHA: " + "2" * 40, exported)
+            self.assertIn("Build: autotrade-observability-test-1", exported)
             self.assertIn("- event-decision", exported)
             self.assertIn("- dataset-1", exported)
             self.assertIn("[REDACTED]", exported)
@@ -272,6 +276,33 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite JSON values"):
             backlog.record("queue.delay", 1.0, marker=object())
         self.assertEqual(backlog.snapshot(), ())
+
+
+    def test_exact_reconstruction_fails_closed_on_missing_or_mismatched_identity(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(evidence_trace("decision-exact"))
+            result = store.reconstruct_exact(
+                "decision-exact",
+                expected_source_sha="2" * 40,
+                expected_build_id="autotrade-observability-test-1",
+                available_event_ids=["event-market", "event-decision"],
+                available_evidence_ids=["dataset-1", "risk-evidence-1"],
+            )
+            self.assertEqual(result["trace_id"], "decision-exact")
+
+            legacy = evidence_trace("decision-legacy")
+            legacy.pop("source_sha")
+            legacy.pop("build_id")
+            store.append(legacy)
+            with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                store.reconstruct_exact(
+                    "decision-legacy",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-observability-test-1",
+                    available_event_ids=["event-market", "event-decision"],
+                    available_evidence_ids=["dataset-1", "risk-evidence-1"],
+                )
 
 
 if __name__ == "__main__":

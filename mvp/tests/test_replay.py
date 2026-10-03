@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from mvp.autotrade_mvp.replay import (
@@ -245,6 +246,177 @@ class CausalReplayTests(unittest.TestCase):
             [(item.sequence, dict(item.payload)) for item in suffix_a],
             [(item.sequence, dict(item.payload)) for item in suffix_b],
         )
+
+    def test_composite_checkpoint_canonical_record_round_trips_and_resumes(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        components = self._runtime_components()
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(components),
+            build_sha="e" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+
+        document = checkpoint.to_canonical_json()
+        self.assertEqual(
+            document,
+            json.dumps(
+                json.loads(document),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+        restored = CompositeReplayCheckpoint.from_canonical_json(document)
+        self.assertEqual(restored.fingerprint, checkpoint.fingerprint)
+        self.assertEqual(dict(restored.runtime_components), dict(components))
+
+        resumed = resume_from_composite_checkpoint(
+            events,
+            start_at="2026-09-24T09:59:00Z",
+            checkpoint=restored,
+            runtime_component_resolver=self._component_resolver(components),
+            build_sha="e" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        self.assertEqual(
+            [item.sequence for item in resumed.advance_to("2026-09-24T10:02:00Z")],
+            [2],
+        )
+
+    def test_persisted_checkpoint_rejects_content_tamper_with_stale_fingerprint(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(
+                self._runtime_components()
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        value = json.loads(checkpoint.to_canonical_json())
+        value["runtime_components"]["rng_state"] = "f" * 64
+        tampered = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        with self.assertRaisesRegex(ReplayError, "fingerprint does not match"):
+            CompositeReplayCheckpoint.from_canonical_json(tampered)
+
+    def test_persisted_checkpoint_rejects_noncanonical_or_unknown_fields(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(
+                self._runtime_components()
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        document = checkpoint.to_canonical_json()
+
+        with self.assertRaisesRegex(ReplayError, "canonical JSON bytes"):
+            CompositeReplayCheckpoint.from_canonical_json(document + "\n")
+
+        value = json.loads(document)
+        value["unexpected"] = "not-authority"
+        unknown = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        with self.assertRaisesRegex(ReplayError, "unknown or missing fields"):
+            CompositeReplayCheckpoint.from_canonical_json(unknown)
+
+        value = json.loads(document)
+        del value["replay"]["clock"]
+        missing_nested = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        with self.assertRaisesRegex(ReplayError, "replay record has invalid fields"):
+            CompositeReplayCheckpoint.from_canonical_json(missing_nested)
+
+    def test_persisted_checkpoint_rejects_python_nonfinite_json_extension(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(
+                self._runtime_components()
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        document = checkpoint.to_canonical_json()
+        value = json.loads(document)
+        value["replay"]["cursor"] = float("nan")
+        nonfinite = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=True,
+        )
+        with self.assertRaisesRegex(ReplayError, "noncanonical JSON values"):
+            CompositeReplayCheckpoint.from_canonical_json(nonfinite)
+
+    def test_persisted_checkpoint_rejects_changed_fingerprint_identity(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(
+                self._runtime_components()
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        value = json.loads(checkpoint.to_canonical_json())
+        value["fingerprint"] = "0" * 64
+        changed = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        with self.assertRaisesRegex(ReplayError, "fingerprint does not match"):
+            CompositeReplayCheckpoint.from_canonical_json(changed)
+
+    def test_persisted_checkpoint_record_is_deeply_immutable(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_component_resolver=self._component_resolver(
+                self._runtime_components()
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:durable-v1",
+        )
+        record = checkpoint.to_record()
+        with self.assertRaises(TypeError):
+            record["protocol_ref"] = "protocol:changed"
+        with self.assertRaises(TypeError):
+            record["runtime_components"]["rng_state"] = "0" * 64
+        with self.assertRaises(TypeError):
+            record["replay"]["clock"] = "2026-09-25T00:00:00Z"
 
     def test_composite_checkpoint_rejects_build_or_protocol_drift(self):
         events = [event(1, "2026-09-24T10:00:00Z", 1)]

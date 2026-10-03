@@ -9,6 +9,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import futures_journal as futures_journal_module
 from mvp.autotrade_mvp.futures import (
     FuturesSettlementEvidence,
     FuturesSettlementScope,
@@ -675,6 +676,114 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(store.current_journal_sequence(), 1)
+
+
+    def test_rebuild_projects_the_single_verified_event_tuple(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "single-rebuild-cut", "105", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            commit_linear_variation_margin(
+                store,
+                opening,
+                settlement,
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+
+            original_load = JournalStore.load_events
+            calls = []
+
+            def counted_load(instance, aggregate_type, aggregate_id):
+                calls.append((aggregate_type, aggregate_id))
+                return original_load(instance, aggregate_type, aggregate_id)
+
+            with patch.object(JournalStore, "load_events", new=counted_load):
+                book = rebuild_variation_margin_book(
+                    store,
+                    opening,
+                    evidence_artifact_root=artifact_root,
+                    evidence_artifact_store=artifacts,
+                )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(book.cash("USD"), Decimal("50"))
+
+    def test_correction_retains_one_reader_generation_for_history_and_new_evidence(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        first = self._settlement(contract, "reader-generation", "105", sequence=1)
+        correction = self._settlement(
+            contract,
+            "reader-generation",
+            "106",
+            sequence=1,
+            revision=1,
+        )
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            first = self._bind_provider_evidence(artifacts, first)
+            correction = self._bind_provider_evidence(artifacts, correction)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            commit_linear_variation_margin(
+                store,
+                opening,
+                first,
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+
+            original_factory = futures_journal_module.trusted_authenticated_reader
+            factory_calls = []
+            read_calls = []
+
+            def counted_factory(*args, **kwargs):
+                factory_calls.append((args, kwargs))
+                reader = original_factory(*args, **kwargs)
+
+                def counted_reader(artifact_id):
+                    read_calls.append(artifact_id)
+                    return reader(artifact_id)
+
+                return counted_reader
+
+            with patch.object(
+                futures_journal_module,
+                "trusted_authenticated_reader",
+                new=counted_factory,
+            ):
+                corrected, delta, _transaction, inserted = (
+                    commit_linear_variation_margin(
+                        store,
+                        opening,
+                        correction,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                    )
+                )
+
+            self.assertTrue(inserted)
+            self.assertEqual(delta, Decimal("1"))
+            self.assertEqual(corrected.last_settlement_price, Decimal("106"))
+            self.assertEqual(len(factory_calls), 1)
+            self.assertEqual(len(read_calls), 2)
 
 
 if __name__ == "__main__":

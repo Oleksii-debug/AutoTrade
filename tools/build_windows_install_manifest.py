@@ -299,10 +299,13 @@ def _open_stable_regular_file(path: Path, *, name: str):
             try:
                 authority_stack.close()
             except BaseException as cleanup_failure:
-                error.add_note(
-                    "retained Windows namespace cleanup also failed: "
-                    f"{type(cleanup_failure).__name__}: {cleanup_failure}"
-                )
+                try:
+                    error.add_note(
+                        "retained Windows namespace cleanup also failed: "
+                        f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                    )
+                except BaseException:
+                    pass
             if isinstance(error, InstallerManifestError):
                 raise
             if isinstance(error, (OSError, RuntimeError, TypeError)):
@@ -310,8 +313,27 @@ def _open_stable_regular_file(path: Path, *, name: str):
                     f"{name} retained Windows namespace authority failed"
                 ) from error
             raise
-        with authority_stack:
+        try:
             yield stream
+        except BaseException as error:
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                try:
+                    error.add_note(
+                        "retained Windows namespace cleanup also failed: "
+                        f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        else:
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                raise InstallerManifestError(
+                    f"{name} retained Windows namespace cleanup failed"
+                ) from cleanup_failure
         return
 
     try:

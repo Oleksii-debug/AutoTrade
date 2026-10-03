@@ -804,21 +804,35 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     plan: RuntimeCampaignPlan,
     cut: RuntimeCampaignCut,
     measurement: TargetHostMeasurementArtifact,
+    expected_release_artifact_id: str,
     max_events: int = 100_000,
 ) -> RuntimeCampaignEvidence:
-    """Derive existing RuntimeCampaignEvidence from one retained raw artifact.
+    """Derive campaign evidence from raw measurement under external release authority.
 
-    The artifact is snapshotted through canonical bytes before use. The existing
-    campaign collector still owns JournalStore conservation/backlog/end-cut and
-    duration authority. After collection, the exact durable event identities and
-    frozen end cut must match the retained measurement artifact or the operation
-    fails closed.
+    The expected delivered-artifact UUID is mandatory at the sole evidence-minting
+    path; trusting the measurement's self-asserted UUID is insufficient. Caller-owned
+    measurement state is snapshotted through canonical bytes before the external
+    binding and campaign-window checks. The existing collector still owns durable
+    JournalStore conservation/backlog/end-cut authority.
     """
 
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
     measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    frozen_release_artifact_id = _uuid(
+        expected_release_artifact_id,
+        name="expected_release_artifact_id",
+    )
+    if measurement.release_artifact_id != frozen_release_artifact_id:
+        raise RuntimeTargetHostMeasurementError(
+            "target-host measurement belongs to another delivered release artifact"
+        )
     measurement.require_campaign_binding(spec=spec, plan=plan, cut=cut)
+    for sample in measurement.financial_samples:
+        if sample.staleness_observed_monotonic_ns < cut.started_monotonic_ns:
+            raise RuntimeTargetHostMeasurementError(
+                "financial staleness observation occurs before campaign monotonic cut"
+            )
 
     evidence = collect_runtime_campaign_evidence(
         journal=journal,
@@ -835,6 +849,10 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     measurement.require_evidence_match(evidence)
 
     campaign_end_ns = evidence.ended_monotonic_ns
+    if campaign_end_ns < cut.started_monotonic_ns:
+        raise RuntimeTargetHostMeasurementError(
+            "campaign terminal monotonic cut precedes campaign start"
+        )
     for sample in measurement.financial_samples:
         if sample.latency_start_monotonic_ns < cut.started_monotonic_ns:
             raise RuntimeTargetHostMeasurementError(

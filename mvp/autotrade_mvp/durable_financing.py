@@ -31,12 +31,14 @@ from .financing import (
     FinancingUpdate,
     book_financing_delta,
 )
+from .exact_decimal import exact_subtract
 from .instruments import (
     InstrumentRegistry,
     InstrumentRegistryError,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
+from .store_identity import same_journal_backing_object
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -489,9 +491,9 @@ def _bybit_funding_event_from_exact_response(
             "Bybit funding row currency does not match authenticated query"
         )
     symbol = _text(row.get("symbol"), name="symbol")
-    if not isinstance(instrument_registry, InstrumentRegistry):
+    if type(instrument_registry) is not InstrumentRegistry:
         raise FinancingError(
-            "Bybit financing requires canonical InstrumentRegistry authority"
+            "Bybit financing requires exact canonical InstrumentRegistry authority"
         )
     if not isinstance(instrument_versions, Mapping):
         raise FinancingError("instrument_versions must be a mapping")
@@ -590,6 +592,30 @@ def _revision_book_digest(events: list[FinancingEvent]) -> str:
     )
 
 
+def _record_exact(
+    book: FinancingRevisionBook,
+    event: FinancingEvent,
+) -> FinancingUpdate:
+    """Apply one pure revision while removing ambient Decimal-context authority."""
+
+    previous = book.latest(event.charge_id)
+    previous_final = (
+        previous.amount
+        if previous is not None and previous.kind == "FINAL"
+        else Decimal("0")
+    )
+    update = book.record(event)
+    if not update.accepted:
+        return update
+    exact_delta = exact_subtract(update.current_final_charge, previous_final)
+    return FinancingUpdate(
+        accepted=True,
+        economic_delta=exact_delta,
+        current_revision=update.current_revision,
+        current_final_charge=update.current_final_charge,
+    )
+
+
 class DurableFinancingBook:
     """Journal-backed provider/account financing revision authority."""
 
@@ -602,17 +628,28 @@ class DurableFinancingBook:
         account_id: str,
         environment: str,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        if not isinstance(economic_book, DurableProviderEconomicBook):
-            raise TypeError("economic_book must be DurableProviderEconomicBook")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be the exact canonical JournalStore")
+        if type(economic_book) is not DurableProviderEconomicBook:
+            raise TypeError(
+                "economic_book must be the exact canonical DurableProviderEconomicBook"
+            )
+        if type(economic_book.store) is not JournalStore:
+            raise TypeError(
+                "economic_book.store must be the exact canonical JournalStore"
+            )
         self.store = store
         self.economic_book = economic_book
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
         self.environment = _environment(environment)
-        if economic_book.store is not store:
-            raise ValueError("financing and economic authorities must share JournalStore")
+        if not same_journal_backing_object(
+            store.store_identity,
+            economic_book.store.store_identity,
+        ):
+            raise ValueError(
+                "financing and economic authorities must share JournalStore backing generation"
+            )
         if (
             economic_book.provider_id != self.provider_id
             or economic_book.account_id != self.account_id
@@ -676,7 +713,7 @@ class DurableFinancingBook:
             candidate_event = _event_from_payload(payload)
             previous_digest = _revision_book_digest(history)
             candidate_book = FinancingRevisionBook(history)
-            candidate_update = candidate_book.record(candidate_event)
+            candidate_update = _record_exact(candidate_book, candidate_event)
             resulting_history = list(candidate_book.events)
             if (
                 payload.get("previous_revision_digest") != previous_digest
@@ -703,13 +740,28 @@ class DurableFinancingBook:
             history = resulting_history
         return FinancingRevisionBook(history)
 
+    def _stable_replay_cut(
+        self,
+        charge_id: str,
+        *,
+        max_attempts: int = 4,
+    ) -> tuple[int, list[dict[str, Any]], FinancingRevisionBook]:
+        """Read financing + economics only from a bounded stable journal cut."""
+
+        for _attempt in range(max_attempts):
+            cut_before = self.store.current_journal_sequence()
+            durable_events = self._events(charge_id)
+            self.economic_book.refresh()
+            book = self._book_from_durable_events(charge_id, durable_events)
+            cut_after = self.store.current_journal_sequence()
+            if cut_before == cut_after:
+                return cut_before, durable_events, book
+        raise FinancingConflict(
+            "financing authority could not obtain a stable JournalStore cut"
+        )
+
     def _replay(self, charge_id: str) -> FinancingRevisionBook:
-        # DurableProviderEconomicBook keeps an in-memory projection for ordinary
-        # balance reads. Financing authority cannot trust a stale projection when
-        # validating journal conservation, so refresh from the shared JournalStore
-        # before replaying any financing aggregate.
-        self.economic_book.refresh()
-        return self._book_from_durable_events(charge_id, self._events(charge_id))
+        return self._stable_replay_cut(charge_id)[2]
 
     def _economic_transaction(
         self,
@@ -847,8 +899,10 @@ class DurableFinancingBook:
         instrument_versions: Mapping[str, str],
         committed_at: str | None = None,
     ) -> DurableFinancingResult:
-        if not isinstance(observation, ProviderResponseObservation):
-            raise TypeError("observation must be ProviderResponseObservation")
+        if type(observation) is not ProviderResponseObservation:
+            raise TypeError(
+                "observation must be the exact canonical ProviderResponseObservation"
+            )
         observation.require_scope(
             provider_id="BYBIT",
             surface=Surface.ACTIVITIES,
@@ -933,10 +987,9 @@ class DurableFinancingBook:
         committed_at: str | None,
     ) -> DurableFinancingResult:
         aggregate_id = self._aggregate_id(event.charge_id)
-        durable_events = self._events(event.charge_id)
-        book = self._replay(event.charge_id)
+        accepted_cut, durable_events, book = self._stable_replay_cut(event.charge_id)
         previous_revision_digest = _revision_book_digest(list(book.events))
-        update = book.record(event)
+        update = _record_exact(book, event)
         resulting_revision_digest = _revision_book_digest(list(book.events))
 
         if not update.accepted:
@@ -956,7 +1009,7 @@ class DurableFinancingBook:
                     if previous is not None and previous.kind == "FINAL"
                     else Decimal("0")
                 )
-                expected_delta = event.amount - previous_final
+                expected_delta = exact_subtract(event.amount, previous_final)
                 if expected_delta != 0:
                     economic_transaction = self._economic_transaction(
                         aggregate_id=aggregate_id,
@@ -1117,6 +1170,7 @@ class DurableFinancingBook:
                 result=result,
                 state_version=state_version,
                 events=events,
+                expected_journal_sequence=accepted_cut,
             )
         finally:
             self.economic_book.refresh()

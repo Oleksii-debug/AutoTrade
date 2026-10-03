@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import (
@@ -21,6 +21,7 @@ from .accounting import (
     reverse_transaction,
     transaction_digest,
 )
+from .futures import FuturesError, settle_fraction
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .perpetuals import (
     FundingConvention,
@@ -28,6 +29,7 @@ from .perpetuals import (
     PerpetualContract,
     PerpetualError,
     funding_cashflow,
+    inverse_funding_cashflow_exact,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
@@ -75,6 +77,94 @@ def _identity(kind: str, *parts: str) -> str:
     return f"{kind}:sha256:{digest}"
 
 
+def _source_event_identity(
+    observation: "PerpetualFundingObservation",
+    external_event_id: str | None = None,
+) -> str:
+    """Canonical provider source-event identity.
+
+    Opaque provider event IDs are not assumed account-global. Until a versioned
+    provider contract proves a broader uniqueness domain, bind them to the exact
+    canonical instrument version inside the already account/provider/environment
+    scoped funding aggregate.
+    """
+
+    if not isinstance(observation, PerpetualFundingObservation):
+        raise TypeError("observation must be PerpetualFundingObservation")
+    return _identity(
+        "funding-source-event",
+        observation.instrument_version,
+        observation.external_event_id
+        if external_event_id is None
+        else _text(external_event_id, "external_event_id"),
+    )
+
+
+def _funding_convention(version: InstrumentVersion) -> FundingConvention:
+    """Resolve immutable funding sign/price semantics from the instrument version."""
+
+    if not isinstance(version, InstrumentVersion):
+        raise TypeError("version must be InstrumentVersion")
+    schedule = version.funding_schedule
+    if not isinstance(schedule, Mapping):
+        raise PerpetualFundingError(
+            "durable funding requires an explicit versioned funding convention"
+        )
+    price_basis = _text(
+        schedule.get("price_basis"),
+        "funding_schedule.price_basis",
+    ).upper()
+    positive_rate_effect = _text(
+        schedule.get("positive_rate_effect"),
+        "funding_schedule.positive_rate_effect",
+    ).upper()
+    if price_basis not in {"MARK", "INDEX"}:
+        raise PerpetualFundingError(
+            "funding_schedule.price_basis must be MARK or INDEX"
+        )
+    if positive_rate_effect not in {"LONG_PAYS", "LONG_RECEIVES"}:
+        raise PerpetualFundingError(
+            "funding_schedule.positive_rate_effect must be LONG_PAYS or LONG_RECEIVES"
+        )
+    return FundingConvention(positive_rate_effect, price_basis)
+
+
+def _inverse_settlement_policy(
+    version: InstrumentVersion,
+) -> tuple[Decimal, str]:
+    """Resolve the one explicit cash-quantization boundary from versioned contract data."""
+
+    if not isinstance(version, InstrumentVersion) or version.payoff != "INVERSE":
+        raise PerpetualFundingError(
+            "inverse settlement policy requires an INVERSE instrument version"
+        )
+    schedule = version.funding_schedule
+    if not isinstance(schedule, Mapping):
+        raise PerpetualFundingError(
+            "inverse durable funding requires an explicit settlement quantization policy"
+        )
+    quantum_value = schedule.get("settlement_quantum")
+    rounding_value = schedule.get("settlement_rounding")
+    if quantum_value is None or rounding_value is None:
+        raise PerpetualFundingError(
+            "inverse durable funding requires an explicit settlement quantization policy"
+        )
+    quantum = _decimal(quantum_value, "funding_schedule.settlement_quantum")
+    if quantum <= 0:
+        raise PerpetualFundingError(
+            "funding_schedule.settlement_quantum must be positive"
+        )
+    rounding = _text(
+        rounding_value,
+        "funding_schedule.settlement_rounding",
+    ).upper()
+    if rounding not in {"HALF_EVEN", "DOWN"}:
+        raise PerpetualFundingError(
+            "funding_schedule.settlement_rounding must be HALF_EVEN or DOWN"
+        )
+    return quantum, rounding
+
+
 @dataclass(frozen=True)
 class PerpetualFundingObservation:
     """Provider-normalized funding fact still bound to sealed raw evidence."""
@@ -98,6 +188,12 @@ class PerpetualFundingObservation:
     collateral_currency: str
     positive_rate_effect: str
     raw_evidence_digest: str
+    provider_income: Decimal | None = None
+    composite_evidence_digest: str | None = None
+    pre_cut_transaction_ids: tuple[str, ...] = ()
+    post_cut_transaction_ids: tuple[str, ...] = ()
+    cut_evidence_digest: str | None = None
+    position_cut_observed_at: datetime | None = None
     corrects_external_event_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -136,9 +232,19 @@ class PerpetualFundingObservation:
             raise PerpetualFundingError(
                 "funding price reference cannot be observed after provider evidence"
             )
+        cut_observed = (
+            observed
+            if self.position_cut_observed_at is None
+            else _utc(self.position_cut_observed_at, "position_cut_observed_at")
+        )
+        if cut_observed < effective or cut_observed > observed:
+            raise PerpetualFundingError(
+                "position_cut_observed_at must be between funding cut and composite observation time"
+            )
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "price_reference_at", price_reference)
+        object.__setattr__(self, "position_cut_observed_at", cut_observed)
         object.__setattr__(
             self, "signed_contracts", _decimal(self.signed_contracts, "signed_contracts")
         )
@@ -166,6 +272,36 @@ class PerpetualFundingObservation:
         digest = _text(self.raw_evidence_digest, "raw_evidence_digest")
         if not digest.startswith("sha256:") or len(digest) != 71:
             raise PerpetualFundingError("raw_evidence_digest must be canonical SHA-256")
+        if self.provider_income is not None:
+            object.__setattr__(
+                self, "provider_income", _decimal(self.provider_income, "provider_income")
+            )
+        if self.composite_evidence_digest is not None:
+            composite = _text(self.composite_evidence_digest, "composite_evidence_digest")
+            if not composite.startswith("sha256:") or len(composite) != 71:
+                raise PerpetualFundingError(
+                    "composite_evidence_digest must be canonical SHA-256"
+                )
+            object.__setattr__(self, "composite_evidence_digest", composite)
+        for field_name in ("pre_cut_transaction_ids", "post_cut_transaction_ids"):
+            raw = getattr(self, field_name)
+            if not isinstance(raw, tuple):
+                raise PerpetualFundingError(f"{field_name} must be an immutable tuple")
+            normalized = tuple(_text(item, field_name) for item in raw)
+            if len(set(normalized)) != len(normalized):
+                raise PerpetualFundingError(f"{field_name} must not contain duplicates")
+            object.__setattr__(self, field_name, normalized)
+        if set(self.pre_cut_transaction_ids) & set(self.post_cut_transaction_ids):
+            raise PerpetualFundingError(
+                "funding cut transaction identity cannot be both pre-cut and post-cut"
+            )
+        if self.cut_evidence_digest is not None:
+            cut_digest = _text(self.cut_evidence_digest, "cut_evidence_digest")
+            if not cut_digest.startswith("sha256:") or len(cut_digest) != 71:
+                raise PerpetualFundingError(
+                    "cut_evidence_digest must be canonical SHA-256"
+                )
+            object.__setattr__(self, "cut_evidence_digest", cut_digest)
         if self.corrects_external_event_id is not None:
             object.__setattr__(
                 self,
@@ -200,11 +336,56 @@ def canonical_perpetual_funding_observation(
         "collateral_currency": observation.collateral_currency,
         "positive_rate_effect": observation.positive_rate_effect,
         "raw_evidence_digest": observation.raw_evidence_digest,
+        "provider_income": (
+            None
+            if observation.provider_income is None
+            else format(observation.provider_income, "f")
+        ),
+        "composite_evidence_digest": observation.composite_evidence_digest,
+        "pre_cut_transaction_ids": list(observation.pre_cut_transaction_ids),
+        "post_cut_transaction_ids": list(observation.post_cut_transaction_ids),
+        "cut_evidence_digest": observation.cut_evidence_digest,
+        "position_cut_observed_at": _utc_text(observation.position_cut_observed_at),
         "corrects_external_event_id": observation.corrects_external_event_id,
     }
 
 
-FundingEvidenceResolver = Callable[[str], ProviderResponseObservation]
+@dataclass(frozen=True)
+class FundingEvidenceBundle:
+    """Separately authenticated provider observations required for financial funding authority."""
+
+    income: ProviderResponseObservation
+    rate: ProviderResponseObservation
+    prices: ProviderResponseObservation
+    cut: ProviderResponseObservation
+    corrects_external_event_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("income", "rate", "prices", "cut"):
+            if not isinstance(getattr(self, name), ProviderResponseObservation):
+                raise TypeError(f"{name} must be ProviderResponseObservation")
+        if self.corrects_external_event_id is not None:
+            object.__setattr__(
+                self,
+                "corrects_external_event_id",
+                _text(self.corrects_external_event_id, "corrects_external_event_id"),
+            )
+
+    @property
+    def evidence_ref(self) -> str:
+        return _identity(
+            "funding-evidence",
+            self.income.evidence_ref,
+            self.rate.evidence_ref,
+            self.prices.evidence_ref,
+            self.cut.evidence_ref,
+            self.corrects_external_event_id or "",
+        )
+
+
+FundingEvidenceResolver = Callable[
+    [str], ProviderResponseObservation | FundingEvidenceBundle
+]
 
 
 def _canonical_observation_from_sealed_response(
@@ -302,6 +483,186 @@ def _canonical_observation_from_sealed_response(
     )
 
 
+def _canonical_instant_text(value: object, name: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise PerpetualFundingError(f"{name} must be canonical UTC text")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise PerpetualFundingError(f"{name} must be canonical UTC text") from error
+    return _utc(parsed, name)
+
+
+def _sequence_ids(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise PerpetualFundingError(f"{name} must be a canonical JSON array")
+    result = tuple(_text(item, name) for item in value)
+    if len(set(result)) != len(result):
+        raise PerpetualFundingError(f"{name} must not contain duplicates")
+    return result
+
+
+def _composite_observation(
+    bundle: FundingEvidenceBundle,
+    *,
+    registry: InstrumentRegistry,
+) -> PerpetualFundingObservation:
+    """Compose financial truth from independent immutable provider observations."""
+
+    sources = (bundle.income, bundle.rate, bundle.prices, bundle.cut)
+    first = bundle.income
+    for source in sources[1:]:
+        if (
+            source.provider_id != first.provider_id
+            or source.account_id != first.account_id
+            or source.environment != first.environment
+            or source.query_binding.entity_id != first.query_binding.entity_id
+            or source.query_binding.instrument_version
+            != first.query_binding.instrument_version
+        ):
+            raise PerpetualFundingError(
+                "funding evidence sources do not share one provider/account/entity/environment/instrument scope"
+            )
+
+    income = first.payload
+    rate = bundle.rate.payload
+    prices = bundle.prices.payload
+    cut = bundle.cut.payload
+    if not all(isinstance(item, Mapping) for item in (income, rate, prices, cut)):
+        raise PerpetualFundingError("funding evidence payloads must be canonical objects")
+    assert isinstance(income, Mapping)
+    assert isinstance(rate, Mapping)
+    assert isinstance(prices, Mapping)
+    assert isinstance(cut, Mapping)
+
+    income_required = {"symbol", "incomeType", "income", "asset", "info", "time", "tranId", "tradeId"}
+    rate_required = {"symbol", "fundingTime", "fundingRate"}
+    prices_required = {"symbol", "time", "markPrice", "indexPrice"}
+    cut_required = {
+        "symbol", "fundingTime", "position",
+        "preCutTransactionIds", "postCutTransactionIds",
+    }
+    if set(income) != income_required:
+        raise PerpetualFundingError("funding income evidence must use official-shaped FUNDING_FEE fields")
+    if set(rate) != rate_required:
+        raise PerpetualFundingError("funding-rate evidence shape is not canonical")
+    if set(prices) != prices_required:
+        raise PerpetualFundingError("funding price evidence shape is not canonical")
+    if set(cut) != cut_required:
+        raise PerpetualFundingError("funding cut evidence shape is not canonical")
+    if _text(income["incomeType"], "incomeType").upper() != "FUNDING_FEE":
+        raise PerpetualFundingError("provider income event is not FUNDING_FEE")
+
+    symbol = _text(income["symbol"], "symbol")
+    if any(_text(item["symbol"], "symbol") != symbol for item in (rate, prices, cut)):
+        raise PerpetualFundingError("funding evidence symbol mismatch")
+    effective = _canonical_instant_text(rate["fundingTime"], "fundingTime")
+    income_time = income["time"]
+    if (
+        isinstance(income_time, bool)
+        or not isinstance(income_time, int)
+        or income_time < 0
+    ):
+        raise PerpetualFundingError("funding income time must be non-negative epoch milliseconds")
+    income_seconds, income_milliseconds = divmod(income_time, 1000)
+    income_effective = datetime.fromtimestamp(
+        income_seconds, tz=timezone.utc
+    ) + timedelta(milliseconds=income_milliseconds)
+    if income_effective != effective:
+        raise PerpetualFundingError(
+            "funding income event is not bound to the registered funding cut"
+        )
+    if _canonical_instant_text(prices["time"], "price time") != effective:
+        raise PerpetualFundingError("mark/index evidence is not bound to the registered funding cut")
+    if _canonical_instant_text(cut["fundingTime"], "cut fundingTime") != effective:
+        raise PerpetualFundingError("position-cut evidence is not bound to the funding period")
+
+    version = registry.exact(first.query_binding.instrument_version)
+    schedule = version.funding_schedule
+    if not isinstance(schedule, Mapping):
+        raise PerpetualFundingError("funding convention must be versioned in instrument metadata")
+    price_basis = _text(schedule.get("price_basis"), "funding_schedule.price_basis")
+    positive_rate_effect = _text(
+        schedule.get("positive_rate_effect"),
+        "funding_schedule.positive_rate_effect",
+    )
+
+    composite_payload = {
+        "schema_version": "1.0.0",
+        "provider_id": first.provider_id,
+        "account_id": first.account_id,
+        "entity_id": first.query_binding.entity_id,
+        "environment": first.environment,
+        "instrument_version": first.query_binding.instrument_version,
+        "sources": [
+            {
+                "role": role,
+                "evidence_ref": source.evidence_ref,
+                "response_sha256": source.response_sha256,
+                "query_digest": source.query_binding.query_digest,
+                "endpoint": source.query_binding.endpoint,
+            }
+            for role, source in zip(
+                ("income", "rate", "prices", "cut"), sources, strict=True
+            )
+        ],
+    }
+    composite_digest = payload_digest(composite_payload)
+    observed = max(
+        _canonical_instant_text(source.observed_at, "observed_at")
+        for source in sources
+    )
+    cut_digest = payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "evidence_ref": bundle.cut.evidence_ref,
+            "response_sha256": bundle.cut.response_sha256,
+            "funding_time": _utc_text(effective),
+            "position": format(_decimal(cut["position"], "position"), "f"),
+            "pre_cut_transaction_ids": list(
+                _sequence_ids(cut["preCutTransactionIds"], "preCutTransactionIds")
+            ),
+            "post_cut_transaction_ids": list(
+                _sequence_ids(cut["postCutTransactionIds"], "postCutTransactionIds")
+            ),
+        }
+    )
+    return PerpetualFundingObservation(
+        provider_id=first.provider_id,
+        account_id=first.account_id,
+        environment=first.environment,
+        instrument_id=symbol,
+        instrument_version=first.query_binding.instrument_version,
+        external_event_id=_text(str(income["tranId"]), "tranId"),
+        provider_revision=first.response_sha256,
+        funding_period_id=_utc_text(effective),
+        effective_at=effective,
+        observed_at=observed,
+        price_reference_at=effective,
+        signed_contracts=_decimal(cut["position"], "position"),
+        funding_rate=_decimal(rate["fundingRate"], "fundingRate"),
+        mark_price=_decimal(prices["markPrice"], "markPrice"),
+        index_price=_decimal(prices["indexPrice"], "indexPrice"),
+        price_basis=price_basis,
+        collateral_currency=_text(income["asset"], "asset"),
+        positive_rate_effect=positive_rate_effect,
+        raw_evidence_digest=first.response_sha256,
+        provider_income=_decimal(income["income"], "income"),
+        composite_evidence_digest=composite_digest,
+        pre_cut_transaction_ids=_sequence_ids(
+            cut["preCutTransactionIds"], "preCutTransactionIds"
+        ),
+        post_cut_transaction_ids=_sequence_ids(
+            cut["postCutTransactionIds"], "postCutTransactionIds"
+        ),
+        cut_evidence_digest=cut_digest,
+        position_cut_observed_at=_canonical_instant_text(
+            bundle.cut.observed_at, "cut observed_at"
+        ),
+        corrects_external_event_id=bundle.corrects_external_event_id,
+    )
+
+
 @dataclass(frozen=True)
 class FundingPositionCut:
     """Causal position proof projected from the canonical durable economic book."""
@@ -314,6 +675,7 @@ class FundingPositionCut:
     journal_sequence: int
     contributing_transaction_ids: tuple[str, ...]
     contributing_transaction_digests: tuple[str, ...]
+    causal_digest: str
     digest: str
 
 
@@ -343,6 +705,7 @@ class DurablePerpetualFundingAuthority:
         evidence_resolver: FundingEvidenceResolver,
         funding_endpoints: frozenset[str],
         permission_scope: str,
+        funding_evidence_endpoints: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -364,6 +727,35 @@ class DurablePerpetualFundingAuthority:
         self.instrument_registry = instrument_registry
         self.evidence_resolver = evidence_resolver
         self.funding_endpoints = endpoints
+        if funding_evidence_endpoints is None:
+            self.funding_evidence_endpoints = None
+        else:
+            if not isinstance(funding_evidence_endpoints, Mapping):
+                raise TypeError("funding_evidence_endpoints must be a mapping")
+            required_roles = {"income", "rate", "prices", "cut"}
+            if set(funding_evidence_endpoints) != required_roles:
+                raise PerpetualFundingError(
+                    "funding_evidence_endpoints must define income/rate/prices/cut roles"
+                )
+            normalized_policy: dict[str, frozenset[str]] = {}
+            for role in sorted(required_roles):
+                values = funding_evidence_endpoints[role]
+                if not isinstance(values, frozenset) or not values:
+                    raise PerpetualFundingError(
+                        "each funding evidence role requires a non-empty endpoint set"
+                    )
+                normalized = frozenset(
+                    _text(value, f"{role} endpoint") for value in values
+                )
+                if any(
+                    not value.startswith("/") or "://" in value
+                    for value in normalized
+                ):
+                    raise PerpetualFundingError(
+                        "funding evidence endpoints must be provider-relative paths"
+                    )
+                normalized_policy[role] = normalized
+            self.funding_evidence_endpoints = normalized_policy
         self.permission_scope = _text(permission_scope, "permission_scope")
         self.aggregate_id = _identity(
             "perpetual-funding-book",
@@ -384,18 +776,81 @@ class DurablePerpetualFundingAuthority:
 
     def _observation(
         self, evidence_ref: str
-    ) -> tuple[PerpetualFundingObservation, ProviderResponseObservation]:
+    ) -> tuple[
+        PerpetualFundingObservation,
+        ProviderResponseObservation | FundingEvidenceBundle,
+    ]:
         reference = _text(evidence_ref, "evidence_ref")
         try:
             source = self.evidence_resolver(reference)
         except Exception as error:
             raise PerpetualFundingError("provider funding evidence could not be resolved") from error
+
+        if isinstance(source, FundingEvidenceBundle):
+            if source.evidence_ref != reference:
+                raise PerpetualFundingError("resolved funding composite identity mismatch")
+            role_items = (
+                ("income", source.income),
+                ("rate", source.rate),
+                ("prices", source.prices),
+                ("cut", source.cut),
+            )
+            if (
+                source.income.environment in {"PAPER", "LIVE"}
+                and self.funding_evidence_endpoints is None
+            ):
+                raise PerpetualFundingError(
+                    "financial funding composite requires role-specific endpoint policy"
+                )
+            for role, item in role_items:
+                endpoint = item.query_binding.endpoint
+                allowed = (
+                    self.funding_endpoints
+                    if self.funding_evidence_endpoints is None
+                    else self.funding_evidence_endpoints[role]
+                )
+                if endpoint not in allowed:
+                    raise PerpetualFundingError(
+                        f"{role} funding evidence endpoint is not allowed"
+                    )
+                if item.query_binding.surface not in {
+                    Surface.ACTIVITIES,
+                    Surface.AUTHENTICATED_READ,
+                }:
+                    raise PerpetualFundingError(
+                        f"{role} funding evidence surface is not allowed"
+                    )
+                try:
+                    item.require_scope(
+                        provider_id=self.economic_book.provider_id,
+                        surface=item.query_binding.surface,
+                        endpoint=endpoint,
+                        account_id=self.economic_book.account_id,
+                        environment=self.economic_book.environment,
+                    )
+                except Exception as error:
+                    raise PerpetualFundingError(
+                        "funding evidence scope mismatch"
+                    ) from error
+                if item.query_binding.permission_scope != self.permission_scope:
+                    raise PerpetualFundingError(
+                        "funding evidence permission scope mismatch"
+                    )
+            observation = _composite_observation(
+                source, registry=self.instrument_registry
+            )
+            return observation, source
+
         if not isinstance(source, ProviderResponseObservation):
             raise PerpetualFundingError(
-                "provider funding evidence must be a sealed ProviderResponseObservation"
+                "provider funding evidence must be a sealed composite or response observation"
             )
         if source.evidence_ref != reference:
             raise PerpetualFundingError("resolved provider funding evidence identity mismatch")
+        if source.environment in {"PAPER", "LIVE"}:
+            raise PerpetualFundingError(
+                "financial funding authority requires separately authenticated income, rate, price and cut evidence"
+            )
         endpoint = source.query_binding.endpoint
         if endpoint not in self.funding_endpoints:
             raise PerpetualFundingError("provider funding evidence endpoint is not allowed")
@@ -412,20 +867,6 @@ class DurablePerpetualFundingAuthority:
         if source.query_binding.permission_scope != self.permission_scope:
             raise PerpetualFundingError("provider funding evidence permission scope mismatch")
         observation = _canonical_observation_from_sealed_response(source)
-        source_observed = datetime.fromisoformat(
-            source.observed_at.replace("Z", "+00:00")
-        ).astimezone(timezone.utc)
-        if (
-            observation.provider_id != source.provider_id
-            or observation.account_id != source.account_id
-            or observation.environment != source.environment
-            or observation.instrument_version != source.query_binding.instrument_version
-            or observation.raw_evidence_digest != source.response_sha256
-            or observation.observed_at != source_observed
-        ):
-            raise PerpetualFundingError(
-                "normalized funding fact does not match sealed provider evidence"
-            )
         return observation, source
 
     def _contract(
@@ -461,10 +902,25 @@ class DurablePerpetualFundingAuthority:
         if version.payoff not in {"LINEAR", "INVERSE"}:
             raise PerpetualFundingError("perpetual payoff is not canonically qualified")
 
+        canonical_convention = _funding_convention(version)
+        if (
+            observation.price_basis != canonical_convention.price_basis
+            or observation.positive_rate_effect
+            != canonical_convention.positive_rate_effect
+        ):
+            raise PerpetualFundingConflict(
+                "provider funding convention does not match immutable instrument version"
+            )
+
+        canonical_collateral = version.settlement_currency
+        if observation.collateral_currency != canonical_collateral:
+            raise PerpetualFundingConflict(
+                "provider funding asset does not match immutable contract settlement currency"
+            )
         contract = PerpetualContract(
             instrument_id=version.provider_symbol,
             settlement_currency=version.settlement_currency,
-            collateral_currency=observation.collateral_currency,
+            collateral_currency=canonical_collateral,
             multiplier=version.contract_multiplier,
             payoff=version.payoff,
             face_currency=(
@@ -482,7 +938,7 @@ class DurablePerpetualFundingAuthority:
                 "schema_version": "1.0.0",
                 "instrument_version": observation.instrument_version,
                 "instrument_contract": version.to_contract_dict(),
-                "provider_collateral_currency": observation.collateral_currency,
+                "canonical_collateral_currency": canonical_collateral,
             }
         )
         return version, contract, contract_digest
@@ -501,6 +957,7 @@ class DurablePerpetualFundingAuthority:
         position = Decimal("0")
         transaction_ids: list[str] = []
         transaction_digests: list[str] = []
+        same_cut_transaction_ids: list[str] = []
 
         for transaction in self.economic_book.transactions:
             position_postings = tuple(
@@ -530,10 +987,23 @@ class DurablePerpetualFundingAuthority:
                     "canonical position history contains invalid causal timestamps"
                 ) from error
 
+            include = (
+                effective_at < observation.effective_at
+                and observed_at <= observation.position_cut_observed_at
+            )
             if (
-                effective_at <= observation.effective_at
-                and observed_at <= observation.observed_at
+                effective_at == observation.effective_at
+                and observed_at <= observation.position_cut_observed_at
             ):
+                same_cut_transaction_ids.append(transaction.transaction_id)
+                in_pre = transaction.transaction_id in observation.pre_cut_transaction_ids
+                in_post = transaction.transaction_id in observation.post_cut_transaction_ids
+                if in_pre == in_post:
+                    raise PerpetualFundingConflict(
+                        "ambiguous position ordering at funding cut requires qualified pre/post evidence"
+                    )
+                include = in_pre
+            if include:
                 position += sum(
                     (item.signed_amount for item in position_postings),
                     Decimal("0"),
@@ -541,11 +1011,39 @@ class DurablePerpetualFundingAuthority:
                 transaction_ids.append(transaction.transaction_id)
                 transaction_digests.append(transaction_digest(transaction))
 
+        declared_same_cut = set(observation.pre_cut_transaction_ids) | set(
+            observation.post_cut_transaction_ids
+        )
+        if declared_same_cut != set(same_cut_transaction_ids):
+            raise PerpetualFundingConflict(
+                "funding cut evidence does not exactly match canonical same-cut position transactions"
+            )
+
+        causal_material = {
+            "schema_version": "1.0.0",
+            "instrument": instrument,
+            "effective_at": _utc_text(observation.effective_at),
+            "position": format(position, "f"),
+            "cut_evidence_digest": observation.cut_evidence_digest,
+            "position_cut_observed_at": _utc_text(
+                observation.position_cut_observed_at
+            ),
+            "pre_cut_transaction_ids": list(observation.pre_cut_transaction_ids),
+            "post_cut_transaction_ids": list(observation.post_cut_transaction_ids),
+            "contributing_transactions": [
+                {"transaction_id": transaction_id, "digest": digest}
+                for transaction_id, digest in zip(
+                    transaction_ids, transaction_digests, strict=True
+                )
+            ],
+        }
         material = {
             "schema_version": "1.0.0",
             "instrument": instrument,
             "effective_at": _utc_text(observation.effective_at),
-            "evidence_observed_at": _utc_text(observation.observed_at),
+            "evidence_observed_at": _utc_text(
+                observation.position_cut_observed_at
+            ),
             "position": format(position, "f"),
             "economic_book_digest": book_digest,
             "journal_sequence": journal_sequence,
@@ -567,12 +1065,14 @@ class DurablePerpetualFundingAuthority:
             journal_sequence=journal_sequence,
             contributing_transaction_ids=tuple(transaction_ids),
             contributing_transaction_digests=tuple(transaction_digests),
+            causal_digest=payload_digest(causal_material),
             digest=payload_digest(material),
         )
 
     def _transaction(
         self,
         observation: PerpetualFundingObservation,
+        version: InstrumentVersion,
         contract: PerpetualContract,
         canonical_position: Decimal,
         *,
@@ -581,10 +1081,6 @@ class DurablePerpetualFundingAuthority:
     ) -> tuple[JournalTransaction, Decimal, str]:
         if contract.instrument_id != observation.instrument_id:
             raise PerpetualFundingError("contract instrument does not match funding evidence")
-        if contract.payoff != "LINEAR":
-            raise PerpetualFundingError(
-                "inverse durable funding requires an explicit settlement quantization policy"
-            )
         canonical_position = _decimal(canonical_position, "position_at_cut")
         if canonical_position != observation.signed_contracts:
             raise PerpetualFundingConflict(
@@ -597,17 +1093,42 @@ class DurablePerpetualFundingAuthority:
             max_age=timedelta(microseconds=1),
             max_mark_index_deviation=Decimal("1"),
         )
-        convention = FundingConvention(
-            observation.positive_rate_effect, observation.price_basis
-        )
-        currency, amount = funding_cashflow(
-            contract=contract,
-            signed_contracts=canonical_position,
-            funding_rate=observation.funding_rate,
-            snapshot=snapshot,
-            convention=convention,
-            at=observation.effective_at,
-        )
+        convention = _funding_convention(version)
+        if contract.payoff == "LINEAR":
+            currency, amount = funding_cashflow(
+                contract=contract,
+                signed_contracts=canonical_position,
+                funding_rate=observation.funding_rate,
+                snapshot=snapshot,
+                convention=convention,
+                at=observation.effective_at,
+            )
+        elif contract.payoff == "INVERSE":
+            quantum, rounding = _inverse_settlement_policy(version)
+            try:
+                currency, exact_amount = inverse_funding_cashflow_exact(
+                    contract=contract,
+                    signed_contracts=canonical_position,
+                    funding_rate=observation.funding_rate,
+                    snapshot=snapshot,
+                    convention=convention,
+                    at=observation.effective_at,
+                )
+                amount = settle_fraction(
+                    exact_amount,
+                    quantum=quantum,
+                    rounding=rounding,
+                )
+            except (PerpetualError, FuturesError) as error:
+                raise PerpetualFundingError(
+                    "inverse funding settlement economics are invalid"
+                ) from error
+        else:
+            raise PerpetualFundingError("perpetual payoff is not canonically qualified")
+        if observation.provider_income is not None and amount != observation.provider_income:
+            raise PerpetualFundingConflict(
+                "provider funding income does not reconcile with computed economics"
+            )
         transaction_id = str(
             uuid5(
                 NAMESPACE_URL,
@@ -617,7 +1138,7 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
-                    observation.external_event_id,
+                    _source_event_identity(observation),
                 ),
             )
         )
@@ -644,24 +1165,55 @@ class DurablePerpetualFundingAuthority:
 
         observation_payload = canonical_perpetual_funding_observation(observation)
         observation_digest = payload_digest(observation_payload)
-        provider_evidence_payload = {
-            "evidence_ref": source.evidence_ref,
-            "response_sha256": source.response_sha256,
-            "query_digest": source.query_binding.query_digest,
-            "endpoint": source.query_binding.endpoint,
-            "permission_scope": source.query_binding.permission_scope,
-            "capability_snapshot_id": source.query_binding.capability_snapshot_id,
-            "instrument_version": source.query_binding.instrument_version,
-            "observed_at": source.observed_at,
-        }
+        if isinstance(source, FundingEvidenceBundle):
+            provider_evidence_payload = {
+                "schema_version": "2.0.0",
+                "evidence_ref": source.evidence_ref,
+                "composite_evidence_digest": observation.composite_evidence_digest,
+                "sources": [
+                    {
+                        "role": role,
+                        "evidence_ref": item.evidence_ref,
+                        "response_sha256": item.response_sha256,
+                        "query_digest": item.query_binding.query_digest,
+                        "endpoint": item.query_binding.endpoint,
+                        "permission_scope": item.query_binding.permission_scope,
+                        "capability_snapshot_id": item.query_binding.capability_snapshot_id,
+                        "instrument_version": item.query_binding.instrument_version,
+                        "entity_id": item.query_binding.entity_id,
+                        "observed_at": item.observed_at,
+                    }
+                    for role, item in zip(
+                        ("income", "rate", "prices", "cut"),
+                        (source.income, source.rate, source.prices, source.cut),
+                        strict=True,
+                    )
+                ],
+            }
+        else:
+            provider_evidence_payload = {
+                "schema_version": "1.0.0-legacy-nonfinancial",
+                "evidence_ref": source.evidence_ref,
+                "response_sha256": source.response_sha256,
+                "query_digest": source.query_binding.query_digest,
+                "endpoint": source.query_binding.endpoint,
+                "permission_scope": source.query_binding.permission_scope,
+                "capability_snapshot_id": source.query_binding.capability_snapshot_id,
+                "instrument_version": source.query_binding.instrument_version,
+                "observed_at": source.observed_at,
+            }
         provider_evidence_digest = payload_digest(provider_evidence_payload)
         events = self._events()
 
         same = [
             event
             for event in events
-            if self._payload(event).get("external_event_id")
-            == observation.external_event_id
+            if (
+                self._payload(event).get("instrument_version")
+                == observation.instrument_version
+                and self._payload(event).get("external_event_id")
+                == observation.external_event_id
+            )
         ]
         if same:
             if len(same) != 1:
@@ -708,8 +1260,8 @@ class DurablePerpetualFundingAuthority:
             for event in events
             if self._payload(event).get("instrument_version")
             == observation.instrument_version
-            and self._payload(event).get("funding_period_id")
-            == observation.funding_period_id
+            and self._payload(event).get("effective_at")
+            == _utc_text(observation.effective_at)
         ]
         if observation.corrects_external_event_id is None and same_period:
             raise PerpetualFundingConflict(
@@ -724,15 +1276,21 @@ class DurablePerpetualFundingAuthority:
             matches = [
                 event
                 for event in events
-                if self._payload(event).get("external_event_id")
-                == observation.corrects_external_event_id
+                if (
+                    self._payload(event).get("instrument_version")
+                    == observation.instrument_version
+                    and self._payload(event).get("external_event_id")
+                    == observation.corrects_external_event_id
+                )
             ]
             if len(matches) != 1:
                 raise PerpetualFundingConflict(
                     "funding correction target must identify exactly one prior event"
                 )
             if any(
-                self._payload(event).get("corrects_external_event_id")
+                self._payload(event).get("instrument_version")
+                == observation.instrument_version
+                and self._payload(event).get("corrects_external_event_id")
                 == observation.corrects_external_event_id
                 for event in events
             ):
@@ -741,6 +1299,14 @@ class DurablePerpetualFundingAuthority:
                 )
             prior_event = matches[0]
             prior_payload = self._payload(prior_event)
+            prior_observed_at = _canonical_instant_text(
+                prior_payload.get("observed_at"),
+                "prior funding observed_at",
+            )
+            if observation.observed_at < prior_observed_at:
+                raise PerpetualFundingConflict(
+                    "funding correction observation cannot predate its predecessor"
+                )
             for key, expected in (
                 ("instrument_version", observation.instrument_version),
                 ("funding_period_id", observation.funding_period_id),
@@ -750,6 +1316,13 @@ class DurablePerpetualFundingAuthority:
                     raise PerpetualFundingConflict(
                         "funding correction cannot change immutable period identity"
                     )
+            # A version ID cannot be reused with new settlement metadata after
+            # restart. Missing legacy identity is not authority to reinterpret
+            # already-booked economics under the current registry.
+            if prior_payload.get("instrument_contract_digest") != contract_digest:
+                raise PerpetualFundingConflict(
+                    "funding correction cannot reinterpret immutable instrument contract"
+                )
             if prior_payload.get("provider_revision") == observation.provider_revision:
                 raise PerpetualFundingConflict(
                     "funding correction requires a new provider revision"
@@ -772,6 +1345,15 @@ class DurablePerpetualFundingAuthority:
                 )
 
         position_cut = self._position_cut(observation)
+        if prior_payload is not None:
+            prior_cut = prior_payload.get("position_cut")
+            if (
+                not isinstance(prior_cut, Mapping)
+                or prior_cut.get("causal_digest") != position_cut.causal_digest
+            ):
+                raise PerpetualFundingConflict(
+                    "funding correction cannot reinterpret immutable funding-period position cut"
+                )
         if position_cut.position != observation.signed_contracts:
             raise PerpetualFundingConflict(
                 "provider funding position does not match canonical position at funding cut"
@@ -786,12 +1368,13 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
-                    observation.external_event_id,
+                    _source_event_identity(observation),
                 ),
             )
         )
         replacement, amount, currency = self._transaction(
             observation,
+            version,
             contract,
             position_cut.position,
             cause_event_id=event_id,
@@ -813,7 +1396,7 @@ class DurablePerpetualFundingAuthority:
                             observation.provider_id,
                             observation.account_id,
                             observation.environment,
-                            observation.external_event_id,
+                            _source_event_identity(observation),
                         ),
                     )
                 ),
@@ -858,6 +1441,12 @@ class DurablePerpetualFundingAuthority:
             "effective_at": _utc_text(observation.effective_at),
             "observed_at": _utc_text(observation.observed_at),
             "raw_evidence_digest": observation.raw_evidence_digest,
+            "composite_evidence_digest": observation.composite_evidence_digest,
+            "provider_income": (
+                None
+                if observation.provider_income is None
+                else format(observation.provider_income, "f")
+            ),
             "provider_evidence_ref": source.evidence_ref,
             "provider_evidence_digest": provider_evidence_digest,
             "observation_digest": observation_digest,
@@ -870,6 +1459,8 @@ class DurablePerpetualFundingAuthority:
                 "position": format(position_cut.position, "f"),
                 "economic_book_digest": position_cut.economic_book_digest,
                 "journal_sequence": position_cut.journal_sequence,
+                "causal_digest": position_cut.causal_digest,
+                "cut_evidence_digest": observation.cut_evidence_digest,
                 "contributing_transaction_ids": list(
                     position_cut.contributing_transaction_ids
                 ),
@@ -919,7 +1510,7 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
-                    observation.external_event_id,
+                    _source_event_identity(observation),
                 ),
             )
         )
@@ -935,7 +1526,7 @@ class DurablePerpetualFundingAuthority:
                         observation.provider_id,
                         observation.account_id,
                         observation.environment,
-                        observation.external_event_id,
+                        _source_event_identity(observation),
                     )
                 ),
                 request=request,

@@ -10,9 +10,10 @@ Three domain-separated canonical projections are derived from one validated
 ``TargetHostMeasurementArtifact``. A signed PASS is composition-eligible only
 when the already authenticated raw payload digest for each measurement family is
 exactly the digest of its projection. The signed campaign payload is separately
-parsed and required to equal the terminal ``RuntimeCampaignEvidence`` collected
-from the same JournalStore cut, including latency/staleness/interference series,
-reconnect backlog and observed duration.
+parsed and required to match the same stable measurement cut, recovered financial
+identities and recomputable metric series. Momentary campaign values such as the
+terminal monotonic duration and reconnect backlog remain signed campaign evidence;
+they are not re-measured during later verification.
 
 This module does not create a signer, trust root, release authority, budget
 evaluator, provider/PAPER/LIVE authority, profitability claim, economic edge or
@@ -21,7 +22,7 @@ trading authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from types import MappingProxyType
@@ -36,23 +37,16 @@ from autotrade_runtime.artifacts import (
 from .performance_qualification import RuntimeBudgetSpec
 from .persistence import JournalStore
 from .qualification_attestation import SignedQualificationAttestation
-from .runtime_load_qualification import (
-    RuntimeCampaignCut,
-    RuntimeCampaignEvidence,
-    RuntimeCampaignPlan,
-)
+from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_campaign import (
     ParsedRuntimeTargetHostCampaign,
     RuntimeTargetHostCampaignError,
 )
 from .runtime_target_host_durable_financial import (
     DurableTargetHostFinancialBinding,
-    bind_durable_financial_latency_to_target_host_measurement,
+    bind_release_bound_durable_financial_latency_to_target_host_measurement,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
-from .runtime_target_host_measurement_authority import (
-    collect_release_bound_target_host_evidence,
-)
 from .runtime_target_host_qualification import (
     AcceptedRuntimeTargetHostQualification,
     CAMPAIGN_EVIDENCE_KIND,
@@ -114,6 +108,12 @@ def _snapshot_spec(spec: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
         min_financial_samples=spec.min_financial_samples,
         min_research_samples=spec.min_research_samples,
     )
+
+
+def _snapshot_campaign_plan(plan: RuntimeCampaignPlan) -> RuntimeCampaignPlan:
+    if type(plan) is not RuntimeCampaignPlan:
+        raise TypeError("campaign_plan must be exact RuntimeCampaignPlan")
+    return replace(plan)
 
 
 def _projection_identity(
@@ -245,8 +245,8 @@ def _require_signed_campaign_match(
     *,
     evidence_store: ArtifactStore,
     evidence_root: str,
-    campaign_evidence: RuntimeCampaignEvidence,
-    spec: RuntimeBudgetSpec,
+    measurement: TargetHostMeasurementArtifact,
+    campaign_plan: RuntimeCampaignPlan,
 ) -> None:
     raw = _read_accepted_raw_payload(
         accepted,
@@ -261,30 +261,45 @@ def _require_signed_campaign_match(
             "signed campaign raw payload is not canonical target-host campaign evidence"
         ) from error
 
-    expected_observation = campaign_evidence.to_observation(spec)
-    recovered_ids = campaign_evidence.recovered_financial_event_ids
-    recovered_sequences = tuple(
-        sequence
-        for _event_id, _payload_hash, sequence
-        in campaign_evidence.recovered_financial_event_bindings
+    observation = parsed.evidence.observation
+    expected_ids = tuple(sample.event_id for sample in measurement.financial_samples)
+    expected_sequences = tuple(
+        sample.journal_sequence for sample in measurement.financial_samples
     )
-    if parsed.evidence.observation != expected_observation:
-        raise RuntimeTargetHostCompositionError(
-            "signed campaign observation does not match terminal JournalStore evidence"
-        )
+    expected_declared_duration_us = campaign_plan.declared_duration_ms * 1_000
     if (
-        parsed.evidence.journal_sequence_before != campaign_evidence.start_journal_sequence
-        or parsed.evidence.journal_sequence_after != campaign_evidence.end_journal_sequence
+        observation.expected_financial_events
+        != len(campaign_plan.expected_financial_event_ids)
+        or observation.recovered_financial_events != len(expected_ids)
+        or observation.financial_latency_us != measurement.financial_latency_us
+        or observation.financial_staleness_us != measurement.financial_staleness_us
+        or observation.research_interference_us
+        != measurement.research_interference_us
     ):
         raise RuntimeTargetHostCompositionError(
-            "signed campaign journal cut does not match terminal JournalStore evidence"
+            "signed campaign metric series do not match canonical target-host measurement"
+        )
+    if observation.declared_duration_us != expected_declared_duration_us:
+        raise RuntimeTargetHostCompositionError(
+            "signed campaign declared duration does not match canonical campaign plan"
+        )
+    if observation.observed_duration_us is None:
+        raise RuntimeTargetHostCompositionError(
+            "signed campaign lacks observed target-host duration"
         )
     if (
-        parsed.evidence.recovered_event_ids != recovered_ids
-        or parsed.evidence.recovered_journal_sequences != recovered_sequences
+        parsed.evidence.journal_sequence_before != measurement.start_journal_sequence
+        or parsed.evidence.journal_sequence_after != measurement.end_journal_sequence
     ):
         raise RuntimeTargetHostCompositionError(
-            "signed campaign financial identities do not match terminal JournalStore evidence"
+            "signed campaign journal cut does not match canonical target-host measurement"
+        )
+    if (
+        parsed.evidence.recovered_event_ids != expected_ids
+        or parsed.evidence.recovered_journal_sequences != expected_sequences
+    ):
+        raise RuntimeTargetHostCompositionError(
+            "signed campaign financial identities do not match canonical target-host measurement"
         )
 
 
@@ -295,7 +310,6 @@ class AcceptedComposedRuntimeTargetHostQualification:
     qualification: AcceptedRuntimeTargetHostQualification
     target_host_measurement_digest: str
     durable_financial_binding_digest: str
-    campaign_evidence_digest: str
     projection_sha256_by_kind: Mapping[str, str]
 
     def __post_init__(self) -> None:
@@ -328,25 +342,18 @@ def verify_composed_runtime_target_host_qualification(
 
     measurement = _snapshot_measurement(measurement)
     spec = _snapshot_spec(spec)
+    campaign_plan = _snapshot_campaign_plan(campaign_plan)
 
-    # Keep the exact terminal campaign evidence instead of discarding it at the
-    # durable-financial facade. This lets the signed campaign payload be compared
-    # to the same frozen JournalStore cut that admitted the raw measurement.
-    campaign_evidence = collect_release_bound_target_host_evidence(
-        journal=journal_store,
-        spec=spec,
-        plan=campaign_plan,
-        cut=campaign_cut,
-        measurement=measurement,
-        expected_release_artifact_id=expected_release_artifact_id,
-        expected_release_artifact_sha256=expected_release_artifact_sha256,
-    )
     durable_binding: DurableTargetHostFinancialBinding = (
-        bind_durable_financial_latency_to_target_host_measurement(
-            journal_store,
-            spec,
+        bind_release_bound_durable_financial_latency_to_target_host_measurement(
+            store=journal_store,
+            spec=spec,
+            campaign_plan=campaign_plan,
+            campaign_cut=campaign_cut,
             declared_plan_id=declared_plan_id,
             measurement=measurement,
+            expected_release_artifact_id=expected_release_artifact_id,
+            expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
     )
     if (
@@ -356,10 +363,6 @@ def verify_composed_runtime_target_host_qualification(
     ):
         raise RuntimeTargetHostCompositionError(
             "durable financial binding does not bind canonical target-host measurement"
-        )
-    if campaign_evidence.resource_evidence_hash != measurement.digest:
-        raise RuntimeTargetHostCompositionError(
-            "terminal campaign evidence does not bind canonical target-host measurement"
         )
 
     accepted = verify_runtime_target_host_qualification(
@@ -385,8 +388,8 @@ def verify_composed_runtime_target_host_qualification(
         accepted,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
-        campaign_evidence=campaign_evidence,
-        spec=spec,
+        measurement=measurement,
+        campaign_plan=campaign_plan,
     )
 
     projection_digests = target_host_measurement_projection_digests(measurement)
@@ -401,6 +404,5 @@ def verify_composed_runtime_target_host_qualification(
         qualification=accepted,
         target_host_measurement_digest=measurement.digest,
         durable_financial_binding_digest=durable_binding.digest,
-        campaign_evidence_digest=campaign_evidence.digest,
         projection_sha256_by_kind=projection_digests,
     )

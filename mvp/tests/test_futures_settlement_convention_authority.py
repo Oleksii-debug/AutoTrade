@@ -1,4 +1,4 @@
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime, timezone
 from inspect import signature
 import unittest
@@ -6,6 +6,10 @@ from uuid import UUID
 
 from mvp.autotrade_mvp.futures import settle_and_book_inverse_variation_margin
 from mvp.autotrade_mvp.instruments import InstrumentRegistryError, InstrumentVersion
+from mvp.autotrade_mvp.settlement_convention import (
+    SettlementConvention,
+    SettlementConventionError,
+)
 
 
 INSTRUMENT_ID = "00000000-0000-0000-0000-000000000101"
@@ -13,6 +17,21 @@ UNDERLYING_ID = "00000000-0000-0000-0000-000000000202@1"
 EXPIRY = datetime(2027, 3, 26, 8, tzinfo=timezone.utc)
 LAST_TRADE = datetime(2027, 3, 26, 7, 55, tzinfo=timezone.utc)
 DELIVERY_CUTOFF = datetime(2027, 3, 26, 7, 50, tzinfo=timezone.utc)
+
+
+def settlement_convention(**overrides):
+    values = {
+        "provider_id": "KRAKEN_FUTURES",
+        "instrument_id": INSTRUMENT_ID,
+        "instrument_version": 1,
+        "settlement_currency": "BTC",
+        "quantum": "0.00000001",
+        "rounding": "HALF_EVEN",
+        "evidence_artifact_id": "00000000-0000-0000-0000-000000000303",
+        "evidence_sha256": "sha256:" + "3" * 64,
+    }
+    values.update(overrides)
+    return SettlementConvention(**values)
 
 
 def inverse_future(**overrides):
@@ -55,6 +74,30 @@ def inverse_future(**overrides):
 
 
 class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
+    def test_convention_identity_changes_with_terminal_economics_or_evidence(self):
+        original = settlement_convention()
+        for name, value in {
+            "quantum": "0.0000001",
+            "rounding": "DOWN",
+            "instrument_version": 2,
+            "settlement_currency": "USD",
+            "evidence_artifact_id": "00000000-0000-0000-0000-000000000304",
+            "evidence_sha256": "sha256:" + "4" * 64,
+        }.items():
+            with self.subTest(field=name):
+                changed = replace(original, **{name: value})
+                self.assertNotEqual(changed.convention_id, original.convention_id)
+
+    def test_convention_rejects_noncanonical_quantum_and_rounding(self):
+        with self.assertRaises(SettlementConventionError):
+            settlement_convention(quantum="1e-8")
+        with self.assertRaises(SettlementConventionError):
+            settlement_convention(quantum="0")
+        with self.assertRaises(SettlementConventionError):
+            settlement_convention(rounding="CEILING")
+        with self.assertRaises(SettlementConventionError):
+            settlement_convention(instrument_version=True)
+
     def test_inverse_future_contract_has_versioned_settlement_convention_field(self):
         names = {field.name for field in fields(InstrumentVersion)}
         self.assertIn(

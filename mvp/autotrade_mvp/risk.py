@@ -403,13 +403,13 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ValueError(
+            f"{name} must use an exact datetime with a built-in timezone"
+        )
+    if datetime.utcoffset(value) is None:
         raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _utc_text(value: datetime) -> str:
@@ -454,11 +454,7 @@ class LiquidationHeadroomEvidence:
     sha256: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.state_version, int)
-            or isinstance(self.state_version, bool)
-            or self.state_version < 0
-        ):
+        if type(self.state_version) is not int or self.state_version < 0:
             raise ValueError("liquidation evidence state_version must be non-negative")
         scope = LiquidationScope(
             provider_id=self.provider_id,
@@ -513,8 +509,8 @@ class LiquidationHeadroomEvidence:
 def liquidation_evidence_payload(
     evidence: LiquidationHeadroomEvidence,
 ) -> dict[str, object]:
-    if not isinstance(evidence, LiquidationHeadroomEvidence):
-        raise TypeError("evidence must be LiquidationHeadroomEvidence")
+    if type(evidence) is not LiquidationHeadroomEvidence:
+        raise TypeError("evidence must be exact LiquidationHeadroomEvidence")
     return {
         "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
         "schema_version": 1,
@@ -1140,10 +1136,10 @@ class RiskContext:
             )
         )
 
-        if liquidation_scope is not None and not isinstance(
-            liquidation_scope, LiquidationScope
-        ):
-            raise TypeError("liquidation_scope must be LiquidationScope or None")
+        if liquidation_scope is not None and type(liquidation_scope) is not LiquidationScope:
+            raise TypeError(
+                "liquidation_scope must be exact LiquidationScope or None"
+            )
         normalized_scope = (
             None
             if liquidation_scope is None
@@ -1155,11 +1151,12 @@ class RiskContext:
                 risk_tier_version=liquidation_scope.risk_tier_version,
             )
         )
-        if liquidation_headroom_evidence is not None and not isinstance(
-            liquidation_headroom_evidence, LiquidationHeadroomEvidence
+        if (
+            liquidation_headroom_evidence is not None
+            and type(liquidation_headroom_evidence) is not LiquidationHeadroomEvidence
         ):
             raise TypeError(
-                "liquidation_headroom_evidence must be "
+                "liquidation_headroom_evidence must be exact "
                 "LiquidationHeadroomEvidence or None"
             )
         normalized_liquidation_evidence = (
@@ -1296,20 +1293,20 @@ class RiskDecision:
 
 
 def _fingerprint_value(value):
-    if isinstance(value, Decimal):
+    if type(value) is Decimal:
         return _canonical_decimal_text(value)
-    if isinstance(value, datetime):
+    if type(value) is datetime:
         return _utc_text(value)
-    if hasattr(value, "__dataclass_fields__"):
+    if type(value) in {LiquidationScope, LiquidationHeadroomEvidence}:
         return _fingerprint_value(vars(value))
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         return {
-            str(key): _fingerprint_value(item)
+            key: _fingerprint_value(item)
             for key, item in value.items()
         }
-    if isinstance(value, (tuple, list)):
+    if type(value) in {tuple, list}:
         return [_fingerprint_value(item) for item in value]
-    if value is None or isinstance(value, (str, int, bool)):
+    if value is None or type(value) in {str, int, bool}:
         return value
     raise TypeError(
         f"Unsupported normalized risk fingerprint value: {type(value).__name__}"

@@ -9,10 +9,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable, Mapping
 
 from .accounting import EconomicBook, JournalTransaction, ScopedEconomicBook, _canonical_equity_fill_terms
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 from .persistence import payload_digest
 
 
@@ -21,15 +29,12 @@ class SettlementConflict(ValueError):
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -51,16 +56,45 @@ class SettlementAccountScope:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
-        )
+        provider = _text(self.provider_id, name="provider_id").upper()
+        object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         environment = _text(self.environment, name="environment").upper()
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("unsupported environment")
+        provider_environment = (
+            environment
+            if self.provider_environment is None
+            else _text(self.provider_environment, name="provider_environment").upper()
+        )
+        if provider == "BYBIT":
+            if self.provider_environment is None:
+                raise ValueError(
+                    "BYBIT settlement scope requires explicit provider_environment"
+                )
+            if provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+                raise ValueError(
+                    "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+                )
+            if (
+                environment == "LIVE" and provider_environment != "MAINNET"
+            ) or (
+                environment == "PAPER"
+                and provider_environment not in {"TESTNET", "DEMO"}
+            ):
+                raise ValueError(
+                    "BYBIT provider_environment does not match runtime environment"
+                )
+        elif provider_environment != environment:
+            raise ValueError(
+                "provider_environment must equal runtime environment until an exact "
+                "provider-domain policy is qualified"
+            )
         object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,23 +150,24 @@ class SettlementRuleBinding:
 
     @property
     def digest(self) -> str:
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "rule_id": self.rule_id,
-                "rule_version": self.rule_version,
-                "provider_id": self.scope.provider_id,
-                "account_id": self.scope.account_id,
-                "environment": self.scope.environment,
-                "instrument_version": self.instrument_version,
-                "settlement_currency": self.settlement_currency,
-                "effective_from": self.effective_from.isoformat(),
-                "effective_to": (
-                    None if self.effective_to is None else self.effective_to.isoformat()
-                ),
-                "evidence_refs": list(self.evidence_refs),
-            }
-        )
+        material = {
+            "schema_version": "1.0.0",
+            "rule_id": self.rule_id,
+            "rule_version": self.rule_version,
+            "provider_id": self.scope.provider_id,
+            "account_id": self.scope.account_id,
+            "environment": self.scope.environment,
+            "instrument_version": self.instrument_version,
+            "settlement_currency": self.settlement_currency,
+            "effective_from": self.effective_from.isoformat(),
+            "effective_to": (
+                None if self.effective_to is None else self.effective_to.isoformat()
+            ),
+            "evidence_refs": list(self.evidence_refs),
+        }
+        if self.scope.provider_environment != self.scope.environment:
+            material["provider_environment"] = self.scope.provider_environment
+        return payload_digest(material)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,11 +306,11 @@ class SettlementSnapshot:
 
     @property
     def net_unsettled(self) -> Decimal:
-        return self.unsettled_receivable - self.unsettled_payable
+        return exact_subtract(self.unsettled_receivable, self.unsettled_payable)
 
     @property
     def economic_cash(self) -> Decimal:
-        return self.settled_cash + self.net_unsettled
+        return exact_add(self.settled_cash, self.net_unsettled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,7 +580,10 @@ class SettlementBook:
                 "settlement evidence was not yet available as of projection date"
             )
         current = self._settled_cash.get(obligation.currency, Decimal("0"))
-        self._settled_cash[obligation.currency] = current + obligation.amount
+        self._settled_cash[obligation.currency] = exact_add(
+            current,
+            obligation.amount,
+        )
         self._settled_ids.add(key)
         self._settlement_evidence[key] = settlement_evidence
         return True
@@ -603,15 +641,17 @@ class SettlementBook:
 
     def snapshot(self, currency: str) -> SettlementSnapshot:
         unit = _text(currency, name="currency").upper()
-        receivable = Decimal("0")
-        payable = Decimal("0")
+        receivables: list[Decimal] = []
+        payables: list[Decimal] = []
         for obligation in self._obligations.values():
             if obligation.currency != unit or obligation.obligation_id in self._settled_ids:
                 continue
             if obligation.amount > 0:
-                receivable += obligation.amount
+                receivables.append(obligation.amount)
             else:
-                payable += -obligation.amount
+                payables.append(exact_subtract(Decimal("0"), obligation.amount))
+        receivable = exact_sum(receivables)
+        payable = exact_sum(payables)
         return SettlementSnapshot(
             currency=unit,
             settled_cash=self._settled_cash.get(unit, Decimal("0")),
@@ -628,8 +668,11 @@ class SettlementBook:
         # obligation exists. Receivables remain unavailable until settlement.
         # reserve is an additional caller-owned hold and must not duplicate
         # the same settlement obligation.
-        available = snapshot.settled_cash - snapshot.unsettled_payable - locked
-        return max(Decimal("0"), available)
+        available = exact_subtract(
+            exact_subtract(snapshot.settled_cash, snapshot.unsettled_payable),
+            locked,
+        )
+        return available if available > 0 else Decimal("0")
 
     @classmethod
     def from_economic_book(
@@ -691,12 +734,12 @@ class SettlementBook:
             replacement_cash: dict[str, Decimal] = {}
             for posting in transaction.postings:
                 if posting.ledger_account == f"CASH:{posting.asset_or_currency}":
-                    replacement_cash[posting.asset_or_currency] = (
+                    replacement_cash[posting.asset_or_currency] = exact_add(
                         replacement_cash.get(
                             posting.asset_or_currency,
                             Decimal("0"),
-                        )
-                        + posting.signed_amount
+                        ),
+                        posting.signed_amount,
                     )
             for currency, amount in replacement_cash.items():
                 if (
@@ -744,14 +787,11 @@ class SettlementBook:
                 raise SettlementConflict(
                     "economic transaction/currency has multiple full settlement obligations"
                 )
-            cash_effect = sum(
-                (
-                    posting.signed_amount
-                    for posting in transaction.postings
-                    if posting.ledger_account == f"CASH:{obligation.currency}"
-                    and posting.asset_or_currency == obligation.currency
-                ),
-                Decimal("0"),
+            cash_effect = exact_sum(
+                posting.signed_amount
+                for posting in transaction.postings
+                if posting.ledger_account == f"CASH:{obligation.currency}"
+                and posting.asset_or_currency == obligation.currency
             )
             if cash_effect != obligation.amount:
                 raise SettlementConflict(
@@ -767,14 +807,13 @@ class SettlementBook:
             if obligation_id in active_ids
         }
         opening_cash = {
-            currency: economic_book.cash(currency)
-            - sum(
-                (
+            currency: exact_subtract(
+                economic_book.cash(currency),
+                exact_sum(
                     item.amount
                     for item in active
                     if item.currency == currency
                 ),
-                Decimal("0"),
             )
             for currency in currencies
         }
@@ -861,7 +900,7 @@ class SettlementBook:
             unsettled_payable=snapshot.unsettled_payable,
             available_cash=available_cash,
             additional_buying_power=additional_credit,
-            available_capital=available_cash + additional_credit,
+            available_capital=exact_add(available_cash, additional_credit),
             overdue_obligation_ids=tuple(sorted(overdue)),
             blocks_new_risk=blocks,
         )
@@ -908,14 +947,11 @@ def cash_settlement_obligation_from_transaction(
         raise SettlementConflict(
             "settlement rule was not effective on economic event date"
         )
-    amount = sum(
-        (
-            posting.signed_amount
-            for posting in transaction.postings
-            if posting.ledger_account == f"CASH:{unit}"
-            and posting.asset_or_currency == unit
-        ),
-        Decimal("0"),
+    amount = exact_sum(
+        posting.signed_amount
+        for posting in transaction.postings
+        if posting.ledger_account == f"CASH:{unit}"
+        and posting.asset_or_currency == unit
     )
     if amount == 0:
         raise SettlementConflict(
@@ -1018,8 +1054,15 @@ def equity_cash_obligation(
     fee_amount = _decimal(fee, name="fee")
     if qty <= 0 or px <= 0 or fee_amount < 0:
         raise ValueError("quantity and price must be positive and fee non-negative")
-    gross = qty * px
-    amount = -(gross + fee_amount) if normalized_side == "BUY" else gross - fee_amount
+    gross = exact_multiply(qty, px)
+    amount = (
+        exact_subtract(
+            Decimal("0"),
+            exact_add(gross, fee_amount),
+        )
+        if normalized_side == "BUY"
+        else exact_subtract(gross, fee_amount)
+    )
     if amount == 0:
         raise ValueError("net settlement amount cannot be zero")
     return SettlementObligation(

@@ -67,7 +67,7 @@ class BundleError(ValueError):
 
 
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise BundleError(f"{name} is required")
     return value.strip()
 
@@ -565,10 +565,10 @@ def build_bundle(
     composition_path: Path | None = None,
 ) -> dict[str, object]:
     normalized_version = _required_text(version, name="version")
-    normalized_sha = _required_text(source_sha, name="source_sha").lower()
+    normalized_sha = _required_text(source_sha, name="source_sha")
     if SOURCE_SHA.fullmatch(normalized_sha) is None:
         raise BundleError("source_sha must be an exact 40-character lowercase Git SHA")
-    if mode not in {"diagnostics", "release"}:
+    if type(mode) is not str or mode not in {"diagnostics", "release"}:
         raise BundleError("mode must be diagnostics or release")
 
     try:
@@ -619,13 +619,13 @@ def build_bundle(
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
-            not isinstance(provenance_source_sha, str)
-            or SOURCE_SHA.fullmatch(provenance_source_sha.lower()) is None
+            type(provenance_source_sha) is not str
+            or SOURCE_SHA.fullmatch(provenance_source_sha) is None
         ):
             raise BundleError(
-                "release provenance must bind an exact 40-character source_sha"
+                "release provenance must bind an exact 40-character lowercase source_sha"
             )
-        if provenance_source_sha.lower() != normalized_sha:
+        if provenance_source_sha != normalized_sha:
             raise BundleError(
                 "release provenance source_sha does not match bundle source_sha"
             )

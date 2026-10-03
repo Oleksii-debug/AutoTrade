@@ -822,6 +822,10 @@ class HistoricalVintageRegistry:
                 "population cutoff exceeds registered dataset availability cutoff"
             )
 
+        if len(manifest["content_hashes"]) != 1:
+            raise HistoricalDataError(
+                "qualified market population manifest must declare exactly one content hash"
+            )
         population_refs = [
             item
             for item in manifest["source_evidence"]
@@ -849,9 +853,12 @@ class HistoricalVintageRegistry:
                 "market population artifact media type is not canonical"
             )
         expected_rights_id = population_ref.get("rights_id")
+        if expected_rights_id is None:
+            raise HistoricalDataError(
+                "market population source evidence must bind rights_id"
+            )
         if (
-            expected_rights_id is not None
-            and artifact_manifest.get("rights", {}).get("rights_id")
+            artifact_manifest.get("rights", {}).get("rights_id")
             != expected_rights_id
         ):
             raise HistoricalConflict(
@@ -961,3 +968,34 @@ class HistoricalVintageRegistry:
             visible_event_json=visible_json,
             fingerprint=fingerprint,
         )
+
+    def revalidate_market_population(
+        self,
+        population: FrozenMarketPopulation,
+        *,
+        artifact_store: ArtifactStore,
+    ) -> FrozenMarketPopulation:
+        """Re-resolve a frozen population through its canonical persisted authorities.
+
+        A FrozenMarketPopulation is a value object, not an issuer token.  Any
+        qualified consumer that receives one must cross this seam before using
+        its rows as authoritative scientific input.
+        """
+
+        if type(population) is not FrozenMarketPopulation:
+            raise TypeError("population must be FrozenMarketPopulation")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
+        canonical = self.resolve_market_population(
+            population.dataset_id,
+            population.version,
+            manifest_digest=population.manifest_digest,
+            artifact_store=artifact_store,
+            cutoff=population.cutoff,
+            events=None,
+        )
+        if canonical != population:
+            raise HistoricalConflict(
+                "frozen market population differs from authenticated authority"
+            )
+        return canonical

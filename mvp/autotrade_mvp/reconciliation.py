@@ -597,21 +597,45 @@ def _snapshot_provider_fill(fill: ProviderFillEvidence) -> ProviderFillEvidence:
     if type(fill) is not ProviderFillEvidence:
         raise TypeError("provider_fills must contain exact ProviderFillEvidence")
 
-    provider_id = fill.provider_id
-    account_id = fill.account_id
-    environment = fill.environment
-    provider_execution_id = fill.provider_execution_id
-    client_order_id = fill.client_order_id
-    instrument = fill.instrument
-    quantity = fill.quantity
-    price = fill.price
-    fee_amount = fill.fee_amount
-    fee_currency = fill.fee_currency
-    trade_time = fill.trade_time
-    side = fill.side
-    position_side = fill.position_side
-    position_effect = fill.position_effect
-    evidence_refs = fill.evidence_refs
+    raw_state = object.__getattribute__(fill, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("provider fill state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_execution_id",
+        "client_order_id",
+        "instrument",
+        "quantity",
+        "price",
+        "fee_amount",
+        "fee_currency",
+        "trade_time",
+        "side",
+        "position_side",
+        "position_effect",
+        "evidence_refs",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("provider fill contains unexpected state fields")
+
+    provider_id = state["provider_id"]
+    account_id = state["account_id"]
+    environment = state["environment"]
+    provider_execution_id = state["provider_execution_id"]
+    client_order_id = state["client_order_id"]
+    instrument = state["instrument"]
+    quantity = state["quantity"]
+    price = state["price"]
+    fee_amount = state["fee_amount"]
+    fee_currency = state["fee_currency"]
+    trade_time = state["trade_time"]
+    side = state["side"]
+    position_side = state["position_side"]
+    position_effect = state["position_effect"]
+    evidence_refs = state["evidence_refs"]
 
     for name, value in (
         ("provider_id", provider_id),

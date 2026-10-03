@@ -14,7 +14,7 @@ import sqlite3
 import re
 
 from autotrade_numeric import (
-    canonical_decimal_text, exact_subtract, exact_sum, parse_bounded_exact_decimal,
+    canonical_decimal_text, exact_multiply, exact_subtract, exact_sum, parse_bounded_exact_decimal,
     MAX_INTEGER_DIGITS, MAX_SCALE,
 )
 
@@ -197,6 +197,8 @@ def _require_provider_fill_financial_binding(
     fill_id: str,
     order_id: str,
     transaction,
+    book: DurableProviderEconomicBook,
+    position: Decimal,
     admission: dict,
     reconciliation: dict,
 ) -> None:
@@ -297,6 +299,15 @@ def _require_provider_fill_financial_binding(
         or request.get("transaction_digest") != payload_digest(transaction_payload)
         or projected.get("quantity") != provider_fill.get("quantity")
         or projected.get("price") != provider_fill.get("price")
+        or _decimal(provider_fill.get("quantity")) != position
+        or exact_multiply(
+            _decimal(provider_fill.get("quantity")),
+            _decimal(provider_fill.get("price")),
+        ) != _balance(book, "CLEARING:USD", "USD")
+        or provider_fill.get("fee_currency") != "USD"
+        or _decimal(provider_fill.get("fee_amount"))
+        != _balance(book, "FEE_EXPENSE:USD", "USD")
+        or transaction.economic_effective_at != provider_fill.get("trade_time")
     ):
         raise ValueError("simulation provider-fill transaction binding differs")
 
@@ -515,6 +526,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 fill_id=fill_id,
                 order_id=result["order_id"],
                 transaction=book.transactions[1],
+                book=book,
+                position=position,
                 admission=admission,
                 reconciliation=reconciliation,
             )

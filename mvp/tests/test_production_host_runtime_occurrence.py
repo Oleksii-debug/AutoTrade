@@ -142,6 +142,65 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             finally:
                 successor.close()
 
+    def test_runtime_property_revalidates_after_returned_value_tamper(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                durable_id = runtime.runtime_occurrence.runtime_occurrence_id
+                exposed = runtime.runtime_occurrence
+                object.__setattr__(
+                    exposed,
+                    "runtime_occurrence_id",
+                    "22222222-2222-4222-8222-222222222222",
+                )
+                revalidated = runtime.runtime_occurrence
+                self.assertEqual(revalidated.runtime_occurrence_id, durable_id)
+                self.assertIsNot(revalidated, exposed)
+            finally:
+                runtime.close()
+
+    def test_forged_cached_occurrence_object_cannot_replace_bound_selector(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                durable = runtime.runtime_occurrence
+                forged = production_host.ProductionHostRuntimeOccurrence(
+                    runtime_occurrence_id="33333333-3333-4333-8333-333333333333",
+                    host_id=durable.host_id,
+                    account_id=durable.account_id,
+                    environment=durable.environment,
+                    aggregate_version=durable.aggregate_version,
+                    journal_sequence=durable.journal_sequence,
+                )
+                object.__setattr__(runtime, "_runtime_occurrence", forged)
+                self.assertEqual(
+                    runtime.runtime_occurrence.runtime_occurrence_id,
+                    durable.runtime_occurrence_id,
+                )
+            finally:
+                runtime.close()
+
+    def test_newer_durable_occurrence_invalidates_bound_runtime_property(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                bound = runtime.runtime_occurrence
+                successor = production_host._issue_production_host_runtime_occurrence(
+                    runtime.journal,
+                    config,
+                )
+                self.assertNotEqual(
+                    successor.runtime_occurrence_id,
+                    bound.runtime_occurrence_id,
+                )
+                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                    _ = runtime.runtime_occurrence
+            finally:
+                runtime.close()
+
     def test_runtime_occurrence_family_is_nonfinancial_for_qualification(self) -> None:
         descriptor = require_journal_aggregate_descriptor(
             "production_host_runtime"

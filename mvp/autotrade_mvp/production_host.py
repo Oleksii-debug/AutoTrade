@@ -733,7 +733,7 @@ class ProductionHostRuntime:
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
         self._product_artifact_reader: object | None = None
-        self._runtime_occurrence: ProductionHostRuntimeOccurrence | None = None
+        self._runtime_occurrence_id: str | None = None
 
     def _bind_runtime_occurrence(
         self,
@@ -743,16 +743,27 @@ class ProductionHostRuntime:
             raise TypeError(
                 "runtime occurrence must be exact ProductionHostRuntimeOccurrence"
             )
-        if self._runtime_occurrence is not None:
+        if self._runtime_occurrence_id is not None:
             raise RuntimeError("production host runtime occurrence is already bound")
-        self._runtime_occurrence = occurrence
+        # Issuance and binding occur before the runtime escapes. Keep this
+        # post-listener bind side-effect free; durable revalidation belongs on
+        # every public read so teardown cannot acquire a new failure edge here.
+        self._runtime_occurrence_id = occurrence.runtime_occurrence_id
 
     @property
     def runtime_occurrence(self) -> ProductionHostRuntimeOccurrence:
-        occurrence = self._runtime_occurrence
-        if occurrence is None:
+        occurrence_id = self._runtime_occurrence_id
+        if occurrence_id is None:
             raise RuntimeError("production host runtime occurrence is not bound")
-        return occurrence
+        durable = _load_production_host_runtime_occurrences(
+            self.journal,
+            self.config,
+        )
+        if not durable or durable[-1].runtime_occurrence_id != occurrence_id:
+            raise RuntimeError(
+                "bound runtime occurrence is no longer the latest durable occurrence"
+            )
+        return durable[-1]
 
     def _bind_product_artifact_reader(self, reader: object) -> None:
         if self._product_artifact_reader is not None:

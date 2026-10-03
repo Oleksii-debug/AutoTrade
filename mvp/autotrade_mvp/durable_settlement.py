@@ -11,14 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from threading import RLock
 from weakref import WeakKeyDictionary
 from typing import Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -99,19 +101,13 @@ def _artifact_ref(value: object, *, name: str) -> tuple[str, str, str]:
 
 
 def _verify_artifact(
-    artifact_store: ArtifactStore,
+    authenticated_reader,
     *,
     evidence_ref: str,
     expected_receipt: Mapping[str, object],
     expected_metadata: Mapping[str, object],
     name: str,
 ) -> str:
-    # Settlement evidence can release durable capital.  Do not accept a
-    # caller-polymorphic ArtifactStore at this financial boundary: a subclass
-    # could manufacture self-consistent manifest/body evidence.  The canonical
-    # class is already root-fenced by the WP-06 artifact authority.
-    if type(artifact_store) is not ArtifactStore:
-        raise SettlementConflict(f"{name} requires trusted ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
@@ -119,10 +115,7 @@ def _verify_artifact(
         # One authenticated snapshot is the complete storage observation for
         # this decision.  Calling the class method deliberately avoids virtual
         # dispatch after the exact-type fence above.
-        manifest, raw = ArtifactStore.read_authenticated_snapshot(
-            artifact_store,
-            artifact_id,
-        )
+        manifest, raw = authenticated_reader(artifact_id)
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -252,7 +245,7 @@ def settlement_rule_evidence_metadata(
 
 def verify_settlement_rule_evidence(
     rule: SettlementRuleBinding,
-    artifact_store: ArtifactStore,
+    authenticated_reader,
     *,
     trade_date: date,
     expected_settlement_date: date,
@@ -268,7 +261,7 @@ def verify_settlement_rule_evidence(
         )
     verified = tuple(
         _verify_artifact(
-            artifact_store,
+            authenticated_reader,
             evidence_ref=reference,
             expected_receipt=settlement_rule_evidence_receipt(
                 rule,
@@ -421,12 +414,12 @@ def verify_settlement_completion_evidence(
     scope: SettlementAccountScope,
     obligation: SettlementObligation,
     evidence: SettlementEvidence,
-    artifact_store: ArtifactStore,
+    authenticated_reader,
 ) -> str:
     if evidence.obligation_id != obligation.obligation_id:
         raise SettlementConflict("settlement evidence identity mismatch")
     return _verify_artifact(
-        artifact_store,
+        authenticated_reader,
         evidence_ref=evidence.evidence_ref,
         expected_receipt=settlement_completion_evidence_receipt(
             scope=scope,
@@ -547,6 +540,62 @@ def _install_durable_settlement_store_binding():
 del _install_durable_settlement_store_binding
 
 
+def _install_durable_settlement_evidence_reader():
+    """Retain one product-selected artifact generation outside mutable book state."""
+
+    readers: WeakKeyDictionary[object, object] = WeakKeyDictionary()
+    lock = RLock()
+
+    def bind(
+        book: object,
+        authoritative_root: str | Path,
+        publication_store: ArtifactStore,
+    ) -> None:
+        with lock:
+            if book in readers:
+                raise SettlementConflict(
+                    "durable settlement evidence authority is already bound"
+                )
+            if type(publication_store) is not ArtifactStore:
+                raise TypeError(
+                    "evidence_artifact_store must be exact ArtifactStore"
+                )
+            try:
+                reader = trusted_authenticated_reader(
+                    authoritative_root,
+                    publication_store=publication_store,
+                )
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise SettlementConflict(
+                    "trusted settlement evidence authority is unavailable"
+                ) from error
+            readers[book] = reader
+
+    def bound(book: object):
+        with lock:
+            reader = readers.get(book)
+        if reader is None:
+            raise SettlementConflict(
+                "durable settlement evidence authority is unavailable"
+            )
+        return reader
+
+    return bind, bound
+
+
+(
+    _bind_durable_settlement_evidence_reader,
+    _durable_settlement_evidence_reader,
+) = _install_durable_settlement_evidence_reader()
+del _install_durable_settlement_evidence_reader
+
+
 class DurableSettlementBook:
     """JournalStore-backed provenance facade for the canonical SettlementBook."""
 
@@ -557,14 +606,18 @@ class DurableSettlementBook:
         provider_id: str,
         account_id: str,
         environment: str,
+        evidence_artifact_root: str | Path,
         evidence_artifact_store: ArtifactStore,
     ) -> None:
         store_identity = require_exact_journal_store_authority(
             store,
             subject="durable settlement JournalStore",
         )
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
+        _bind_durable_settlement_evidence_reader(
+            self,
+            evidence_artifact_root,
+            evidence_artifact_store,
+        )
         scope = SettlementAccountScope(
             provider_id=provider_id,
             account_id=account_id,
@@ -580,7 +633,6 @@ class DurableSettlementBook:
             scope_id,
         )
         self.store = store
-        self.evidence_artifact_store = evidence_artifact_store
         self.scope = scope
         self.scope_id = scope_id
         self._book = SettlementBook()
@@ -671,7 +723,7 @@ class DurableSettlementBook:
                     assert obligation.rule_binding is not None
                     verify_settlement_rule_evidence(
                         obligation.rule_binding,
-                        self.evidence_artifact_store,
+                        _durable_settlement_evidence_reader(self),
                         trade_date=obligation.trade_date,
                         expected_settlement_date=obligation.settlement_date,
                     )
@@ -701,7 +753,7 @@ class DurableSettlementBook:
                     scope=scope,
                     obligation=obligation,
                     evidence=evidence,
-                    artifact_store=self.evidence_artifact_store,
+                    authenticated_reader=_durable_settlement_evidence_reader(self),
                 )
                 book.settle(
                     evidence.obligation_id,
@@ -752,7 +804,7 @@ class DurableSettlementBook:
                 )
             verify_settlement_rule_evidence(
                 obligation.rule_binding,
-                self.evidence_artifact_store,
+                _durable_settlement_evidence_reader(self),
                 trade_date=obligation.trade_date,
                 expected_settlement_date=obligation.settlement_date,
             )
@@ -887,7 +939,7 @@ class DurableSettlementBook:
             scope=scope,
             obligation=obligation,
             evidence=evidence,
-            artifact_store=self.evidence_artifact_store,
+            authenticated_reader=_durable_settlement_evidence_reader(self),
         )
         inserted = candidate.settle(
             evidence.obligation_id,

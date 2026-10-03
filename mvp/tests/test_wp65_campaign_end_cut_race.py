@@ -193,8 +193,8 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("reconnect_backlog_not_drained", decision.reasons)
 
-    def test_post_start_clock_financial_commit_cannot_hide_inside_start_cut(self):
-        """A financial event after campaign-start time must remain in the durable cut."""
+    def test_post_start_clock_financial_commit_fails_closed(self):
+        """A journal mutation while sampling campaign start makes the cut ambiguous."""
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")
@@ -208,35 +208,18 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
             )
 
             def starting_clock() -> int:
-                # This commit occurs while campaign start time is being sampled.
-                # A start journal cursor captured afterwards would incorrectly
-                # classify it as pre-campaign and hide it from conservation.
                 journal.append_event(_envelope("fin-hidden"))
                 return 1_000_000_000
 
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=plan,
-                monotonic_ns=starting_clock,
-            )
-            journal.append_event(_envelope("fin-expected"))
-
             with self.assertRaisesRegex(
                 RuntimeBudgetError,
-                "undeclared financial event",
+                "journal changed while sampling the start clock",
             ):
-                collect_runtime_campaign_evidence(
+                begin_runtime_campaign(
                     journal=journal,
                     spec=spec,
                     plan=plan,
-                    cut=cut,
-                    financial_latency_us=(100,),
-                    financial_staleness_us=(100,),
-                    research_interference_us=(100,),
-                    resource_evidence_hash=RESOURCE,
-                    resource_metrics={"cpu_peak_millis": 1},
-                    monotonic_ns=lambda: 1_000_001_000,
+                    monotonic_ns=starting_clock,
                 )
 
 

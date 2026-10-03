@@ -367,7 +367,7 @@ def _hold_projection(
     *,
     episode_id: str,
     completed: bool,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object]]:
     if JournalStore.load_events_by_aggregate_type(store, "submission_attempt"):
         raise ValueError("HOLD terminal projection cannot contain submission attempts")
     if JournalStore.load_events_by_aggregate_type(store, "reservation_book"):
@@ -393,9 +393,13 @@ def _hold_projection(
         "projection_checkpoints": 0,
         "global_projection_checkpoints": 0,
     }
-    if JournalStore.whole_store_state_counts(store) != expected_counts:
+    cut = JournalStore.whole_store_state_cut(store)
+    if (
+        cut.get("journal_sequence") != expected_counts["events"]
+        or cut.get("counts") != expected_counts
+    ):
         raise ValueError("HOLD terminal durable state is not exact")
-    return {
+    result = {
         "status": "HOLD",
         "decision": "HOLD",
         "environment": ENVIRONMENT,
@@ -408,6 +412,7 @@ def _hold_projection(
         "reconciliation_event_id": checkpoint["event_id"],
         "new_outbound_requests": 0,
     }
+    return result, cut
 
 
 def _zero_wire_blocked_projection(
@@ -720,7 +725,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         "completed BLOCKED session does not match durable zero-wire facts"
                     )
             elif result.get("status") == "HOLD":
-                expected = _hold_projection(
+                expected, _completed_cut = _hold_projection(
                     store,
                     episode_id=episode_id,
                     completed=True,
@@ -733,7 +738,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             result["new_outbound_requests"] = 0
             return result
         if decision.side == "HOLD":
-            result = _hold_projection(
+            result, terminal_cut = _hold_projection(
                 store,
                 episode_id=episode_id,
                 completed=False,
@@ -744,6 +749,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 episode_id,
                 result,
                 timestamp,
+                expected_cut=terminal_cut,
             )
             return {**result, "resumed": True}
         if decision.side == "BUY":
@@ -886,12 +892,19 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "episode_id": episode_id, "environment": ENVIRONMENT,
     }, timestamp, expected_cut=bootstrap_cut)
     if decision.side == "HOLD":
-        result = _hold_projection(
+        result, terminal_cut = _hold_projection(
             store,
             episode_id=episode_id,
             completed=False,
         )
-        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+        _event(
+            store,
+            "SimulationSessionCompleted",
+            episode_id,
+            result,
+            timestamp,
+            expected_cut=terminal_cut,
+        )
         return {**result, "resumed": resumed_from_owner}
 
     policy = _risk_policy()

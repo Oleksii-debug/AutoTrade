@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 from typing import Iterable, Mapping
 
+from autotrade_research.artifacts import ArtifactStore
 from autotrade_research.data.vintages import (
     FrozenMarketPopulation,
     HistoricalVintageRegistry,
@@ -288,20 +289,24 @@ def resolve_authoritative_feature_points(
     dataset_id: str,
     dataset_version: int,
     manifest_digest: str,
-    events: Iterable[Mapping[str, object]],
+    artifact_store: ArtifactStore,
     cutoff: datetime,
     spec: HistoricalFeatureInputSpec,
+    events: Iterable[Mapping[str, object]] | None = None,
 ) -> tuple[FeaturePoint, ...]:
-    """Resolve a causal dataset cut then derive feature points from its exact bytes."""
+    """Resolve authenticated source bytes, then derive causal feature points."""
 
     if type(registry) is not HistoricalVintageRegistry:
         raise TypeError("registry must be HistoricalVintageRegistry")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be exact ArtifactStore")
     population = registry.resolve_market_population(
         dataset_id,
         dataset_version,
         manifest_digest=manifest_digest,
-        events=tuple(events),
+        artifact_store=artifact_store,
         cutoff=cutoff,
+        events=tuple(events) if events is not None else None,
     )
     return authoritative_feature_points(population, spec=spec)
 
@@ -390,8 +395,9 @@ class AuthoritativeFoldNormalizer:
         *,
         fold: CausalFold,
         registry: HistoricalVintageRegistry,
-        events: Iterable[Mapping[str, object]],
+        artifact_store: ArtifactStore,
         spec: HistoricalFeatureInputSpec,
+        events: Iterable[Mapping[str, object]] | None = None,
         replay_common_cut_fingerprint: str | None = None,
     ):
         """Re-resolve training + validation source truth before transforming.
@@ -407,6 +413,8 @@ class AuthoritativeFoldNormalizer:
             raise TypeError("fold must be CausalFold")
         if type(registry) is not HistoricalVintageRegistry:
             raise TypeError("registry must be HistoricalVintageRegistry")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
         if type(spec) is not HistoricalFeatureInputSpec:
             raise TypeError("spec must be HistoricalFeatureInputSpec")
         if fold.fingerprint != self.fold_normalizer.fold_fingerprint:
@@ -416,13 +424,14 @@ class AuthoritativeFoldNormalizer:
         if _replay_common_cut(replay_common_cut_fingerprint) != self.replay_common_cut_fingerprint:
             raise ValueError("replay common-cut identity differs from fitted authority")
 
-        raw_events = tuple(events)
+        event_cache = tuple(events) if events is not None else None
         training_population = registry.resolve_market_population(
             self.dataset_id,
             self.dataset_version,
             manifest_digest=self.manifest_digest,
-            events=raw_events,
+            artifact_store=artifact_store,
             cutoff=fold.training_information_cutoff,
+            events=event_cache,
         )
         if training_population.fingerprint != self.training_population_fingerprint:
             raise ValueError("authoritative training population differs from fitted authority")
@@ -439,8 +448,9 @@ class AuthoritativeFoldNormalizer:
             self.dataset_id,
             self.dataset_version,
             manifest_digest=self.manifest_digest,
-            events=raw_events,
+            artifact_store=artifact_store,
             cutoff=point.decision_time,
+            events=event_cache,
         )
         candidates = [
             candidate
@@ -485,15 +495,18 @@ def fit_authoritative_fold_normalizer(
     dataset_id: str,
     dataset_version: int,
     manifest_digest: str,
-    events: Iterable[Mapping[str, object]],
+    artifact_store: ArtifactStore,
     fold: CausalFold,
     spec: HistoricalFeatureInputSpec,
+    events: Iterable[Mapping[str, object]] | None = None,
     replay_common_cut_fingerprint: str | None = None,
 ) -> AuthoritativeFoldNormalizer:
     """Fit WP-34 normalization only from WP-10 authenticated source truth."""
 
     if type(registry) is not HistoricalVintageRegistry:
         raise TypeError("registry must be HistoricalVintageRegistry")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be exact ArtifactStore")
     if type(fold) is not CausalFold:
         raise TypeError("fold must be CausalFold")
     if type(spec) is not HistoricalFeatureInputSpec:
@@ -502,8 +515,9 @@ def fit_authoritative_fold_normalizer(
         dataset_id,
         dataset_version,
         manifest_digest=manifest_digest,
-        events=tuple(events),
+        artifact_store=artifact_store,
         cutoff=fold.training_information_cutoff,
+        events=tuple(events) if events is not None else None,
     )
     fitted = _fit_from_population(population, fold=fold, spec=spec)
     return AuthoritativeFoldNormalizer(

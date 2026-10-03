@@ -20,7 +20,7 @@ import re
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import JournalTransaction, posting, reverse_transaction
+from .accounting import AccountingConflict, JournalTransaction, posting, reverse_transaction
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -31,7 +31,7 @@ from .options import (
     physical_exercise_obligation,
 )
 from .persistence import JournalStore, payload_digest
-from .provider_activity_accounting import DurableProviderEconomicBook
+from .provider_activity_accounting import DurableProviderEconomicBook, EconomicBookCut
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -508,11 +508,11 @@ def _economic_transaction(
 
 def _project_position_after_reversal(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     instrument: str,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> Decimal:
-    projected = economic_book.position(instrument)
+    projected = economic_cut.position(instrument)
     for transaction in old_active_transactions:
         matching = [
             item
@@ -530,14 +530,14 @@ def _project_position_after_reversal(
 
 def _require_consumable_option_position(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     observation: OptionLifecycleObservation,
     version: InstrumentVersion,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> None:
     instrument = f"{version.instrument_id}@{version.version}"
     available = _project_position_after_reversal(
-        economic_book=economic_book,
+        economic_cut=economic_cut,
         instrument=instrument,
         old_active_transactions=old_active_transactions,
     )
@@ -735,6 +735,8 @@ class DurableOptionLifecycleAuthority:
                 ),
             )
 
+        economic_cut = self.economic_book.read_cut()
+
         prior_event: Mapping[str, Any] | None = None
         prior_payload: Mapping[str, Any] | None = None
         root_external_id = observation.external_event_id
@@ -793,7 +795,7 @@ class DurableOptionLifecycleAuthority:
                 or prior_payload.get("external_event_id")
             )
             active_ids = tuple(prior_payload.get("active_transaction_ids", ()))
-            by_id = {item.transaction_id: item for item in self.economic_book.transactions}
+            by_id = {item.transaction_id: item for item in economic_cut.transactions}
             missing = [transaction_id for transaction_id in active_ids if transaction_id not in by_id]
             if missing:
                 raise OptionLifecycleConflict(
@@ -806,7 +808,7 @@ class DurableOptionLifecycleAuthority:
                 )
 
         _require_consumable_option_position(
-            economic_book=self.economic_book,
+            economic_cut=economic_cut,
             observation=observation,
             version=version,
             old_active_transactions=old_active_transactions,
@@ -863,14 +865,23 @@ class DurableOptionLifecycleAuthority:
         )
         economic_transactions = tuple(reversal_transactions + [replacement])
 
-        plan = (
-            self.economic_book.prepare_batch_mutation(
-                economic_transactions,
-                committed_at=_utc_text(observation.observed_at),
+        try:
+            plan = (
+                self.economic_book.prepare_batch_mutation(
+                    economic_transactions,
+                    committed_at=_utc_text(observation.observed_at),
+                    expected_previous_book_digest=economic_cut.book_digest,
+                )
+                if economic_transactions
+                else None
             )
-            if economic_transactions
-            else None
-        )
+        except AccountingConflict as error:
+            self.economic_book.refresh()
+            if str(error) == "economic book changed after validated read cut":
+                raise OptionLifecycleConflict(
+                    "canonical economic book changed after lifecycle position validation"
+                ) from error
+            raise
         if plan is not None and plan.already_committed:
             raise OptionLifecycleConflict(
                 "fresh lifecycle identity maps to economics already committed elsewhere"

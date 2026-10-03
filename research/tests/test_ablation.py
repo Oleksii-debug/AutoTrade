@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from autotrade_research.evaluation.ablation import (
@@ -994,6 +995,115 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_terminal_authority_rejects_polymorphic_persistent_dependencies(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                protocol_id="protocol-test",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            with self.assertRaisesRegex(TypeError, "canonical ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=ForgedScientificRegistry(),
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "canonical ExperienceMemory"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=ForgedExperienceMemory(),
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=ForgedArtifactStore(),
+                    **common,
+                )
+
+    def test_terminal_qualification_rejects_caller_defined_authority_subclass(self):
+        cases = [
+            pair("forged-authority-a", "2", population_unit="unit-a"),
+            pair("forged-authority-b", "2", population_unit="unit-b"),
+        ]
+        population = registered_population(cases)
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+
+        class ForgedAuthority(AblationQualificationAuthority):
+            def __init__(self):
+                pass
+
+            def resolve(self, pairs, *, outcome_refs):
+                return population, evidence
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical AblationQualificationAuthority",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=ForgedAuthority(),
+                outcome_refs=(),
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+    def test_trusted_qualification_rejects_case_reassignment_inside_complete_population(self):
+        cases = [
+            pair("case-a", "2", population_unit="unit-a"),
+            pair("case-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        population = RegisteredAblationPopulation(
+            protocol_digest=FINGERPRINT_A,
+            population_digest=FINGERPRINT_D,
+            stopping_rule_digest=FINGERPRINT_C,
+            source_revision="9" * 40,
+            registered_at_utc=CUT - timedelta(days=1),
+            evaluation_cutoff_utc=CUT + timedelta(hours=2),
+            population_unit_ids=("unit-a", "unit-b"),
+            case_bindings=(("unit-a", "case-b"), ("unit-b", "case-a")),
+            complete=True,
+        )
+
+        class TrustedStub(AblationQualificationAuthority):
+            def __init__(self):
+                pass
+
+            def resolve(self, pairs, *, outcome_refs):
+                return population, evidence
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical AblationQualificationAuthority",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=TrustedStub(),
+                outcome_refs=(),
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
     def test_qualified_pass_requires_canonical_outcome_evidence(self):
         cases = [
             pair("qualified-a", "2", population_unit="unit-a"),
@@ -1244,6 +1354,16 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            frozen_payload = population.rows[0]["effective_payload"]
+            self.assertIsInstance(frozen_payload, Mapping)
+            self.assertNotIsInstance(frozen_payload, dict)
+            frozen_action = frozen_payload["intended_action"]
+            self.assertIsInstance(frozen_action, Mapping)
+            self.assertNotIsInstance(frozen_action, dict)
+            self.assertEqual(
+                frozen_action["case_id"],
+                cases[0].full.case_id,
+            )
             refs = []
             source_revision = "9" * 40
             artifact_index = 0
@@ -1288,6 +1408,7 @@ class AblationTests(unittest.TestCase):
                             sha256=manifest["sha256"],
                         )
                     )
+            artifacts = ArtifactStore(root / "artifacts")
             authority = AblationQualificationAuthority(
                 scientific_registry=science,
                 experience_memory=memory,
@@ -1300,7 +1421,59 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
-            result = evaluate_qualified_incremental_value(
+            with patch.object(
+                artifacts,
+                "load_manifest",
+                side_effect=AssertionError("split manifest read is forbidden"),
+            ), patch.object(
+                artifacts,
+                "read_bytes",
+                side_effect=AssertionError("split object read is forbidden"),
+            ):
+                result = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=authority,
+                    outcome_refs=refs,
+                    minimum_pairs=2,
+                    required_lower_bound=Decimal("0"),
+                )
+            self.assertEqual(result.status, "PASS")
+            self.assertEqual(
+                result.reason,
+                "qualified_registered_canonical_ablation_net_of_cost",
+            )
+
+            swapped_cases = [
+                AblationPair(
+                    target_component=cases[0].target_component,
+                    full=replace(cases[0].full, case_id=cases[1].full.case_id),
+                    ablated=replace(cases[0].ablated, case_id=cases[1].ablated.case_id),
+                ),
+                AblationPair(
+                    target_component=cases[1].target_component,
+                    full=replace(cases[1].full, case_id=cases[0].full.case_id),
+                    ablated=replace(cases[1].ablated, case_id=cases[0].ablated.case_id),
+                ),
+            ]
+            reassigned = evaluate_qualified_incremental_value(
+                "agent",
+                swapped_cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(reassigned.status, "INCONCLUSIVE")
+            self.assertEqual(
+                reassigned.reason,
+                "registered_population_case_binding_mismatch",
+            )
+
+            authority.resolve = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("caller-controlled virtual resolve must not execute")
+            )
+            direct_dispatch_result = evaluate_qualified_incremental_value(
                 "agent",
                 cases,
                 authority=authority,
@@ -1308,9 +1481,9 @@ class AblationTests(unittest.TestCase):
                 minimum_pairs=2,
                 required_lower_bound=Decimal("0"),
             )
-            self.assertEqual(result.status, "PASS")
+            self.assertEqual(direct_dispatch_result.status, "PASS")
             self.assertEqual(
-                result.reason,
+                direct_dispatch_result.reason,
                 "qualified_registered_canonical_ablation_net_of_cost",
             )
 

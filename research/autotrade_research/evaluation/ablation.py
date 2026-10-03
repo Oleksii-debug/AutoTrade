@@ -6,6 +6,7 @@ economic edge by itself.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -777,6 +778,7 @@ class RegisteredAblationPopulation:
     registered_at_utc: datetime
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
+    case_bindings: tuple[tuple[str, str], ...] = ()
     complete: bool = True
 
     def __post_init__(self) -> None:
@@ -808,6 +810,34 @@ class RegisteredAblationPopulation:
         if len(set(normalized)) != len(normalized):
             raise ValueError("population_unit_ids must be unique")
         object.__setattr__(self, "population_unit_ids", normalized)
+        if not isinstance(self.case_bindings, tuple):
+            raise TypeError("case_bindings must be an immutable tuple")
+        normalized_bindings: list[tuple[str, str]] = []
+        for binding in self.case_bindings:
+            if (
+                not isinstance(binding, tuple)
+                or len(binding) != 2
+                or any(not isinstance(value, str) or not value.strip() for value in binding)
+            ):
+                raise ValueError(
+                    "case_bindings must contain (population_unit_id, case_id) string tuples"
+                )
+            unit_id, case_id = (binding[0].strip(), binding[1].strip())
+            if unit_id != binding[0] or case_id != binding[1]:
+                raise ValueError("case_bindings must use canonical text")
+            normalized_bindings.append((unit_id, case_id))
+        normalized_binding_tuple = tuple(sorted(normalized_bindings))
+        if normalized_binding_tuple != self.case_bindings:
+            raise ValueError("case_bindings must be sorted canonically")
+        bound_units = tuple(unit_id for unit_id, _case_id in normalized_binding_tuple)
+        bound_cases = tuple(case_id for _unit_id, case_id in normalized_binding_tuple)
+        if len(set(bound_units)) != len(bound_units):
+            raise ValueError("case_bindings must use unique population_unit_id values")
+        if len(set(bound_cases)) != len(bound_cases):
+            raise ValueError("case_bindings must use unique case_id values")
+        if normalized_binding_tuple and tuple(sorted(bound_units)) != normalized:
+            raise ValueError("case_bindings must cover the complete registered population")
+        object.__setattr__(self, "case_bindings", normalized_binding_tuple)
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
 
@@ -835,12 +865,12 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be canonical ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be canonical ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be canonical ArtifactStore")
         if not isinstance(protocol_id, str) or not protocol_id.strip():
             raise ValueError("protocol_id is required")
         if not isinstance(protocol_hash, str):
@@ -868,12 +898,14 @@ class AblationQualificationAuthority:
     ) -> CanonicalAblationOutcomeEvidence:
         if not isinstance(reference, AblationOutcomeArtifactRef):
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            self.artifact_store,
+            reference.artifact_id,
+        )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = self.artifact_store.read_bytes(reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -965,6 +997,28 @@ class AblationQualificationAuthority:
         )
         snapshot.verify_integrity()
         completeness = self.scientific_registry.completeness(self.protocol_id)
+        case_bindings: list[tuple[str, str]] = []
+        for row in snapshot.rows:
+            effective_payload = row.get("effective_payload")
+            intended_action = (
+                effective_payload.get("intended_action")
+                if isinstance(effective_payload, Mapping)
+                else None
+            )
+            case_id = (
+                intended_action.get("case_id")
+                if isinstance(intended_action, Mapping)
+                else None
+            )
+            if not isinstance(case_id, str) or not case_id.strip():
+                raise ValueError(
+                    "registered ablation population episode lacks intended_action.case_id"
+                )
+            if case_id != case_id.strip():
+                raise ValueError(
+                    "registered ablation population case_id must use canonical text"
+                )
+            case_bindings.append((row["episode_id"], case_id))
         population = RegisteredAblationPopulation(
             protocol_digest=self.protocol_hash,
             population_digest=snapshot.root_hash,
@@ -975,6 +1029,7 @@ class AblationQualificationAuthority:
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
+            case_bindings=tuple(sorted(case_bindings)),
             complete=True,
         )
         outcomes = tuple(
@@ -993,6 +1048,7 @@ class AblationQualificationAuthority:
                     registered_at_utc=registered_at,
                     evaluation_cutoff_utc=population.evaluation_cutoff_utc,
                     population_unit_ids=population.population_unit_ids,
+                    case_bindings=population.case_bindings,
                     complete=True,
                 )
         return population, outcomes
@@ -1043,13 +1099,16 @@ def evaluate_qualified_incremental_value(
     selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
-        if not isinstance(authority, AblationQualificationAuthority):
-            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if type(authority) is not AblationQualificationAuthority:
+            raise TypeError(
+                "terminal authority must be the canonical AblationQualificationAuthority"
+            )
         if population is not None or tuple(canonical_outcomes):
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
-        population, trusted_outcomes = authority.resolve(
+        population, trusted_outcomes = AblationQualificationAuthority.resolve(
+            authority,
             selected_input,
             outcome_refs=tuple(outcome_refs),
         )
@@ -1083,6 +1142,12 @@ def evaluate_qualified_incremental_value(
     selected_units = tuple(sorted(pair.full.population_unit_id for pair in selected))
     if selected_units != population.population_unit_ids:
         return inconclusive("incomplete_registered_population")
+    if trusted:
+        selected_case_bindings = tuple(
+            sorted((pair.full.population_unit_id, pair.full.case_id) for pair in selected)
+        )
+        if selected_case_bindings != population.case_bindings:
+            return inconclusive("registered_population_case_binding_mismatch")
 
     if selected:
         earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)

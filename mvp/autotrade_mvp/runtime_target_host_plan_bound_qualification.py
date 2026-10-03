@@ -46,10 +46,13 @@ if TYPE_CHECKING:
     from .trusted_chronology_cut import TrustedChronologyCut
 
 
-def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
-    if type(value) is not RuntimeBudgetSpec:
+def _snapshot_budget_spec(
+    value: RuntimeBudgetSpec,
+    _spec_type=RuntimeBudgetSpec,
+) -> RuntimeBudgetSpec:
+    if type(value) is not _spec_type:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
-    return RuntimeBudgetSpec(
+    return _spec_type(
         scenario_id=value.scenario_id,
         release_sha=value.release_sha,
         configuration_hash=value.configuration_hash,
@@ -63,11 +66,16 @@ def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
     )
 
 
-def _canonical_sha256_text(value: object, *, name: str) -> str:
+def _canonical_sha256_text(
+    value: object,
+    *,
+    name: str,
+    _composition_error_type=RuntimeTargetHostCompositionError,
+) -> str:
     """Return one inert canonical sha256 identity without invoking caller operators."""
 
     if type(value) is not str:
-        raise RuntimeTargetHostCompositionError(
+        raise _composition_error_type(
             f"{name} must remain exact canonical sha256 text"
         )
     if (
@@ -76,31 +84,37 @@ def _canonical_sha256_text(value: object, *, name: str) -> str:
         or value != value.lower()
         or any(char not in "0123456789abcdef" for char in value[7:])
     ):
-        raise RuntimeTargetHostCompositionError(
+        raise _composition_error_type(
             f"{name} must remain exact canonical sha256 text"
         )
     return value
 
 
-def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
+def _snapshot_campaign_cut(
+    value: RuntimeCampaignCut,
+    *,
+    _cut_type=RuntimeCampaignCut,
+    _copy=copy,
+    _composition_error_type=RuntimeTargetHostCompositionError,
+) -> RuntimeCampaignCut:
     """Detach one issued cut before composed code performs caller-visible work."""
 
-    if type(value) is not RuntimeCampaignCut:
+    if type(value) is not _cut_type:
         raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
-    detached = copy(value)
-    if type(detached) is not RuntimeCampaignCut or detached is value:
-        raise RuntimeTargetHostCompositionError(
+    detached = _copy(value)
+    if type(detached) is not _cut_type or detached is value:
+        raise _composition_error_type(
             "campaign_cut could not be detached at terminal authority boundary"
         )
     for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
         if type(getattr(detached, field)) is not str:
-            raise RuntimeTargetHostCompositionError(
+            raise _composition_error_type(
                 f"campaign_cut {field} must remain exact inert text"
             )
     for field in ("start_journal_sequence", "started_monotonic_ns"):
         field_value = getattr(detached, field)
         if type(field_value) is not int or field_value < 0:
-            raise RuntimeTargetHostCompositionError(
+            raise _composition_error_type(
                 f"campaign_cut {field} must remain a non-negative integer"
             )
     return detached

@@ -183,6 +183,11 @@ class DurableUnknownRestartTests(unittest.TestCase):
     def test_restart_rejects_cross_sender_submission_chains_before_state_mutation(self):
         cases = (
             (
+                "non-canonical prepared envelope epoch",
+                {"prepared_envelope_epoch": "01"},
+                "SubmissionPrepared owner epoch is invalid",
+            ),
+            (
                 "prepared payload epoch",
                 {"prepared_payload_epoch": 2},
                 "SubmissionPrepared payload owner epoch does not match envelope",

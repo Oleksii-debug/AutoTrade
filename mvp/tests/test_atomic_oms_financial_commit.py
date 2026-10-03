@@ -6,12 +6,15 @@ import unittest
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
     commit_order_fill_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
+from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 
 
 PROVIDER = "SIMULATED"
@@ -512,6 +515,138 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
                 reservations.get("reservation-1").consumed["CASH:USD"],
                 Decimal("0"),
             )
+
+
+    def test_paper_wrapper_rejects_caller_authored_finance_without_provider_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id=ACCOUNT,
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+            )
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+                host_id="paper-boundary-host",
+                owner_epoch="1",
+            )
+            reservations.reserve(
+                command_id="paper-reserve",
+                idempotency_key="paper-reserve",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            orders.create_order(
+                event_key="paper-create",
+                client_order_id="order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=WHEN,
+                parent_intent_id="intent-1",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires provider-derived financial binding",
+            ):
+                commit_order_fill_with_reservation_consumption(
+                    orders,
+                    economics,
+                    reservations,
+                    order_event_key="fill-1",
+                    client_order_id="order-1",
+                    fill_id="fill-1",
+                    provider_execution_id="provider-execution-1",
+                    quantity="1",
+                    price="100",
+                    command_id="paper-unbound-fill",
+                    idempotency_key="paper-unbound-fill",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USD": "100"},
+                    transactions=(transaction(),),
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
+    def test_provider_evidence_entrypoint_composes_oms_and_finance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            seed(reservations, orders)
+            projected = ProjectedFillEvidence.create(
+                fill_id="fill-1",
+                provider_execution_id="provider-execution-1",
+                intent_id="intent-1",
+                client_order_id="order-1",
+                side="BUY",
+                quantity="1",
+                price="100",
+            )
+            provider = ProviderFillEvidence.create(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_execution_id="provider-execution-1",
+                client_order_id="order-1",
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time=WHEN,
+                side="BUY",
+            )
+
+            kwargs = dict(
+                command_id="provider-derived-atomic-fill",
+                idempotency_key="provider-derived-atomic-fill",
+                reservation_id="reservation-1",
+                projected_fill=projected,
+                provider_fill=provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                observed_at=WHEN,
+                committed_at=WHEN,
+                order_book=orders,
+                order_event_key="fill-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    **kwargs,
+                )
+            )
+            self.assert_complete(orders, economics, reservations)
+            self.assertFalse(
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    **kwargs,
+                )
+            )
+            self.assert_complete(orders, economics, reservations)
 
 
 

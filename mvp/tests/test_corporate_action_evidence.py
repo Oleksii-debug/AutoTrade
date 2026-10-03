@@ -686,7 +686,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 CorporateActionEvidenceConflict,
-                "generation changed",
+                "composition was modified",
             ):
                 durable.record(accepted)
 
@@ -706,6 +706,98 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                 ),
                 [],
             )
+
+
+    def test_coordinated_store_and_scope_retarget_cannot_replace_bound_authority(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            first_path = f"{directory}/first.sqlite3"
+            second_path = f"{directory}/second.sqlite3"
+            first, durable = self._store(first_path)
+            second = JournalStore(second_path)
+            replacement = DurableCorporateActionEvidenceStore(
+                second,
+                provider_id="OTHER_PROVIDER",
+                account_id="other-account",
+                environment="LIVE",
+            )
+            first_aggregate_id = durable.aggregate_id
+            second_aggregate_id = replacement.aggregate_id
+
+            for name in (
+                "_store_identity",
+                "store",
+                "provider_id",
+                "account_id",
+                "environment",
+                "aggregate_id",
+            ):
+                vars(durable)[name] = vars(replacement)[name]
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "composition was modified",
+            ):
+                DurableCorporateActionEvidenceStore.record(durable, accepted)
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    first,
+                    "corporate_action_evidence",
+                    first_aggregate_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    second,
+                    "corporate_action_evidence",
+                    second_aggregate_id,
+                ),
+                [],
+            )
+
+    def test_explicit_reinit_cannot_retarget_durable_evidence_scope(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            first_path = f"{directory}/first.sqlite3"
+            second_path = f"{directory}/second.sqlite3"
+            first, durable = self._store(first_path)
+            second = JournalStore(second_path)
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "already initialized",
+            ):
+                DurableCorporateActionEvidenceStore.__init__(
+                    durable,
+                    second,
+                    provider_id="OTHER_PROVIDER",
+                    account_id="other-account",
+                    environment="LIVE",
+                )
+
+            self.assertIs(durable.store, first)
+            result = DurableCorporateActionEvidenceStore.record(
+                durable,
+                accepted,
+            )
+            self.assertTrue(result.inserted)
+
+    def test_durable_evidence_store_subclass_is_rejected_at_construction(self):
+        class ForgedEvidenceStore(DurableCorporateActionEvidenceStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact canonical type"):
+                ForgedEvidenceStore(
+                    journal,
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+
 
 
 if __name__ == "__main__":

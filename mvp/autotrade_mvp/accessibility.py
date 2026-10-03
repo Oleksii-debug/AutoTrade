@@ -107,6 +107,8 @@ def format_accessible_status(
                 lines.append(f"Reserved {resource}: {amount}; state: {item['state']}")
         if state == "awaiting_order_reconciliation":
             lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
+        if status.get("session_status") == "BLOCKED":
+            lines.append(f"Blocked reason: {_value(status, 'reason')}")
 
     if economic_report is not None:
         lines.extend(

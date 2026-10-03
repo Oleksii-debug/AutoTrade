@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Mapping
 
 
 def canonical_json(value: Any) -> str:
@@ -17,6 +17,56 @@ def canonical_json(value: Any) -> str:
 
 def payload_digest(value: Any) -> str:
     return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_WHOLE_STORE_STATE_TABLES = (
+    "events",
+    "outbox",
+    "command_dedupe",
+    "projection_checkpoints",
+    "global_projection_checkpoints",
+)
+
+
+def _whole_store_state_counts(
+    connection: sqlite3.Connection,
+) -> dict[str, int]:
+    """Read exact business-table cardinalities from one held SQLite snapshot."""
+
+    counts: dict[str, int] = {}
+    for table in _WHOLE_STORE_STATE_TABLES:
+        row = connection.execute(
+            f"SELECT COUNT(*) AS row_count FROM {table}"
+        ).fetchone()
+        if row is None or type(row["row_count"]) is not int:
+            raise RuntimeError(f"whole-store state count failed for {table}")
+        value = row["row_count"]
+        if value < 0:
+            raise ValueError(f"whole-store state count is invalid for {table}")
+        counts[table] = value
+    return counts
+
+
+def _validated_expected_whole_store_counts(
+    value: Mapping[str, int] | None,
+) -> dict[str, int] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise TypeError("expected_whole_store_counts must be an exact dict or None")
+    if set(value) != set(_WHOLE_STORE_STATE_TABLES):
+        raise ValueError(
+            "expected_whole_store_counts must cover the exact business-state tables"
+        )
+    result: dict[str, int] = {}
+    for table in _WHOLE_STORE_STATE_TABLES:
+        count = value[table]
+        if type(count) is not int or count < 0:
+            raise ValueError(
+                f"expected whole-store count must be a non-negative integer for {table}"
+            )
+        result[table] = count
+    return result
 
 
 def _outbox_envelope_digest(topic: str, payload_json: str) -> str:
@@ -1079,7 +1129,14 @@ class JournalStore:
             expected += 1
         return decoded
 
-    def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
+    def append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
+    ) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
@@ -1106,6 +1163,19 @@ class JournalStore:
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence < 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1174,6 +1244,27 @@ class JournalStore:
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
+            journal_sequence_cut = (
+                self._journal_sequence_value(connection)
+                if self.SCHEMA_VERSION >= 6
+                else 0
+            )
+            if (
+                expected_journal_sequence is not None
+                and journal_sequence_cut != expected_journal_sequence
+            ):
+                connection.rollback()
+                raise ValueError(
+                    "journal sequence changed after whole-store validation"
+                )
+            if expected_counts is not None:
+                actual_counts = _whole_store_state_counts(connection)
+                if actual_counts != expected_counts:
+                    connection.rollback()
+                    raise ValueError(
+                        "whole-store state changed after bootstrap validation"
+                    )
+
             current = self._aggregate_version_value(
                 connection,
                 aggregate_type,
@@ -1187,7 +1278,7 @@ class JournalStore:
                 )
 
             if self.SCHEMA_VERSION >= 6:
-                journal_sequence = self._journal_sequence_value(connection) + 1
+                journal_sequence = journal_sequence_cut + 1
                 connection.execute(
                     """
                     INSERT INTO events(
@@ -1852,6 +1943,8 @@ class JournalStore:
         outbox_id: str,
         *,
         expected_envelope_hash: str,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> bool:
         """Acknowledge exactly the verified outbox envelope that was delivered.
 
@@ -1866,6 +1959,19 @@ class JournalStore:
         expected_envelope_hash = self._require_text(
             expected_envelope_hash,
             "expected_envelope_hash",
+        )
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence < 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1961,6 +2067,25 @@ class JournalStore:
                 if row["delivered_at"] is not None:
                     connection.commit()
                     return False
+
+                journal_sequence_cut = (
+                    self._journal_sequence_value(connection)
+                    if self.SCHEMA_VERSION >= 6
+                    else 0
+                )
+                if (
+                    expected_journal_sequence is not None
+                    and journal_sequence_cut != expected_journal_sequence
+                ):
+                    raise ValueError(
+                        "journal sequence changed after whole-store validation"
+                    )
+                if expected_counts is not None:
+                    actual_counts = _whole_store_state_counts(connection)
+                    if actual_counts != expected_counts:
+                        raise ValueError(
+                            "whole-store state changed after bootstrap validation"
+                        )
 
                 updated = connection.execute(
                     """
@@ -2278,6 +2403,7 @@ class JournalStore:
         state_version: int,
         events: list[tuple[dict[str, Any], str | None]],
         expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
@@ -2301,6 +2427,10 @@ class JournalStore:
             raise ValueError(
                 "expected_journal_sequence must be a non-negative integer"
             )
+
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
+        )
 
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
@@ -2431,6 +2561,12 @@ class JournalStore:
                     raise ValueError(
                         "journal sequence changed after financial evidence validation"
                     )
+                if expected_counts is not None:
+                    actual_counts = _whole_store_state_counts(connection)
+                    if actual_counts != expected_counts:
+                        raise ValueError(
+                            "whole-store state changed after financial evidence validation"
+                        )
                 batch_journal_sequences = list(
                     range(
                         journal_sequence_cut + 1,

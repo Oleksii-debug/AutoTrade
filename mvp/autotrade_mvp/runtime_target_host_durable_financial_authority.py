@@ -3,7 +3,8 @@
 The public durable-financial facade remains an explicit focused-test seam. Product
 composed qualification uses the verifier constructed here so rebinding measurement
 snapshotting, delivered-release validation, parent target-host evidence collection,
-error classes, or lower durable mechanics after import cannot retarget terminal PASS.
+error classes, lower durable mechanics, or their authority-bearing dependency
+graphs after import cannot retarget terminal PASS.
 
 This module does not create provider truth, chronology, signer policy, release
 authority, trading authority, profitability, or economic edge.
@@ -15,7 +16,13 @@ from types import FunctionType
 from uuid import UUID
 
 from .performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
+from .runtime_load_measurement import load_declared_financial_latency_samples
+from .runtime_load_plan import load_declared_runtime_event_plan
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_durable_financial import (
     DurableTargetHostFinancialBinding,
@@ -163,8 +170,14 @@ def _build_release_bound_durable_financial_authority(
     measurement_dependency_guard=None,
     parent_dependency_guard=None,
     durable_dependency_guard=None,
+    durable_external_dependency_guards=(),
 ):
-    """Build one release-bound binder with immutable direct dependency captures."""
+    """Build one release-bound binder with immutable dependency captures."""
+
+    if type(durable_external_dependency_guards) is not tuple or any(
+        not callable(guard) for guard in durable_external_dependency_guards
+    ):
+        raise TypeError("durable_external_dependency_guards must be exact tuple of callables")
 
     def canonical_uuid(value: object, *, name: str) -> str:
         if type(value) is not str or not value or value != value.strip():
@@ -247,12 +260,21 @@ def _build_release_bound_durable_financial_authority(
             measurement_dependency_guard()
         if durable_dependency_guard is not None:
             durable_dependency_guard()
-        return durable_binder(
+        for guard in durable_external_dependency_guards:
+            guard()
+        result = durable_binder(
             store,
             spec,
             declared_plan_id=declared_plan_id,
             measurement=measurement_authority,
         )
+        # Persistent mutation during durable projection must not survive into a
+        # terminal accepted result even when the root callable identity is stable.
+        if durable_dependency_guard is not None:
+            durable_dependency_guard()
+        for guard in durable_external_dependency_guards:
+            guard()
+        return result
 
     return bind
 
@@ -272,6 +294,32 @@ _PRODUCTION_DURABLE_BINDER_GUARD = _build_module_authority_guard(
     error_type=RuntimeTargetHostDurableFinancialError,
     label="durable-financial binder",
 )
+_PRODUCTION_JOURNAL_STORE_AUTHORITY_GUARD = _build_module_authority_guard(
+    root=require_exact_journal_store_authority,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="durable-financial JournalStore authority",
+)
+_PRODUCTION_JOURNAL_STORE_SCOPE_GUARD = _build_module_authority_guard(
+    root=journal_store_authority_scope.__wrapped__,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="durable-financial JournalStore scope",
+)
+_PRODUCTION_DECLARED_PLAN_LOADER_GUARD = _build_module_authority_guard(
+    root=load_declared_runtime_event_plan,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="durable-financial declared-plan loader",
+)
+_PRODUCTION_DURABLE_SAMPLE_LOADER_GUARD = _build_module_authority_guard(
+    root=load_declared_financial_latency_samples,
+    error_type=RuntimeTargetHostDurableFinancialError,
+    label="durable-financial sample loader",
+)
+_PRODUCTION_DURABLE_EXTERNAL_DEPENDENCY_GUARDS = (
+    _PRODUCTION_JOURNAL_STORE_AUTHORITY_GUARD,
+    _PRODUCTION_JOURNAL_STORE_SCOPE_GUARD,
+    _PRODUCTION_DECLARED_PLAN_LOADER_GUARD,
+    _PRODUCTION_DURABLE_SAMPLE_LOADER_GUARD,
+)
 
 
 bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement = (
@@ -286,5 +334,6 @@ bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement =
         measurement_dependency_guard=_PRODUCTION_MEASUREMENT_SNAPSHOT_GUARD,
         parent_dependency_guard=_PRODUCTION_PARENT_EVIDENCE_GUARD,
         durable_dependency_guard=_PRODUCTION_DURABLE_BINDER_GUARD,
+        durable_external_dependency_guards=_PRODUCTION_DURABLE_EXTERNAL_DEPENDENCY_GUARDS,
     )
 )

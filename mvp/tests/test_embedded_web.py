@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import socket
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.embedded_web import (
     EmbeddedWebHostApplication,
@@ -371,6 +372,24 @@ class EmbeddedWebTests(unittest.TestCase):
                 hostile,
             )
         self.assertEqual(HostilePath.comparisons, 0)
+
+    def test_oversized_body_set_fails_before_asset_hashing(self):
+        bodies = {item.path: item.body for item in self.web_bundle.assets}
+        with (
+            patch(
+                "mvp.autotrade_mvp.embedded_web._MAX_BUNDLE_BYTES",
+                1,
+            ),
+            patch(
+                "mvp.autotrade_mvp.embedded_web.sha256",
+                side_effect=AssertionError("hashing ran before aggregate size fence"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "body set exceeds"):
+                load_immutable_web_bundle(
+                    self.web_bundle.manifest_bytes,
+                    bodies,
+                )
 
     def test_current_canonical_web_bytes_fit_the_immutable_bundle_contract(self):
         root = Path(__file__).resolve().parents[2] / "web" / "src"

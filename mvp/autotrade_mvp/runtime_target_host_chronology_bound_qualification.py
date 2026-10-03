@@ -57,15 +57,82 @@ class RuntimeTargetHostChronologyBindingError(ValueError):
     """Raised when WP-65 and accepted runtime chronology do not bind exactly."""
 
 
+_EVIDENCE_REF_STATE_FIELDS = frozenset(
+    {"artifact_id", "sha256", "media_type", "evidence_kind", "source_sha"}
+)
+_ATTESTATION_STATE_FIELDS = frozenset(
+    {
+        "attestation_id",
+        "source_sha",
+        "domain",
+        "gate",
+        "package_id",
+        "protocol_id",
+        "protocol_version",
+        "requirement_ids",
+        "evidence_refs",
+        "producer_id",
+        "verifier_id",
+        "trust_root_id",
+        "runner_id",
+        "harness_version",
+        "started_at",
+        "completed_at",
+        "signed_at",
+        "result",
+        "unresolved_limits",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "schema_version",
+        "verification_method",
+    }
+)
+_SIGNED_RECEIPT_STATE_FIELDS = frozenset({"attestation", "signature_b64"})
+
+
+def _detached_exact_state(
+    value: object,
+    *,
+    expected_fields: frozenset[str],
+    name: str,
+) -> dict[str, object]:
+    """Take one callback-free instance-state cut and reject hidden authority fields."""
+
+    raw_state = value.__dict__
+    if type(raw_state) is not dict:
+        raise RuntimeTargetHostChronologyBindingError(
+            f"{name} state must remain an exact built-in dict"
+        )
+    state = dict.copy(raw_state)
+    keys = tuple(state)
+    if not all(type(key) is str for key in keys):
+        raise RuntimeTargetHostChronologyBindingError(
+            f"{name} state keys must remain exact text"
+        )
+    actual_fields = frozenset(keys)
+    if actual_fields != expected_fields:
+        missing = sorted(expected_fields - actual_fields)
+        extra = sorted(actual_fields - expected_fields)
+        raise RuntimeTargetHostChronologyBindingError(
+            f"{name} fields mismatch: missing={missing} extra={extra}"
+        )
+    return state
+
+
 def _snapshot_evidence_ref(value: EvidenceArtifactRef) -> EvidenceArtifactRef:
     if type(value) is not EvidenceArtifactRef:
         raise TypeError("receipt evidence ref must be exact EvidenceArtifactRef")
+    state = _detached_exact_state(
+        value,
+        expected_fields=_EVIDENCE_REF_STATE_FIELDS,
+        name="receipt evidence ref",
+    )
     return EvidenceArtifactRef(
-        artifact_id=value.artifact_id,
-        sha256=value.sha256,
-        media_type=value.media_type,
-        evidence_kind=value.evidence_kind,
-        source_sha=value.source_sha,
+        artifact_id=state["artifact_id"],
+        sha256=state["sha256"],
+        media_type=state["media_type"],
+        evidence_kind=state["evidence_kind"],
+        source_sha=state["source_sha"],
     )
 
 
@@ -76,18 +143,31 @@ def _snapshot_signed_receipt(
 
     if type(value) is not SignedQualificationAttestation:
         raise TypeError("receipt must be exact SignedQualificationAttestation")
-    attestation = value.attestation
+    receipt_state = _detached_exact_state(
+        value,
+        expected_fields=_SIGNED_RECEIPT_STATE_FIELDS,
+        name="signed receipt",
+    )
+    attestation = receipt_state["attestation"]
     if type(attestation) is not QualificationAttestation:
         raise TypeError("receipt attestation must be exact QualificationAttestation")
-    if type(attestation.requirement_ids) is not tuple:
+    attestation_state = _detached_exact_state(
+        attestation,
+        expected_fields=_ATTESTATION_STATE_FIELDS,
+        name="receipt attestation",
+    )
+    requirement_ids = attestation_state["requirement_ids"]
+    evidence_refs = attestation_state["evidence_refs"]
+    unresolved_limits = attestation_state["unresolved_limits"]
+    if type(requirement_ids) is not tuple:
         raise RuntimeTargetHostChronologyBindingError(
             "receipt requirement_ids must remain an exact tuple"
         )
-    if type(attestation.evidence_refs) is not tuple:
+    if type(evidence_refs) is not tuple:
         raise RuntimeTargetHostChronologyBindingError(
             "receipt evidence_refs must remain an exact tuple"
         )
-    if type(attestation.unresolved_limits) is not tuple:
+    if type(unresolved_limits) is not tuple:
         raise RuntimeTargetHostChronologyBindingError(
             "receipt unresolved_limits must remain an exact tuple"
         )
@@ -111,50 +191,49 @@ def _snapshot_signed_receipt(
         "schema_version",
         "verification_method",
     ):
-        if type(getattr(attestation, field)) is not str:
+        if type(attestation_state[field]) is not str:
             raise RuntimeTargetHostChronologyBindingError(
                 f"receipt {field} must remain exact inert text"
             )
     for field in ("release_artifact_id", "release_artifact_sha256"):
-        field_value = getattr(attestation, field)
+        field_value = attestation_state[field]
         if field_value is not None and type(field_value) is not str:
             raise RuntimeTargetHostChronologyBindingError(
                 f"receipt {field} must remain exact inert text or None"
             )
-    if type(value.signature_b64) is not str:
+    signature_b64 = receipt_state["signature_b64"]
+    if type(signature_b64) is not str:
         raise RuntimeTargetHostChronologyBindingError(
             "receipt signature_b64 must remain exact inert text"
         )
     snapshot = QualificationAttestation(
-        attestation_id=attestation.attestation_id,
-        source_sha=attestation.source_sha,
-        domain=attestation.domain,
-        gate=attestation.gate,
-        package_id=attestation.package_id,
-        protocol_id=attestation.protocol_id,
-        protocol_version=attestation.protocol_version,
-        requirement_ids=tuple(attestation.requirement_ids),
-        evidence_refs=tuple(
-            _snapshot_evidence_ref(ref) for ref in attestation.evidence_refs
-        ),
-        producer_id=attestation.producer_id,
-        verifier_id=attestation.verifier_id,
-        trust_root_id=attestation.trust_root_id,
-        runner_id=attestation.runner_id,
-        harness_version=attestation.harness_version,
-        started_at=attestation.started_at,
-        completed_at=attestation.completed_at,
-        signed_at=attestation.signed_at,
-        result=attestation.result,
-        unresolved_limits=tuple(attestation.unresolved_limits),
-        release_artifact_id=attestation.release_artifact_id,
-        release_artifact_sha256=attestation.release_artifact_sha256,
-        schema_version=attestation.schema_version,
-        verification_method=attestation.verification_method,
+        attestation_id=attestation_state["attestation_id"],
+        source_sha=attestation_state["source_sha"],
+        domain=attestation_state["domain"],
+        gate=attestation_state["gate"],
+        package_id=attestation_state["package_id"],
+        protocol_id=attestation_state["protocol_id"],
+        protocol_version=attestation_state["protocol_version"],
+        requirement_ids=tuple(requirement_ids),
+        evidence_refs=tuple(_snapshot_evidence_ref(ref) for ref in evidence_refs),
+        producer_id=attestation_state["producer_id"],
+        verifier_id=attestation_state["verifier_id"],
+        trust_root_id=attestation_state["trust_root_id"],
+        runner_id=attestation_state["runner_id"],
+        harness_version=attestation_state["harness_version"],
+        started_at=attestation_state["started_at"],
+        completed_at=attestation_state["completed_at"],
+        signed_at=attestation_state["signed_at"],
+        result=attestation_state["result"],
+        unresolved_limits=tuple(unresolved_limits),
+        release_artifact_id=attestation_state["release_artifact_id"],
+        release_artifact_sha256=attestation_state["release_artifact_sha256"],
+        schema_version=attestation_state["schema_version"],
+        verification_method=attestation_state["verification_method"],
     )
     return SignedQualificationAttestation(
         attestation=snapshot,
-        signature_b64=value.signature_b64,
+        signature_b64=signature_b64,
     )
 
 

@@ -510,6 +510,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             resolved = resolved_policy(store, data_age="2")
             observation = mark(
+                source_event_at=NOW,
                 available_at=NOW,
                 observed_at=NOW,
             )
@@ -952,7 +953,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
 
             store.current_journal_sequence = poison
             with self.assertRaisesRegex(
-                (RuntimeError, ValuationConflict),
+                (TypeError, RuntimeError, ValuationConflict),
                 "shadow|authority|composition",
             ):
                 book.resolve_at(

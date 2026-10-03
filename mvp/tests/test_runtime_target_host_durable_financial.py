@@ -54,7 +54,7 @@ def expected(event_id: str = "financial-1") -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id=event_id,
         event_type=EVENT_TYPE,
-        aggregate_type="runtime_target_host_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="wp65-durable-financial",
         aggregate_version=1,
     )
@@ -82,7 +82,7 @@ def campaign_plan(current_spec: RuntimeBudgetSpec, event_id: str) -> RuntimeCamp
         workload_profile_hash=WORKLOAD,
         declared_duration_ms=1_000,
         expected_financial_event_ids=(event_id,),
-        financial_aggregate_types=("runtime_target_host_fixture",),
+        financial_aggregate_types=("risk_decision",),
         release_artifact_sha256=RELEASE_SHA,
     )
 

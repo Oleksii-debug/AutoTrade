@@ -209,6 +209,81 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                 if patch_started:
                     parser_patcher.stop()
 
+    def test_signed_verifier_cannot_mutate_cut_type_to_launder_future_horizon(self):
+        with _cases.TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            manifest = self._measurement_manifest(accepted, measurement)
+            cut_type = chronology.TrustedChronologyCut
+            had_own_getattribute = "__getattribute__" in cut_type.__dict__
+            original_own_getattribute = cut_type.__dict__.get("__getattribute__")
+            mutation_started = False
+
+            def forged_getattribute(instance, name):
+                if name in {"covered_utc", "utc_lower_bound", "utc_upper_bound"}:
+                    return "2099-01-01T00:00:00Z"
+                return object.__getattribute__(instance, name)
+
+            def raced_verifier(*_args, **_kwargs):
+                nonlocal mutation_started
+                cut_type.__getattribute__ = forged_getattribute
+                mutation_started = True
+                return accepted
+
+            try:
+                with (
+                    patch.object(
+                        chronology,
+                        "parse_signed_qualification_attestation",
+                        return_value=self._dummy_receipt(),
+                    ),
+                    patch.object(
+                        chronology,
+                        "verify_canonical_qualification_attestation",
+                        side_effect=raced_verifier,
+                    ),
+                    patch.object(
+                        chronology,
+                        "trusted_authenticated_reader",
+                        return_value=lambda _artifact_id: (manifest, measurement),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "trusted chronology implementation type authority changed: "
+                        "TrustedChronologyCut",
+                    ),
+                ):
+                    verifier = chronology._build_test_current_cut_verifier()
+                    verifier(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        evidence_store=artifacts,
+                        evidence_root=str(artifacts.root),
+                        expected_source_sha=_cases.SOURCE_SHA,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                        claimed_instants=("2026-10-03T14:30:00Z",),
+                    )
+
+                self.assertTrue(mutation_started)
+            finally:
+                if mutation_started:
+                    if had_own_getattribute:
+                        cut_type.__getattribute__ = original_own_getattribute
+                    else:
+                        del cut_type.__getattribute__
+
 
 if __name__ == "__main__":
     unittest.main()

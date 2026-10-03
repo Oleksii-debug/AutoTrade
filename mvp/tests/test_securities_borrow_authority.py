@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -12,7 +13,7 @@ from mvp.autotrade_mvp.authority import (
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -336,6 +337,40 @@ def _admit_short(
     )
 
 
+def _rewrite_risk_event_without_borrow_quantity_unit(store, risk_decision_id):
+    event = store.load_events("risk_decision", risk_decision_id)[0]
+    payload = event["payload"]
+    del payload["reservation_availability_evidence"][
+        "borrow_capacity_adjustments"
+    ][_borrow_key()]["quantity_unit"]
+    payload_hash = payload_digest(payload)
+    envelope = {
+        key: value
+        for key, value in event.items()
+        if key != "journal_sequence"
+    }
+    envelope["aggregate_version"] = str(event["aggregate_version"])
+    envelope["payload"] = payload
+    envelope["payload_hash"] = payload_hash
+    envelope_json = canonical_json(envelope)
+    envelope_hash = "sha256:" + sha256(envelope_json.encode("utf-8")).hexdigest()
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE events
+            SET payload_json = ?, payload_hash = ?, envelope_json = ?, envelope_hash = ?
+            WHERE event_id = ?
+            """,
+            (
+                canonical_json(payload),
+                payload_hash,
+                envelope_json,
+                envelope_hash,
+                event["event_id"],
+            ),
+        )
+
+
 class SecuritiesBorrowAuthorityTests(unittest.TestCase):
     def test_increasing_short_requires_canonical_instrument_registry_before_mutation(self):
         with TemporaryDirectory() as directory:
@@ -481,6 +516,40 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 ),
                 (False, "financial_evidence_invalid"),
             )
+
+    def test_missing_unit_legacy_borrow_adjustment_fails_closed_on_restart(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = _authority(store, quantity_unit="share")
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit_short(
+                authority,
+                reservations,
+                checkpoint,
+                suffix="legacy-missing-unit",
+                reserved=None,
+                max_age_seconds="120",
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            _rewrite_risk_event_without_borrow_quantity_unit(
+                store,
+                admitted.risk_decision_id,
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "borrow capacity adjustment is malformed",
+            ):
+                _authority(
+                    JournalStore(path),
+                    quantity_unit="share",
+                )
 
     def test_incremental_short_quantity_handles_crossing_flat_and_reserved_orders(self):
         self.assertEqual(

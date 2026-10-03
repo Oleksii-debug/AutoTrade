@@ -84,7 +84,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         event = js[
             js.index("function renderHostEvent(event, cursor, stateVersion)"):
-            js.index("function resetOperationsForScope()")
+            js.index("function resetOperationsForScope(")
         ]
         for scope in (operation, event):
             self.assertIn('const rowHeader = document.createElement("th")', scope)
@@ -871,8 +871,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_account_or_environment_scope_change_clears_operation_evidence(self):
         js = APP.read_text(encoding="utf-8")
         reset = js[
-            js.index("function resetOperationsForScope()"):
-            js.index("function resetEventHistoryForScope()")
+            js.index("function resetOperationsForScope("):
+            js.index("function resetEventHistoryForScope(")
         ]
         self.assertIn('const body = byId("operations-body")', reset)
         self.assertIn("body.replaceChildren()", reset)
@@ -1007,6 +1007,53 @@ class SemanticWebClientContractTests(unittest.TestCase):
         announcement = snapshot.index("Host scope changed to account ")
         self.assertLess(markers, announcement)
 
+    def test_same_scope_snapshot_cursor_jump_clears_event_derived_views(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const priorCursor = state.cursor", snapshot)
+        self.assertIn("const skippedSameScopeEvents =", snapshot)
+        self.assertIn("parsed.cursor > priorCursor", snapshot)
+        self.assertIn(
+            '"Canonical snapshot advanced from event cursor " + priorCursor.toString()',
+            snapshot,
+        )
+        self.assertIn(
+            '" to " + parsed.cursor.toString()',
+            snapshot,
+        )
+        for reset in (
+            "resetNotificationsForScope(",
+            "resetOperationsForScope(",
+            "resetEventHistoryForScope(",
+        ):
+            self.assertGreaterEqual(snapshot.count(reset), 2)
+        self.assertIn(
+            "Event-derived operation, notification, and received-event views were cleared rather than shown as current.",
+            snapshot,
+        )
+        gap = snapshot.index("if (skippedSameScopeEvents)")
+        cursor_commit = snapshot.index("state.cursor = parsed.cursor")
+        self.assertLess(gap, cursor_commit)
+        self.assertIn("true);", snapshot[gap:cursor_commit])
+
+    def test_same_scope_snapshot_without_cursor_jump_preserves_event_derived_views(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        condition = snapshot[
+            snapshot.index("const skippedSameScopeEvents ="):
+            snapshot.index("if (scopeChanged)")
+        ]
+        self.assertIn("!scopeChanged", condition)
+        self.assertIn("state.renderedAccountId !== null", condition)
+        self.assertIn("parsed.cursor > priorCursor", condition)
+        self.assertNotIn("parsed.cursor >= priorCursor", condition)
+
     def test_snapshot_and_event_stream_responses_are_generation_fenced(self):
         js = APP.read_text(encoding="utf-8")
         refresh = js[
@@ -1082,7 +1129,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_scope_change_clears_unscoped_command_and_notification_feedback(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function resetNotificationsForScope()", js)
+        self.assertIn("function resetNotificationsForScope(", js)
         self.assertIn("window.clearTimeout(state.announcementTimer)", js)
         self.assertIn("window.clearTimeout(state.urgentAnnouncementTimer)", js)
         self.assertIn("state.pendingAnnouncements = []", js)

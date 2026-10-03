@@ -48,7 +48,8 @@ public sealed class WebExperienceSecurityPolicy
         Uri topLevelDocument)
     {
         if (!AllowsTopLevelNavigation(topLevelDocument)
-            || !IsSameHostOrigin(target))
+            || !IsSameHostOrigin(target)
+            || !string.IsNullOrEmpty(target.Fragment))
         {
             return false;
         }

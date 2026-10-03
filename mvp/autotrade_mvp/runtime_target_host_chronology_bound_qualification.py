@@ -31,7 +31,6 @@ from .recovery import RecoveryController
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_composed_qualification import (
     AcceptedComposedRuntimeTargetHostQualification,
-    RuntimeTargetHostCompositionError,
 )
 from .runtime_target_host_measurement import (
     RuntimeTargetHostMeasurementError,
@@ -41,6 +40,7 @@ from .runtime_target_host_measurement import (
 from .runtime_target_host_plan_bound_qualification import (
     verify_declared_plan_runtime_target_host_qualification,
 )
+from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 from .trusted_chronology import ChronologyScope
 from .trusted_chronology_cut import (
     TrustedChronologyCut,
@@ -129,6 +129,42 @@ def _snapshot_measurement(
         raise RuntimeTargetHostChronologyBindingError(str(error)) from error
 
 
+def _require_pre_binding(
+    chronology: TrustedChronologyCut,
+    measurement: TargetHostMeasurementArtifact,
+    *,
+    expected_release_artifact_id: str,
+    expected_release_artifact_sha256: str,
+) -> None:
+    if type(chronology) is not TrustedChronologyCut:
+        raise RuntimeTargetHostChronologyBindingError(
+            "chronology verifier returned non-canonical cut"
+        )
+    bindings = (
+        ("source SHA", chronology.source_sha, measurement.source_sha),
+        (
+            "release artifact id",
+            chronology.release_artifact_id,
+            expected_release_artifact_id,
+        ),
+        (
+            "release artifact digest",
+            chronology.release_artifact_sha256,
+            expected_release_artifact_sha256,
+        ),
+        (
+            "JournalStore identity",
+            chronology.store_identity_digest,
+            measurement.journal_store_identity_digest,
+        ),
+    )
+    for name, observed, expected in bindings:
+        if type(observed) is not str or type(expected) is not str or observed != expected:
+            raise RuntimeTargetHostChronologyBindingError(
+                f"runtime chronology {name} does not match terminal WP-65 authority"
+            )
+
+
 def _require_cross_binding(
     qualification: AcceptedComposedRuntimeTargetHostQualification,
     chronology: TrustedChronologyCut,
@@ -141,19 +177,19 @@ def _require_cross_binding(
         raise RuntimeTargetHostChronologyBindingError(
             "WP-65 verifier returned non-canonical composed acceptance"
         )
-    if type(chronology) is not TrustedChronologyCut:
-        raise RuntimeTargetHostChronologyBindingError(
-            "chronology verifier returned non-canonical cut"
-        )
     accepted = qualification.qualification
+    if type(accepted) is not AcceptedRuntimeTargetHostQualification:
+        raise RuntimeTargetHostChronologyBindingError(
+            "WP-65 verifier returned non-canonical signed acceptance"
+        )
+    _require_pre_binding(
+        chronology,
+        measurement,
+        expected_release_artifact_id=expected_release_artifact_id,
+        expected_release_artifact_sha256=expected_release_artifact_sha256,
+    )
     bindings = (
-        ("source SHA", chronology.source_sha, measurement.source_sha),
         ("source SHA", accepted.source_sha, measurement.source_sha),
-        (
-            "release artifact id",
-            chronology.release_artifact_id,
-            expected_release_artifact_id,
-        ),
         (
             "release artifact id",
             accepted.release_artifact_id,
@@ -161,18 +197,8 @@ def _require_cross_binding(
         ),
         (
             "release artifact digest",
-            chronology.release_artifact_sha256,
-            expected_release_artifact_sha256,
-        ),
-        (
-            "release artifact digest",
             accepted.release_artifact_sha256,
             expected_release_artifact_sha256,
-        ),
-        (
-            "JournalStore identity",
-            chronology.store_identity_digest,
-            measurement.journal_store_identity_digest,
         ),
         (
             "JournalStore identity",
@@ -183,7 +209,7 @@ def _require_cross_binding(
     for name, observed, expected in bindings:
         if type(observed) is not str or type(expected) is not str or observed != expected:
             raise RuntimeTargetHostChronologyBindingError(
-                f"runtime chronology {name} does not match terminal WP-65 authority"
+                f"signed WP-65 {name} does not match runtime chronology authority"
             )
 
 
@@ -243,12 +269,9 @@ def verify_chronology_bound_runtime_target_host_qualification(
         expected_release_artifact_sha256=expected_release_artifact_sha256,
         runtime=runtime,
     )
-    _require_cross_binding(
-        # The signed WP-65 acceptance does not exist yet. Cross-bind the authority
-        # facts available before verifier side effects explicitly here.
-        qualification=_prequalification_binding_view(measurement, expected_release_artifact_id, expected_release_artifact_sha256),
-        chronology=chronology,
-        measurement=measurement,
+    _require_pre_binding(
+        chronology,
+        measurement,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
@@ -311,13 +334,3 @@ def verify_chronology_bound_runtime_target_host_qualification(
         qualification=qualification,
         chronology_cut=final_chronology,
     )
-
-
-def _prequalification_binding_view(
-    measurement: TargetHostMeasurementArtifact,
-    release_id: str,
-    release_sha256: str,
-) -> AcceptedComposedRuntimeTargetHostQualification:
-    """Never called in production verification; retained only for static typing."""
-
-    raise AssertionError("prequalification binding view is not executable")

@@ -107,8 +107,11 @@ def _snapshot_operations(
         raise RuntimeTargetHostRunnerError(
             "operations must be an exact dict keyed by durable planned event_id"
         )
+    operation_keys = tuple(operations)
+    if any(type(key) is not str for key in operation_keys):
+        raise RuntimeTargetHostRunnerError("operation keys must be exact strings")
     expected_ids = plan.expected_event_ids
-    if set(operations) != set(expected_ids):
+    if set(operation_keys) != set(expected_ids):
         raise RuntimeTargetHostRunnerError(
             "operation key set must exactly match the durable pre-run event plan"
         )
@@ -345,6 +348,86 @@ def _class_authority_state(
     )
 
 
+def _class_resolution_authority_state(
+    value: type,
+    names: tuple[str, ...],
+) -> tuple[
+    tuple[
+        str,
+        type,
+        object,
+        tuple[tuple[FunctionType, tuple], ...],
+    ],
+    ...,
+]:
+    """Snapshot raw class-member resolution without invoking descriptors."""
+
+    if type(value) is not type:
+        raise TypeError("class-resolution authority must be an exact class")
+    if type(names) is not tuple or any(type(name) is not str or not name for name in names):
+        raise TypeError("class-resolution authority names must be exact text tuple")
+    result = []
+    for member_name in names:
+        owner = None
+        member = None
+        for candidate in value.__mro__:
+            namespace = vars(candidate)
+            if member_name in namespace:
+                owner = candidate
+                member = namespace[member_name]
+                break
+        if owner is None:
+            raise TypeError(f"class-resolution member is unavailable: {member_name}")
+        result.append(
+            (
+                member_name,
+                owner,
+                member,
+                tuple(
+                    (function, _callable_authority_state(function))
+                    for function in _class_member_executables(member)
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _require_class_resolution_authority(
+    value: type,
+    state: tuple,
+    *,
+    name: str,
+) -> None:
+    """Require the same MRO owner, raw descriptor and executable state."""
+
+    if type(value) is not type:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class-resolution authority changed during campaign callback"
+        )
+    missing = object()
+    for member_name, expected_owner, expected_member, executables in state:
+        current_owner = None
+        for candidate in value.__mro__:
+            if member_name in vars(candidate):
+                current_owner = candidate
+                break
+        if current_owner is not expected_owner:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{member_name} resolution authority changed during campaign callback"
+            )
+        namespace = vars(expected_owner)
+        if namespace.get(member_name, missing) is not expected_member:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{member_name} class member changed during campaign callback"
+            )
+        for function, function_state in executables:
+            _require_callable_authority(
+                function,
+                function_state,
+                name=f"{name}.{member_name}",
+            )
+
+
 def _require_class_authority(
     value: type,
     state: tuple,
@@ -403,6 +486,8 @@ def _capture_resource_metrics(
     if process_time_ns is None:
         process_time_ns = time.process_time_ns
 
+    if authority_check is not None:
+        authority_check()
     sequence_before = current_journal_sequence(store)
     extras: dict[str, int] = {}
     if resource_probe is not None:
@@ -424,6 +509,8 @@ def _capture_resource_metrics(
     active_threads = active_count()
     process_cpu_time_ns = process_time_ns()
     sequence_after = current_journal_sequence(store)
+    if authority_check is not None:
+        authority_check()
     if sequence_after != sequence_before:
         raise RuntimeTargetHostRunnerError(
             "resource observation crossed a durable JournalStore cut"
@@ -511,6 +598,44 @@ def run_declared_target_host_campaign(
     _require_shared_clock_contract()
     if type(spec) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
+
+    # Detach the authority-bearing budget from the caller-owned object before
+    # any caller callback runs. Frozen dataclasses can still be mutated through
+    # object.__setattr__, so evaluating against the original instance would let
+    # a callback widen its own qualification thresholds after the campaign cut.
+    input_spec = spec
+    budget_spec_fields = (
+        "scenario_id",
+        "release_sha",
+        "configuration_hash",
+        "host_fingerprint",
+        "strategy_horizon_us",
+        "max_p95_financial_latency_us",
+        "max_financial_staleness_us",
+        "max_research_interference_us",
+        "min_financial_samples",
+        "min_research_samples",
+    )
+    input_spec_dict = input_spec.__dict__
+    if type(input_spec_dict) is not dict:
+        raise RuntimeTargetHostRunnerError(
+            "input RuntimeBudgetSpec instance state is non-canonical"
+        )
+    input_spec_keys = tuple(input_spec_dict)
+    if (
+        any(type(key) is not str for key in input_spec_keys)
+        or len(input_spec_keys) != len(budget_spec_fields)
+        or set(input_spec_keys) != set(budget_spec_fields)
+    ):
+        raise RuntimeTargetHostRunnerError(
+            "input RuntimeBudgetSpec instance state is non-canonical"
+        )
+    input_spec_state = tuple(
+        (name, input_spec_dict[name]) for name in budget_spec_fields
+    )
+    spec = RuntimeBudgetSpec(
+        **{name: value for name, value in input_spec_state}
+    )
     duration_ms = _positive_int(declared_duration_ms, name="declared_duration_ms")
     require_exact_journal_store_authority(
         journal,
@@ -537,6 +662,25 @@ def run_declared_target_host_campaign(
     active_count = threading.active_count
     financial_clock = _runtime_load_measurement.perf_counter_ns
     journal_store_type = JournalStore
+    journal_store_mro = JournalStore.__mro__
+    journal_store_resolution_state = _class_resolution_authority_state(
+        JournalStore,
+        (
+            "SCHEMA_VERSION",
+            "_connect",
+            "_connect_windows",
+            "_require_text",
+            "_now",
+            "_aggregate_version_value",
+            "_journal_sequence_value",
+            "_decode_event_row",
+            "get_event",
+            "append_event",
+            "current_journal_sequence",
+            "pending_outbox_count",
+            "load_events_after_journal_sequence",
+        ),
+    )
     current_journal_sequence = JournalStore.current_journal_sequence
     pending_outbox_count = JournalStore.pending_outbox_count
     measure_financial = measure_declared_financial_operation
@@ -561,6 +705,43 @@ def run_declared_target_host_campaign(
     campaign_evidence_type = RuntimeCampaignEvidence
     durable_sample_type = DurableFinancialLatencySample
     inventory_type = RuntimeTargetHostInventory
+    error_type = RuntimeTargetHostRunnerError
+    monotonic_clock_id = MONOTONIC_CLOCK_ID
+    staleness_basis = STALENESS_BASIS
+    research_interference_basis = RESEARCH_INTERFERENCE_BASIS
+
+    require_callable_authority_helper = _require_callable_authority
+    require_class_authority_helper = _require_class_authority
+    require_class_resolution_authority_helper = _require_class_resolution_authority
+    require_callable_kwdefaults = require_callable_authority_helper.__kwdefaults__
+    require_class_kwdefaults = require_class_authority_helper.__kwdefaults__
+    require_class_resolution_kwdefaults = (
+        require_class_resolution_authority_helper.__kwdefaults__
+    )
+    require_callable_helper_state = (
+        require_callable_authority_helper.__code__,
+        require_callable_authority_helper.__defaults__,
+        require_callable_kwdefaults,
+        None
+        if require_callable_kwdefaults is None
+        else tuple(sorted(require_callable_kwdefaults.items())),
+    )
+    require_class_helper_state = (
+        require_class_authority_helper.__code__,
+        require_class_authority_helper.__defaults__,
+        require_class_kwdefaults,
+        None
+        if require_class_kwdefaults is None
+        else tuple(sorted(require_class_kwdefaults.items())),
+    )
+    require_class_resolution_helper_state = (
+        require_class_resolution_authority_helper.__code__,
+        require_class_resolution_authority_helper.__defaults__,
+        require_class_resolution_kwdefaults,
+        None
+        if require_class_resolution_kwdefaults is None
+        else tuple(sorted(require_class_resolution_kwdefaults.items())),
+    )
 
     class_states = tuple(
         (name, value, _class_authority_state(value))
@@ -597,10 +778,106 @@ def run_declared_target_host_campaign(
         ("terminal campaign parser", lambda: ParsedRuntimeTargetHostCampaign.parse, _callable_authority_state(parse_campaign)),
     )
 
+    def require_guard_helper_authority() -> None:
+        if RuntimeTargetHostRunnerError is not error_type:
+            raise error_type(
+                "runner callback guard helper authority changed: "
+                "RuntimeTargetHostRunnerError"
+            )
+        helper_checks = (
+            (
+                "_require_callable_authority",
+                _require_callable_authority,
+                require_callable_authority_helper,
+                require_callable_helper_state,
+            ),
+            (
+                "_require_class_authority",
+                _require_class_authority,
+                require_class_authority_helper,
+                require_class_helper_state,
+            ),
+            (
+                "_require_class_resolution_authority",
+                _require_class_resolution_authority,
+                require_class_resolution_authority_helper,
+                require_class_resolution_helper_state,
+            ),
+        )
+        for name, current, expected, state in helper_checks:
+            if current is not expected:
+                raise error_type(
+                    f"runner callback guard helper authority changed: {name}"
+                )
+            code, defaults, kwdefaults, kwdefault_items = state
+            if (
+                expected.__code__ is not code
+                or expected.__defaults__ is not defaults
+                or expected.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    f"runner callback guard helper executable authority changed: {name}"
+                )
+
+    def require_input_spec_authority() -> None:
+        if type(input_spec) is not budget_spec_type:
+            raise error_type(
+                "input RuntimeBudgetSpec authority changed during campaign callback"
+            )
+        current_state = input_spec.__dict__
+        if type(current_state) is not dict:
+            raise error_type(
+                "input RuntimeBudgetSpec state changed during campaign callback"
+            )
+        current_keys = tuple(current_state)
+        if (
+            any(type(key) is not str for key in current_keys)
+            or len(current_keys) != len(budget_spec_fields)
+            or set(current_keys) != set(budget_spec_fields)
+        ):
+            raise error_type(
+                "input RuntimeBudgetSpec state changed during campaign callback"
+            )
+        missing = object()
+        for name, expected in input_spec_state:
+            current = current_state.get(name, missing)
+            if type(current) is not type(expected) or current != expected:
+                raise error_type(
+                    "input RuntimeBudgetSpec state changed during campaign callback: "
+                    + name
+                )
+
     def require_callback_authority() -> None:
+        require_guard_helper_authority()
+        require_input_spec_authority()
         if JournalStore is not journal_store_type:
-            raise RuntimeTargetHostRunnerError(
+            raise error_type(
                 "JournalStore authority changed during campaign callback"
+            )
+        if JournalStore.__mro__ != journal_store_mro:
+            raise error_type(
+                "JournalStore MRO authority changed during campaign callback"
+            )
+        require_class_resolution_authority_helper(
+            JournalStore,
+            journal_store_resolution_state,
+            name="JournalStore",
+        )
+        if MONOTONIC_CLOCK_ID is not monotonic_clock_id:
+            raise error_type(
+                "monotonic clock identity changed during campaign callback"
+            )
+        if STALENESS_BASIS is not staleness_basis:
+            raise error_type(
+                "staleness basis changed during campaign callback"
+            )
+        if RESEARCH_INTERFERENCE_BASIS is not research_interference_basis:
+            raise error_type(
+                "research interference basis changed during campaign callback"
             )
         class_bindings = (
             ("budget spec type", RuntimeBudgetSpec, budget_spec_type),
@@ -625,9 +902,9 @@ def run_declared_target_host_campaign(
                     f"{name} authority changed during campaign callback"
                 )
         for name, resolve, state in callable_states:
-            _require_callable_authority(resolve(), state, name=name)
+            require_callable_authority_helper(resolve(), state, name=name)
         for name, value, state in class_states:
-            _require_class_authority(value, state, name=name)
+            require_class_authority_helper(value, state, name=name)
 
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,
@@ -654,22 +931,35 @@ def run_declared_target_host_campaign(
 
     def capture_resource(phase: str) -> None:
         require_callback_authority()
+        sample_sequence_before = current_journal_sequence(journal)
+        sample_monotonic_ns = monotonic_ns()
+        metrics = capture_resource_metrics(
+            journal,
+            resource_probe,
+            current_journal_sequence=current_journal_sequence,
+            pending_outbox_count=pending_outbox_count,
+            active_count=active_count,
+            process_time_ns=process_time_ns,
+            authority_check=require_callback_authority,
+        )
+        require_callback_authority()
+        sample_sequence_after = current_journal_sequence(journal)
+        if (
+            sample_sequence_after != sample_sequence_before
+            or metrics.get("journal_sequence") != sample_sequence_before
+        ):
+            raise error_type(
+                "resource sample crossed a durable JournalStore cut"
+            )
         resource_samples.append(
             resource_sample_type(
                 sample_id=f"resource-{len(resource_samples) + 1}",
-                monotonic_ns=monotonic_ns(),
+                monotonic_ns=sample_monotonic_ns,
                 phase=phase,
-                metrics=capture_resource_metrics(
-                    journal,
-                    resource_probe,
-                    current_journal_sequence=current_journal_sequence,
-                    pending_outbox_count=pending_outbox_count,
-                    active_count=active_count,
-                    process_time_ns=process_time_ns,
-                    authority_check=require_callback_authority,
-                ),
+                metrics=metrics,
             )
         )
+        require_callback_authority()
 
     capture_resource("campaign-start")
     for phase, research_operation in research_snapshot:
@@ -734,9 +1024,9 @@ def run_declared_target_host_campaign(
         journal_store_identity_digest=campaign_cut.journal_store_identity_digest,
         start_journal_sequence=campaign_cut.start_journal_sequence,
         end_journal_sequence=end_sequence,
-        monotonic_clock_id=MONOTONIC_CLOCK_ID,
-        staleness_basis=STALENESS_BASIS,
-        research_interference_basis=RESEARCH_INTERFERENCE_BASIS,
+        monotonic_clock_id=monotonic_clock_id,
+        staleness_basis=staleness_basis,
+        research_interference_basis=research_interference_basis,
         financial_samples=financial_samples,
         research_samples=tuple(research_samples),
         resource_samples=tuple(resource_samples),
@@ -750,9 +1040,11 @@ def run_declared_target_host_campaign(
         measurement=measurement,
         expected_release_artifact_id=release_artifact_id,
     )
+    require_callback_authority()
     observation = campaign_evidence.to_observation(spec)
     require_callback_authority()
     decision = evaluate_budget(spec, observation)
+    require_callback_authority()
     retained_campaign = retained_campaign_type(
         observation=observation,
         journal_sequence_before=campaign_evidence.start_journal_sequence,

@@ -380,7 +380,8 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeLoadMeasurementError,
-                "financial latency clock authority changed",
+                "measurement authority changed during financial operation: "
+                "perf_counter_ns",
             ):
                 self._run(
                     journal,
@@ -390,6 +391,271 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(journal.get_event("fin-1"))
+
+
+    def test_operation_mapping_rejects_string_subclass_before_hash_dispatch(self):
+        class HostileOperationKey(str):
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return super().__hash__()
+
+            def __eq__(self, other):
+                type(self).calls += 1
+                return super().__eq__(other)
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            key = HostileOperationKey("fin-1")
+            operations = {key: lambda: append_expected(journal, "fin-1")}
+            HostileOperationKey.calls = 0
+            before = journal.current_journal_sequence()
+
+            with (
+                patch.object(
+                    runner_module,
+                    "_require_shared_clock_contract",
+                    return_value=None,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "operation keys must be exact strings",
+                ),
+            ):
+                run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="runner-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations=operations,
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertEqual(HostileOperationKey.calls, 0)
+            self.assertEqual(journal.current_journal_sequence(), before)
+
+    def test_input_budget_spec_rejects_executable_state_keys_before_guard_dispatch(self):
+        class HostileSpecKey(str):
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return super().__hash__()
+
+            def __eq__(self, other):
+                type(self).calls += 1
+                return super().__eq__(other)
+
+            def __lt__(self, other):
+                type(self).calls += 1
+                return super().__lt__(other)
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            hostile_key = HostileSpecKey("callback-poison")
+
+            def poison_input_spec_keys() -> None:
+                spec.__dict__[hostile_key] = 1
+                HostileSpecKey.calls = 0
+
+            with self.assertRaisesRegex(
+                RuntimeTargetHostRunnerError,
+                "input RuntimeBudgetSpec state changed during campaign callback",
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": lambda: append_expected(journal, "fin-1")},
+                    clock=clock,
+                    research=(("poison-budget-spec-keys", poison_input_spec_keys),),
+                )
+
+            self.assertEqual(HostileSpecKey.calls, 0)
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_mutate_input_budget_spec_instance(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = spec.max_p95_financial_latency_us
+
+            def poison_input_spec() -> None:
+                object.__setattr__(
+                    spec,
+                    "max_p95_financial_latency_us",
+                    spec.strategy_horizon_us,
+                )
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "input RuntimeBudgetSpec state changed during campaign callback: "
+                    "max_p95_financial_latency_us",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget-spec", poison_input_spec),),
+                    )
+            finally:
+                object.__setattr__(
+                    spec,
+                    "max_p95_financial_latency_us",
+                    original,
+                )
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_replace_terminal_journal_readback_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            owner = next(
+                candidate
+                for candidate in JournalStore.__mro__
+                if "load_events_after_journal_sequence" in vars(candidate)
+            )
+            original = vars(owner)["load_events_after_journal_sequence"]
+
+            def forged_load_events(*_args, **_kwargs):
+                return []
+
+            def poison_journal_readback() -> None:
+                setattr(
+                    owner,
+                    "load_events_after_journal_sequence",
+                    forged_load_events,
+                )
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "JournalStore.load_events_after_journal_sequence "
+                    "class member changed during campaign callback",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-journal-readback", poison_journal_readback),),
+                    )
+            finally:
+                setattr(owner, "load_events_after_journal_sequence", original)
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_disable_callback_guard_helper(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module._require_callable_authority
+
+            def disabled_guard(*_args, **_kwargs) -> None:
+                return None
+
+            def poison_guard_helper() -> None:
+                runner_module._require_callable_authority = disabled_guard
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "runner callback guard helper authority changed: "
+                    "_require_callable_authority",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-guard-helper", poison_guard_helper),),
+                    )
+            finally:
+                runner_module._require_callable_authority = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_rebind_measurement_basis(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.STALENESS_BASIS
+
+            def poison_basis() -> None:
+                runner_module.STALENESS_BASIS = "forged-staleness-basis"
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "staleness basis changed during campaign callback",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-basis", poison_basis),),
+                    )
+            finally:
+                runner_module.STALENESS_BASIS = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_resource_timestamp_and_metrics_share_one_durable_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original_capture = runner_module._capture_resource_metrics
+            raced = False
+
+            def racing_capture(store, resource_probe, **kwargs):
+                nonlocal raced
+                metrics = original_capture(store, resource_probe, **kwargs)
+                if not raced:
+                    append_expected(store, "resource-race")
+                    raced = True
+                return metrics
+
+            with (
+                patch.object(
+                    runner_module,
+                    "_capture_resource_metrics",
+                    side_effect=racing_capture,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "resource sample crossed a durable JournalStore cut",
+                ),
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": lambda: append_expected(journal, "fin-1")},
+                    clock=clock,
+                )
+
+            self.assertTrue(raced)
+            self.assertIsNotNone(journal.get_event("resource-race"))
 
     @unittest.skipUnless(
         sys.version_info >= (3, 13),

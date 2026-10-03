@@ -1,13 +1,16 @@
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 import unittest
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
@@ -647,6 +650,140 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
                 )
             )
             self.assert_complete(orders, economics, reservations)
+
+
+    def test_paper_provider_evidence_entrypoint_atomically_composes_oms_and_finance(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id=ACCOUNT,
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+            )
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+                host_id="paper-provider-boundary-host",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            reservations.reserve(
+                command_id="paper-provider-reserve",
+                idempotency_key="paper-provider-reserve",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            orders.create_order(
+                event_key="paper-provider-create",
+                client_order_id="order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=WHEN,
+                parent_intent_id="intent-1",
+            )
+
+            projected = ProjectedFillEvidence.create(
+                fill_id="fill-1",
+                provider_execution_id="provider-execution-1",
+                intent_id="intent-1",
+                client_order_id="order-1",
+                side="BUY",
+                quantity="1",
+                price="100",
+            )
+            provider = ProviderFillEvidence.create(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+                provider_execution_id="provider-execution-1",
+                client_order_id="order-1",
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time=WHEN,
+                side="BUY",
+            )
+            order_request = {
+                "client_order_id": "order-1",
+                "fill_id": "fill-1",
+                "provider_execution_id": "provider-execution-1",
+                "quantity": "1",
+                "price": "100",
+                "provider_revision": None,
+            }
+            artifact_id = str(uuid4())
+            source_uri = "https://provider.example.test/fill-evidence"
+            rights_id = "provider-fill-test-evidence"
+            manifest = artifacts.publish_bytes(
+                artifact_id=artifact_id,
+                data=canonical_json({
+                    "operation": "RECORD_FILL",
+                    "request": order_request,
+                    "observed_at": WHEN,
+                }).encode("utf-8"),
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=[source_uri],
+                metadata={
+                    "provider_id": PROVIDER,
+                    "account_id": ACCOUNT,
+                    "environment": "PAPER",
+                    "order_operation": "RECORD_FILL",
+                    "request_hash": payload_digest(order_request),
+                    "observed_at": WHEN,
+                    "rights_id": rights_id,
+                },
+            )
+            order_ref = {
+                "artifact_id": artifact_id,
+                "sha256": manifest["sha256"],
+                "source_uri": source_uri,
+                "observed_at": WHEN,
+                "rights_id": rights_id,
+            }
+
+            self.assertTrue(
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="paper-provider-derived-fill",
+                    idempotency_key="paper-provider-derived-fill",
+                    reservation_id="reservation-1",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    observed_at=WHEN,
+                    committed_at=WHEN,
+                    order_book=orders,
+                    order_event_key="fill-1",
+                    order_evidence_refs=(order_ref,),
+                )
+            )
+            snapshot = orders.order("order-1").snapshot()
+            self.assertEqual(snapshot.state, "FILLED")
+            self.assertEqual(snapshot.filled_quantity, Decimal("1"))
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
 
 
 

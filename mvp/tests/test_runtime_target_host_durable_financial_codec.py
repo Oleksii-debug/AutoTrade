@@ -154,13 +154,24 @@ class RuntimeTargetHostDurableFinancialCodecTests(unittest.TestCase):
 
     def test_duplicate_latency_measurement_sequence_is_rejected(self):
         value = binding()
-        first = value.bindings[0]
+        first = DurableFinancialIdentityBinding(
+            event_id="financial-1",
+            event_journal_sequence=7,
+            event_payload_hash=DIGEST_A,
+            latency_measurement_event_id="latency-financial-1",
+            latency_measurement_journal_sequence=12,
+            durable_latency_sample_digest=DIGEST_B,
+            latency_start_monotonic_ns=100_000,
+            latency_end_monotonic_ns=101_500,
+            latency_us=2,
+            target_sample_id="target-financial-1",
+        )
         second = DurableFinancialIdentityBinding(
             event_id="financial-2",
             event_journal_sequence=9,
             event_payload_hash=DIGEST_C,
             latency_measurement_event_id="latency-financial-2",
-            latency_measurement_journal_sequence=first.latency_measurement_journal_sequence,
+            latency_measurement_journal_sequence=12,
             durable_latency_sample_digest=DIGEST_D,
             latency_start_monotonic_ns=200_000,
             latency_end_monotonic_ns=201_500,

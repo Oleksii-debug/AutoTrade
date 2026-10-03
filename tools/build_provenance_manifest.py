@@ -417,6 +417,7 @@ def qualification_trust_policy_composition(
         if (
             item.get("component_id") == QUALIFICATION_TRUST_POLICY_COMPONENT_ID
             or item.get("path") == QUALIFICATION_TRUST_POLICY_COMPONENT_PATH
+            or item.get("kind") == QUALIFICATION_TRUST_POLICY_COMPONENT_KIND
         ):
             matches.append(item)
 

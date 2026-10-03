@@ -351,6 +351,24 @@ class QualificationTrustPolicyCompositionTests(unittest.TestCase):
             (False, "component_ambiguous", None),
         )
 
+    def test_policy_kind_cannot_create_second_split_identity(self):
+        document = {
+            "components": [
+                policy_component(),
+                policy_component(
+                    component_id="other-policy",
+                    path="other/policy.json",
+                ),
+            ]
+        }
+        self.assertEqual(
+            qualification_trust_policy_composition(
+                document,
+                expected_digest=DIGEST,
+            ),
+            (False, "component_ambiguous", None),
+        )
+
     def test_component_id_is_canonical(self):
         ok, reason, digest = qualification_trust_policy_composition(
             {"components": [policy_component(component_id="other")]},

@@ -21,6 +21,55 @@ _original_require_current_trusted_chronology_cut = (
 _original_require_chronology_horizon = _impl.require_chronology_horizon
 
 
+# The compatibility facade intentionally publishes a small number of replacements
+# onto the implementation module below. Everything else in the implementation
+# namespace is part of the captured authority graph used by the original verifier
+# and horizon checker. Snapshot identity now, before publishing those replacements,
+# so later pre-call or callback-time rebinding fails closed instead of redirecting
+# a function object whose ``__globals__`` still points at the mutable impl module.
+_IMPL_SEAL_EXCLUDED_NAMES = frozenset(
+    {
+        "_build_post_verification_currentness",
+        "_build_current_cut_with_horizon",
+        "_build_impl_namespace_guard",
+        "require_current_trusted_chronology_cut",
+        "require_chronology_horizon",
+    }
+)
+
+
+def _build_impl_namespace_guard(
+    namespace: dict[str, object],
+    *,
+    excluded_names: frozenset[str] = _IMPL_SEAL_EXCLUDED_NAMES,
+):
+    """Return a closure that rejects rebinding of the captured impl namespace."""
+
+    if type(namespace) is not dict:
+        raise TypeError("implementation namespace must be exact dict")
+    if type(excluded_names) is not frozenset:
+        raise TypeError("excluded_names must be exact frozenset")
+    captured = tuple(
+        (name, value)
+        for name, value in namespace.items()
+        if type(name) is str
+        and not name.startswith("__")
+        and name not in excluded_names
+    )
+
+    def require_impl_namespace_sealed() -> None:
+        for name, expected in captured:
+            if namespace.get(name) is not expected:
+                raise RuntimeError(
+                    "trusted chronology implementation authority changed: " + name
+                )
+
+    return require_impl_namespace_sealed
+
+
+_require_impl_namespace_sealed = _build_impl_namespace_guard(_impl.__dict__)
+
+
 def _build_post_verification_currentness(
     *,
     recovery_type,
@@ -126,6 +175,7 @@ def _build_current_cut_with_horizon(
     require_current_cut,
     require_post_currentness,
     require_horizon,
+    require_impl_namespace_sealed,
 ):
     """Capture terminal current-cut composition before callback-driven rebinding."""
 
@@ -136,9 +186,13 @@ def _build_current_cut_with_horizon(
     ):
         if type(claimed_instants) is not tuple:
             raise TypeError("claimed_instants must be exact tuple")
+        require_impl_namespace_sealed()
         durable = require_current_cut(**kwargs)
+        require_impl_namespace_sealed()
         require_post_currentness(durable, kwargs=kwargs)
+        require_impl_namespace_sealed()
         require_horizon(durable, *claimed_instants)
+        require_impl_namespace_sealed()
         return durable
 
     return require_current_trusted_chronology_cut_with_horizon
@@ -148,6 +202,7 @@ _require_current_trusted_chronology_cut_with_horizon = _build_current_cut_with_h
     require_current_cut=_original_require_current_trusted_chronology_cut,
     require_post_currentness=_require_post_verification_currentness,
     require_horizon=_original_require_chronology_horizon,
+    require_impl_namespace_sealed=_require_impl_namespace_sealed,
 )
 
 
@@ -162,6 +217,7 @@ def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> 
 
 _impl._build_post_verification_currentness = _build_post_verification_currentness
 _impl._build_current_cut_with_horizon = _build_current_cut_with_horizon
+_impl._build_impl_namespace_guard = _build_impl_namespace_guard
 _impl.require_current_trusted_chronology_cut = (
     _require_current_trusted_chronology_cut_with_horizon
 )

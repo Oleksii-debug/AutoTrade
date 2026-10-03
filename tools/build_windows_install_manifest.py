@@ -38,7 +38,7 @@ class InstallerManifestError(ValueError):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise InstallerManifestError(f"{name} is required")
     return value.strip()
 
@@ -583,20 +583,9 @@ def build_installer_input_manifest(
     runtime_mode: str,
     runtime_prerequisite: str | None = None,
 ) -> dict[str, object]:
-    verified = verify_release_bundle(bundle)
-    bundle_resolved = bundle.resolve(strict=False)
-    output_resolved = output.resolve(strict=False)
-    digest_path = output.with_suffix(output.suffix + ".sha256")
-    digest_resolved = digest_path.resolve(strict=False)
-    if output_resolved == bundle_resolved:
-        raise InstallerManifestError(
-            "installer manifest output must not overwrite verified release bundle"
-        )
-    if digest_resolved == bundle_resolved:
-        raise InstallerManifestError(
-            "installer manifest digest output must not overwrite verified release bundle"
-        )
-
+    # Freeze caller-controlled installer policy scalars before reading the release
+    # artifact.  A str subclass can override strip()/upper(); it must never gain
+    # executable authority after bundle verification and before durable publication.
     framework = _text(target_framework, name="target_framework")
     mode = _text(runtime_mode, name="runtime_mode").upper()
     if mode not in {"SELF_CONTAINED", "FRAMEWORK_DEPENDENT"}:
@@ -612,6 +601,20 @@ def build_installer_input_manifest(
     elif runtime_prerequisite is not None:
         raise InstallerManifestError(
             "self-contained runtime cannot claim external runtime prerequisite"
+        )
+
+    verified = verify_release_bundle(bundle)
+    bundle_resolved = bundle.resolve(strict=False)
+    output_resolved = output.resolve(strict=False)
+    digest_path = output.with_suffix(output.suffix + ".sha256")
+    digest_resolved = digest_path.resolve(strict=False)
+    if output_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
         )
 
     manifest = {

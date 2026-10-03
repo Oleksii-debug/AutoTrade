@@ -139,9 +139,10 @@ internal static class Program
         Uri trustedDocument = new(HostOrigin, "/index.html");
         foreach (string path in new[]
         {
-            "/api/v1",
             "/api/v1/state",
             "/api/v1/commands",
+            "/api/v1/events",
+            "/api/v1/events?after=7",
             "/api/v1/operations/11111111-1111-1111-1111-111111111111",
         })
         {
@@ -156,6 +157,12 @@ internal static class Program
         {
             new Uri(HostOrigin, "/"),
             new Uri(HostOrigin, "/index.html"),
+            new Uri(HostOrigin, "/api/v1"),
+            new Uri(HostOrigin, "/api/v1/health"),
+            new Uri(HostOrigin, "/api/v1/future"),
+            new Uri(HostOrigin, "/api/v1/operations/not-a-uuid"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-111111111111/extra"),
+            new Uri(HostOrigin, "/api/v1/operations/11111111-1111-1111-1111-11111111111A"),
             new Uri(HostOrigin, "/api/v10/state"),
             new Uri(HostOrigin, "/api/v1evil/state"),
             new Uri(HostOrigin, "/api/v1/state#debug"),

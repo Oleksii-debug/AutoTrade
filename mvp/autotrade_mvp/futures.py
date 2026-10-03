@@ -15,7 +15,15 @@ import json
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+)
 from .instruments import InstrumentVersion
 
 
@@ -53,15 +61,48 @@ def _utc(value: datetime, name: str) -> datetime:
 
 
 def _fraction(value: Decimal) -> Fraction:
-    sign, digits, exponent = value.as_tuple()
-    integer = 0
-    for digit in digits:
-        integer = integer * 10 + digit
-    if sign:
-        integer = -integer
-    if exponent >= 0:
-        return Fraction(integer * (10**exponent), 1)
-    return Fraction(integer, 10 ** (-exponent))
+    try:
+        return as_fraction(value)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _bounded_fraction(value: Fraction) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise FuturesError(
+            "futures exact rational exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_multiply(*values: Decimal) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
 
 
 def _decimal_identity(value: Decimal) -> str:
@@ -487,8 +528,13 @@ class InverseVariationMarginState:
             "last_settlement_price",
             _decimal(self.last_settlement_price, "last_settlement_price", positive=True),
         )
-        if not isinstance(self.cumulative_variation_margin, Fraction):
+        if type(self.cumulative_variation_margin) is not Fraction:
             raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
+        object.__setattr__(
+            self,
+            "cumulative_variation_margin",
+            _bounded_fraction(self.cumulative_variation_margin),
+        )
         _validate_settlement_history(
             self.contract,
             self.settlement_scope,
@@ -542,7 +588,8 @@ def linear_futures_pnl(
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return contracts * contract_multiplier * (exit_value - entry)
+    spread = _exact_subtract(exit_value, entry)
+    return _exact_multiply(contracts, contract_multiplier, spread)
 
 
 def inverse_futures_pnl_exact(
@@ -562,11 +609,11 @@ def inverse_futures_pnl_exact(
     face = _decimal(contract_quote_value, "contract_quote_value", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    entry_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    inverse_spread = _bounded_fraction(entry_inverse - exit_inverse)
+    contract_face = _bounded_fraction(_fraction(contracts) * _fraction(face))
+    return _bounded_fraction(contract_face * inverse_spread)
 
 
 def settle_fraction(
@@ -577,13 +624,14 @@ def settle_fraction(
 ) -> Decimal:
     """Round an exact rational to an exact multiple of the settlement quantum."""
 
-    if not isinstance(value, Fraction):
+    if type(value) is not Fraction:
         raise FuturesError("value must be an exact Fraction")
+    exact_value = _bounded_fraction(value)
     step = _decimal(quantum, "quantum", positive=True)
     if rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
-    units = value / _fraction(step)
+    units = _bounded_fraction(exact_value / _fraction(step))
     sign = -1 if units < 0 else 1
     numerator = abs(units.numerator)
     denominator = units.denominator
@@ -595,7 +643,7 @@ def settle_fraction(
             whole += 1
 
     signed_units = whole * sign
-    return step * Decimal(signed_units)
+    return _exact_multiply(step, Decimal(signed_units))
 
 
 def apply_variation_margin(
@@ -620,11 +668,12 @@ def apply_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _exact_add(state.cumulative_variation_margin, amount)
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -653,11 +702,14 @@ def apply_inverse_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _bounded_fraction(
+        state.cumulative_variation_margin + amount
+    )
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -779,7 +831,11 @@ def book_variation_margin(
         cause_event_id=f"FUTURES_SETTLEMENT:{digest}",
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(f"FUTURES_VARIATION_PNL:{currency}", currency, -value),
+            posting(
+                f"FUTURES_VARIATION_PNL:{currency}",
+                currency,
+                _exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)

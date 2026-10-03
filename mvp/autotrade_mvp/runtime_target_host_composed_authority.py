@@ -405,6 +405,11 @@ def _build_composed_production_verifier(
                     f"signed {kind} raw payload does not bind canonical target-host measurement"
                 )
 
+        # Signed-campaign re-read/parsing/budget evaluation also crosses callback-
+        # capable trust boundaries. No mutation of the signed verifier's executable
+        # graph may survive that phase into the composed return boundary either.
+        if signed_dependency_guard is not None:
+            signed_dependency_guard()
         return composed_type(
             qualification=accepted,
             target_host_measurement_digest=measurement_authority.digest,

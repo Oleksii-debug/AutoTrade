@@ -210,7 +210,8 @@ class JournalStore(_JournalStoreImpl):
                     raise
         return _impl.AppendResult(event_id, 1, True)
 
-    def load_command_event_batch(        self,
+    def load_command_event_batch(
+        self,
         *,
         command_id: str,
         actor: str,

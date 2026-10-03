@@ -59,6 +59,51 @@ def _append(store: JournalStore, expected: ExpectedJournalEvent) -> None:
 
 
 class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
+    def test_event_committed_only_while_sampling_end_clock_is_not_attributed_to_operation(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JournalStore(Path(root) / "runtime-load-measurement.sqlite")
+            expected = _expected()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-end-race",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            operation = Mock(return_value="done")
+            clock_calls = 0
+
+            def racing_clock() -> int:
+                nonlocal clock_calls
+                clock_calls += 1
+                if clock_calls == 1:
+                    return 1_000_000
+                # The operation has already returned. A commit admitted only
+                # while sampling the terminal clock must not be credited to it.
+                _append(store, expected)
+                return 1_000_100
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                    side_effect=racing_clock,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    "canonical operation returned without the predeclared durable financial event",
+                ),
+            ):
+                measure_declared_financial_operation(
+                    store,
+                    _spec(),
+                    plan_id=plan.plan_id,
+                    event_id=expected.event_id,
+                    operation=operation,
+                )
+
+            operation.assert_called_once_with()
+            self.assertEqual(clock_calls, 1)
+            self.assertIsNone(JournalStore.get_event(store, expected.event_id))
+
     def test_event_committed_before_start_clock_returns_cannot_be_measured_as_operation_latency(self):
         with tempfile.TemporaryDirectory() as root:
             store = JournalStore(Path(root) / "runtime-load-measurement.sqlite")

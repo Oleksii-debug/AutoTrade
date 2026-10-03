@@ -270,6 +270,14 @@ def measure_declared_financial_operation(
             "predeclared financial event appeared before monotonic measurement start"
         )
     result = operation()
+    # Bind the expected durable event before sampling the terminal clock. If the
+    # operation returned without publishing it, an unrelated commit racing with
+    # end-clock sampling must not be attributed to the measured operation.
+    financial_event = _require_expected_event(
+        JournalStore.get_event(store, expected.event_id),
+        expected,
+        after_sequence=pre_sequence,
+    )
     end_ns = perf_counter_ns()
     if (
         type(start_ns) is not int
@@ -281,11 +289,6 @@ def measure_declared_financial_operation(
             "system monotonic clock produced an invalid interval"
         )
 
-    financial_event = _require_expected_event(
-        JournalStore.get_event(store, expected.event_id),
-        expected,
-        after_sequence=pre_sequence,
-    )
     latency_us = (end_ns - start_ns + 999) // 1_000
     payload = {
         "schema_version": _MEASUREMENT_SCHEMA_VERSION,

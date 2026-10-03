@@ -47,11 +47,15 @@ def classify_bybit_credential_nonacceptance(
     *,
     ret_code: int | None,
     product_family: str,
+    response_surface: str,
 ) -> BybitCredentialNonAcceptance:
     """Classify provider semantics without minting fence authority.
 
     ``ret_code`` must come from a separately authenticated exact-domain Bybit
-    response.  ``None`` means no canonical Bybit JSON response code was
+    V5 UTA REST response. Bybit reuses code 10003 on its WebSocket OE surface
+    for a different condition (too many sessions), so response-surface identity
+    is mandatory before any rejection semantic is interpreted. ``None`` means
+    no canonical Bybit JSON response code was
     established (for example an HTTP-only failure) and therefore fails closed
     as ``INCONCLUSIVE``.
 
@@ -73,6 +77,10 @@ def classify_bybit_credential_nonacceptance(
     if type(product_family) is not str or product_family not in _SUPPORTED_FAMILIES:
         raise ProviderCoreError(
             "Bybit credential product_family must be a canonical supported family"
+        )
+    if type(response_surface) is not str or response_surface != "V5_UTA_REST":
+        raise ProviderCoreError(
+            "Bybit credential non-acceptance requires exact V5_UTA_REST surface"
         )
     if ret_code is not None and type(ret_code) is not int:
         raise ProviderCoreError("Bybit credential ret_code must be an exact integer or None")

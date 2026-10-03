@@ -417,8 +417,14 @@ def _bind_version(
 ) -> InstrumentVersion:
     if type(registry) is not InstrumentRegistry:
         raise TypeError("registry must be exact InstrumentRegistry")
-    version = registry.exact(observation.instrument_version)
-    effective = registry.at(version.instrument_id, observation.effective_at)
+    # Invoke the exact canonical implementation through the class so an exact
+    # registry instance cannot shadow financial lookup methods in __dict__.
+    version = InstrumentRegistry.exact(registry, observation.instrument_version)
+    effective = InstrumentRegistry.at(
+        registry,
+        version.instrument_id,
+        observation.effective_at,
+    )
     if effective != version:
         raise OptionLifecycleError(
             "instrument_version is not the version effective for lifecycle event"

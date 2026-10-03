@@ -181,6 +181,42 @@ class ProjectedFillEvidence:
         )
 
 
+def _provider_fill_accounting_evidence_payload(
+    *,
+    provider: str,
+    book: ScopedEconomicBook,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+) -> dict[str, object]:
+    """Serialize the exact revision-bearing evidence used by fill identities.
+
+    Validation stays in _validated_fill_evidence. This helper is deliberately
+    representation-preserving so durable correction replay can recompute the
+    same identity material that originally named the economic transaction.
+    """
+
+    return {
+        "schema_version": "1.0.0",
+        "provider_id": provider,
+        "environment": book.environment,
+        "account_id": book.account_id,
+        "provider_execution_id": provider_fill.provider_execution_id,
+        "client_order_id": projected_fill.client_order_id,
+        "fill_id": projected_fill.fill_id,
+        "intent_id": projected_fill.intent_id,
+        "side": provider_fill.side,
+        "position_side": provider_fill.position_side,
+        "position_effect": provider_fill.position_effect,
+        "instrument": provider_fill.instrument,
+        "quantity": format(provider_fill.quantity, "f"),
+        "price": format(provider_fill.price, "f"),
+        "fee_amount": format(provider_fill.fee_amount, "f"),
+        "fee_currency": provider_fill.fee_currency,
+        "trade_time": provider_fill.trade_time,
+        "provider_revision": projected_fill.provider_revision,
+    }
+
+
 def _validated_fill_evidence(
     *,
     book: ScopedEconomicBook,
@@ -282,26 +318,12 @@ def _validated_fill_evidence(
     if provider_fill.instrument != instrument:
         raise AccountingConflict("provider instrument does not match expected instrument")
 
-    evidence: dict[str, object] = {
-        "schema_version": "1.0.0",
-        "provider_id": provider,
-        "environment": book.environment,
-        "account_id": book.account_id,
-        "provider_execution_id": provider_fill.provider_execution_id,
-        "client_order_id": projected_fill.client_order_id,
-        "fill_id": projected_fill.fill_id,
-        "intent_id": projected_fill.intent_id,
-        "side": provider_fill.side,
-        "position_side": provider_fill.position_side,
-        "position_effect": provider_fill.position_effect,
-        "instrument": provider_fill.instrument,
-        "quantity": format(provider_fill.quantity, "f"),
-        "price": format(provider_fill.price, "f"),
-        "fee_amount": format(provider_fill.fee_amount, "f"),
-        "fee_currency": provider_fill.fee_currency,
-        "trade_time": provider_fill.trade_time,
-        "provider_revision": projected_fill.provider_revision,
-    }
+    evidence = _provider_fill_accounting_evidence_payload(
+        provider=provider,
+        book=book,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+    )
     return provider, instrument, settlement, evidence
 
 

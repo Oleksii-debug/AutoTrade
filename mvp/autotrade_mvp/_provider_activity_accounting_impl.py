@@ -36,6 +36,7 @@ from .durable_settlement import DurableSettlementBook
 from .fill_accounting import (
     ProjectedFillEvidence,
     ProviderFillFinancialPlan,
+    _provider_fill_accounting_evidence_payload,
     build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
 )
@@ -1014,6 +1015,8 @@ def _prepare_provider_fill_correction_binding(
     conservative_usage = dict(initial_usage)
     active_fill_id = _text(initial_request.get("fill_id"), name="initial fill_id")
     active_transaction_id = initial_transaction.transaction_id
+    active_projected_evidence = initial_projected_evidence
+    active_provider_evidence = initial_provider_evidence
     seen_fill_ids = {active_fill_id}
     last_event: Mapping[str, Any] | None = None
     last_request: dict[str, Any] | None = None
@@ -1206,9 +1209,81 @@ def _prepare_provider_fill_correction_binding(
             raise AccountingConflict(
                 "provider fill correction corrected evidence semantics are invalid"
             )
+
+        correction_observed_at = historical_replacement.observed_at
+        if correction_observed_at is None:
+            raise AccountingConflict(
+                "provider fill correction durable replacement observation is missing"
+            )
+        correction_observed_at = _instant_text(
+            correction_observed_at,
+            name="historical correction observed_at",
+        )
+        original_accounting_evidence = _provider_fill_accounting_evidence_payload(
+            provider=economic_book.provider_id,
+            book=economic_book,
+            projected_fill=active_projected_evidence,
+            provider_fill=active_provider_evidence,
+        )
+        corrected_accounting_evidence = _provider_fill_accounting_evidence_payload(
+            provider=economic_book.provider_id,
+            book=economic_book,
+            projected_fill=historical_projected,
+            provider_fill=historical_provider,
+        )
+        historical_correction_evidence = {
+            "schema_version": "1.1.0",
+            "provider_id": economic_book.provider_id,
+            "environment": economic_book.environment,
+            "account_id": economic_book.account_id,
+            "correction_of": historical_projected.correction_of,
+            "correction_observed_at": correction_observed_at,
+            "original_transaction_id": active_transaction_id,
+            "original": original_accounting_evidence,
+            "corrected": {
+                **corrected_accounting_evidence,
+                "correction_of": historical_projected.correction_of,
+            },
+        }
+        historical_correction_digest = payload_digest(
+            historical_correction_evidence
+        ).removeprefix("sha256:")
+        correction_prefix = (
+            f"provider:{economic_book.provider_id}:"
+            f"environment:{economic_book.environment}:"
+            f"account:{economic_book.account_id}:"
+            f"correction:{historical_correction_digest}"
+        )
+        if (
+            historical_replacement.transaction_id
+            != f"provider-fill-correction-replacement:{historical_correction_digest}"
+            or historical_replacement.cause_event_id
+            != f"{correction_prefix}:replacement"
+        ):
+            raise AccountingConflict(
+                "provider fill correction revision-bearing durable identity is invalid"
+            )
+        matching_reversals = [
+            transaction
+            for transaction in economic_book.transactions
+            if (
+                transaction.transaction_id
+                == f"provider-fill-correction-reversal:{historical_correction_digest}"
+                and transaction.cause_event_id == f"{correction_prefix}:reversal"
+                and transaction.reverses_transaction_id == active_transaction_id
+                and transaction.observed_at == correction_observed_at
+            )
+        ]
+        if len(matching_reversals) != 1:
+            raise AccountingConflict(
+                "provider fill correction durable reversal identity is invalid"
+            )
+
         seen_fill_ids.add(corrected_fill_id)
         active_fill_id = corrected_fill_id
         active_transaction_id = historical_replacement.transaction_id
+        active_projected_evidence = historical_projected
+        active_provider_evidence = historical_provider
         active_projected_digest = corrected_projected_digest
         active_provider_digest = corrected_provider_digest
         conservative_usage = expected_resulting

@@ -14,9 +14,19 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
         "decision": "NO_TRADE",
         "decision_reason": "insufficient_after_cost_edge",
         "risk_outcome": "not_applicable",
+        "source_sha": "2" * 40,
+        "build_id": "autotrade-observability-test-1",
         "evidence_refs": ["dataset-1", "risk-evidence-1"],
+        "evidence_digests": {
+            "dataset-1": "5" * 64,
+            "risk-evidence-1": "6" * 64,
+        },
         "correlation_id": "corr-1",
         "event_ids": ["event-market", "event-decision"],
+        "event_digests": {
+            "event-market": "3" * 64,
+            "event-decision": "4" * 64,
+        },
         "attributes": {
             "strategy": "baseline",
             "token": "super-secret",
@@ -73,10 +83,123 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             store.append(evidence_trace())
             exported = store.accessible_export("decision-1")
             self.assertIn("Decision trace: decision-1", exported)
-            self.assertIn("- event-decision", exported)
+            self.assertIn("Source SHA: " + "2" * 40, exported)
+            self.assertIn("Build: autotrade-observability-test-1", exported)
+            self.assertIn("- event-decision sha256 " + "4" * 64, exported)
             self.assertIn("- dataset-1", exported)
             self.assertIn("[REDACTED]", exported)
             self.assertNotIn("super-secret", exported)
+
+    def test_compound_sensitive_keys_never_reach_persistence_or_accessible_export(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-compound-secrets")
+            item["attributes"].update(
+                {
+                    "session_reference": "OPAQUE-SESSION-REFERENCE",
+                    "credential_handle": "OPAQUE-CREDENTIAL-HANDLE",
+                    "provider_credential_id": "OPAQUE-PROVIDER-CREDENTIAL-ID",
+                    "proxy_authorization_token": "OPAQUE-PROXY-AUTH-TOKEN",
+                    "token_budget": 8,
+                    "api_secret_rotation_count": 4,
+                    "signed_url": (
+                        "https://provider.test/private?"
+                        "credential_handle=OPAQUE-URL-CREDENTIAL&symbol=BTC"
+                    ),
+                    "structured_json": (
+                        '{"session_reference":"OPAQUE-JSON-SESSION","safe":"ok"}'
+                    ),
+                }
+            )
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export("decision-compound-secrets")
+
+            for leaked in (
+                "OPAQUE-SESSION-REFERENCE",
+                "OPAQUE-CREDENTIAL-HANDLE",
+                "OPAQUE-PROVIDER-CREDENTIAL-ID",
+                "OPAQUE-PROXY-AUTH-TOKEN",
+                "OPAQUE-URL-CREDENTIAL",
+                "OPAQUE-JSON-SESSION",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+
+            attributes = json.loads(raw)["attributes"]
+            self.assertEqual(attributes["session_reference"], "[REDACTED]")
+            self.assertEqual(attributes["credential_handle"], "[REDACTED]")
+            self.assertEqual(attributes["provider_credential_id"], "[REDACTED]")
+            self.assertEqual(attributes["proxy_authorization_token"], "[REDACTED]")
+            self.assertEqual(attributes["token_budget"], 8)
+            self.assertEqual(attributes["api_secret_rotation_count"], 4)
+            self.assertIn("credential_handle=[REDACTED]", attributes["signed_url"])
+            structured = json.loads(attributes["structured_json"])
+            self.assertEqual(structured["session_reference"], "[REDACTED]")
+            self.assertEqual(structured["safe"], "ok")
+            self.assertTrue(store.verify())
+
+    def test_camel_case_sensitive_aliases_do_not_escape_accessible_export(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-camel-sensitive-aliases")
+            item["attributes"].update(
+                {
+                    "accessToken": "ACCESS-EXPORT-SECRET",
+                    "clientSecret": "CLIENT-EXPORT-SECRET",
+                    "sessionId": "SESSION-EXPORT-SECRET",
+                    "proxyAuthorization": "PROXY-EXPORT-SECRET",
+                    "XApiKey": "API-EXPORT-SECRET",
+                }
+            )
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export("decision-camel-sensitive-aliases")
+            for leaked in (
+                "ACCESS-EXPORT-SECRET",
+                "CLIENT-EXPORT-SECRET",
+                "SESSION-EXPORT-SECRET",
+                "PROXY-EXPORT-SECRET",
+                "API-EXPORT-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+
+    def test_benign_counter_aliases_only_bypass_redaction_for_exact_counts(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-benign-counter-shape")
+            item["attributes"].update(
+                {
+                    "token_budget": "TOKEN-BUDGET-SECRET",
+                    "api_secret_rotation_count": "ROTATION-COUNT-SECRET",
+                    "safe_counters": {
+                        "token_budget": 8,
+                        "api_secret_rotation_count": 4,
+                    },
+                }
+            )
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)["attributes"]
+            exported = store.accessible_export("decision-benign-counter-shape")
+
+            self.assertNotIn("TOKEN-BUDGET-SECRET", raw)
+            self.assertNotIn("ROTATION-COUNT-SECRET", raw)
+            self.assertNotIn("TOKEN-BUDGET-SECRET", exported)
+            self.assertNotIn("ROTATION-COUNT-SECRET", exported)
+            self.assertEqual(persisted["token_budget"], "[REDACTED]")
+            self.assertEqual(persisted["api_secret_rotation_count"], "[REDACTED]")
+            self.assertEqual(persisted["safe_counters"]["token_budget"], 8)
+            self.assertEqual(
+                persisted["safe_counters"]["api_secret_rotation_count"],
+                4,
+            )
 
     def test_conflicting_retry_compares_redacted_persisted_semantics(self):
         with TemporaryDirectory() as directory:
@@ -168,6 +291,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 {
                     "Authorization-Header": "Bearer hidden",
                     "client.secret": "hidden-client",
+                    "credential_id": "hidden-credential-id",
+                    "proxy authorization": "Basic hidden-proxy-auth",
                     "refresh-token": "hidden-refresh",
                     "private key pem": "hidden-key",
                 }
@@ -177,6 +302,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             attrs = persisted["attributes"]
             self.assertEqual(attrs["Authorization-Header"], "[REDACTED]")
             self.assertEqual(attrs["client.secret"], "[REDACTED]")
+            self.assertEqual(attrs["credential_id"], "[REDACTED]")
+            self.assertEqual(attrs["proxy authorization"], "[REDACTED]")
             self.assertEqual(attrs["refresh-token"], "[REDACTED]")
             self.assertEqual(attrs["private key pem"], "[REDACTED]")
 
@@ -207,6 +334,93 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         snapshot = backlog.snapshot()
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot[-1]["labels"]["password"], "[REDACTED]")
+
+    def test_metric_backlog_rejects_scalar_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileInt(int):
+            def __le__(self, other):
+                touched.append("le")
+                raise AssertionError("hostile integer comparison executed")
+
+        class HostileName(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile metric-name strip executed")
+
+        with self.assertRaisesRegex(ValueError, "exact positive integer"):
+            BoundedMetricBacklog(max_items=HostileInt(2))
+        backlog = BoundedMetricBacklog()
+        with self.assertRaisesRegex(ValueError, "exact non-empty string"):
+            backlog.record(HostileName("queue.delay"), 1.0)
+        with self.assertRaisesRegex(ValueError, "exact finite number"):
+            backlog.record("queue.delay", HostileInt(1))
+        self.assertEqual(touched, [])
+        self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_backlog_rejects_unbounded_or_non_json_labels(self):
+        backlog = BoundedMetricBacklog(max_items=2, max_label_bytes=32)
+        with self.assertRaisesRegex(ValueError, "bounded size"):
+            backlog.record("queue.delay", 1.0, detail="x" * 100)
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, score=float("nan"))
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, marker=object())
+        self.assertEqual(backlog.snapshot(), ())
+
+
+    def test_exact_reconstruction_fails_closed_on_missing_or_mismatched_identity(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(evidence_trace("decision-exact"))
+            result = store.reconstruct_exact(
+                "decision-exact",
+                expected_source_sha="2" * 40,
+                expected_build_id="autotrade-observability-test-1",
+                available_event_digests={
+                    "event-market": "3" * 64,
+                    "event-decision": "4" * 64,
+                },
+                available_evidence_digests={
+                    "dataset-1": "5" * 64,
+                    "risk-evidence-1": "6" * 64,
+                },
+            )
+            self.assertEqual(result["trace_id"], "decision-exact")
+
+            legacy = evidence_trace("decision-legacy")
+            legacy.pop("source_sha")
+            legacy.pop("build_id")
+            store.append(legacy)
+            with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                store.reconstruct_exact(
+                    "decision-legacy",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-observability-test-1",
+                    available_event_digests={
+                        "event-market": "3" * 64,
+                        "event-decision": "4" * 64,
+                    },
+                    available_evidence_digests={
+                        "dataset-1": "5" * 64,
+                        "risk-evidence-1": "6" * 64,
+                    },
+                )
+
+            with self.assertRaisesRegex(ValueError, "event digest mismatch"):
+                store.reconstruct_exact(
+                    "decision-exact",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-observability-test-1",
+                    available_event_digests={
+                        "event-market": "9" * 64,
+                        "event-decision": "4" * 64,
+                    },
+                    available_evidence_digests={
+                        "dataset-1": "5" * 64,
+                        "risk-evidence-1": "6" * 64,
+                    },
+                )
 
 
 if __name__ == "__main__":

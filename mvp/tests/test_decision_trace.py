@@ -14,9 +14,13 @@ def trace(trace_id: str, *, decision: str = "BUY") -> dict:
         "decision": decision,
         "decision_reason": "fast_above_slow" if decision == "BUY" else "averages_equal",
         "risk_outcome": "admitted" if decision == "BUY" else "not_applicable",
+        "source_sha": "1" * 40,
+        "build_id": "autotrade-test-build-1",
         "order_id": "intent-1" if decision == "BUY" else None,
         "fill_id": "fill-1" if decision == "BUY" else None,
         "evidence_refs": ["evidence-1"],
+        "evidence_digests": {"evidence-1": "a" * 64},
+        "event_digests": {},
     }
 
 
@@ -44,6 +48,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
             store.append(trace("trace-1"))
             second = trace("trace-2", decision="HOLD")
             second["evidence_refs"] = ["evidence-2"]
+            second["evidence_digests"] = {"evidence-2": "b" * 64}
             store.append(second)
             rows = store.records()
             self.assertEqual(rows[1]["previous_hash"], rows[0]["record_hash"])
@@ -399,6 +404,207 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "https://provider.test/orders?"
                 "api%5Fsecret%5Frotation%5Fcount=4&symbol=BTC",
             )
+
+
+    def test_digest_maps_must_match_linked_identities(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            bad_keys = trace("trace-bad-digest-keys")
+            bad_keys["evidence_digests"] = {"other": "a" * 64}
+            with self.assertRaisesRegex(ValueError, "keys must exactly match"):
+                store.append(bad_keys)
+
+            bad_digest = trace("trace-bad-digest")
+            bad_digest["evidence_digests"] = {"evidence-1": "A" * 64}
+            with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                store.append(bad_digest)
+
+    def test_camel_and_acronym_secret_aliases_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-camel-secret-aliases")
+            item["attributes"] = {
+                "accessToken": "ACCESS-CAMEL-SECRET",
+                "clientSecret": "CLIENT-CAMEL-SECRET",
+                "sessionId": "SESSION-CAMEL-SECRET",
+                "proxyAuthorization": "PROXY-CAMEL-SECRET",
+                "XApiKey": "API-ACRONYM-SECRET",
+                "safeValue": "visible",
+            }
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)["attributes"]
+
+            for leaked in (
+                "ACCESS-CAMEL-SECRET",
+                "CLIENT-CAMEL-SECRET",
+                "SESSION-CAMEL-SECRET",
+                "PROXY-CAMEL-SECRET",
+                "API-ACRONYM-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+            for key in (
+                "accessToken",
+                "clientSecret",
+                "sessionId",
+                "proxyAuthorization",
+                "XApiKey",
+            ):
+                self.assertEqual(persisted[key], "[REDACTED]")
+            self.assertEqual(persisted["safeValue"], "visible")
+
+    def test_benign_security_counter_names_cannot_hide_secret_values(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-benign-name-secret")
+            item["attributes"] = {
+                "token_budget": "Bearer SHOULD-NOT-PERSIST",
+                "api_secret_rotation_count": "ROTATION-SECRET",
+                "nested": {
+                    "token_budget": 8,
+                    "api_secret_rotation_count": 4,
+                },
+            }
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)
+
+            self.assertNotIn("SHOULD-NOT-PERSIST", raw)
+            self.assertNotIn("ROTATION-SECRET", raw)
+            self.assertEqual(persisted["attributes"]["token_budget"], "[REDACTED]")
+            self.assertEqual(
+                persisted["attributes"]["api_secret_rotation_count"],
+                "[REDACTED]",
+            )
+            self.assertEqual(persisted["attributes"]["nested"]["token_budget"], 8)
+            self.assertEqual(
+                persisted["attributes"]["nested"]["api_secret_rotation_count"],
+                4,
+            )
+
+    def test_source_and_build_identity_validation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            bad_source = trace("trace-bad-source")
+            bad_source["source_sha"] = "G" * 40
+            with self.assertRaisesRegex(ValueError, "source_sha"):
+                store.append(bad_source)
+
+            bad_build = trace("trace-bad-build")
+            bad_build["build_id"] = " bad build "
+            with self.assertRaisesRegex(ValueError, "build_id"):
+                store.append(bad_build)
+
+    def test_executable_container_and_string_subclasses_are_rejected_before_callbacks(self):
+        class HostileDict(dict):
+            def items(self):
+                raise AssertionError("hostile mapping callback executed")
+
+        class HostileStr(str):
+            def lower(self):
+                raise AssertionError("hostile string callback executed")
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile string callback executed")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            hostile_attributes = trace("trace-hostile-attributes")
+            hostile_attributes["attributes"] = HostileDict({"safe": "value"})
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_attributes)
+            self.assertFalse(path.exists())
+
+            hostile_source = trace("trace-hostile-source")
+            hostile_source["source_sha"] = HostileStr("1" * 40)
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_source)
+            self.assertFalse(path.exists())
+
+            store.append(trace("trace-exact-subclass"))
+            with self.assertRaisesRegex(ValueError, "source_sha"):
+                store.reconstruct_exact(
+                    "trace-exact-subclass",
+                    expected_source_sha=HostileStr("1" * 40),
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+
+    def test_exact_reconstruction_rejects_polymorphic_digest_keys_before_hash(self):
+        touched = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                touched.append("hash")
+                raise AssertionError("hostile digest-key hash executed")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile digest-key equality executed")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-hostile-available-key"))
+            hostile = HostileKey("evidence-1")
+            available_evidence = {hostile: "a" * 64}
+            touched.clear()
+
+            with self.assertRaisesRegex(ValueError, "keys must be exact strings"):
+                store.reconstruct_exact(
+                    "trace-hostile-available-key",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests=available_evidence,
+                )
+            self.assertEqual(touched, [])
+
+    def test_exact_reconstruction_requires_matching_source_and_build(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-exact"))
+            exact = store.reconstruct_exact(
+                "trace-exact",
+                expected_source_sha="1" * 40,
+                expected_build_id="autotrade-test-build-1",
+                available_event_digests={},
+                available_evidence_digests={"evidence-1": "a" * 64},
+            )
+            self.assertEqual(exact["source_sha"], "1" * 40)
+            self.assertEqual(exact["build_id"], "autotrade-test-build-1")
+
+            with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+            with self.assertRaisesRegex(ValueError, "build identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-2",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+
+            with self.assertRaisesRegex(ValueError, "evidence digest mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "b" * 64},
+                )
 
 
 if __name__ == "__main__":

@@ -36,11 +36,12 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
             "source_refs": [f"git:{evidence_ref.source_sha}"],
         }
 
-    def test_runtime_currentness_ignores_helper_rebound_from_signed_verifier(self):
+    def test_runtime_currentness_helper_rebound_from_signed_verifier_fails_closed(self):
         with _cases.TemporaryDirectory() as directory:
             store, recovery, config, occurrence = self._state(directory)
             runtime = self._runtime(directory)
             patcher = None
+            patch_started = False
             try:
                 attempt = self._prepare(
                     store,
@@ -72,12 +73,13 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                 successor = None
 
                 def raced_verifier(*_args, **_kwargs):
-                    nonlocal successor
+                    nonlocal successor, patch_started
                     successor = production_host._issue_production_host_runtime_occurrence(
                         store,
                         config,
                     )
                     patcher.start()
+                    patch_started = True
                     return accepted
 
                 with (
@@ -96,9 +98,14 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                         "trusted_authenticated_reader",
                         return_value=lambda _artifact_id: (manifest, measurement),
                     ),
-                    self.assertRaises(PermissionError),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "trusted chronology implementation authority changed: "
+                        "require_current_production_host_runtime_occurrence",
+                    ),
                 ):
-                    chronology.require_current_trusted_chronology_cut(
+                    verifier = chronology._build_test_current_cut_verifier()
+                    verifier(
                         store=store,
                         recovery=recovery,
                         cut=cut,
@@ -119,7 +126,7 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                 )
                 forged_runtime_currentness.assert_not_called()
             finally:
-                if patcher is not None:
+                if patch_started and patcher is not None:
                     patcher.stop()
                 runtime.close()
 
@@ -184,7 +191,8 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                         "trusted chronology implementation authority changed: _instant",
                     ),
                 ):
-                    chronology.require_current_trusted_chronology_cut(
+                    verifier = chronology._build_test_current_cut_verifier()
+                    verifier(
                         store=store,
                         recovery=recovery,
                         cut=cut,

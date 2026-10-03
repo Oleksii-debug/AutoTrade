@@ -676,6 +676,7 @@
   }
 
   async function copyVisibleTableRows(tool) {
+    const scopeEpoch = state.scopeEpoch;
     const rows = visibleTableRows(tool);
     if (rows.length === 0) {
       const message = "No visible " + tool.label + " rows are available to copy.";
@@ -692,10 +693,16 @@
     const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
     try {
       await navigator.clipboard.writeText(payload);
+      if (scopeEpoch !== state.scopeEpoch) {
+        return;
+      }
       const message = String(rows.length) + " visible " + tool.label + " rows copied.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
     } catch {
+      if (scopeEpoch !== state.scopeEpoch) {
+        return;
+      }
       const message = "Clipboard copy was not permitted. Use normal text selection and copy.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
@@ -1277,8 +1284,14 @@
           try {
             const operation = await refreshOperation(result.operationId);
             if (operation === null) {
-              acceptedMessage +=
-                " Operation status was not rendered because the account/environment scope changed while it was loading.";
+              text(
+                "command-result",
+                acceptedMessage +
+                  " Operation status was not rendered because the account/environment scope changed while it was loading. " +
+                  "This accepted response belongs to the original scope " +
+                  payload.account_id + " / " + payload.environment + ".");
+              byId("command-result").focus();
+              return;
             } else {
               const uncertainty = operation.remainingUncertainty.length > 0
                 ? " Remaining uncertainty: " +
@@ -1321,16 +1334,26 @@
           true);
       }
     } catch {
-      state.scopeEpoch += 1;
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text(
-        "command-result",
-        "Command " + commandId +
-          " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      if (commandScopeMatchesCurrentSnapshot(payload)) {
+        state.scopeEpoch += 1;
+        state.snapshotReady = false;
+        state.sessionIdentity = null;
+        state.accountId = null;
+        state.environment = null;
+        setCommandAvailability(false);
+        text(
+          "command-result",
+          "Command " + commandId +
+            " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      } else {
+        text(
+          "command-result",
+          "Command " + commandId + " from original scope " +
+            payload.account_id + " / " + payload.environment +
+            " could not be confirmed after the authenticated host scope changed. " +
+            "Its original command_id and idempotency_key are retained and will not be retargeted. " +
+            "The current scope snapshot is not invalidated by this older request.");
+      }
       renderCommandValidationDetails([], "unavailable");
       byId("command-result").focus();
     } finally {

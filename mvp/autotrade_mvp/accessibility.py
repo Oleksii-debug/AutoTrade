@@ -125,14 +125,22 @@ def format_accessible_status(
                     )
                     continue
                 remaining = item.get("remaining")
-                state_text = _value(item, "state")
+                raw_state = item.get("state")
+                state_text = _safe_text(raw_state, "")
+                state_readable = bool(state_text)
+                if not state_readable:
+                    malformed_reservations = True
+                    state_text = "Unavailable"
+                    reservation_lines.append(
+                        "Reservation state: unavailable; malformed value"
+                    )
                 if not isinstance(remaining, dict):
                     malformed_reservations = True
                     reservation_lines.append(
                         f"Reservation detail: unavailable; state: {state_text}; malformed remaining resources"
                     )
                     continue
-                reservation_readable = True
+                reservation_readable = state_readable
                 for resource, amount in remaining.items():
                     resource_text = _safe_text(resource, "")
                     amount_text = _safe_text(amount, "")

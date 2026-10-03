@@ -89,6 +89,16 @@ class ReleaseEvidenceJsonAuthorityTests(unittest.TestCase):
                 )
                 self.assert_unqualified(raw, "invalid_evidence_refs")
 
+    def test_extra_evidence_ref_field_fails_closed(self):
+        raw = valid_evidence_json().replace(
+            f'"observed_at":"{OBSERVED_AT}"'.encode("utf-8"),
+            (
+                f'"observed_at":"{OBSERVED_AT}",'
+                '"alternate_digest":"sha256:' + "3" * 64 + '"'
+            ).encode("utf-8"),
+        )
+        self.assert_unqualified(raw, "invalid_evidence_refs")
+
     def test_duplicate_top_level_authority_key_fails_closed(self):
         raw = (
             "{"

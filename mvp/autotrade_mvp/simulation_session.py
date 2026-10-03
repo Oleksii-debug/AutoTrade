@@ -481,6 +481,7 @@ def _finalize_zero_wire_blocked(
     timestamp: str,
     resumed: bool,
 ) -> dict[str, object]:
+    validation_start_cut = JournalStore.whole_store_state_cut(store)
     result, reservations, attempt_id, client_order_id = (
         _zero_wire_blocked_projection(
             store,
@@ -489,7 +490,11 @@ def _finalize_zero_wire_blocked(
             required_reservation_state="WORKING",
         )
     )
-    journal_cut = JournalStore.current_journal_sequence(store)
+    terminal_cut = JournalStore.whole_store_state_cut(store)
+    if terminal_cut != validation_start_cut:
+        raise ValueError(
+            "whole-store state changed while validating zero-wire terminal facts"
+        )
     terminal_plan = reservations.prepare_zero_wire_blocked_terminal_mutation(
         event_key=_uuid("blocked-terminal-reservation-event", episode_id),
         idempotency_key=_uuid("blocked-terminal-reservation-idempotency", episode_id),
@@ -539,7 +544,8 @@ def _finalize_zero_wire_blocked(
             (terminal_plan.envelope, None),
             (completed, None),
         ],
-        expected_journal_sequence=journal_cut,
+        expected_journal_sequence=terminal_cut["journal_sequence"],
+        expected_whole_store_counts=terminal_cut["counts"],
     )
     reservations.refresh()
     terminal = reservations.get(_uuid("reservation", episode_id))

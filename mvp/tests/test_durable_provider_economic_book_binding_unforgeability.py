@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.accounting import AccountingConflict
 from mvp.autotrade_mvp import _provider_activity_accounting_impl as authority
@@ -56,6 +57,28 @@ class DurableProviderEconomicBookBindingUnforgeabilityTests(unittest.TestCase):
                 "JournalStore changed",
             ):
                 book.refresh()
+
+    def test_binding_weakref_exposes_no_erasable_callback(self):
+        with TemporaryDirectory() as directory:
+            selected = JournalStore(Path(directory) / "selected.sqlite3")
+            book = DurableProviderEconomicBook(
+                selected,
+                provider_id="PROVIDER-A",
+                account_id="acct-authority",
+                environment="PAPER",
+            )
+
+            binding_refs = weakref.getweakrefs(book)
+            self.assertTrue(binding_refs)
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in binding_refs)
+            )
+
+            detached = authority._require_durable_provider_economic_book_authority(
+                book
+            )
+            self.assertIs(detached.store, selected)
+            book.refresh()
 
     def test_reinitialization_cannot_retarget_existing_financial_authority(self):
         with TemporaryDirectory() as directory:

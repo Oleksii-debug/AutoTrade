@@ -10,6 +10,7 @@ APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
+OPENAPI = ROOT / "contracts" / "openapi" / "host-api.yaml"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
@@ -45,6 +46,22 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("AllowsNewWindow(Uri target) => false", text)
         self.assertNotIn("Authorization", text)
         self.assertNotIn("AutoTrade-Session", text)
+
+    def test_event_credential_query_grammar_is_pinned_to_openapi_after_parameter(self):
+        policy = WEB_POLICY.read_text(encoding="utf-8")
+        openapi = OPENAPI.read_text(encoding="utf-8")
+        event = openapi.split("  /api/v1/events:", 1)[1].split(
+            "  /api/v1/health:",
+            1,
+        )[0]
+        self.assertIn('const string prefix = "?after=";', policy)
+        self.assertIn("name: after", event)
+        self.assertIn("in: query", event)
+        self.assertIn("required: false", event)
+        self.assertIn(
+            "$ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence",
+            event,
+        )
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")

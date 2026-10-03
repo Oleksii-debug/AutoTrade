@@ -323,7 +323,7 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             )
         load_plan.assert_not_called()
 
-    def test_target_must_declare_exact_shared_clock_contract(self):
+    def test_target_must_declare_canonical_monotonic_clock_authority(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)
         measurement = self._measurement(
@@ -339,7 +339,7 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             "load_declared_runtime_event_plan"
         ) as load_plan, self.assertRaisesRegex(
             RuntimeTargetHostDurableFinancialError,
-            "does not declare the shared",
+            "does not declare canonical time.monotonic_ns authority",
         ):
             bind_durable_financial_latency_to_target_host_measurement(
                 store,

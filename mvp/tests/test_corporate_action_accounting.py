@@ -161,14 +161,6 @@ def evidence_store(store):
 
 class AtomicCorporateActionFinancialTests(unittest.TestCase):
     def test_financial_collaborator_subclasses_are_rejected_before_dispatch(self):
-        store = object.__new__(JournalStore)
-        evidence = object.__new__(DurableCorporateActionEvidenceStore)
-        accepted = object.__new__(
-            __import__(
-                "mvp.autotrade_mvp.corporate_action_evidence",
-                fromlist=["AuthoritativeCorporateAction"],
-            ).AuthoritativeCorporateAction
-        )
         calls = []
 
         class HostileEconomicBook(DurableProviderEconomicBook):
@@ -181,28 +173,34 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 calls.append(("corporate", name))
                 raise AssertionError("corporate subclass dispatched")
 
-        with self.assertRaisesRegex(
-            TypeError,
-            "exact DurableProviderEconomicBook",
-        ):
-            commit_authoritative_corporate_action(
-                store=store,
-                evidence_store=evidence,
-                economic_book=object.__new__(HostileEconomicBook),
-                corporate_book=object.__new__(CorporateActionBook),
-                accepted=accepted,
-            )
-        self.assertEqual(calls, [])
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action())
 
-        with self.assertRaisesRegex(TypeError, "exact CorporateActionBook"):
-            commit_authoritative_corporate_action(
-                store=store,
-                evidence_store=evidence,
-                economic_book=object.__new__(DurableProviderEconomicBook),
-                corporate_book=object.__new__(HostileCorporateBook),
-                accepted=accepted,
-            )
-        self.assertEqual(calls, [])
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact DurableProviderEconomicBook",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=object.__new__(HostileEconomicBook),
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+            self.assertEqual(calls, [])
+
+            economics = economic_book(store)
+            with self.assertRaisesRegex(TypeError, "exact CorporateActionBook"):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=object.__new__(HostileCorporateBook),
+                    accepted=accepted,
+                )
+            self.assertEqual(calls, [])
 
     def test_sealed_dividend_source_and_economics_commit_together(self):
         with TemporaryDirectory() as directory:

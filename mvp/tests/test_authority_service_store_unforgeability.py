@@ -100,6 +100,26 @@ class AuthorityServiceStoreUnforgeabilityTests(unittest.TestCase):
 
             self.assertIsNone(service.store)
 
+    def test_live_service_registry_weakrefs_have_no_eraser_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            service = AuthorityService(store)
+
+            service_callbacks = [
+                ref.__callback__
+                for ref in weakref.getweakrefs(service)
+                if ref.__callback__ is not None
+            ]
+            store_callbacks = [
+                ref.__callback__
+                for ref in weakref.getweakrefs(store)
+                if ref.__callback__ is not None
+            ]
+
+            self.assertEqual(service_callbacks, [])
+            self.assertEqual(store_callbacks, [])
+            service._restore_journal()
+
     def test_dead_service_releases_selected_store_binding(self):
         with TemporaryDirectory() as directory:
             database_path = Path(directory) / "selected.sqlite3"

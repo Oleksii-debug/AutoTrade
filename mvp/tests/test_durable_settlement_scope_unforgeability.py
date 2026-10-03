@@ -58,6 +58,41 @@ class DurableSettlementScopeUnforgeabilityTests(unittest.TestCase):
             with self.assertRaises(SettlementConflict):
                 book.refresh()
 
+    def test_caller_cannot_retarget_scope_value_while_scope_id_stays_selected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            book = self._book(store, root)
+            selected_scope_id = book.scope_id
+
+            book.scope = SettlementAccountScope(
+                provider_id="PROVIDER-A",
+                account_id="acct-other",
+                environment="PAPER",
+            )
+            self.assertEqual(book.scope_id, selected_scope_id)
+
+            with self.assertRaises(SettlementConflict):
+                book.refresh()
+
+    def test_caller_cannot_retarget_scope_id_while_scope_value_stays_selected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            book = self._book(store, root)
+            selected_scope = book.scope
+
+            replacement_scope = SettlementAccountScope(
+                provider_id="PROVIDER-A",
+                account_id="acct-other",
+                environment="PAPER",
+            )
+            book.scope_id = settlement_authority._scope_id(replacement_scope)
+            self.assertEqual(book.scope, selected_scope)
+
+            with self.assertRaises(SettlementConflict):
+                book.refresh()
+
 
 if __name__ == "__main__":
     unittest.main()

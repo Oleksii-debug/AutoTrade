@@ -230,23 +230,34 @@ def resolve_scientific_trial_owner(
     profile: GateProfile,
     evidence: EvaluationEvidence,
 ) -> ScientificTrialOwnerEvidence:
-    """Resolve one registry-owned trial population against gate observations."""
+    """Resolve one stable registry-owned protocol + trial-population cut.
 
+    ``BEGIN IMMEDIATE`` holds SQLite's writer reservation while the existing
+    canonical protocol-population resolver and #1426 trial snapshot perform
+    their read transactions. That prevents a concurrent registration/trial
+    writer from committing between the two authority reads and producing a
+    mixed profile-owner/trial-population composition.
+    """
+
+    if type(registry) is not ScientificRegistry:
+        raise TypeError("registry must be exact ScientificRegistry")
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
-    binding = resolve_gate_profile_protocol_binding(
-        registry=registry,
-        profile=profile,
-    )
-    trial_evidence = registry.trial_completeness_evidence(binding.protocol_id)
-    if trial_evidence.protocol_hash != binding.protocol_hash:
-        raise ProtocolViolation(
-            "trial completeness snapshot does not match bound protocol hash"
+    with registry._connect() as authority_guard:
+        authority_guard.execute("BEGIN IMMEDIATE")
+        binding = resolve_gate_profile_protocol_binding(
+            registry=registry,
+            profile=profile,
         )
-    if trial_evidence.trial_budget > profile.max_trials:
-        raise ProtocolViolation(
-            "bound scientific protocol trial budget exceeds gate profile max_trials"
-        )
+        trial_evidence = registry.trial_completeness_evidence(binding.protocol_id)
+        if trial_evidence.protocol_hash != binding.protocol_hash:
+            raise ProtocolViolation(
+                "trial completeness snapshot does not match bound protocol hash"
+            )
+        if trial_evidence.trial_budget > profile.max_trials:
+            raise ProtocolViolation(
+                "bound scientific protocol trial budget exceeds gate profile max_trials"
+            )
     population_matches = (
         evidence.trials_attempted is not None
         and evidence.trials_attempted == trial_evidence.recorded_trials

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
@@ -422,6 +422,213 @@ class FxValuationTests(unittest.TestCase):
                 as_of=NOW,
                 max_age=timedelta(minutes=1),
             )
+
+
+class FxValuationAuthorityBoundaryTests(unittest.TestCase):
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                touched.append("is_finite")
+                raise AssertionError("hostile Decimal dispatch")
+
+            def as_tuple(self):
+                touched.append("as_tuple")
+                raise AssertionError("hostile Decimal dispatch")
+
+        with self.assertRaisesRegex(FxValuationError, "exact decimal"):
+            value_amount(
+                HostileDecimal("1"),
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_text_subclass_is_rejected_before_strip_or_upper_dispatch(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile text strip")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile text upper")
+
+        with self.assertRaisesRegex(FxValuationError, "base_currency"):
+            FxQuote.create(
+                base_currency=HostileText("EUR"),
+                quote_currency="USD",
+                bid="1",
+                ask="1",
+                available_at=NOW,
+                source_id="provider:fx",
+                evidence_sha256=DIGEST,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_datetime_subclass_is_rejected_before_time_callbacks(self):
+        touched = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                touched.append("utcoffset")
+                raise AssertionError("hostile datetime utcoffset")
+
+            def astimezone(self, *args, **kwargs):
+                touched.append("astimezone")
+                raise AssertionError("hostile datetime astimezone")
+
+        hostile = HostileDateTime(2026, 9, 24, 18, 0, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(FxValuationError, "exact datetime"):
+            FxQuote.create(
+                base_currency="EUR",
+                quote_currency="USD",
+                bid="1",
+                ask="1",
+                available_at=hostile,
+                source_id="provider:fx",
+                evidence_sha256=DIGEST,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_custom_tzinfo_is_rejected_before_tz_callbacks(self):
+        touched = []
+
+        class HostileTzInfo(tzinfo):
+            def utcoffset(self, dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile tzinfo utcoffset")
+
+            def dst(self, dt):
+                touched.append("dst")
+                raise AssertionError("hostile tzinfo dst")
+
+            def tzname(self, dt):
+                touched.append("tzname")
+                raise AssertionError("hostile tzinfo tzname")
+
+        hostile = datetime(2026, 9, 24, 18, 0, tzinfo=HostileTzInfo())
+        with self.assertRaisesRegex(FxValuationError, "built-in timezone"):
+            FxQuote.create(
+                base_currency="EUR",
+                quote_currency="USD",
+                bid="1",
+                ask="1",
+                available_at=hostile,
+                source_id="provider:fx",
+                evidence_sha256=DIGEST,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_quote_and_rounding_policy_subclasses_are_rejected_before_reads(self):
+        touched = []
+
+        class HostileQuote(FxQuote):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(f"quote:{name}")
+                    raise AssertionError("hostile quote attribute dispatch")
+                return super().__getattribute__(name)
+
+        class HostilePolicy(FxRoundingPolicy):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(f"policy:{name}")
+                    raise AssertionError("hostile policy attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile_quote = object.__new__(HostileQuote)
+        hostile_policy = object.__new__(HostilePolicy)
+
+        with self.assertRaisesRegex(FxValuationError, "exact FxQuote"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=hostile_quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+        with self.assertRaisesRegex(FxValuationError, "exact FxRoundingPolicy"):
+            value_amount(
+                "1",
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=eurusd(bid="1.1", ask="1.1"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=hostile_policy,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_mapping_subclasses_are_rejected_before_mapping_callbacks(self):
+        touched = []
+
+        class HostileDict(dict):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile dict iteration")
+
+            def get(self, *args, **kwargs):
+                touched.append("get")
+                raise AssertionError("hostile dict get")
+
+        for balances, quotes in (
+            (HostileDict({"USD": "1"}), {}),
+            ({"USD": "1"}, HostileDict({})),
+        ):
+            touched.clear()
+            with self.subTest(
+                balances_type=type(balances).__name__,
+                quotes_type=type(quotes).__name__,
+            ):
+                with self.assertRaisesRegex(FxValuationError, "exact dict"):
+                    value_cash_balances(
+                        balances,
+                        reporting_currency="USD",
+                        quotes=quotes,
+                        as_of=NOW,
+                        max_age=timedelta(minutes=1),
+                    )
+                self.assertEqual(touched, [])
+
+    def test_nonexact_currency_key_is_rejected_before_sort_or_text_dispatch(self):
+        touched = []
+
+        class HostileCurrency(str):
+            def __lt__(self, other):
+                touched.append("lt")
+                raise AssertionError("hostile key comparison")
+
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile key strip")
+
+        hostile_key = HostileCurrency("EUR")
+        balances = {hostile_key: "1", "USD": "1"}
+        touched.clear()
+
+        with self.assertRaisesRegex(FxValuationError, "currency keys"):
+            value_cash_balances(
+                balances,
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(touched, [])
 
 
 if __name__ == "__main__":

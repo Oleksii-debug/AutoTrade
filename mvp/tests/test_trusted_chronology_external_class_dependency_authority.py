@@ -22,7 +22,7 @@ class TrustedChronologyExternalClassDependencyAuthorityTests(unittest.TestCase):
             namespace["int_"] = forged
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"trusted chronology signed receipt parser external class dependency changed: uuid\.UUID\.__init__\.int_",
+                r"trusted chronology signed receipt parser dependency changed: int_",
             ):
                 chronology.parse_signed_qualification_attestation({})
         finally:
@@ -62,11 +62,55 @@ class TrustedChronologyExternalClassDependencyAuthorityTests(unittest.TestCase):
             external_namespace["helper"] = forged
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"synthetic parser external class dependency changed: synthetic_external\.ExternalValue\.__init__\.helper",
+                r"synthetic parser dependency changed: helper",
             ):
                 guard()
         finally:
             external_namespace["helper"] = original
+
+        guard()
+
+    def test_external_class_member_closure_dependency_is_sealed_and_recovers(self) -> None:
+        def build_external_type():
+            helper = lambda value: value
+
+            class ExternalValue:
+                def __init__(self, value):
+                    self.value = helper(value)
+
+            return ExternalValue
+
+        external_type = build_external_type()
+        initializer = external_type.__init__
+        self.assertIsNotNone(initializer.__closure__)
+        closure_cell = initializer.__closure__[0]
+        original = closure_cell.cell_contents
+        parser_namespace: dict[str, object] = {
+            "__name__": "synthetic_parser_closure",
+            "ExternalValue": external_type,
+        }
+        exec(
+            "def root(value):\n"
+            "    return ExternalValue(value)\n",
+            parser_namespace,
+        )
+        guard = chronology._build_external_function_graph_guard(
+            root=parser_namespace["root"],
+            label="synthetic closure parser",
+        )
+
+        def forged(value):
+            raise AssertionError("forged closure helper executed")
+
+        try:
+            closure_cell.cell_contents = forged
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"synthetic closure parser closure changed",
+            ):
+                guard()
+        finally:
+            closure_cell.cell_contents = original
 
         guard()
 

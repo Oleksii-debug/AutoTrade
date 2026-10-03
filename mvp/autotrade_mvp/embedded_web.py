@@ -47,6 +47,7 @@ _CSP = (
     "form-action 'self'; "
     "connect-src 'self'; "
     "script-src 'self'; "
+    "worker-src 'none'; "
     "style-src 'self'; "
     "img-src 'self'"
 )

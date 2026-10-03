@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter_ns
+from types import FunctionType, MethodType, ModuleType
 from typing import Callable, Sequence, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
@@ -237,6 +238,104 @@ def _decode_measurement(
     )
 
 
+def _capture_operation_authority_graph(values: tuple[object, ...]) -> tuple:
+    """Snapshot first-party transitive globals/closures used after product code."""
+
+    function_states: list[tuple] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    module_member_bindings: list[tuple[ModuleType, str, object]] = []
+    closure_bindings: list[tuple[object, bool, object | None]] = []
+    seen_functions: set[int] = set()
+    seen_globals: set[tuple[int, str]] = set()
+    seen_module_members: set[tuple[int, str]] = set()
+
+    def first_party(function: FunctionType) -> bool:
+        module = function.__module__
+        return module == "mvp.autotrade_mvp" or module.startswith(
+            "mvp.autotrade_mvp."
+        )
+
+    def capture(value: object) -> None:
+        target = value.__func__ if type(value) is MethodType else value
+        if type(target) is not FunctionType:
+            return
+        identity = id(target)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        kwdefaults = target.__kwdefaults__
+        function_states.append(
+            (
+                target,
+                target.__code__,
+                target.__defaults__,
+                kwdefaults,
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+            )
+        )
+        namespace = target.__globals__
+        referenced_names = target.__code__.co_names
+        for dependency_name in referenced_names:
+            if dependency_name not in namespace:
+                continue
+            expected_dependency = namespace[dependency_name]
+            key = (id(namespace), dependency_name)
+            if key not in seen_globals:
+                seen_globals.add(key)
+                global_bindings.append(
+                    (namespace, dependency_name, expected_dependency)
+                )
+            if type(expected_dependency) is ModuleType:
+                for member_name in referenced_names:
+                    if not hasattr(expected_dependency, member_name):
+                        continue
+                    module_key = (id(expected_dependency), member_name)
+                    if module_key in seen_module_members:
+                        continue
+                    seen_module_members.add(module_key)
+                    module_member_bindings.append(
+                        (
+                            expected_dependency,
+                            member_name,
+                            getattr(expected_dependency, member_name),
+                        )
+                    )
+            dependency_target = (
+                expected_dependency.__func__
+                if type(expected_dependency) is MethodType
+                else expected_dependency
+            )
+            if type(dependency_target) is FunctionType and first_party(
+                dependency_target
+            ):
+                capture(dependency_target)
+        for cell in target.__closure__ or ():
+            try:
+                expected_value = cell.cell_contents
+            except ValueError:
+                closure_bindings.append((cell, False, None))
+                continue
+            closure_bindings.append((cell, True, expected_value))
+            dependency_target = (
+                expected_value.__func__
+                if type(expected_value) is MethodType
+                else expected_value
+            )
+            if type(dependency_target) is FunctionType and first_party(
+                dependency_target
+            ):
+                capture(dependency_target)
+
+    for value in values:
+        capture(value)
+    return (
+        tuple(function_states),
+        tuple(global_bindings),
+        tuple(module_member_bindings),
+        tuple(closure_bindings),
+    )
+
+
 def measure_declared_financial_operation(
     store: JournalStore,
     spec: RuntimeBudgetSpec,
@@ -327,6 +426,22 @@ def measure_declared_financial_operation(
             ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),
         )
     )
+    journal_dependency_names = (
+        "_connect",
+        "_require_text",
+        "_decode_event_row",
+        "_aggregate_version_value",
+        "_journal_sequence_value",
+    )
+    journal_dependencies = tuple(
+        (name, getattr(journal_store_type, name))
+        for name in journal_dependency_names
+    )
+    journal_schema_version = journal_store_type.SCHEMA_VERSION
+    transitive_authority = _capture_operation_authority_graph(
+        tuple(function for _name, function, *_rest in protected_functions)
+        + tuple(value for _name, value in journal_dependencies)
+    )
 
     def require_operation_authority() -> None:
         missing = object()
@@ -345,6 +460,16 @@ def measure_declared_financial_operation(
         ):
             raise error_type(
                 "measurement class authority changed during financial operation"
+            )
+        for name, expected_value in journal_dependencies:
+            if getattr(journal_store_type, name, missing) is not expected_value:
+                raise error_type(
+                    "measurement JournalStore dependency changed during financial "
+                    f"operation: {name}"
+                )
+        if journal_store_type.SCHEMA_VERSION is not journal_schema_version:
+            raise error_type(
+                "measurement JournalStore schema authority changed during financial operation"
             )
         for (
             name,
@@ -365,6 +490,51 @@ def measure_declared_financial_operation(
             ):
                 raise error_type(
                     f"measurement executable authority changed during financial operation: {name}"
+                )
+        (
+            transitive_functions,
+            transitive_globals,
+            transitive_module_members,
+            transitive_closures,
+        ) = transitive_authority
+        for function, code, defaults, kwdefaults, kwdefault_items in transitive_functions:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "measurement transitive executable authority changed during "
+                    f"financial operation: {function.__module__}.{function.__qualname__}"
+                )
+        for namespace, dependency_name, expected_dependency in transitive_globals:
+            if namespace.get(dependency_name, missing) is not expected_dependency:
+                raise error_type(
+                    "measurement transitive global dependency changed during "
+                    f"financial operation: {dependency_name}"
+                )
+        for module, member_name, expected_member in transitive_module_members:
+            if getattr(module, member_name, missing) is not expected_member:
+                raise error_type(
+                    "measurement transitive module dependency changed during "
+                    f"financial operation: {module.__name__}.{member_name}"
+                )
+        for cell, had_value, expected_value in transitive_closures:
+            try:
+                current_value = cell.cell_contents
+            except ValueError:
+                if had_value:
+                    raise error_type(
+                        "measurement transitive closure dependency changed during financial operation"
+                    )
+                continue
+            if not had_value or current_value is not expected_value:
+                raise error_type(
+                    "measurement transitive closure dependency changed during financial operation"
                 )
 
     store_identity = require_exact_journal_store_authority(

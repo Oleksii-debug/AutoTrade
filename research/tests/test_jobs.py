@@ -1959,5 +1959,27 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now,
                 )
 
+            evidence_ref = (
+                f"artifact:{uuid4()}@" + digest("external-resolution")
+            )
+            with self.assertRaisesRegex(ValueError, "output_refs"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=1,
+                    verdict="PROVEN_FAILED",
+                    evidence_ref=evidence_ref,
+                    output_refs=HostileList([]),
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(ValueError, "error must be a non-empty object"):
+                store.fail(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=1,
+                    error=HostileDict({"code": "never-read"}),
+                    now=self.now,
+                )
+
 if __name__ == "__main__":
     unittest.main()

@@ -159,7 +159,12 @@ class CredentialTransitionReceipt:
             "record_state_sha256",
         ):
             value = getattr(self, name)
-            if type(value) is not str or not value.startswith("sha256:") or len(value) != 71:
+            if (
+                type(value) is not str
+                or not value.startswith("sha256:")
+                or len(value) != 71
+                or any(character not in "0123456789abcdef" for character in value[7:])
+            ):
                 raise CredentialTransitionReceiptError(
                     f"credential transition receipt {name} is invalid"
                 )
@@ -167,6 +172,10 @@ class CredentialTransitionReceipt:
             type(self.receipt_id) is not str
             or not self.receipt_id.startswith("credential-transition/sha256:")
             or len(self.receipt_id) != len("credential-transition/sha256:") + 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.receipt_id[len("credential-transition/sha256:"):]
+            )
         ):
             raise CredentialTransitionReceiptError(
                 "credential transition receipt id is invalid"

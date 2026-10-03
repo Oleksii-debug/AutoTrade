@@ -1102,6 +1102,13 @@ def load_account_resource_availability_evidence(
                 or settlement_scope.get("environment") != scope
             ):
                 continue
+            settlement_domain = _provider_environment_scope(
+                provider_id=provider,
+                environment=scope,
+                provider_environment=settlement_scope.get("provider_environment"),
+            )
+            if settlement_domain != domain:
+                continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"
@@ -1138,11 +1145,12 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("environment") != scope
             ):
                 continue
-            lifecycle_domain = lifecycle_payload.get("provider_environment")
-            if (
-                lifecycle_domain is not None
-                and lifecycle_domain != domain
-            ):
+            lifecycle_domain = _provider_environment_scope(
+                provider_id=provider,
+                environment=scope,
+                provider_environment=lifecycle_payload.get("provider_environment"),
+            )
+            if lifecycle_domain != domain:
                 continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(

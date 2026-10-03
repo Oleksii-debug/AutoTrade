@@ -261,6 +261,26 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                 )
         self.assertEqual(outputs, [expected] * len(outputs))
 
+    def test_settlement_rounding_policy_rejects_polymorphic_string(self):
+        calls = []
+
+        class HostileRounding(str):
+            def __hash__(self):
+                calls.append("__hash__")
+                return super().__hash__()
+
+            def __eq__(self, other):
+                calls.append("__eq__")
+                return True
+
+        with self.assertRaisesRegex(FuturesError, "unsupported rounding policy"):
+            settle_fraction(
+                Fraction(3, 2),
+                quantum=Decimal("1"),
+                rounding=HostileRounding("DOWN"),
+            )
+        self.assertEqual(calls, [])
+
     def test_arithmetic_repair_does_not_change_settlement_identity(self):
         contract = self._contract()
         settlement = self._settlement(

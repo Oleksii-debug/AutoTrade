@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
+import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -361,6 +362,44 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
             )
             parser.assert_not_called()
 
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_real_ancestor_junction_is_rejected_before_zip_parser(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            external = root / "external"
+            external.mkdir()
+            (external / "release.zip").write_bytes(b"must-not-reach-zip-parser")
+            junction = root / "junction"
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(
+                    "directory junction creation unavailable: "
+                    + (created.stderr or created.stdout).strip()
+                )
+            try:
+                with patch.object(
+                    installer_manifest,
+                    "_verify_release_bundle_stream",
+                ) as parser:
+                    with self.assertRaisesRegex(
+                        installer_manifest.InstallerManifestError,
+                        "retained Windows namespace authority failed",
+                    ):
+                        installer_manifest.verify_release_bundle(junction / "release.zip")
+                parser.assert_not_called()
+            finally:
+                subprocess.run(
+                    ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
 
     def test_windows_parent_namespace_rejection_prevents_leaf_open_and_zip_parse(self) -> None:
         with TemporaryDirectory() as directory:

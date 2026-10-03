@@ -378,9 +378,9 @@ def _next_sequence(
     vault: ProtectedCredentialVault,
     section: dict[str, object],
     *,
-    handle_id: str,
+    handle: PersistentCredentialHandle,
 ) -> tuple[int, str | None]:
-    previous = section["latest_by_handle"].get(handle_id)
+    previous = section["latest_by_handle"].get(handle.handle_id)
     if previous is None:
         return 1, None
 
@@ -397,6 +397,17 @@ def _next_sequence(
     if parsed.vault_authority_sha256 != expected_authority:
         raise CredentialTransitionReceiptError(
             "prior credential transition receipt vault authority is invalid"
+        )
+    if (
+        parsed.handle_id != handle.handle_id
+        or parsed.account_id != handle.account_id
+        or parsed.provider != handle.provider
+        or parsed.environment != handle.environment
+        or parsed.provider_environment != handle.provider_environment
+        or parsed.purpose != handle.purpose
+    ):
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt scope does not match current credential"
         )
     try:
         sealed = b64decode(previous["seal_b64"], validate=True)
@@ -445,7 +456,7 @@ def _issue_locked(
     sequence, previous_receipt_id = _next_sequence(
         vault,
         section,
-        handle_id=current_handle.handle_id,
+        handle=current_handle,
     )
     subject = {
         "schema_version": _SCHEMA_VERSION,

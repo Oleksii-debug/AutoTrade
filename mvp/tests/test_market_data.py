@@ -1874,6 +1874,22 @@ class MarketNormalizationTests(unittest.TestCase):
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
             )
+
+        substituted_build = replace(
+            delta,
+            adapter_version="autotrade-test-market-adapter@2",
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "differs from retained normalized identity",
+        ):
+            normalizer.apply_qualified_book_range(
+                substituted_build,
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            )
+
         self.assertEqual(
             normalizer.book_state(
                 provider_id="provider-a",

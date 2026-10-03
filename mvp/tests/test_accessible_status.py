@@ -98,7 +98,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "active_reservations": [
                     None,
                     {"state": "WORKING", "remaining": "not-a-mapping"},
-                    {"state": "WORKING", "remaining": {"USD": "25.00"}},
+                    {"state": "WORKING", "remaining": {"USD": "25"}},
                 ],
             }
         )
@@ -111,7 +111,7 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("inspect or restore reservation state", text)
         self.assertIn("Reservation detail: unavailable; malformed state", text)
         self.assertIn("malformed remaining resources", text)
-        self.assertIn("Reserved USD: 25.00; state: WORKING", text)
+        self.assertIn("Reserved USD: 25; state: WORKING", text)
 
     def test_unknown_top_level_state_fails_closed_as_corrupt(self):
         text = format_accessible_status(
@@ -198,6 +198,10 @@ class AccessibleStatusTests(unittest.TestCase):
             {"CASH:USD": "-1"},
             {"CASH:USD": "NaN"},
             {"CASH:USD": "Infinity"},
+            {"CASH:USD": "25.00"},
+            {"CASH:USD": "+1"},
+            {"CASH:USD": "1e2"},
+            {"CASH:USD": "-0"},
             {"CASH:USD": "9" * 1000},
             {"": "1"},
             {" CASH:USD": "1"},

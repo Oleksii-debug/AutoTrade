@@ -248,6 +248,91 @@ class RuntimeStateAuthority:
             sha256,
         ).hexdigest()
 
+    @staticmethod
+    def _checkpoint_binding_material(
+        *,
+        authority_id: str,
+        cut_id: str,
+        replay: "ReplayCheckpoint",
+        runtime_components: Mapping[str, str],
+        build_sha: str,
+        protocol_ref: str,
+    ) -> bytes:
+        build = _build_sha(build_sha)
+        if not isinstance(protocol_ref, str) or not protocol_ref.strip():
+            raise ReplayError("protocol_ref must be non-empty")
+        protocol = protocol_ref.strip()
+        if protocol != protocol_ref:
+            raise ReplayError("protocol_ref must be canonical text")
+        material = {
+            "binding_kind": "composite_replay_checkpoint-v1",
+            "authority_id": authority_id,
+            "cut_id": cut_id,
+            "replay": {
+                "dataset_digest": replay.dataset_digest,
+                "cursor": replay.cursor,
+                "clock": replay.clock,
+            },
+            "runtime_components": dict(runtime_components),
+            "build_sha": build,
+            "protocol_ref": protocol,
+        }
+        return json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+
+    def seal_checkpoint(
+        self,
+        snapshot: RuntimeStateSnapshot,
+        *,
+        build_sha: str,
+        protocol_ref: str,
+    ) -> str:
+        """Bind a verified common cut to the exact build and protocol identity."""
+
+        RuntimeStateAuthority.verify_snapshot(self, snapshot)
+        return hmac.new(
+            self._secret,
+            self._checkpoint_binding_material(
+                authority_id=self._authority_id,
+                cut_id=snapshot.cut_id,
+                replay=snapshot.replay,
+                runtime_components=snapshot.runtime_components,
+                build_sha=build_sha,
+                protocol_ref=protocol_ref,
+            ),
+            sha256,
+        ).hexdigest()
+
+    def verify_checkpoint_binding(
+        self,
+        checkpoint: "CompositeReplayCheckpoint",
+    ) -> None:
+        if type(checkpoint) is not CompositeReplayCheckpoint:
+            raise ReplayError(
+                "runtime state authority must verify the canonical CompositeReplayCheckpoint"
+            )
+        if checkpoint.runtime_authority_id != self._authority_id:
+            raise ReplayError("runtime state snapshot authority identity mismatch")
+        expected = hmac.new(
+            self._secret,
+            self._checkpoint_binding_material(
+                authority_id=self._authority_id,
+                cut_id=checkpoint.runtime_cut_id,
+                replay=checkpoint.replay,
+                runtime_components=checkpoint.runtime_components,
+                build_sha=checkpoint.build_sha,
+                protocol_ref=checkpoint.protocol_ref,
+            ),
+            sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, checkpoint.runtime_authority_seal):
+            raise ReplayError("runtime state checkpoint authority seal mismatch")
+
     def capture(self) -> RuntimeStateSnapshot:
         try:
             cut_id, replay, raw_components = self._cut_resolver()
@@ -665,12 +750,18 @@ class CausalReplay:
             raise ReplayError(
                 "runtime state snapshot is not bound to the current replay cut"
             )
+        checkpoint_seal = RuntimeStateAuthority.seal_checkpoint(
+            runtime_state_authority,
+            snapshot,
+            build_sha=build_sha,
+            protocol_ref=protocol_ref,
+        )
         return CompositeReplayCheckpoint(
             replay=replay_before,
             runtime_components=snapshot.runtime_components,
             runtime_cut_id=snapshot.cut_id,
             runtime_authority_id=snapshot.authority_id,
-            runtime_authority_seal=snapshot.authority_seal,
+            runtime_authority_seal=checkpoint_seal,
             build_sha=build_sha,
             protocol_ref=protocol_ref,
         )
@@ -695,28 +786,27 @@ def resume_from_composite_checkpoint(
         )
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
-    checkpoint_snapshot = RuntimeStateSnapshot(
-        cut_id=checkpoint.runtime_cut_id,
-        replay=checkpoint.replay,
-        runtime_components=checkpoint.runtime_components,
-        authority_id=checkpoint.runtime_authority_id,
-        authority_seal=checkpoint.runtime_authority_seal,
-    )
-    RuntimeStateAuthority.verify_snapshot(
+    RuntimeStateAuthority.verify_checkpoint_binding(
         runtime_state_authority,
-        checkpoint_snapshot,
+        checkpoint,
     )
     snapshot = _resolve_runtime_snapshot(runtime_state_authority)
     if snapshot.replay != checkpoint.replay:
         raise ReplayError(
             "runtime state snapshot replay cut differs from checkpoint"
         )
+    current_seal = RuntimeStateAuthority.seal_checkpoint(
+        runtime_state_authority,
+        snapshot,
+        build_sha=build_sha,
+        protocol_ref=protocol_ref,
+    )
     current = CompositeReplayCheckpoint(
         replay=snapshot.replay,
         runtime_components=snapshot.runtime_components,
         runtime_cut_id=snapshot.cut_id,
         runtime_authority_id=snapshot.authority_id,
-        runtime_authority_seal=snapshot.authority_seal,
+        runtime_authority_seal=current_seal,
         build_sha=build_sha,
         protocol_ref=protocol_ref,
     )

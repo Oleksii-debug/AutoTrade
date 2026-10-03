@@ -22,11 +22,25 @@ from autotrade_runtime.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
+from autotrade_runtime.strict_json import (
+    DuplicateJsonKeyError,
+    InvalidJsonDomainError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
+)
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
     SignedQualificationAttestation,
     verify_canonical_qualification_attestation,
+)
+from .runtime_target_host_campaign import (
+    ParsedRuntimeTargetHostCampaign,
+    RuntimeTargetHostCampaignError,
+)
+from .runtime_target_host_inventory import (
+    RuntimeTargetHostInventory,
+    RuntimeTargetHostInventoryError,
 )
 
 
@@ -104,18 +118,6 @@ def _uuid(value: object, *, name: str) -> str:
         )
     return text
 
-
-def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeTargetHostQualificationError(
-                "target-host evidence contains duplicate JSON object key"
-            )
-        result[key] = value
-    return result
-
-
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value,
@@ -130,16 +132,25 @@ def _strict_json(raw: bytes, *, name: str) -> dict[str, object]:
     if type(raw) is not bytes or not raw:
         raise RuntimeTargetHostQualificationError(f"{name} must be non-empty bytes")
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                RuntimeTargetHostQualificationError(
-                    f"{name} contains invalid JSON constant {token}"
-                )
-            ),
-        )
-    except (UnicodeError, json.JSONDecodeError) as error:
+        text = raw.decode("utf-8")
+        value = strict_json_loads(text)
+    except UnicodeError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} is not valid UTF-8 JSON"
+        ) from error
+    except DuplicateJsonKeyError as error:
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence contains duplicate JSON object key"
+        ) from error
+    except NonStandardJsonConstantError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} contains invalid JSON constant"
+        ) from error
+    except InvalidJsonDomainError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} exceeds bounded JSON domain"
+        ) from error
+    except json.JSONDecodeError as error:
         raise RuntimeTargetHostQualificationError(
             f"{name} is not valid UTF-8 JSON"
         ) from error
@@ -546,6 +557,67 @@ def _provenance_identity(value: RuntimeTargetHostProvenance) -> tuple[str, ...]:
     )
 
 
+def _verify_campaign_payload(
+    raw_payload: bytes,
+    provenance: RuntimeTargetHostProvenance,
+    *,
+    expected_source_sha: str,
+    expected_scenario_id: str,
+    expected_spec_digest: str,
+    expected_configuration_hash: str,
+    expected_host_fingerprint: str,
+) -> None:
+    try:
+        campaign = ParsedRuntimeTargetHostCampaign.parse(raw_payload)
+    except RuntimeTargetHostCampaignError as error:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host campaign payload is not canonical"
+        ) from error
+    observation = campaign.evidence.observation
+    if (
+        observation.release_sha != expected_source_sha
+        or observation.scenario_id != expected_scenario_id
+        or observation.spec_digest != expected_spec_digest
+        or observation.configuration_hash != expected_configuration_hash
+        or observation.host_fingerprint != expected_host_fingerprint
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host campaign observation identity conflicts"
+        )
+    if (
+        provenance.collector_id != campaign.collector_id
+        or provenance.collector_version != campaign.collector_version
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "target-host campaign provenance collector conflicts with raw payload"
+        )
+
+
+def _verify_host_inventory_payload(
+    raw_payload: bytes,
+    provenance: RuntimeTargetHostProvenance,
+    *,
+    expected_host_fingerprint: str,
+) -> None:
+    try:
+        inventory = RuntimeTargetHostInventory.parse(raw_payload)
+    except RuntimeTargetHostInventoryError as error:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host inventory payload is not canonical"
+        ) from error
+    if inventory.host_fingerprint != expected_host_fingerprint:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host inventory belongs to another host"
+        )
+    if (
+        provenance.collector_id != inventory.collector_id
+        or provenance.collector_version != inventory.collector_version
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "target-host inventory provenance collector conflicts with raw payload"
+        )
+
+
 def verify_runtime_target_host_qualification(
     receipt: SignedQualificationAttestation,
     *,
@@ -637,6 +709,14 @@ def verify_runtime_target_host_qualification(
         )
 
     refs = _required_refs(accepted, expected_source_sha=source_sha)
+    if any(ref.artifact_id == release_artifact_id for ref in refs.values()):
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence artifact cannot alias delivered release artifact"
+        )
+    if any(ref.sha256 == release_artifact_sha256 for ref in refs.values()):
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence bytes cannot alias delivered release bytes"
+        )
     try:
         reader = trusted_authenticated_reader(
             evidence_root,
@@ -698,7 +778,7 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance identity conflicts for {kind}"
             )
-        _read_bound_payload(
+        raw_payload = _read_bound_payload(
             reader,
             provenance,
             forbidden_artifact_ids=(
@@ -708,6 +788,22 @@ def verify_runtime_target_host_qualification(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
         )
+        if kind == CAMPAIGN_EVIDENCE_KIND:
+            _verify_campaign_payload(
+                raw_payload,
+                provenance,
+                expected_source_sha=source_sha,
+                expected_scenario_id=scenario_id,
+                expected_spec_digest=spec_digest,
+                expected_configuration_hash=configuration_hash,
+                expected_host_fingerprint=host_fingerprint,
+            )
+        elif kind == HOST_INVENTORY_EVIDENCE_KIND:
+            _verify_host_inventory_payload(
+                raw_payload,
+                provenance,
+                expected_host_fingerprint=host_fingerprint,
+            )
         payload_artifact_ids.add(provenance.payload_artifact_id)
         payload_sha256.add(provenance.payload_sha256)
         payload_id_by_kind[kind] = provenance.payload_artifact_id

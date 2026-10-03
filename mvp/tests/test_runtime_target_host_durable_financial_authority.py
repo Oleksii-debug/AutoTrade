@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from inspect import getclosurevars
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from mvp.autotrade_mvp import (
     runtime_target_host_durable_financial as durable,
@@ -67,12 +67,70 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         )
 
         self.assertIs(result, expected)
-        measurement_guard.assert_called_once_with()
+        self.assertEqual(measurement_guard.call_args_list, [call(), call()])
         snapshotter.assert_called_once_with(current)
         parent_guard.assert_called_once_with()
         parent.assert_called_once()
         durable_guard.assert_called_once_with()
         mechanics.assert_called_once()
+
+    def test_parent_side_effect_cannot_retarget_nested_measurement_snapshot(self) -> None:
+        class Measurement:
+            release_artifact_id = RELEASE_ID
+            release_artifact_sha256 = RELEASE_SHA
+
+        class DurableError(Exception):
+            pass
+
+        current = Measurement()
+        snapshotter = Mock(return_value=current)
+        state = {"measurement_graph_changed": False}
+
+        def require_measurement_graph() -> None:
+            if state["measurement_graph_changed"]:
+                raise DurableError("measurement graph changed after parent evidence")
+
+        def mutate_measurement_graph(**_kwargs) -> None:
+            state["measurement_graph_changed"] = True
+
+        measurement_guard = Mock(side_effect=require_measurement_graph)
+        parent = Mock(side_effect=mutate_measurement_graph)
+        durable_guard = Mock()
+        mechanics = Mock()
+
+        binder = _build_release_bound_durable_financial_authority(
+            measurement_type=Measurement,
+            measurement_snapshotter=snapshotter,
+            uuid_type=__import__("uuid").UUID,
+            durable_error_type=DurableError,
+            parent_collector=parent,
+            parent_error_types=(ValueError,),
+            durable_binder=mechanics,
+            measurement_dependency_guard=measurement_guard,
+            parent_dependency_guard=Mock(),
+            durable_dependency_guard=durable_guard,
+        )
+
+        with self.assertRaisesRegex(
+            DurableError,
+            "measurement graph changed after parent evidence",
+        ):
+            binder(
+                store=object(),
+                spec=object(),
+                campaign_plan=object(),
+                campaign_cut=object(),
+                declared_plan_id="plan-1",
+                measurement=current,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+        self.assertEqual(measurement_guard.call_args_list, [call(), call()])
+        snapshotter.assert_called_once_with(current)
+        parent.assert_called_once()
+        durable_guard.assert_not_called()
+        mechanics.assert_not_called()
 
     def test_invalid_release_identity_fails_before_parent_or_mechanics(self) -> None:
         class Measurement:
@@ -189,7 +247,6 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         forged_snapshotter.assert_not_called()
         forged_parent.assert_not_called()
         forged_mechanics.assert_not_called()
-
 
     def test_module_guard_rejects_root_code_replacement(self) -> None:
         class DurableError(Exception):

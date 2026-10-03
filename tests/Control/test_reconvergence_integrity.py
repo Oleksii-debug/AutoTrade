@@ -515,6 +515,13 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("--allow-protected-path", workflow)
         self.assertNotIn("edited", workflow)
+        self.assertIn("Require event base to match live target branch tip", workflow)
+        self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", workflow)
+        self.assertIn("EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}", workflow)
+        self.assertIn(
+            'refs/remotes/origin/${BASE_REF}^{commit}',
+            workflow,
+        )
 
 
 

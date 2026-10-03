@@ -275,9 +275,9 @@ class RuntimeStateAuthority:
         )
 
     def verify_snapshot(self, snapshot: RuntimeStateSnapshot) -> None:
-        if not isinstance(snapshot, RuntimeStateSnapshot):
+        if type(snapshot) is not RuntimeStateSnapshot:
             raise ReplayError(
-                "runtime state authority must issue RuntimeStateSnapshot"
+                "runtime state authority must issue the canonical RuntimeStateSnapshot"
             )
         if snapshot.authority_id != self._authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
@@ -293,10 +293,12 @@ class RuntimeStateAuthority:
 def _resolve_runtime_snapshot(
     authority: RuntimeStateAuthority,
 ) -> RuntimeStateSnapshot:
-    if not isinstance(authority, RuntimeStateAuthority):
-        raise TypeError("runtime_state_authority must be RuntimeStateAuthority")
-    snapshot = authority.capture()
-    authority.verify_snapshot(snapshot)
+    if type(authority) is not RuntimeStateAuthority:
+        raise TypeError(
+            "runtime_state_authority must be the canonical RuntimeStateAuthority"
+        )
+    snapshot = RuntimeStateAuthority.capture(authority)
+    RuntimeStateAuthority.verify_snapshot(authority, snapshot)
     return snapshot
 
 
@@ -685,10 +687,12 @@ def resume_from_composite_checkpoint(
 ) -> CausalReplay:
     """Validate one authority-issued common cut before exposing another event."""
 
-    if not isinstance(checkpoint, CompositeReplayCheckpoint):
-        raise TypeError("checkpoint must be CompositeReplayCheckpoint")
-    if not isinstance(runtime_state_authority, RuntimeStateAuthority):
-        raise TypeError("runtime_state_authority must be RuntimeStateAuthority")
+    if type(checkpoint) is not CompositeReplayCheckpoint:
+        raise TypeError("checkpoint must be the canonical CompositeReplayCheckpoint")
+    if type(runtime_state_authority) is not RuntimeStateAuthority:
+        raise TypeError(
+            "runtime_state_authority must be the canonical RuntimeStateAuthority"
+        )
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
     checkpoint_snapshot = RuntimeStateSnapshot(
@@ -698,7 +702,10 @@ def resume_from_composite_checkpoint(
         authority_id=checkpoint.runtime_authority_id,
         authority_seal=checkpoint.runtime_authority_seal,
     )
-    runtime_state_authority.verify_snapshot(checkpoint_snapshot)
+    RuntimeStateAuthority.verify_snapshot(
+        runtime_state_authority,
+        checkpoint_snapshot,
+    )
     snapshot = _resolve_runtime_snapshot(runtime_state_authority)
     if snapshot.replay != checkpoint.replay:
         raise ReplayError(

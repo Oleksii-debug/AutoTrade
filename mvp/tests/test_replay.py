@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import unittest
 
@@ -9,7 +11,7 @@ from mvp.autotrade_mvp.replay import (
     ReplayEvent,
     RuntimeStateAuthority,
     RuntimeStateSnapshot,
-    _issue_runtime_state_authority,
+    RuntimeStateVerifier,
     dataset_digest,
     resume_from_composite_checkpoint,
 )
@@ -21,6 +23,22 @@ def event(sequence, available_at, value, source_version="v1"):
         available_at=available_at,
         source_version=source_version,
         payload={"value": value},
+    )
+
+
+def _issue_runtime_state_authority(
+    *,
+    authority_id,
+    secret,
+    cut_resolver,
+):
+    def signer(material):
+        return hmac.new(secret, material, hashlib.sha256).hexdigest()
+
+    return RuntimeStateAuthority(
+        authority_id=authority_id,
+        signer=signer,
+        cut_resolver=cut_resolver,
     )
 
 
@@ -163,6 +181,23 @@ class CausalReplayTests(unittest.TestCase):
             cut_resolver=resolve,
         )
 
+    @staticmethod
+    def _state_verifier(
+        *,
+        authority_id="runtime:test",
+        verifier_id="runtime:test-verifier",
+        secret=b"runtime-test-authority-secret-0000000001",
+    ):
+        def verify(material, signature):
+            expected = hmac.new(secret, material, hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, signature)
+
+        return RuntimeStateVerifier(
+            authority_id=authority_id,
+            verifier_id=verifier_id,
+            verify_signature=verify,
+        )
+
     def test_composite_checkpoint_rejects_changed_rng_before_next_event(self):
         events = [
             event(1, "2026-09-24T10:00:00Z", 1),
@@ -173,6 +208,7 @@ class CausalReplayTests(unittest.TestCase):
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=self._state_authority(replay, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -185,6 +221,7 @@ class CausalReplayTests(unittest.TestCase):
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
                 runtime_state_authority=self._state_authority(replay, changed),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -199,6 +236,7 @@ class CausalReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ReplayError, "missing required runtime components: execution_state"):
             replay.composite_checkpoint(
                 runtime_state_authority=self._state_authority(replay, incomplete),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -209,6 +247,7 @@ class CausalReplayTests(unittest.TestCase):
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=self._state_authority(replay, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -218,6 +257,7 @@ class CausalReplayTests(unittest.TestCase):
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
                 runtime_components=dict(checkpoint.runtime_components),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -233,6 +273,7 @@ class CausalReplayTests(unittest.TestCase):
         components = self._runtime_components()
         checkpoint = uninterrupted.composite_checkpoint(
             runtime_state_authority=self._state_authority(uninterrupted, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -243,6 +284,7 @@ class CausalReplayTests(unittest.TestCase):
                 runtime_components=dict(reversed(tuple(components.items()))),
                 runtime_cut_id=checkpoint.runtime_cut_id,
                 runtime_authority_id=checkpoint.runtime_authority_id,
+                runtime_verifier_id=checkpoint.runtime_verifier_id,
                 runtime_authority_seal=checkpoint.runtime_authority_seal,
                 build_sha="b" * 64,
                 protocol_ref="protocol:walk-forward-v1",
@@ -254,6 +296,7 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
             checkpoint=checkpoint,
             runtime_state_authority=self._state_authority(uninterrupted, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -280,6 +323,7 @@ class CausalReplayTests(unittest.TestCase):
         )
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=trusted,
+            runtime_state_verifier=self._state_verifier(),
             build_sha="e" * 64,
             protocol_ref="protocol:sealed-v1",
         )
@@ -298,12 +342,13 @@ class CausalReplayTests(unittest.TestCase):
             secret=b"attacker-runtime-authority-secret-00000001",
             cut_resolver=echo_checkpoint,
         )
-        with self.assertRaisesRegex(ReplayError, "authority seal mismatch"):
+        with self.assertRaisesRegex(ReplayError, "authority signature mismatch"):
             resume_from_composite_checkpoint(
                 events,
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
                 runtime_state_authority=attacker,
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="e" * 64,
                 protocol_ref="protocol:sealed-v1",
             )
@@ -316,11 +361,13 @@ class CausalReplayTests(unittest.TestCase):
             replay=replay.checkpoint(),
             runtime_components=self._runtime_components(),
             authority_id="runtime:test",
+            verifier_id="runtime:test-verifier",
             authority_seal="0" * 64,
         )
         with self.assertRaisesRegex(TypeError, "runtime_state_authority"):
             replay.composite_checkpoint(
                 runtime_state_authority=lambda: forged,
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:sealed-v1",
             )
@@ -339,6 +386,7 @@ class CausalReplayTests(unittest.TestCase):
                     replay=replay.checkpoint(),
                     runtime_components=components,
                     authority_id="runtime:test",
+                    verifier_id="runtime:test-verifier",
                     authority_seal="0" * 64,
                 )
 
@@ -347,12 +395,17 @@ class CausalReplayTests(unittest.TestCase):
 
         authority = ForgedAuthority(
             authority_id="runtime:test",
-            secret=b"runtime-test-authority-secret-0000000001",
+            signer=lambda material: hmac.new(
+                b"runtime-test-authority-secret-0000000001",
+                material,
+                hashlib.sha256,
+            ).hexdigest(),
             cut_resolver=lambda: ("cut:unused", replay.checkpoint(), components),
         )
         with self.assertRaisesRegex(TypeError, "canonical RuntimeStateAuthority"):
             replay.composite_checkpoint(
                 runtime_state_authority=authority,
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:sealed-v1",
             )
@@ -374,6 +427,7 @@ class CausalReplayTests(unittest.TestCase):
         )
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=trusted,
+            runtime_state_verifier=self._state_verifier(),
             build_sha="e" * 64,
             protocol_ref="protocol:sealed-v1",
         )
@@ -397,15 +451,17 @@ class CausalReplayTests(unittest.TestCase):
                 replay=checkpoint.replay,
                 runtime_components=checkpoint.runtime_components,
                 authority_id=checkpoint.runtime_authority_id,
+                verifier_id=checkpoint.runtime_verifier_id,
                 authority_seal=checkpoint.runtime_authority_seal,
             )
 
-        with self.assertRaisesRegex(ReplayError, "authority seal mismatch"):
+        with self.assertRaisesRegex(ReplayError, "authority signature mismatch"):
             resume_from_composite_checkpoint(
                 events,
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
                 runtime_state_authority=attacker,
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="e" * 64,
                 protocol_ref="protocol:sealed-v1",
             )
@@ -430,6 +486,7 @@ class CausalReplayTests(unittest.TestCase):
         authority = self._state_authority(replay, components)
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=authority,
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:sealed-v1",
         )
@@ -444,6 +501,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_components=checkpoint.runtime_components,
             runtime_cut_id=checkpoint.runtime_cut_id,
             runtime_authority_id=checkpoint.runtime_authority_id,
+            runtime_verifier_id=checkpoint.runtime_verifier_id,
             runtime_authority_seal=checkpoint.runtime_authority_seal,
             build_sha="b" * 64,
             protocol_ref="protocol:forged",
@@ -454,6 +512,7 @@ class CausalReplayTests(unittest.TestCase):
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=forged,
                 runtime_state_authority=authority,
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="b" * 64,
                 protocol_ref="protocol:forged",
             )
@@ -468,6 +527,7 @@ class CausalReplayTests(unittest.TestCase):
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=self._state_authority(replay, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="e" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -491,6 +551,7 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
             checkpoint=restored,
             runtime_state_authority=self._state_authority(replay, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="e" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -508,6 +569,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, self._runtime_components()
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -531,6 +593,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, self._runtime_components()
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -570,6 +633,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, self._runtime_components()
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -595,6 +659,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, self._runtime_components()
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -618,6 +683,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, self._runtime_components()
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -640,6 +706,7 @@ class CausalReplayTests(unittest.TestCase):
         trusted = self._state_authority(replay, components)
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=trusted,
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:sealed-v1",
         )
@@ -661,13 +728,14 @@ class CausalReplayTests(unittest.TestCase):
                 self.assertNotEqual(tampered.fingerprint, checkpoint.fingerprint)
                 with self.assertRaisesRegex(
                     ReplayError,
-                    "checkpoint authority seal mismatch",
+                    "checkpoint authority signature mismatch",
                 ):
                     resume_from_composite_checkpoint(
                         events,
                         start_at="2026-09-24T09:59:00Z",
                         checkpoint=tampered,
                         runtime_state_authority=trusted,
+                        runtime_state_verifier=self._state_verifier(),
                         build_sha=build_sha,
                         protocol_ref=protocol_ref,
                     )
@@ -678,6 +746,7 @@ class CausalReplayTests(unittest.TestCase):
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
             runtime_state_authority=self._state_authority(replay, components),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="c" * 64,
             protocol_ref="protocol:registered-v1",
         )
@@ -692,6 +761,7 @@ class CausalReplayTests(unittest.TestCase):
                         start_at="2026-09-24T09:59:00Z",
                         checkpoint=checkpoint,
                         runtime_state_authority=self._state_authority(replay, components),
+                        runtime_state_verifier=self._state_verifier(),
                         build_sha=build_sha,
                         protocol_ref=protocol_ref,
                     )
@@ -719,6 +789,7 @@ class CausalReplayTests(unittest.TestCase):
                     secret=b"runtime-test-authority-secret-0000000001",
                     cut_resolver=moving_authority,
                 ),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -731,6 +802,7 @@ class CausalReplayTests(unittest.TestCase):
             runtime_state_authority=self._state_authority(
                 replay, components, cut_id="cut:one"
             ),
+            runtime_state_verifier=self._state_verifier(),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -742,6 +814,7 @@ class CausalReplayTests(unittest.TestCase):
                 runtime_state_authority=self._state_authority(
                     replay, components, cut_id="cut:aba"
                 ),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -766,6 +839,7 @@ class CausalReplayTests(unittest.TestCase):
                     secret=b"runtime-test-authority-secret-0000000001",
                     cut_resolver=stale_authority,
                 ),
+                runtime_state_verifier=self._state_verifier(),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )

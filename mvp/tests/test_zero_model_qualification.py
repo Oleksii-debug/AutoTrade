@@ -199,9 +199,21 @@ class ZeroModelQualificationTests(unittest.TestCase):
             return_value=SimpleNamespace(
                 stdout=" M mvp/autotrade_mvp/pipeline.py\n"
             ),
-        ):
+        ) as git:
             with self.assertRaisesRegex(RuntimeError, "source changes"):
                 _require_clean_checkout()
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ),
+        )
 
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)

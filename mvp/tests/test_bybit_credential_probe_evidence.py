@@ -72,6 +72,9 @@ def _capture(
     source_uri="https://api.bybit.com/v5/user/query-api",
     product_family="SPOT",
     response_surface="V5_UTA_REST",
+    request_timestamp_ms=1791064800123,
+    recv_window_ms=5000,
+    http_status=200,
     response=None,
     observed_at="2026-10-03T22:01:02Z",
 ):
@@ -85,6 +88,9 @@ def _capture(
         source_uri=source_uri,
         product_family=product_family,
         response_surface=response_surface,
+        request_timestamp_ms=request_timestamp_ms,
+        recv_window_ms=recv_window_ms,
+        http_status=http_status,
         response=response,
         observed_at=observed_at,
     )
@@ -156,6 +162,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             evidence.source_uri,
             "https://api.bybit.com/v5/user/query-api",
         )
+        self.assertEqual(evidence.request_timestamp_ms, 1791064800123)
+        self.assertEqual(evidence.recv_window_ms, 5000)
+        self.assertEqual(evidence.http_status, 200)
         self.assertIs(
             evidence.classification,
             BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
@@ -255,6 +264,25 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             {"response_surface": "WS_OE_GENERAL"},
         )
         for overrides in cases:
+            with self.subTest(overrides=overrides), self.assertRaises(
+                ProviderCoreError
+            ):
+                _capture(**overrides)
+
+    def test_request_window_and_http_status_are_exact_receipt_fields(self):
+        bad_cases = (
+            {"request_timestamp_ms": True},
+            {"request_timestamp_ms": -1},
+            {"request_timestamp_ms": _IntSubclass(1)},
+            {"recv_window_ms": True},
+            {"recv_window_ms": 0},
+            {"recv_window_ms": 60001},
+            {"recv_window_ms": _IntSubclass(5000)},
+            {"http_status": True},
+            {"http_status": 201},
+            {"http_status": _IntSubclass(200)},
+        )
+        for overrides in bad_cases:
             with self.subTest(overrides=overrides), self.assertRaises(
                 ProviderCoreError
             ):
@@ -377,6 +405,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             source_uri="https://api.bybit.com/v5/user/query-api",
             response_surface="V5_UTA_REST",
             product_family="SPOT",
+            request_timestamp_ms=1791064800123,
+            recv_window_ms=5000,
+            http_status=200,
             ret_code=10003,
             response_sha256="sha256:" + "0" * 64,
             observed_at="2026-10-03T22:01:02Z",
@@ -418,6 +449,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "source_uri": "https://api.bybit.com/v5/user/query-api",
                 "response_surface": "V5_UTA_REST",
                 "product_family": "SPOT",
+                "request_timestamp_ms": 1791064800123,
+                "recv_window_ms": 5000,
+                "http_status": 200,
                 "ret_code": 10003,
                 "response_sha256": evidence.response_sha256,
                 "observed_at": "2026-10-03T22:01:02Z",
@@ -439,6 +473,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             source_uri=evidence.source_uri,
             response_surface=evidence.response_surface,
             product_family=evidence.product_family,
+            request_timestamp_ms=evidence.request_timestamp_ms,
+            recv_window_ms=evidence.recv_window_ms,
+            http_status=evidence.http_status,
             ret_code=evidence.ret_code,
             response_sha256=evidence.response_sha256,
             observed_at=evidence.observed_at,
@@ -476,6 +513,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(evidence.credential_handle, handle)
             self.assertEqual(evidence.credential_handle.generation, 1)
+            self.assertEqual(evidence.request_timestamp_ms, 1791064800123)
+            self.assertEqual(evidence.recv_window_ms, 5000)
+            self.assertEqual(evidence.http_status, 200)
             self.assertIs(
                 evidence.classification,
                 BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
@@ -710,9 +750,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             (200, {"retCode": 0, "bad": (1, 2)}),
         )
         for http_status, response in bad:
-            with self.subTest(http_status=http_status, response=response), self.assertRaises(
-                ProviderCoreError
-            ):
+            with self.subTest(
+                http_status=http_status,
+                response=response,
+            ), self.assertRaises(ProviderCoreError):
                 BybitCredentialProbeWireResponse(
                     http_status=http_status,
                     response=response,

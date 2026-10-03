@@ -1497,9 +1497,12 @@
 
   function authorityPolicyActions() {
     const raw = requiredPolicyInput("authority-actions", "allowed actions");
-    const actions = raw.split(",").map((item) => item.trim()).filter(Boolean);
-    if (actions.length === 0 || new Set(actions).size !== actions.length) {
-      throw new Error("allowed actions must be non-empty and unique");
+    const actions = raw.split(",");
+    if (actions.some((item) => item === "" || item !== item.trim())) {
+      throw new Error("allowed actions must be comma-separated canonical names without surrounding whitespace or empty entries");
+    }
+    if (new Set(actions).size !== actions.length) {
+      throw new Error("allowed actions must be unique");
     }
     if (actions.some((item) => item !== item.toUpperCase())) {
       throw new Error("allowed actions must use canonical uppercase names");

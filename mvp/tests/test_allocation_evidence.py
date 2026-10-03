@@ -979,6 +979,19 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                         baseline = values
                     self.assertEqual(values, baseline)
 
+    def test_horizon_binding_algorithm_is_bound_into_policy_identity(self):
+        bundle = self.bundle()
+        original = self.allocate(bundle=bundle)
+        with patch.object(
+            allocation_module,
+            "_OBJECTIVE_HORIZON_BINDING_ALGORITHM",
+            "test-future-horizon-binding-v2",
+            create=True,
+        ):
+            changed = self.allocate(bundle=bundle)
+        self.assertNotEqual(original.policy_config_digest, changed.policy_config_digest)
+        self.assertNotEqual(original.decision_digest, changed.decision_digest)
+
     def test_fx_projection_algorithm_is_bound_into_policy_identity(self):
         candidate, bundle = self.inverse_fx_bundle()
         original = self.allocate(candidate=candidate, bundle=bundle)

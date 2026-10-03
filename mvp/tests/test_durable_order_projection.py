@@ -86,6 +86,24 @@ def provider_evidence(
     }
 
 
+class SnapshotOnlyArtifactStore(ArtifactStore):
+    """Regression double that forbids legacy split reads."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.authenticated_snapshot_reads = 0
+
+    def read_authenticated_snapshot(self, artifact_id):
+        self.authenticated_snapshot_reads += 1
+        return super().read_authenticated_snapshot(artifact_id)
+
+    def load_manifest(self, artifact_id):
+        raise AssertionError("legacy split manifest read must not be used")
+
+    def read_bytes(self, artifact_id):
+        raise AssertionError("legacy split object read must not be used")
+
+
 class DurableOrderProjectionTests(unittest.TestCase):
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
@@ -660,6 +678,48 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "cancel-command-durable",
             )
 
+
+    def test_provider_evidence_uses_one_authenticated_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = SnapshotOnlyArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-authenticated-evidence",
+                client_order_id="authenticated-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "authenticated-evidence",
+                "provider_order_id": "provider-authenticated-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            acknowledged = book.acknowledge(
+                event_key="ack-authenticated-evidence",
+                client_order_id="authenticated-evidence",
+                provider_order_id="provider-authenticated-evidence",
+                status="ACCEPTED",
+                committed_at=T1,
+                evidence_refs=[ref],
+            )
+
+            self.assertEqual(acknowledged.snapshot.state, "ACKNOWLEDGED")
+            self.assertEqual(artifacts.authenticated_snapshot_reads, 1)
 
     def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):
         with TemporaryDirectory() as directory:

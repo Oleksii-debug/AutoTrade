@@ -32,6 +32,7 @@ from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, ve
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class UnavailableModelInventory:
@@ -60,19 +61,35 @@ def _require_source_sha(value: str) -> str:
     return value
 
 
-def _observed_source_sha() -> str:
-    """Read source identity from the actual Git checkout, not caller metadata."""
-
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+        return subprocess.run(
+            ["git", *args],
+            cwd=_SOURCE_ROOT,
             check=True,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("cannot resolve observed Git source identity") from error
-    return _require_source_sha(result.stdout.strip())
+        raise RuntimeError("cannot inspect qualification Git checkout") from error
+
+
+def _observed_source_sha() -> str:
+    """Read source identity from the checkout that owns this qualifier."""
+
+    return _require_source_sha(_git("rev-parse", "HEAD").stdout.strip())
+
+
+def _require_clean_checkout() -> None:
+    status = _git(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ).stdout
+    if status:
+        raise RuntimeError(
+            "qualification Git checkout has tracked or untracked source changes"
+        )
 
 
 def _require_exact_checkout(expected_source_sha: str) -> str:
@@ -82,6 +99,7 @@ def _require_exact_checkout(expected_source_sha: str) -> str:
         raise RuntimeError(
             "qualification source identity does not match actual Git checkout"
         )
+    _require_clean_checkout()
     return observed
 
 

@@ -5,8 +5,10 @@ import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
+    BorrowAvailabilityEvidence,
     BorrowEvidenceError,
     BorrowRecallEvidence,
+    BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
     verify_provider_borrow_evidence,
 )
@@ -23,6 +25,25 @@ ACCOUNT_ID = "paper-borrow"
 ENVIRONMENT = "PAPER"
 
 
+def availability() -> BorrowAvailabilityEvidence:
+    return BorrowAvailabilityEvidence(
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+        instrument_id=INSTRUMENT_ID,
+        instrument_version=1,
+        locate_id="locate-authenticated-snapshot",
+        provider_revision="availability-snapshot-r1",
+        capacity_quantity="100",
+        hard_to_borrow=False,
+        observed_at="2026-10-03T17:00:30Z",
+        effective_at="2026-10-03T17:00:00Z",
+        expires_at="2026-10-03T18:00:00Z",
+        evidence_ref="provider:availability-snapshot-r1",
+        indicative_rate="0.01",
+    )
+
+
 def recall() -> BorrowRecallEvidence:
     return BorrowRecallEvidence(
         recall_id="recall-authenticated-snapshot",
@@ -37,6 +58,23 @@ def recall() -> BorrowRecallEvidence:
         effective_at="2026-10-03T17:00:00Z",
         deadline="2026-10-03T18:00:00Z",
         evidence_ref="provider:recall-snapshot-r1",
+    )
+
+
+def resolution() -> BorrowRecallResolutionEvidence:
+    return BorrowRecallResolutionEvidence(
+        resolution_id="resolution-authenticated-snapshot",
+        recall_id="recall-authenticated-snapshot",
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+        instrument_id=INSTRUMENT_ID,
+        instrument_version=1,
+        provider_revision="resolution-snapshot-r1",
+        resolved_quantity="1",
+        observed_at="2026-10-03T17:10:30Z",
+        effective_at="2026-10-03T17:10:00Z",
+        evidence_ref="provider:resolution-snapshot-r1",
     )
 
 
@@ -62,16 +100,18 @@ class FailingSnapshotStore(ArtifactStore):
 
 
 class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
-    def test_valid_recall_consumes_exactly_one_authenticated_snapshot(self):
-        with TemporaryDirectory() as directory:
-            producer = ArtifactStore(directory)
-            bound = bind_provider_evidence(producer, recall())
-            guarded = SnapshotOnlyStore(directory)
+    def test_each_evidence_kind_consumes_exactly_one_authenticated_snapshot(self):
+        for factory in (availability, recall, resolution):
+            with self.subTest(evidence_kind=factory.__name__):
+                with TemporaryDirectory() as directory:
+                    producer = ArtifactStore(directory)
+                    bound = bind_provider_evidence(producer, factory())
+                    guarded = SnapshotOnlyStore(directory)
 
-            reference = verify_provider_borrow_evidence(bound, guarded)
+                    reference = verify_provider_borrow_evidence(bound, guarded)
 
-            self.assertEqual(reference, bound.evidence_ref)
-            self.assertEqual(guarded.snapshot_reads, 1)
+                    self.assertEqual(reference, bound.evidence_ref)
+                    self.assertEqual(guarded.snapshot_reads, 1)
 
     def test_snapshot_integrity_failure_precedes_journal_mutation(self):
         with TemporaryDirectory() as directory:

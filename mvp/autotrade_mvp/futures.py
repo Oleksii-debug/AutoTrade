@@ -629,7 +629,7 @@ def settle_fraction(
         raise FuturesError("value must be an exact Fraction")
     exact_value = _bounded_fraction(value)
     step = _decimal(quantum, "quantum", positive=True)
-    if rounding not in {"HALF_EVEN", "DOWN"}:
+    if type(rounding) is not str or rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
     units = _bounded_fraction(exact_value / _fraction(step))

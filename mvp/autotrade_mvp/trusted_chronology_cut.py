@@ -32,6 +32,7 @@ _IMPL_SEAL_EXCLUDED_NAMES = frozenset(
         "_build_post_verification_currentness",
         "_build_current_cut_with_horizon",
         "_build_impl_namespace_guard",
+        "_build_test_current_cut_verifier",
         "require_current_trusted_chronology_cut",
         "require_chronology_horizon",
     }
@@ -206,6 +207,24 @@ _require_current_trusted_chronology_cut_with_horizon = _build_current_cut_with_h
 )
 
 
+def _build_test_current_cut_verifier():
+    """Build a focused verifier after test doubles are installed.
+
+    Production authority never calls this helper. Legacy chronology tests must
+    inject signer/evidence doubles without rebinding the already-sealed production
+    verifier. Capturing a fresh namespace guard here treats the explicit test
+    doubles as that verifier's baseline while still detecting any rebinding that
+    occurs from inside a verifier callback.
+    """
+
+    return _build_current_cut_with_horizon(
+        require_current_cut=_original_require_current_trusted_chronology_cut,
+        require_post_currentness=_require_post_verification_currentness,
+        require_horizon=_original_require_chronology_horizon,
+        require_impl_namespace_sealed=_build_impl_namespace_guard(_impl.__dict__),
+    )
+
+
 def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> None:
     """Prevent caller-owned cuts from becoming standalone horizon authority."""
 
@@ -218,6 +237,7 @@ def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> 
 _impl._build_post_verification_currentness = _build_post_verification_currentness
 _impl._build_current_cut_with_horizon = _build_current_cut_with_horizon
 _impl._build_impl_namespace_guard = _build_impl_namespace_guard
+_impl._build_test_current_cut_verifier = _build_test_current_cut_verifier
 _impl.require_current_trusted_chronology_cut = (
     _require_current_trusted_chronology_cut_with_horizon
 )

@@ -202,6 +202,12 @@ def _exact_collection(value: object, *, name: str) -> tuple[object, ...]:
     return tuple(value)
 
 
+def _permission_none(value: object, *, name: str) -> str:
+    if type(value) is not str or value != "NONE":
+        raise ResearchBoundaryError(f"{name} cannot grant authority")
+    return "NONE"
+
+
 def _hash(value: str) -> str:
     return "sha256:" + sha256(value.encode("utf-8")).hexdigest()
 
@@ -232,8 +238,11 @@ class ResearchEvidence:
             )
         if self.untrusted_content is not True:
             raise ResearchBoundaryError("research evidence must remain untrusted")
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError("research evidence cannot grant authority")
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(self.permission_effect, name="research evidence"),
+        )
         if not isinstance(self.redistribution, Redistribution):
             raise ResearchBoundaryError("redistribution must be explicit")
 
@@ -332,10 +341,14 @@ class AdmittedResearchToolRequest:
         if len(set(refs)) != len(refs):
             raise ResearchBoundaryError("evidence references must be unique")
         object.__setattr__(self, "evidence_refs", refs)
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError(
-                "admitted research request cannot grant authority"
-            )
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(
+                self.permission_effect,
+                name="admitted research request",
+            ),
+        )
 
 
 class ResearchToolBoundary:
@@ -431,8 +444,11 @@ class ResearchModelResult:
             )
         )
         object.__setattr__(self, "requested_capabilities", capabilities)
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError("model result cannot grant authority")
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(self.permission_effect, name="model result"),
+        )
 
 
 _FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
@@ -489,15 +505,15 @@ def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
     if depth > _MAX_PROPOSAL_DEPTH:
         raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
     found: set[str] = set()
-    if isinstance(value, Mapping):
+    if type(value) in (dict, _FrozenDict):
         for key, nested in value.items():
-            if not isinstance(key, str):
-                raise ResearchBoundaryError("model proposal object keys must be strings")
+            if type(key) is not str:
+                raise ResearchBoundaryError("model proposal object keys must be exact strings")
             normalized = _privileged_key(key.strip())
             if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
                 found.add(normalized)
             found.update(_scan_privileged_fields(nested, depth=depth + 1))
-    elif isinstance(value, (list, tuple)):
+    elif type(value) in (list, tuple):
         for nested in value:
             found.update(_scan_privileged_fields(nested, depth=depth + 1))
     return frozenset(found)
@@ -554,11 +570,20 @@ def export_research_evidence(
     }
 
 
+def _plain_json(value: object) -> object:
+    if type(value) is _FrozenDict:
+        return {key: _plain_json(nested) for key, nested in value.items()}
+    if type(value) is tuple:
+        return [_plain_json(nested) for nested in value]
+    return value
+
+
 def canonical_export_digest(value: Mapping[str, object]) -> str:
-    if not isinstance(value, Mapping):
-        raise TypeError("value must be a mapping")
+    if type(value) is not dict:
+        raise TypeError("value must be an exact dict")
+    frozen = _freeze_proposal(value, label="canonical export")
     encoded = json.dumps(
-        value,
+        _plain_json(frozen),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

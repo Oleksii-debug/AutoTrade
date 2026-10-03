@@ -236,6 +236,32 @@ class PreparedEconomicBatch:
     already_committed: bool = False
 
 
+@dataclass(frozen=True)
+class EconomicBookCut:
+    """Read-only canonical economic projection from one durable journal cut.
+
+    This value is descriptive, not an independent write authority. Mutation
+    preparation must revalidate book_digest against the durable book before
+    constructing an envelope, and JournalStore aggregate-version fencing still
+    protects the later atomic commit.
+    """
+
+    provider_id: str
+    account_id: str
+    environment: str
+    transactions: tuple[JournalTransaction, ...]
+    book_digest: str
+    aggregate_version: int
+
+    def position(self, instrument: str) -> Decimal:
+        projection = ScopedEconomicBook(
+            environment=self.environment,
+            account_id=self.account_id,
+            transactions=self.transactions,
+        )
+        return projection.position(instrument)
+
+
 _PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"
 _PROVIDER_FILL_BINDING_EVENT_TYPE = "ProviderFillFinancialPlanBound"
 
@@ -1087,11 +1113,28 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         candidate = self._replay(self._events())
         self._book = candidate._book
 
+    def read_cut(self) -> EconomicBookCut:
+        """Replay and return the exact current durable economic-book cut."""
+
+        events = self._events()
+        current = self._replay(events)
+        return EconomicBookCut(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            transactions=current.transactions,
+            book_digest=current.audit_digest(),
+            aggregate_version=(
+                0 if not events else int(events[-1]["aggregate_version"])
+            ),
+        )
+
     def prepare_batch_mutation(
         self,
         transactions: Iterable[JournalTransaction],
         *,
         committed_at: str | None = None,
+        expected_previous_book_digest: str | None = None,
     ) -> PreparedEconomicBatch:
         """Prepare one economic batch without mutating durable state.
 
@@ -1110,6 +1153,14 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
 
         events = self._events()
         current = self._replay(events)
+        previous_digest = current.audit_digest()
+        if (
+            expected_previous_book_digest is not None
+            and previous_digest != expected_previous_book_digest
+        ):
+            raise AccountingConflict(
+                "economic book changed after validated read cut"
+            )
         candidate = ScopedEconomicBook(
             environment=self.environment,
             account_id=self.account_id,
@@ -1170,7 +1221,6 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 already_committed=True,
             )
 
-        previous_digest = current.audit_digest()
         resulting_digest = candidate.audit_digest()
         next_version = (
             1 if not events else int(events[-1]["aggregate_version"]) + 1

@@ -535,11 +535,14 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
     # contract here. This checks exact workload profile, plan digest, taxonomy,
     # JournalStore generation/start cut and plan-delivered-artifact SHA before any
     # durable-financial JournalStore mechanics are allowed to run.
-    measurement.require_campaign_binding(
-        spec=spec,
-        plan=campaign_plan,
-        cut=campaign_cut,
-    )
+    try:
+        measurement.require_campaign_binding(
+            spec=spec,
+            plan=campaign_plan,
+            cut=campaign_cut,
+        )
+    except RuntimeTargetHostMeasurementError as error:
+        raise RuntimeTargetHostDurableFinancialError(str(error)) from error
     return bind_durable_financial_latency_to_target_host_measurement(
         store,
         spec,

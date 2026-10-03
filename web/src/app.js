@@ -1589,6 +1589,7 @@
         ? "Retrying unresolved command " + commandId +
           " with its original idempotency identity. No new command is being created."
         : "Submitting host command " + commandId + ".");
+    byId("command-result").focus();
     try {
       const result = await submitCanonicalCommand(payload);
       const responseScopeCurrent = commandScopeMatchesCurrentSnapshot(payload);

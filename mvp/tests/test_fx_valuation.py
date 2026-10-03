@@ -713,5 +713,27 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+    def test_quote_factory_cannot_issue_polymorphic_quote(self):
+        touched = []
+
+        class HostileQuote(FxQuote):
+            def __init__(self, *args, **kwargs):
+                touched.append("init")
+                raise AssertionError("hostile quote constructor")
+
+        with self.assertRaisesRegex(FxValuationError, "exact FxQuote class"):
+            HostileQuote.create(
+                base_currency="EUR",
+                quote_currency="USD",
+                bid="1",
+                ask="1",
+                available_at=NOW,
+                source_id="provider:fx",
+                evidence_sha256=DIGEST,
+            )
+
+        self.assertEqual(touched, [])
+
+
 if __name__ == "__main__":
     unittest.main()

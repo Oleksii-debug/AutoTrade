@@ -1066,6 +1066,7 @@ def _prepare_provider_fill_correction_binding(
             request.get("correction_of") != active_fill_id
             or historical_projected.fill_id != corrected_fill_id
             or historical_projected.correction_of != active_fill_id
+            or historical_projected.provider_revision is None
             or historical_projected.provider_execution_id != execution_id
             or historical_projected.intent_id
             != initial_projected_evidence.intent_id

@@ -30,6 +30,17 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
           git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
+      - name: Require event base to match live target branch tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          test -n "$BASE_REF"
+          test -n "$EVENT_BASE_SHA"
+          git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          test "$(git rev-parse "refs/remotes/origin/${BASE_REF}^{commit}")" = "$EVENT_BASE_SHA"
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
         shell: bash

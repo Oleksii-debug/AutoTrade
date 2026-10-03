@@ -72,6 +72,43 @@ class AccessibleStatusTests(unittest.TestCase):
         ):
             self.assertIn(expected, text)
 
+    def test_canonical_journal_financial_scalars_fail_closed_on_noncanonical_types(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": 1000,
+                "cash": "1000.00",
+                "position": 1.0,
+                "journal_sequence": "007",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "final_equity": 1000,
+                "net_pnl": "0.00",
+                "total_fees": 0.0,
+                "turnover": "+1",
+                "max_drawdown": "1e2",
+                "reconciled": True,
+            },
+        )
+        for expected in (
+            "Initial capital: Unavailable",
+            "Cash (USD): Unavailable",
+            "Position (shares): Unavailable",
+            "Journal sequence: Unavailable",
+            "Final equity: Unavailable",
+            "Net profit or loss: Unavailable",
+            "Total fees: Unavailable",
+            "Turnover: Unavailable",
+            "Maximum drawdown: Unavailable",
+        ):
+            self.assertIn(expected, text)
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn("Economic edge: unproven", text)
+
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(
             {

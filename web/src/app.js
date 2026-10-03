@@ -177,6 +177,28 @@
     return token;
   }
 
+  function compareCanonicalUtcInstants(left, right, leftName, rightName) {
+    const leftToken = utcInstant(left, leftName);
+    const rightToken = utcInstant(right, rightName);
+    const parts = (token) => {
+      const withoutZ = token.slice(0, -1);
+      const dot = withoutZ.indexOf(".");
+      return dot === -1
+        ? [withoutZ, ""]
+        : [withoutZ.slice(0, dot), withoutZ.slice(dot + 1)];
+    };
+    const [leftBase, leftFraction] = parts(leftToken);
+    const [rightBase, rightFraction] = parts(rightToken);
+    if (leftBase < rightBase) return -1;
+    if (leftBase > rightBase) return 1;
+    const width = Math.max(leftFraction.length, rightFraction.length);
+    const normalizedLeft = leftFraction.padEnd(width, "0");
+    const normalizedRight = rightFraction.padEnd(width, "0");
+    if (normalizedLeft < normalizedRight) return -1;
+    if (normalizedLeft > normalizedRight) return 1;
+    return 0;
+  }
+
   function requiredStringArray(value, name) {
     if (!Array.isArray(value) ||
         value.some((item) => typeof item !== "string" || item.length === 0)) {
@@ -360,7 +382,11 @@
     }
     const startedAt = utcInstant(result.started_at, "started_at");
     const updatedAt = utcInstant(result.updated_at, "updated_at");
-    if (Date.parse(updatedAt) < Date.parse(startedAt)) {
+    if (compareCanonicalUtcInstants(
+        updatedAt,
+        startedAt,
+        "updated_at",
+        "started_at") < 0) {
       throw new Error("OperationResult updated_at cannot precede started_at");
     }
     return {

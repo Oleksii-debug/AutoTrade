@@ -164,6 +164,30 @@ class StrategyDescriptor:
         return "sha256:" + sha256(payload).hexdigest()
 
 
+def _readmit_strategy_descriptor(value: StrategyDescriptor) -> StrategyDescriptor:
+    """Detach a descriptor so later caller mutation cannot retarget a strategy."""
+
+    if type(value) is not StrategyDescriptor:
+        raise TypeError("descriptor must be StrategyDescriptor")
+    return StrategyDescriptor(
+        strategy_id=value.strategy_id,
+        version=value.version,
+        family=value.family,
+        feature_schema=value.feature_schema,
+        market_requirements=value.market_requirements,
+        minimum_history=value.minimum_history,
+        horizon_seconds=value.horizon_seconds,
+        decision_schedule=value.decision_schedule,
+        proposal_semantics=value.proposal_semantics,
+        parameter_bounds=value.parameter_bounds,
+        resource_profile=value.resource_profile,
+        supported_regimes=value.supported_regimes,
+        source_license=value.source_license,
+        evaluation_protocol_sha256=value.evaluation_protocol_sha256,
+        artifact_sha256=value.artifact_sha256,
+    )
+
+
 @dataclass(frozen=True)
 class CausalObservation:
     event_id: str
@@ -758,8 +782,7 @@ class NoTradeBaseline:
     """Deterministic null baseline that can never propose financial exposure."""
 
     def __init__(self, *, descriptor: StrategyDescriptor):
-        if not isinstance(descriptor, StrategyDescriptor):
-            raise TypeError("descriptor must be StrategyDescriptor")
+        descriptor = _readmit_strategy_descriptor(descriptor)
         if descriptor.family != "NO_TRADE_CONTROL":
             raise ValueError("no-trade descriptor family must be NO_TRADE_CONTROL")
         self.descriptor = descriptor
@@ -825,8 +848,7 @@ class ReturnThresholdBaseline:
         if self.proposal_quantity <= 0:
             raise ValueError("proposal_quantity must be positive")
         if descriptor is not None:
-            if not isinstance(descriptor, StrategyDescriptor):
-                raise TypeError("descriptor must be StrategyDescriptor or None")
+            descriptor = _readmit_strategy_descriptor(descriptor)
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
             bounds = {name: (Decimal(minimum), Decimal(maximum)) for name, minimum, maximum in descriptor.parameter_bounds}
@@ -1221,6 +1243,8 @@ def to_decision_proposal(
         economics_binding,
         instrument_version=instrument,
     )
+    proposal = bound.gross_proposal
+    economics_binding = bound.economics
     no_trade = bound.action == "HOLD"
     body: dict[str, object] = {
         "proposal_id": normalized_proposal_id,

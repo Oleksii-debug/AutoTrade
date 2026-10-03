@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import date
 from decimal import (
     Decimal,
@@ -24,7 +25,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     build_provider_fill_correction_transactions,
@@ -2040,6 +2041,170 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     )
                 ),
                 1,
+            )
+
+    def test_rehashed_historical_correction_cannot_retarget_semantic_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-rehash-1",
+                provider_revision="provider-revision-rehash-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:rehash-1",),
+            )
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:41:01Z",
+                obligation_id="settlement-correction-rehash-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-rehash-1-command",
+                    idempotency_key="correction-rehash-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:41:01Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:41:02Z",
+                )
+            )
+
+            retargeted_client = "client-order-retargeted"
+            retargeted_first_projected = replace(
+                first_projected,
+                client_order_id=retargeted_client,
+            )
+            retargeted_first_provider = replace(
+                first_provider,
+                client_order_id=retargeted_client,
+            )
+            second_projected = replace(
+                self.projected_fill(
+                    quantity="1.0",
+                    fill_id="fill-correction-rehash-2",
+                    provider_revision="provider-revision-rehash-2",
+                    correction_of=first_projected.fill_id,
+                ),
+                client_order_id=retargeted_client,
+            )
+            second_provider = replace(
+                self.provider_fill(
+                    quantity="1.0",
+                    evidence_refs=("provider-fill:rehash-2",),
+                ),
+                client_order_id=retargeted_client,
+            )
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=retargeted_first_projected,
+                original_provider=retargeted_first_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:42:01Z",
+                obligation_id="settlement-correction-rehash-2",
+            )
+
+            real_load_events = store.load_events
+
+            def load_events_with_rehashed_semantic_transplant(
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(aggregate_type, aggregate_id)
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_projected_fill"]["client_order_id"] = (
+                    retargeted_client
+                )
+                request["corrected_provider_fill"]["client_order_id"] = (
+                    retargeted_client
+                )
+                request["corrected_projected_fill_digest"] = payload_digest(
+                    request["corrected_projected_fill"]
+                )
+                request["corrected_provider_fill_digest"] = payload_digest(
+                    request["corrected_provider_fill"]
+                )
+                forged[0]["payload"]["request_digest"] = payload_digest(request)
+                forged[0]["payload_hash"] = payload_digest(forged[0]["payload"])
+                return forged
+
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+            before_bindings = store.load_events_by_aggregate_type(
+                "provider_fill_reservation_correction_binding"
+            )
+            store.load_events = load_events_with_rehashed_semantic_transplant
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "corrected evidence semantics are invalid",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-rehash-2-command",
+                        idempotency_key="correction-rehash-2-idempotency",
+                        original_projected_fill=retargeted_first_projected,
+                        original_provider_fill=retargeted_first_provider,
+                        corrected_projected_fill=second_projected,
+                        corrected_provider_fill=second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:42:01Z",
+                        settlement_obligations=(second_obligation,),
+                        committed_at="2026-09-25T12:42:02Z",
+                    )
+            finally:
+                store.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
             )
 
     def test_correction_precommit_failure_leaves_all_financial_projections_unchanged(self):

@@ -657,6 +657,21 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn('name="environment"', html)
 
 
+    def test_policy_actions_are_not_silently_normalized_after_review(self):
+        js = APP.read_text(encoding="utf-8")
+        policy = js[
+            js.index("function authorityPolicyActions()"):
+            js.index("function authorityPolicyPayload()")
+        ]
+        self.assertIn('const actions = raw.split(",")', policy)
+        self.assertIn('item === "" || item !== item.trim()', policy)
+        self.assertIn(
+            "without surrounding whitespace or empty entries",
+            policy,
+        )
+        self.assertNotIn(".map((item) => item.trim())", policy)
+        self.assertNotIn(".filter(Boolean)", policy)
+
     def test_policy_form_uses_exact_integer_and_decimal_guards_before_host_submit(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function positiveSafeIntegerPolicyInput(id, name)", js)

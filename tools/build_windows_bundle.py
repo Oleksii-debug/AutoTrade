@@ -368,9 +368,11 @@ def _load_composition(
         raise BundleError("unsupported Windows composition schema_version")
     if value["product"] != "AutoTrade":
         raise BundleError("Windows composition product must be AutoTrade")
-    composition_sha = _required_text(value["source_sha"], name="composition source_sha").lower()
+    composition_sha = _required_text(value["source_sha"], name="composition source_sha")
     if SOURCE_SHA.fullmatch(composition_sha) is None:
-        raise BundleError("composition source_sha must be an exact 40-character Git SHA")
+        raise BundleError(
+            "composition source_sha must be an exact 40-character lowercase Git SHA"
+        )
     if composition_sha != source_sha:
         raise BundleError("composition source_sha does not match bundle source_sha")
 

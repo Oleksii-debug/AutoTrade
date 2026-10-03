@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import NAMESPACE_URL, uuid5
 
+import mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification as bound
+import mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification as plan_bound
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -15,7 +17,6 @@ from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
 from mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification import (
     verify_declared_plan_runtime_target_host_qualification,
 )
-import mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification as plan_bound
 
 
 SOURCE_SHA = "a" * 40
@@ -58,7 +59,8 @@ def _receipt() -> SignedQualificationAttestation:
 
 
 class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
-    def _call(self, verifier, **extra):
+    @staticmethod
+    def _call(verifier, **extra):
         return verifier(
             _receipt(),
             evidence_store=object(),
@@ -82,21 +84,29 @@ class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
             self._call(verify_declared_plan_runtime_target_host_qualification)
 
     def test_partial_chronology_authority_fails_before_any_terminal_dispatch(self):
-        captured_dispatch = Mock()
-        verifier = plan_bound._build_product_verifier(captured_dispatch)
-
-        with self.assertRaisesRegex(
+        forged_terminal = Mock(return_value=object())
+        with patch.object(
+            bound,
+            "verify_chronology_bound_runtime_target_host_qualification",
+            forged_terminal,
+        ), self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "complete RELEASE_RUNTIME chronology authority",
         ):
-            self._call(verifier, recovery=object())
+            self._call(
+                verify_declared_plan_runtime_target_host_qualification,
+                recovery=object(),
+            )
+        forged_terminal.assert_not_called()
 
-        captured_dispatch.assert_not_called()
-
-    def test_complete_chronology_authority_is_the_only_canonical_terminal_dispatch(self):
+    def test_factory_dispatches_complete_chronology_only_to_captured_terminal(self):
         accepted = object()
-        captured_dispatch = Mock(return_value=accepted)
-        verifier = plan_bound._build_product_verifier(captured_dispatch)
+        captured_terminal = Mock(return_value=accepted)
+        lower = Mock(side_effect=AssertionError("chronology-free verifier ran"))
+        verifier = bound._build_product_dispatcher(
+            terminal_verifier=captured_terminal,
+            lower_verifier=lower,
+        )
 
         result = self._call(
             verifier,
@@ -106,45 +116,30 @@ class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
         )
 
         self.assertIs(result, accepted)
-        captured_dispatch.assert_called_once()
-        kwargs = captured_dispatch.call_args.kwargs
+        captured_terminal.assert_called_once()
+        lower.assert_not_called()
+        kwargs = captured_terminal.call_args.kwargs
         self.assertEqual(kwargs["plan_id"], "plan-1")
         self.assertEqual(kwargs["expected_release_artifact_id"], RELEASE_ID)
         self.assertEqual(kwargs["expected_release_artifact_sha256"], RELEASE_SHA)
 
-    def test_product_factory_captures_dispatch_before_module_rebinding(self):
+    def test_factory_captures_terminal_and_type_authority_before_rebinding(self):
         accepted = object()
-        captured_dispatch = Mock(return_value=accepted)
-        verifier = plan_bound._build_product_verifier(captured_dispatch)
-        forged_dispatch = Mock(
-            side_effect=AssertionError("rebound terminal dispatcher ran")
+        captured_terminal = Mock(return_value=accepted)
+        lower = Mock(side_effect=AssertionError("chronology-free verifier ran"))
+        verifier = bound._build_product_dispatcher(
+            terminal_verifier=captured_terminal,
+            lower_verifier=lower,
         )
 
-        with patch.object(
-            plan_bound,
-            "_terminal_chronology_dispatch",
-            forged_dispatch,
-        ):
-            result = self._call(
-                verifier,
-                recovery=object(),
-                runtime=object(),
-                chronology_cut=object(),
-            )
-
-        self.assertIs(result, accepted)
-        captured_dispatch.assert_called_once()
-        forged_dispatch.assert_not_called()
-
-    def test_product_gate_ignores_rebound_receipt_error_and_legacy_globals(self):
         class ForgedReceipt:
             pass
 
         class ForgedCompositionError(Exception):
             pass
 
-        forged_legacy = Mock(
-            side_effect=AssertionError("rebound chronology-free verifier ran")
+        forged_public_terminal = Mock(
+            side_effect=AssertionError("rebound public terminal verifier ran")
         )
         with (
             patch.object(plan_bound, "SignedQualificationAttestation", ForgedReceipt),
@@ -154,25 +149,29 @@ class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
                 ForgedCompositionError,
             ),
             patch.object(
-                plan_bound,
-                "_verify_declared_plan_runtime_target_host_qualification_without_chronology",
-                forged_legacy,
-            ),
-            self.assertRaisesRegex(
-                RuntimeTargetHostCompositionError,
-                "accepted RELEASE_RUNTIME chronology authority",
+                bound,
+                "verify_chronology_bound_runtime_target_host_qualification",
+                forged_public_terminal,
             ),
         ):
-            self._call(verify_declared_plan_runtime_target_host_qualification)
+            result = self._call(
+                verifier,
+                recovery=object(),
+                runtime=object(),
+                chronology_cut=object(),
+            )
 
-        forged_legacy.assert_not_called()
+        self.assertIs(result, accepted)
+        captured_terminal.assert_called_once()
+        lower.assert_not_called()
+        forged_public_terminal.assert_not_called()
 
     def test_production_dispatch_ignores_rebound_public_terminal_symbol(self):
         forged_terminal = Mock(
             side_effect=AssertionError("rebound public terminal verifier ran")
         )
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification."
+        with patch.object(
+            bound,
             "verify_chronology_bound_runtime_target_host_qualification",
             forged_terminal,
         ):
@@ -183,7 +182,6 @@ class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
                     runtime=object(),
                     chronology_cut=object(),
                 )
-
         forged_terminal.assert_not_called()
 
 

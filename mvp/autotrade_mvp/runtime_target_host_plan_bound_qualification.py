@@ -17,6 +17,7 @@ attestation, provider authority, economic edge, or trading authority.
 from __future__ import annotations
 
 from copy import copy
+import sys
 from typing import TYPE_CHECKING
 
 from autotrade_runtime.artifacts import ArtifactStore
@@ -205,112 +206,54 @@ def _verify_declared_plan_runtime_target_host_qualification_without_chronology(
         return accepted
 
 
-def _terminal_chronology_dispatch_authority():
-    """Return one write-once binder and one closure-private terminal dispatcher."""
-
-    verifier = None
-
-    def bind(candidate) -> None:
-        nonlocal verifier
-        if not callable(candidate):
-            raise TypeError("terminal chronology verifier must be callable")
-        if verifier is None:
-            verifier = candidate
-            return
-        if verifier is not candidate:
-            raise RuntimeError("terminal chronology verifier is already bound")
-
-    def dispatch(*args, **kwargs):
-        nonlocal verifier
-        if verifier is None:
-            # Import for initialization side effects only. The chronology module
-            # binds the canonical verifier into this closure exactly once.
-            from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
-
-            del _chronology_bound
-        selected = verifier
-        if selected is None:
-            raise RuntimeError("terminal chronology verifier is unavailable")
-        return selected(*args, **kwargs)
-
-    return bind, dispatch
-
-
-_bind_terminal_chronology_verifier, _terminal_chronology_dispatch = (
-    _terminal_chronology_dispatch_authority()
-)
-
-
-def _build_product_verifier(
-    terminal_chronology_dispatch,
+def verify_declared_plan_runtime_target_host_qualification(
+    receipt: SignedQualificationAttestation,
     *,
-    signed_receipt_type=SignedQualificationAttestation,
-    composition_error_type=RuntimeTargetHostCompositionError,
-    chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
+    evidence_store: ArtifactStore,
+    evidence_root: str,
+    journal_store: JournalStore,
+    plan_id: str,
+    spec: RuntimeBudgetSpec,
+    expected_release_artifact_id: str,
+    expected_release_artifact_sha256: str,
+    campaign_plan: RuntimeCampaignPlan | None = None,
+    campaign_cut: RuntimeCampaignCut | None = None,
+    measurement: TargetHostMeasurementArtifact | None = None,
+    recovery: RecoveryController | None = None,
+    runtime: ProductionHostRuntime | None = None,
+    chronology_cut: TrustedChronologyCut | None = None,
+) -> (
+    AcceptedComposedRuntimeTargetHostQualification
+    | AcceptedChronologyBoundRuntimeTargetHostQualification
 ):
-    """Capture every authority-bearing product dependency before module rebinding."""
+    """Verify product-facing WP-65 admission, requiring chronology for real receipts.
 
-    def verify_declared_plan_runtime_target_host_qualification(
-        receipt: SignedQualificationAttestation,
-        *,
-        evidence_store: ArtifactStore,
-        evidence_root: str,
-        journal_store: JournalStore,
-        plan_id: str,
-        spec: RuntimeBudgetSpec,
-        expected_release_artifact_id: str,
-        expected_release_artifact_sha256: str,
-        campaign_plan: RuntimeCampaignPlan | None = None,
-        campaign_cut: RuntimeCampaignCut | None = None,
-        measurement: TargetHostMeasurementArtifact | None = None,
-        recovery: RecoveryController | None = None,
-        runtime: ProductionHostRuntime | None = None,
-        chronology_cut: TrustedChronologyCut | None = None,
-    ) -> (
-        AcceptedComposedRuntimeTargetHostQualification
-        | AcceptedChronologyBoundRuntimeTargetHostQualification
-    ):
-        """Verify product-facing WP-65 admission, requiring chronology for real receipts."""
+    Exact canonical signed receipts are terminal authority candidates and therefore
+    fail closed unless all three RELEASE_RUNTIME chronology inputs are supplied.
+    Non-canonical receipt objects can only reach the private lower-level path used
+    by focused fencing tests; the canonical signed verifier rejects such objects.
+    """
 
-        chronology_supplied = (
-            recovery is not None or runtime is not None or chronology_cut is not None
+    chronology_values = (recovery, runtime, chronology_cut)
+    chronology_supplied = any(value is not None for value in chronology_values)
+    if chronology_supplied and any(value is None for value in chronology_values):
+        raise RuntimeTargetHostCompositionError(
+            "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
         )
-        chronology_complete = (
-            recovery is not None and runtime is not None and chronology_cut is not None
+
+    if chronology_supplied:
+        from .runtime_target_host_chronology_bound_qualification import (
+            verify_chronology_bound_runtime_target_host_qualification,
         )
-        if chronology_supplied and not chronology_complete:
-            raise composition_error_type(
-                "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
-            )
 
-        if chronology_supplied:
-            return terminal_chronology_dispatch(
-                receipt,
-                evidence_store=evidence_store,
-                evidence_root=evidence_root,
-                journal_store=journal_store,
-                recovery=recovery,
-                runtime=runtime,
-                chronology_cut=chronology_cut,
-                plan_id=plan_id,
-                spec=spec,
-                expected_release_artifact_id=expected_release_artifact_id,
-                expected_release_artifact_sha256=expected_release_artifact_sha256,
-                campaign_plan=campaign_plan,
-                campaign_cut=campaign_cut,
-                measurement=measurement,
-            )
-
-        if type(receipt) is signed_receipt_type:
-            raise composition_error_type(
-                "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
-            )
-
-        return chronology_free_verifier(
+        return verify_chronology_bound_runtime_target_host_qualification(
             receipt,
             evidence_store=evidence_store,
             evidence_root=evidence_root,
             journal_store=journal_store,
+            recovery=recovery,
+            runtime=runtime,
+            chronology_cut=chronology_cut,
             plan_id=plan_id,
             spec=spec,
             expected_release_artifact_id=expected_release_artifact_id,
@@ -320,20 +263,33 @@ def _build_product_verifier(
             measurement=measurement,
         )
 
-    return verify_declared_plan_runtime_target_host_qualification
+    if type(receipt) is SignedQualificationAttestation:
+        raise RuntimeTargetHostCompositionError(
+            "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
+        )
+
+    return _verify_declared_plan_runtime_target_host_qualification_without_chronology(
+        receipt,
+        evidence_store=evidence_store,
+        evidence_root=evidence_root,
+        journal_store=journal_store,
+        plan_id=plan_id,
+        spec=spec,
+        expected_release_artifact_id=expected_release_artifact_id,
+        expected_release_artifact_sha256=expected_release_artifact_sha256,
+        campaign_plan=campaign_plan,
+        campaign_cut=campaign_cut,
+        measurement=measurement,
+    )
 
 
-verify_declared_plan_runtime_target_host_qualification = _build_product_verifier(
-    _terminal_chronology_dispatch,
-    signed_receipt_type=SignedQualificationAttestation,
-    composition_error_type=RuntimeTargetHostCompositionError,
-    chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
+# Install the captured production dispatcher before a direct import of this module
+# can return the historical lazy-dispatch function. When the terminal facade is
+# already importing us through its private implementation, the sys.modules guard
+# avoids a circular read of a partially initialized facade; that facade installs
+# the same captured dispatcher immediately after its dependencies finish loading.
+_TERMINAL_FACADE_MODULE = (
+    f"{__package__}.runtime_target_host_chronology_bound_qualification"
 )
-
-# Complete canonical terminal-verifier binding during module import. Leaving this
-# until the first product call creates a pre-initialization window where external
-# code can invoke the otherwise write-once private binder with a forged verifier.
-# Importing here closes that window before this module becomes externally usable.
-from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
-
-del _chronology_bound
+if _TERMINAL_FACADE_MODULE not in sys.modules:
+    from . import runtime_target_host_chronology_bound_qualification as _terminal_bootstrap

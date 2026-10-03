@@ -13,15 +13,9 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification import (
     AcceptedChronologyBoundRuntimeTargetHostQualification,
     RuntimeTargetHostChronologyBindingError,
-    verify_chronology_bound_runtime_target_host_qualification,
 )
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     AcceptedComposedRuntimeTargetHostQualification,
-)
-from mvp.autotrade_mvp.runtime_target_host_measurement import (
-    MONOTONIC_CLOCK_ID,
-    ResourceTargetHostSample,
-    TargetHostMeasurementArtifact,
 )
 from mvp.autotrade_mvp.runtime_target_host_qualification import (
     AcceptedRuntimeTargetHostQualification,
@@ -29,6 +23,12 @@ from mvp.autotrade_mvp.runtime_target_host_qualification import (
 from mvp.autotrade_mvp.trusted_chronology import ChronologyScope
 from mvp.autotrade_mvp.trusted_chronology_cut import TrustedChronologyCut
 import mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification as bound
+
+
+def verify_chronology_bound_runtime_target_host_qualification(*args, **kwargs):
+    """Focused tests inject seams explicitly; production verifier stays sealed."""
+
+    return bound._build_terminal_verifier_for_tests()(*args, **kwargs)
 
 
 SOURCE_SHA = "a" * 40
@@ -88,37 +88,6 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
             source_sha=SOURCE_SHA,
             journal_store_identity_digest=store_digest,
             digest=TARGET_MEASUREMENT_DIGEST,
-        )
-
-    @staticmethod
-    def _real_measurement() -> TargetHostMeasurementArtifact:
-        return TargetHostMeasurementArtifact(
-            source_sha=SOURCE_SHA,
-            release_artifact_id=RELEASE_ID,
-            release_artifact_sha256=RELEASE_SHA,
-            scenario_id="target-host-pressure",
-            spec_digest="sha256:" + "9" * 64,
-            configuration_hash="sha256:" + "a" * 64,
-            host_fingerprint="sha256:" + "b" * 64,
-            workload_profile_hash="sha256:" + "c" * 64,
-            plan_digest="sha256:" + "d" * 64,
-            journal_taxonomy_digest="sha256:" + "e" * 64,
-            journal_store_identity_digest=STORE_DIGEST,
-            start_journal_sequence=0,
-            end_journal_sequence=0,
-            monotonic_clock_id=MONOTONIC_CLOCK_ID,
-            staleness_basis="same-host-monotonic",
-            research_interference_basis="same-host-monotonic",
-            financial_samples=(),
-            research_samples=(),
-            resource_samples=(
-                ResourceTargetHostSample(
-                    sample_id="resource-1",
-                    monotonic_ns=0,
-                    phase="qualification",
-                    metrics={"rss_bytes": 1},
-                ),
-            ),
         )
 
     @staticmethod
@@ -202,29 +171,6 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
             projection_sha256_by_kind={},
         )
 
-    @staticmethod
-    def _receipt_snapshotter():
-        return bound._build_receipt_snapshot(
-            evidence_ref_type=EvidenceArtifactRef,
-            attestation_type=QualificationAttestation,
-            signed_receipt_type=SignedQualificationAttestation,
-            binding_error_type=RuntimeTargetHostChronologyBindingError,
-        )
-
-    def _build_verifier(self, *, snapshot_measurement, current, plan_verify):
-        return bound._build_terminal_verifier(
-            snapshot_signed_receipt=self._receipt_snapshotter(),
-            snapshot_measurement=snapshot_measurement,
-            trusted_cut_type=TrustedChronologyCut,
-            chronology_scope_type=ChronologyScope,
-            binding_error_type=RuntimeTargetHostChronologyBindingError,
-            composed_acceptance_type=AcceptedComposedRuntimeTargetHostQualification,
-            signed_acceptance_type=AcceptedRuntimeTargetHostQualification,
-            accepted_terminal_type=AcceptedChronologyBoundRuntimeTargetHostQualification,
-            require_current_cut=current,
-            verify_plan_qualification=plan_verify,
-        )
-
     def _verify(self, chronology, *, qualification=None, second_current=None):
         measurement = self._measurement()
         if qualification is None:
@@ -232,45 +178,19 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         if second_current is None:
             second_current = chronology
         current = Mock(side_effect=[chronology, second_current])
-        snapshot_measurement = Mock(side_effect=[measurement, measurement])
+        horizon = Mock()
         plan_verify = Mock(return_value=qualification)
-        verifier = self._build_verifier(
-            snapshot_measurement=snapshot_measurement,
-            current=current,
-            plan_verify=plan_verify,
-        )
-        result = verifier(
-            self._receipt(),
-            evidence_store=object(),
-            evidence_root="evidence-root",
-            journal_store=object(),
-            recovery=object(),
-            runtime=object(),
-            chronology_cut=chronology,
-            plan_id="plan-1",
-            spec=object(),
-            expected_release_artifact_id=RELEASE_ID,
-            expected_release_artifact_sha256=RELEASE_SHA,
-            campaign_plan=object(),
-            campaign_cut=object(),
-            measurement=object(),
-        )
-        return result, current, snapshot_measurement, plan_verify
-
-    def test_requires_release_runtime_scope_before_terminal_verifier(self):
-        chronology = self._chronology(scope=ChronologyScope.SOURCE_QUALIFICATION)
-        current = Mock()
-        plan_verify = Mock()
-        verifier = self._build_verifier(
-            snapshot_measurement=Mock(return_value=self._measurement()),
-            current=current,
-            plan_verify=plan_verify,
-        )
-        with self.assertRaisesRegex(
-            RuntimeTargetHostChronologyBindingError,
-            "RELEASE_RUNTIME",
+        with (
+            patch.object(bound, "snapshot_target_host_measurement", return_value=measurement),
+            patch.object(bound, "require_current_trusted_chronology_cut", current),
+            patch.object(bound, "require_chronology_horizon", horizon),
+            patch.object(
+                bound,
+                "verify_declared_plan_runtime_target_host_qualification",
+                plan_verify,
+            ),
         ):
-            verifier(
+            result = verify_chronology_bound_runtime_target_host_qualification(
                 self._receipt(),
                 evidence_store=object(),
                 evidence_root="evidence-root",
@@ -286,12 +206,48 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
                 campaign_cut=object(),
                 measurement=object(),
             )
-        current.assert_not_called()
+        return result, current, horizon, plan_verify
+
+    def test_requires_release_runtime_scope_before_terminal_verifier(self):
+        chronology = self._chronology(scope=ChronologyScope.SOURCE_QUALIFICATION)
+        plan_verify = Mock()
+        with (
+            patch.object(
+                bound,
+                "snapshot_target_host_measurement",
+                return_value=self._measurement(),
+            ),
+            patch.object(
+                bound,
+                "verify_declared_plan_runtime_target_host_qualification",
+                plan_verify,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeTargetHostChronologyBindingError,
+                "RELEASE_RUNTIME",
+            ):
+                verify_chronology_bound_runtime_target_host_qualification(
+                    self._receipt(),
+                    evidence_store=object(),
+                    evidence_root="evidence-root",
+                    journal_store=object(),
+                    recovery=object(),
+                    runtime=object(),
+                    chronology_cut=chronology,
+                    plan_id="plan-1",
+                    spec=object(),
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
         plan_verify.assert_not_called()
 
     def test_brackets_wp65_verification_and_covers_signed_instants(self):
         chronology = self._chronology()
-        result, current, snapshot_measurement, plan_verify = self._verify(chronology)
+        result, current, horizon, plan_verify = self._verify(chronology)
 
         self.assertIsInstance(
             result,
@@ -299,18 +255,24 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         )
         self.assertEqual(result.chronology_cut, chronology)
         self.assertEqual(current.call_count, 2)
-        self.assertEqual(snapshot_measurement.call_count, 2)
         self.assertEqual(plan_verify.call_count, 1)
+        self.assertEqual(
+            horizon.call_args_list,
+            [
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+            ],
+        )
         first_kwargs = current.call_args_list[0].kwargs
         second_kwargs = current.call_args_list[1].kwargs
-        self.assertEqual(
-            first_kwargs["claimed_instants"],
-            ("2026-10-03T14:00:01Z", "2026-10-03T14:00:02Z"),
-        )
-        self.assertEqual(
-            second_kwargs["claimed_instants"],
-            ("2026-10-03T14:00:01Z", "2026-10-03T14:00:02Z"),
-        )
         self.assertEqual(first_kwargs["expected_scope"], ChronologyScope.RELEASE_RUNTIME)
         self.assertEqual(second_kwargs["expected_scope"], ChronologyScope.RELEASE_RUNTIME)
         self.assertEqual(first_kwargs["expected_source_sha"], SOURCE_SHA)
@@ -322,31 +284,39 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         chronology = self._chronology(store_digest="sha256:" + "0" * 64)
         current = Mock(return_value=chronology)
         plan_verify = Mock()
-        verifier = self._build_verifier(
-            snapshot_measurement=Mock(return_value=self._measurement()),
-            current=current,
-            plan_verify=plan_verify,
-        )
-        with self.assertRaisesRegex(
-            RuntimeTargetHostChronologyBindingError,
-            "JournalStore identity",
+        with (
+            patch.object(
+                bound,
+                "snapshot_target_host_measurement",
+                return_value=self._measurement(),
+            ),
+            patch.object(bound, "require_current_trusted_chronology_cut", current),
+            patch.object(
+                bound,
+                "verify_declared_plan_runtime_target_host_qualification",
+                plan_verify,
+            ),
         ):
-            verifier(
-                self._receipt(),
-                evidence_store=object(),
-                evidence_root="evidence-root",
-                journal_store=object(),
-                recovery=object(),
-                runtime=object(),
-                chronology_cut=chronology,
-                plan_id="plan-1",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
-            )
+            with self.assertRaisesRegex(
+                RuntimeTargetHostChronologyBindingError,
+                "JournalStore identity",
+            ):
+                verify_chronology_bound_runtime_target_host_qualification(
+                    self._receipt(),
+                    evidence_store=object(),
+                    evidence_root="evidence-root",
+                    journal_store=object(),
+                    recovery=object(),
+                    runtime=object(),
+                    chronology_cut=chronology,
+                    plan_id="plan-1",
+                    spec=object(),
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
         plan_verify.assert_not_called()
 
     def test_signed_wp65_acceptance_cannot_splice_other_journal_generation(self):
@@ -388,31 +358,35 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
 
     def test_runtime_or_recovery_change_during_wp65_verification_fails_closed(self):
         chronology = self._chronology()
-        current = Mock(
-            side_effect=[chronology, PermissionError("runtime occurrence changed")]
-        )
-        verifier = self._build_verifier(
-            snapshot_measurement=Mock(return_value=self._measurement()),
-            current=current,
-            plan_verify=Mock(return_value=self._qualification()),
-        )
-        with self.assertRaisesRegex(PermissionError, "runtime occurrence changed"):
-            verifier(
-                self._receipt(),
-                evidence_store=object(),
-                evidence_root="evidence-root",
-                journal_store=object(),
-                recovery=object(),
-                runtime=object(),
-                chronology_cut=chronology,
-                plan_id="plan-1",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
-            )
+        measurement = self._measurement()
+        current = Mock(side_effect=[chronology, PermissionError("runtime occurrence changed")])
+        with (
+            patch.object(bound, "snapshot_target_host_measurement", return_value=measurement),
+            patch.object(bound, "require_current_trusted_chronology_cut", current),
+            patch.object(bound, "require_chronology_horizon"),
+            patch.object(
+                bound,
+                "verify_declared_plan_runtime_target_host_qualification",
+                return_value=self._qualification(),
+            ),
+        ):
+            with self.assertRaisesRegex(PermissionError, "runtime occurrence changed"):
+                verify_chronology_bound_runtime_target_host_qualification(
+                    self._receipt(),
+                    evidence_store=object(),
+                    evidence_root="evidence-root",
+                    journal_store=object(),
+                    recovery=object(),
+                    runtime=object(),
+                    chronology_cut=chronology,
+                    plan_id="plan-1",
+                    spec=object(),
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
         self.assertEqual(current.call_count, 2)
 
     def test_second_chronology_value_must_be_identical_to_first_authority(self):
@@ -429,6 +403,7 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         chronology = self._chronology()
         authority_measurement = self._measurement()
         verifier_measurement = self._measurement()
+        horizon = Mock()
         current = Mock(side_effect=[chronology, chronology])
 
         def mutating_verifier(receipt, **kwargs):
@@ -442,61 +417,21 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
             kwargs["measurement"].digest = "sha256:" + "0" * 64
             return self._qualification()
 
-        verifier = self._build_verifier(
-            snapshot_measurement=Mock(
-                side_effect=[authority_measurement, verifier_measurement]
-            ),
-            current=current,
-            plan_verify=Mock(side_effect=mutating_verifier),
-        )
-        result = verifier(
-            self._receipt(),
-            evidence_store=object(),
-            evidence_root="evidence-root",
-            journal_store=object(),
-            recovery=object(),
-            runtime=object(),
-            chronology_cut=chronology,
-            plan_id="plan-1",
-            spec=object(),
-            expected_release_artifact_id=RELEASE_ID,
-            expected_release_artifact_sha256=RELEASE_SHA,
-            campaign_plan=object(),
-            campaign_cut=object(),
-            measurement=object(),
-        )
-
-        self.assertIsInstance(
-            result,
-            AcceptedChronologyBoundRuntimeTargetHostQualification,
-        )
-        self.assertEqual(
-            current.call_args_list[1].kwargs["claimed_instants"],
-            ("2026-10-03T14:00:01Z", "2026-10-03T14:00:02Z"),
-        )
-        self.assertEqual(current.call_args_list[1].kwargs["expected_source_sha"], SOURCE_SHA)
-
-    def test_factory_captures_current_cut_and_wp65_verifier_before_module_rebinding(self):
-        chronology = self._chronology()
-        captured_current = Mock(side_effect=[chronology, chronology])
-        captured_plan = Mock(return_value=self._qualification())
-        verifier = self._build_verifier(
-            snapshot_measurement=Mock(return_value=self._measurement()),
-            current=captured_current,
-            plan_verify=captured_plan,
-        )
-        forged_current = Mock(side_effect=AssertionError("rebound current-cut verifier ran"))
-        forged_plan = Mock(side_effect=AssertionError("rebound WP-65 verifier ran"))
-
         with (
-            patch.object(bound, "require_current_trusted_chronology_cut", forged_current),
+            patch.object(
+                bound,
+                "snapshot_target_host_measurement",
+                side_effect=[authority_measurement, verifier_measurement],
+            ),
+            patch.object(bound, "require_current_trusted_chronology_cut", current),
+            patch.object(bound, "require_chronology_horizon", horizon),
             patch.object(
                 bound,
                 "verify_declared_plan_runtime_target_host_qualification",
-                forged_plan,
+                side_effect=mutating_verifier,
             ),
         ):
-            result = verifier(
+            result = verify_chronology_bound_runtime_target_host_qualification(
                 self._receipt(),
                 evidence_store=object(),
                 evidence_root="evidence-root",
@@ -513,58 +448,23 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
                 measurement=object(),
             )
 
-        self.assertIsInstance(
-            result,
-            AcceptedChronologyBoundRuntimeTargetHostQualification,
+        self.assertIsInstance(result, AcceptedChronologyBoundRuntimeTargetHostQualification)
+        self.assertEqual(
+            horizon.call_args_list,
+            [
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+            ],
         )
-        self.assertEqual(captured_current.call_count, 2)
-        captured_plan.assert_called_once()
-        forged_current.assert_not_called()
-        forged_plan.assert_not_called()
-
-    def test_production_receipt_snapshot_ignores_rebound_private_snapshot_name(self):
-        forged_snapshot = Mock(side_effect=AssertionError("rebound receipt snapshot ran"))
-        with patch.object(bound, "_snapshot_signed_receipt", forged_snapshot):
-            with self.assertRaises((TypeError, RuntimeTargetHostChronologyBindingError)):
-                verify_chronology_bound_runtime_target_host_qualification(
-                    self._receipt(),
-                    evidence_store=object(),
-                    evidence_root="evidence-root",
-                    journal_store=object(),
-                    recovery=object(),
-                    runtime=object(),
-                    chronology_cut=self._chronology(),
-                    plan_id="plan-1",
-                    spec=object(),
-                    expected_release_artifact_id=RELEASE_ID,
-                    expected_release_artifact_sha256=RELEASE_SHA,
-                    campaign_plan=object(),
-                    campaign_cut=object(),
-                    measurement=object(),
-                )
-        forged_snapshot.assert_not_called()
-
-    def test_production_current_cut_ignores_rebound_module_verifier(self):
-        forged_current = Mock(side_effect=AssertionError("rebound current-cut verifier ran"))
-        with patch.object(bound, "require_current_trusted_chronology_cut", forged_current):
-            with self.assertRaises((TypeError, AttributeError, PermissionError, ValueError)):
-                verify_chronology_bound_runtime_target_host_qualification(
-                    self._receipt(),
-                    evidence_store=object(),
-                    evidence_root="evidence-root",
-                    journal_store=object(),
-                    recovery=object(),
-                    runtime=object(),
-                    chronology_cut=self._chronology(),
-                    plan_id="plan-1",
-                    spec=object(),
-                    expected_release_artifact_id=RELEASE_ID,
-                    expected_release_artifact_sha256=RELEASE_SHA,
-                    campaign_plan=object(),
-                    campaign_cut=object(),
-                    measurement=self._real_measurement(),
-                )
-        forged_current.assert_not_called()
+        self.assertEqual(current.call_args_list[1].kwargs["expected_source_sha"], SOURCE_SHA)
 
 
 if __name__ == "__main__":

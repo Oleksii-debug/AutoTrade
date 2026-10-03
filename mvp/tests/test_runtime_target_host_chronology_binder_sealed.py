@@ -7,24 +7,16 @@ import unittest
 
 
 class RuntimeTargetHostChronologyBinderSealedTests(unittest.TestCase):
-    def test_plan_bound_import_seals_terminal_binder_before_external_prebind(self):
+    def test_plan_bound_import_installs_sealed_terminal_dispatcher_before_return(self):
         repo_root = Path(__file__).resolve().parents[2]
         script = """
 import mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification as plan_bound
 
-
-def forged_terminal_verifier(*args, **kwargs):
-    return object()
-
-
-try:
-    plan_bound._bind_terminal_chronology_verifier(forged_terminal_verifier)
-except RuntimeError as error:
-    if "already bound" not in str(error):
-        raise
-else:
+verifier = plan_bound.verify_declared_plan_runtime_target_host_qualification
+if not verifier.__module__.endswith("runtime_target_host_chronology_bound_qualification"):
     raise AssertionError(
-        "terminal chronology binder remained externally pre-bindable after module import"
+        "plan-bound import returned before the sealed chronology dispatcher was installed: "
+        + verifier.__module__
     )
 """
         completed = subprocess.run(
@@ -38,7 +30,7 @@ else:
             completed.returncode,
             0,
             msg=(
-                "fresh-process terminal binder sealing regression failed\n"
+                "fresh-process terminal dispatcher sealing regression failed\n"
                 f"stdout:\n{completed.stdout}\n"
                 f"stderr:\n{completed.stderr}"
             ),

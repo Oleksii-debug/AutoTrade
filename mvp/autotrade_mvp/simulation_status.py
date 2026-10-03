@@ -528,7 +528,13 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         status.update(
             status="awaiting_order_reconciliation" if is_fill or active else "completed",
             session_status=session_status, reconciled=True,
-            reason="order_terminal_state_unconfirmed" if is_fill or active else None,
+            reason=(
+                result.get("reason")
+                if session_status == "BLOCKED"
+                else "order_terminal_state_unconfirmed"
+                if is_fill or active
+                else None
+            ),
             reconciliation_event_id=reconciliation["event_id"],
         )
         fees = _balance(book, "FEE_EXPENSE:USD", "USD")

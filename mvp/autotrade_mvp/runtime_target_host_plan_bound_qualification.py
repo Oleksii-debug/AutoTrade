@@ -15,7 +15,11 @@ from __future__ import annotations
 from autotrade_runtime.artifacts import ArtifactStore
 
 from .performance_qualification import RuntimeBudgetSpec
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_plan import load_declared_runtime_event_plan
 from .runtime_target_host_qualification import (
@@ -65,11 +69,19 @@ def verify_declared_plan_runtime_target_host_qualification(
         raise TypeError("journal_store must be exact JournalStore")
     spec = _snapshot_budget_spec(spec)
 
-    plan = load_declared_runtime_event_plan(
+    selected_journal_identity = require_exact_journal_store_authority(
         journal_store,
-        plan_id=plan_id,
-        spec=spec,
+        subject="runtime target-host qualification JournalStore",
     )
+    with journal_store_authority_scope(
+        journal_store,
+        selected_journal_identity,
+    ):
+        plan = load_declared_runtime_event_plan(
+            journal_store,
+            plan_id=plan_id,
+            spec=spec,
+        )
     return verify_runtime_target_host_qualification(
         receipt,
         evidence_store=evidence_store,

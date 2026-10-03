@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from research.autotrade_research.evaluation.gates import GateProfile
 from research.autotrade_research.evaluation.scientific_trial_owner import (
     gate_profile_subject_digest,
     gate_profile_subject_payload,
+    resolve_gate_profile_protocol_binding,
+)
+from research.autotrade_research.science.registry import (
+    ProtocolViolation,
+    ScientificRegistry,
 )
 from research.tests.test_evaluation_gates import profile
+from research.tests.test_science_registry import protocol
 
 
 class ScientificTrialOwnerProfileDigestTests(unittest.TestCase):
@@ -53,6 +61,30 @@ class ScientificTrialOwnerProfileDigestTests(unittest.TestCase):
         original = gate_profile_subject_digest(gate_profile)
         self.assertNotEqual(gate_profile_subject_digest(reordered_baselines), original)
         self.assertNotEqual(gate_profile_subject_digest(reordered_regimes), original)
+
+    def test_in_place_profile_mutation_after_registration_breaks_owner_binding(self) -> None:
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            payload = protocol()
+            payload["gate_profile_id"] = gate_profile.profile_id
+            payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
+            registry.register_protocol(payload)
+
+            object.__setattr__(
+                gate_profile,
+                "require_untouched_holdout",
+                not gate_profile.require_untouched_holdout,
+            )
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "rebound to a different immutable profile digest",
+            ):
+                resolve_gate_profile_protocol_binding(
+                    registry=registry,
+                    profile=gate_profile,
+                )
 
 
 if __name__ == "__main__":

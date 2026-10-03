@@ -178,6 +178,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             "role": "market_event_population",
             "artifact_id": artifact_id,
             "sha256": artifact_manifest["sha256"],
+            "manifest_hash": artifact_manifest["manifest_hash"],
             "rights_id": "research-fixture",
         }
         return self.registry.commit(
@@ -305,6 +306,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             "role": "market_event_population",
             "artifact_id": _uuid(30, 1),
             "sha256": "sha256:" + "0" * 64,
+            "manifest_hash": "sha256:" + "1" * 64,
             "rights_id": "research-fixture",
         }
         with self.assertRaisesRegex(
@@ -313,6 +315,90 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         ):
             self.registry.commit(
                 self._manifest([digest], content_refs=[content_ref])
+            )
+
+    def test_artifact_manifest_hash_is_bound_by_dataset_vintage(self):
+        rows = self._base_events()
+        artifact_id = _uuid(31, 1)
+        artifact_manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=canonical_market_event_population_bytes(rows),
+            media_type="application/vnd.autotrade.market-event-population+json",
+            rights={
+                "storage": True,
+                "export": False,
+                "rights_id": "research-fixture",
+            },
+        )
+        content_ref = {
+            "ordinal": 1,
+            "role": "market_event_population",
+            "artifact_id": artifact_id,
+            "sha256": artifact_manifest["sha256"],
+            "manifest_hash": "sha256:" + "0" * 64,
+            "rights_id": "research-fixture",
+        }
+        manifest_digest = self.registry.commit(
+            self._manifest(
+                [artifact_manifest["sha256"]],
+                content_refs=[content_ref],
+            )
+        )
+        with self.assertRaisesRegex(
+            HistoricalConflict,
+            "artifact manifest identity differs",
+        ):
+            fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+
+    def test_artifact_rights_identity_is_bound_by_dataset_vintage(self):
+        rows = self._base_events()
+        artifact_id = _uuid(32, 1)
+        artifact_manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=canonical_market_event_population_bytes(rows),
+            media_type="application/vnd.autotrade.market-event-population+json",
+            rights={
+                "storage": True,
+                "export": False,
+                "rights_id": "research-fixture",
+            },
+        )
+        content_ref = {
+            "ordinal": 1,
+            "role": "market_event_population",
+            "artifact_id": artifact_id,
+            "sha256": artifact_manifest["sha256"],
+            "manifest_hash": artifact_manifest["manifest_hash"],
+            "rights_id": "different-rights",
+        }
+        manifest_digest = self.registry.commit(
+            self._manifest(
+                [artifact_manifest["sha256"]],
+                content_refs=[content_ref],
+            )
+        )
+        with self.assertRaisesRegex(
+            HistoricalConflict,
+            "rights identity differs",
+        ):
+            fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
             )
 
     def test_caller_forged_validation_feature_is_rejected(self):

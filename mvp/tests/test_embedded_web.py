@@ -348,6 +348,30 @@ class EmbeddedWebTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "size"):
             load_immutable_web_bundle(mutated, bodies)
 
+    def test_body_path_subclass_is_rejected_before_equality_dispatch(self):
+        class HostilePath(str):
+            comparisons = 0
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                type(self).comparisons += 1
+                raise AssertionError("hostile path comparison executed")
+
+        bodies = {item.path: item.body for item in self.web_bundle.assets}
+        bodies["app.js"] = bodies.pop("app.js")
+        hostile = {
+            (HostilePath(path) if path == "app.js" else path): body
+            for path, body in bodies.items()
+        }
+        HostilePath.comparisons = 0
+
+        with self.assertRaisesRegex(TypeError, "body paths"):
+            load_immutable_web_bundle(
+                self.web_bundle.manifest_bytes,
+                hostile,
+            )
+        self.assertEqual(HostilePath.comparisons, 0)
+
     def test_current_canonical_web_bytes_fit_the_immutable_bundle_contract(self):
         root = Path(__file__).resolve().parents[2] / "web" / "src"
         names = ("index.html", "app.js", "host-api-routes.js", "styles.css")
@@ -443,6 +467,40 @@ class EmbeddedWebTests(unittest.TestCase):
             ).status,
             400,
         )
+
+    def test_static_target_subclass_is_rejected_before_url_parser_dispatch(self):
+        class HostileTarget(str):
+            lstrip_calls = 0
+
+            def lstrip(self, *args, **kwargs):
+                type(self).lstrip_calls += 1
+                raise AssertionError("hostile target parser callback executed")
+
+        response = self.app.dispatch(
+            method="GET",
+            target=HostileTarget("/index.html"),
+            headers={},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(HostileTarget.lstrip_calls, 0)
+
+    def test_static_mapping_subclass_is_rejected_before_items_dispatch(self):
+        class HostileHeaders(dict):
+            items_calls = 0
+
+            def items(self):
+                type(self).items_calls += 1
+                raise AssertionError("hostile header mapping callback executed")
+
+        headers = HostileHeaders()
+        HostileHeaders.items_calls = 0
+        response = self.app.dispatch(
+            method="GET",
+            target="/index.html",
+            headers=headers,
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(HostileHeaders.items_calls, 0)
 
     def test_static_origin_is_exact_and_duplicate_origin_fails(self):
         allowed = self.app.dispatch(

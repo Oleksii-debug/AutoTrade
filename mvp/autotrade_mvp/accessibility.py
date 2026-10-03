@@ -7,6 +7,7 @@ It is a development fallback surface, not NVDA release qualification.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any
 
@@ -32,6 +33,24 @@ def _safe_text(value: Any, default: str = "Unavailable") -> str:
     if type(value) is float and isfinite(value):
         return str(value)
     return default
+
+
+def _reservation_resource_text(value: Any) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        return ""
+    return value
+
+
+def _reservation_amount_text(value: Any) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        return ""
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return ""
+    if not amount.is_finite() or amount < 0:
+        return ""
+    return value
 
 
 def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable") -> str:
@@ -155,8 +174,8 @@ def format_accessible_status(
                     continue
                 reservation_readable = state_readable
                 for resource, amount in remaining.items():
-                    resource_text = _safe_text(resource, "")
-                    amount_text = _safe_text(amount, "")
+                    resource_text = _reservation_resource_text(resource)
+                    amount_text = _reservation_amount_text(amount)
                     if not resource_text or not amount_text:
                         malformed_reservations = True
                         reservation_readable = False

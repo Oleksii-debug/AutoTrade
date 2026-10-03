@@ -13,6 +13,8 @@ attestation, provider authority, or trading authority.
 
 from __future__ import annotations
 
+from copy import copy
+
 from autotrade_runtime.artifacts import ArtifactStore
 
 from .performance_qualification import RuntimeBudgetSpec
@@ -47,6 +49,30 @@ def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
         min_financial_samples=value.min_financial_samples,
         min_research_samples=value.min_research_samples,
     )
+
+
+def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
+    """Detach one issued cut before composed code performs any caller-visible work."""
+
+    if type(value) is not RuntimeCampaignCut:
+        raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
+    for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
+        if type(getattr(value, field)) is not str:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain exact inert text"
+            )
+    for field in ("start_journal_sequence", "started_monotonic_ns"):
+        field_value = getattr(value, field)
+        if type(field_value) is not int or field_value < 0:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain a non-negative integer"
+            )
+    detached = copy(value)
+    if type(detached) is not RuntimeCampaignCut or detached is value:
+        raise RuntimeTargetHostCompositionError(
+            "campaign_cut could not be detached at terminal authority boundary"
+        )
+    return detached
 
 
 def verify_declared_plan_runtime_target_host_qualification(
@@ -93,6 +119,13 @@ def verify_declared_plan_runtime_target_host_qualification(
             raise RuntimeTargetHostCompositionError(
                 "terminal WP-65 qualification requires composed target-host measurement authority"
             )
+        # ``RuntimeCampaignCut`` is a frozen issued object but Python callers can
+        # still abuse ``object.__setattr__``. Detach its inert scalar state before
+        # the composed verifier reaches measurement/campaign-window prechecks.
+        # Invalid non-cut inputs remain delegated to the composed authority's
+        # existing exact-type checks rather than becoming accepted here.
+        if type(campaign_cut) is RuntimeCampaignCut:
+            campaign_cut = _snapshot_campaign_cut(campaign_cut)
         return verify_composed_runtime_target_host_qualification(
             receipt,
             evidence_store=evidence_store,

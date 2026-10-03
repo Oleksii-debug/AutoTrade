@@ -247,17 +247,17 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(self, **kwargs):
                 raise RuntimeError("injected pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit"):
                     commit_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -275,23 +275,23 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(**kwargs):
+            def lose_ack_after_commit(self, **kwargs):
                 nonlocal injected
-                result = original_commit(**kwargs)
+                result = original_commit(self, **kwargs)
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected acknowledgement loss")
                 return result
 
-            store.commit_command = lose_ack_after_commit
+            JournalStore.commit_command = lose_ack_after_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
                     commit_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -443,18 +443,18 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             settlements = settlement_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(**kwargs):
+            def lose_ack_after_commit(self, **kwargs):
                 nonlocal injected
-                result = original_commit(**kwargs)
+                result = original_commit(self, **kwargs)
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected settlement acknowledgement loss")
                 return result
 
-            store.commit_command = lose_ack_after_commit
+            JournalStore.commit_command = lose_ack_after_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
                     commit_fill(
@@ -463,7 +463,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                         settlements=settlements,
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -528,12 +528,12 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             settlements = settlement_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(self, **kwargs):
                 raise RuntimeError("injected three-way pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit"):
                     commit_fill(
@@ -542,7 +542,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                         settlements=settlements,
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             self.assertEqual(economic_book(reopened_store).transactions, ())
@@ -1049,19 +1049,19 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(self, **kwargs):
                 raise RuntimeError("injected provider-fill binding failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(
                     RuntimeError, "provider-fill binding failure"
                 ):
                     self.commit_evidenced_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             self.assertEqual(
                 store.load_events_by_aggregate_type(
@@ -2689,12 +2689,12 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-failure",
             )
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(self, **kwargs):
                 raise RuntimeError("injected correction pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit failure"):
                     commit_provider_fill_correction_with_settlement_replacement(
@@ -2715,7 +2715,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T13:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened = JournalStore(path)
             reopened_reservations = reservation_book(reopened)

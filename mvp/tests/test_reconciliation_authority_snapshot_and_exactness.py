@@ -89,6 +89,22 @@ class ReconciliationAuthoritySnapshotAndExactnessTests(unittest.TestCase):
         values.update(overrides)
         return reconcile_account(**values)
 
+    def test_polymorphic_text_is_rejected_before_virtual_dispatch(self):
+        class HostileText(str):
+            def strip(self):
+                raise AssertionError("hostile strip must not run")
+
+            def upper(self):
+                raise AssertionError("hostile upper must not run")
+
+        with self.assertRaisesRegex(ValueError, "provider_id is required"):
+            self.base(provider_id=HostileText("TEST_PROVIDER"))
+
+        order = working("provider-order-1", "client-order-1")
+        object.__setattr__(order, "provider_order_id", HostileText("provider-order-1"))
+        with self.assertRaisesRegex(TypeError, "provider_order_id must be exact str"):
+            self.base(provider_working_orders=(order,))
+
     def test_singleton_authority_is_frozen_before_sequence_callbacks(self):
         snapshot = SnapshotConsistencyEvidence(
             provider_id="TEST_PROVIDER",

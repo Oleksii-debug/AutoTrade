@@ -71,6 +71,7 @@ class CredentialTransitionAnchorWitness:
     event_id: str
     payload_hash: str
     journal_sequence: int
+    verified_journal_cut: int
     receipt_id: str
     transition_sequence: int
 
@@ -96,6 +97,8 @@ class CredentialTransitionAnchorWitness:
         if (
             type(self.journal_sequence) is not int
             or self.journal_sequence < 1
+            or type(self.verified_journal_cut) is not int
+            or self.verified_journal_cut < self.journal_sequence
             or type(self.transition_sequence) is not int
             or self.transition_sequence < 1
         ):
@@ -255,12 +258,15 @@ def _witness(
     aggregate_id: str,
     event: dict[str, object],
     receipt: CredentialTransitionReceipt,
+    *,
+    verified_journal_cut: int,
 ) -> CredentialTransitionAnchorWitness:
     return CredentialTransitionAnchorWitness(
         aggregate_id=aggregate_id,
         event_id=event["event_id"],
         payload_hash=event["payload_hash"],
         journal_sequence=event["journal_sequence"],
+        verified_journal_cut=verified_journal_cut,
         receipt_id=receipt.receipt_id,
         transition_sequence=receipt.transition_sequence,
     )
@@ -305,7 +311,13 @@ def record_current_trade_credential_transition_anchor(
                     raise CredentialTransitionAnchorError(
                         "current vault receipt differs from latest durable anchor"
                     )
-                return _witness(aggregate_id, events[-1], current)
+                cut = JournalStore.current_journal_sequence(store)
+                return _witness(
+                    aggregate_id,
+                    events[-1],
+                    current,
+                    verified_journal_cut=cut,
+                )
             if verified.transition_sequence != latest.transition_sequence + 1:
                 raise CredentialTransitionAnchorError(
                     "new credential transition is not the next durable receipt sequence"
@@ -340,7 +352,13 @@ def record_current_trade_credential_transition_anchor(
             raise CredentialTransitionAnchorError(
                 "credential transition changed during durable anchor publication"
             )
-        return _witness(aggregate_id, readback[-1], verified)
+        cut = JournalStore.current_journal_sequence(store)
+        return _witness(
+            aggregate_id,
+            readback[-1],
+            verified,
+            verified_journal_cut=cut,
+        )
 
 
 def require_current_trade_credential_transition_anchor(
@@ -391,4 +409,9 @@ def require_current_trade_credential_transition_anchor(
             raise CredentialTransitionAnchorError(
                 "credential transition receipt changed during verification"
             )
-        return _witness(aggregate_id, events[-1], verified)
+        return _witness(
+            aggregate_id,
+            events[-1],
+            verified,
+            verified_journal_cut=cut_after,
+        )

@@ -1,11 +1,57 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
+from uuid import uuid4
 
+from mvp.autotrade_mvp.capabilities import CapabilitySnapshot
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
+    prepare_order_request,
     validate_intent_market_rules,
 )
+
+
+NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+def market_rules() -> WhiteBitMarketRules:
+    return WhiteBitMarketRules(
+        market="BTC_USDT",
+        market_type="SPOT",
+        is_tradfi_futures=False,
+        is_collateral=False,
+        trades_enabled=True,
+        step_size=Decimal("1"),
+        tick_size=Decimal("1"),
+        min_amount=Decimal("1"),
+        min_total=Decimal("1"),
+        max_total=Decimal("1000"),
+        delisted_at=None,
+    )
+
+
+def non_admitting_capability() -> CapabilitySnapshot:
+    return CapabilitySnapshot(
+        snapshot_id=str(uuid4()),
+        provider_id="WHITEBIT",
+        account_id="account-1",
+        entity_id="global",
+        environment="PAPER",
+        instrument_version="BTC_USDT:v1",
+        observed_at=NOW - timedelta(minutes=1),
+        expires_at=NOW + timedelta(minutes=1),
+        supported_order_types=frozenset({"LIMIT"}),
+        time_in_force=frozenset({"GTC"}),
+        permission_scopes=frozenset({"ORDER_WRITE"}),
+        position_mode="NET",
+        native_protection=frozenset(),
+        rate_limit_policy_id="whitebit-test",
+        data_entitlements=frozenset(),
+        evidence=(),
+        status="UNKNOWN",
+        sources=frozenset(),
+    )
 
 
 class WhiteBitMarketRuleAuthorityTests(unittest.TestCase):
@@ -55,16 +101,112 @@ class WhiteBitMarketRuleAuthorityTests(unittest.TestCase):
         )
 
         with self.assertRaises(TypeError):
-            validate_intent_market_rules(
+            validate_intent_market_rules(intent, rules, at=NOW)
+
+        self.assertEqual(calls, [])
+
+    def test_prepare_rejects_intent_subclass_before_authority_field_dispatch(self):
+        calls = []
+
+        class HostileIntent(WhiteBitOrderIntent):
+            def __getattribute__(self, name):
+                if name in {
+                    "instrument_version",
+                    "product_family",
+                    "market",
+                    "side",
+                    "order_type",
+                    "amount",
+                    "price",
+                    "activation_price",
+                    "time_in_force",
+                    "post_only",
+                    "reduce_only",
+                    "position_side",
+                }:
+                    calls.append(name)
+                return super().__getattribute__(name)
+
+        intent = HostileIntent(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount=Decimal("1"),
+            price=Decimal("10"),
+        )
+
+        with self.assertRaises(TypeError):
+            prepare_order_request(
                 intent,
-                rules,
-                at=__import__("datetime").datetime(
-                    2026,
-                    9,
-                    24,
-                    20,
-                    tzinfo=__import__("datetime").timezone.utc,
-                ),
+                client_order_id="cid-1",
+                account_id="account-1",
+                environment="PAPER",
+                capability=non_admitting_capability(),
+                market_rules=market_rules(),
+                at=NOW,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_prepare_rejects_capability_subclass_before_virtual_admission(self):
+        calls = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                if name in {
+                    "provider_id",
+                    "account_id",
+                    "environment",
+                    "instrument_version",
+                    "admits",
+                    "snapshot_id",
+                }:
+                    calls.append(name)
+                    if name == "admits":
+                        return lambda **_kwargs: True
+                return super().__getattribute__(name)
+
+        capability = HostileCapability(
+            snapshot_id=str(uuid4()),
+            provider_id="WHITEBIT",
+            account_id="account-1",
+            entity_id="global",
+            environment="PAPER",
+            instrument_version="BTC_USDT:v1",
+            observed_at=NOW - timedelta(minutes=1),
+            expires_at=NOW + timedelta(minutes=1),
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="whitebit-test",
+            data_entitlements=frozenset(),
+            evidence=(),
+            status="UNKNOWN",
+            sources=frozenset(),
+        )
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="1",
+            price="10",
+        )
+
+        with self.assertRaises(TypeError):
+            prepare_order_request(
+                intent,
+                client_order_id="cid-1",
+                account_id="account-1",
+                environment="PAPER",
+                capability=capability,
+                market_rules=market_rules(),
+                at=NOW,
             )
 
         self.assertEqual(calls, [])

@@ -194,6 +194,67 @@ class RuntimeTargetHostRunnerCallbackAuthorityTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_financial_operation_cannot_mutate_measurement_helper_code_in_place(self) -> None:
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            self._declare(journal, spec)
+
+            original_code = measurement_module._require_expected_event.__code__
+
+            def forged_require_expected_event(event, expected, *, after_sequence):
+                return event
+
+            def attack() -> None:
+                append_expected(journal, "fin-1")
+                measurement_module._require_expected_event.__code__ = (
+                    forged_require_expected_event.__code__
+                )
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    r"executable authority: .*_require_expected_event",
+                ):
+                    self._run(journal, spec, operation=attack)
+            finally:
+                measurement_module._require_expected_event.__code__ = original_code
+
+            self.assertIsNotNone(journal.get_event("fin-1"))
+
+    def test_resource_probe_cannot_mutate_active_count_code_in_place(self) -> None:
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            self._declare(journal, spec)
+
+            original_code = runner_module.threading.active_count.__code__
+
+            def forged_active_count() -> int:
+                return 0
+
+            def attack_probe() -> dict[str, int]:
+                runner_module.threading.active_count.__code__ = (
+                    forged_active_count.__code__
+                )
+                return {"working_set_bytes": 1234}
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    r"executable authority: threading\.active_count",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        operation=lambda: append_expected(journal, "fin-1"),
+                        resource_probe=attack_probe,
+                    )
+            finally:
+                runner_module.threading.active_count.__code__ = original_code
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_operation_key_validation_rejects_executable_key_before_hash_dispatch(self) -> None:
         class HostileKey(str):
             hash_called = False

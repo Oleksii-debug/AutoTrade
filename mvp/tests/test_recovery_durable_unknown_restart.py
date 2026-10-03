@@ -9,7 +9,18 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
-from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.reconciliation import (
+    ProviderFillEvidence,
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+)
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.autotrade_mvp.recovery import (
+    HostState,
+    OutboundAttempt,
+    RecoveryController,
+)
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 class DurableUnknownRestartTests(unittest.TestCase):
@@ -366,7 +377,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "not ready|unresolved"):
                 recovery.validate_admission(recovery.owner.epoch)
 
-    def test_exact_reconciliation_terminal_verdict_clears_recovered_unknown(self):
+    def test_exact_reconciliation_terminal_verdict_is_durable_rescan_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             outcome = self._unknown_dispatch(store)
@@ -377,46 +388,156 @@ class DurableUnknownRestartTests(unittest.TestCase):
             owner = recovery.start("host-restarted")
             self.assertEqual(recovery.unresolved_attempts, {"attempt-1"})
 
-            checkpoint = {
-                "event_id": "reconciliation-event-1",
-                "payload_hash": "sha256:" + "a" * 64,
-                "journal_sequence": 99,
-                "payload": {
-                    "provider_id": "SIM",
-                    "account_id": "acct",
-                    "environment": "SIMULATION",
-                    "complete": True,
-                    "snapshot_consistent": True,
-                    "activity_coverage_complete": True,
-                    "blocking_resources": [],
-                    "submission_resolutions": [
-                        {
-                            "attempt_id": "attempt-1",
-                            "intent_id": "intent-1",
-                            "client_order_id": outcome.client_order_id,
-                            "outcome": "PROVEN_ABSENT",
-                            "evidence_reason": "complete provider absence proof",
-                            "provider_order_ids": [],
-                            "provider_execution_ids": [],
-                        }
-                    ],
-                },
-            }
-            with patch(
-                "mvp.autotrade_mvp.recovery.load_reconciliation_checkpoint_for_readiness",
-                return_value=checkpoint,
-            ):
-                evidence = recovery.record_reconciliation_checkpoint(
-                    reconciliation_id="recon-1",
+            unknown = UnknownSubmission.create(
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=outcome.client_order_id,
+                started_at="2026-09-25T20:00:00Z",
+            )
+            provider_fill = ProviderFillEvidence.create(
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                provider_execution_id="e1",
+                client_order_id=outcome.client_order_id,
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_currency="USD",
+                trade_time="2026-09-25T20:30:00Z",
+            )
+            snapshot = SnapshotConsistencyEvidence(
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                mode="ATOMIC",
+                query_started_at="2026-09-25T20:40:00Z",
+                query_completed_at="2026-09-25T20:50:00Z",
+            )
+            result = reconciliation(
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                provider_fills=[provider_fill],
+                unknown_submissions=[unknown],
+                coverage_start="2026-09-25T19:00:00Z",
+                coverage_end="2026-09-25T21:00:00Z",
+                snapshot_consistency=snapshot,
+            )
+            self.assertEqual(
+                result.submission_resolutions[0].outcome,
+                "OBSERVED_EXECUTION",
+            )
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="recon-durable-resolution",
+                result=result,
+                observed_at="2026-09-25T21:00:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
+            evidence = recovery.record_reconciliation_checkpoint(
+                reconciliation_id="recon-durable-resolution",
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+            )
+
+            self.assertEqual(evidence["event_id"], checkpoint["event_id"])
+            self.assertEqual(recovery.unresolved_attempts, set())
+            self.assertEqual(recovery.state, HostState.READY)
+
+            # The immutable submission aggregate still ends in UNKNOWN.  A
+            # fresh projection pass must derive the later terminal verdict from
+            # the journal rather than relying on a Python tombstone.
+            self.assertEqual(
+                recovery.recover_durable_submission_uncertainty(
+                    environment="SIMULATION",
+                    account_id="acct",
+                ),
+                (),
+            )
+            recovery.validate_admission(owner.epoch)
+            recovery.validate_sender(owner.owner_id, owner.epoch)
+            self.assertEqual(recovery.state, HostState.READY)
+
+            # A new possible-send event after the reconciliation cut is not
+            # dominated by the old checkpoint and becomes sticky immediately
+            # on the next durable projection.
+            self._unknown_dispatch(store, attempt_id="attempt-after-checkpoint")
+            recovered = recovery.recover_durable_submission_uncertainty(
+                environment="SIMULATION",
+                account_id="acct",
+            )
+            self.assertEqual(recovered, ("attempt-after-checkpoint",))
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"attempt-after-checkpoint"},
+            )
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+
+    def test_terminal_checkpoint_bound_to_other_owner_cannot_clear_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            outcome = self._unknown_dispatch(store)
+            unknown = UnknownSubmission.create(
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                client_order_id=outcome.client_order_id,
+                started_at="2026-09-25T20:00:00Z",
+            )
+            provider_fill = ProviderFillEvidence.create(
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                provider_execution_id="e1",
+                client_order_id=outcome.client_order_id,
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_currency="USD",
+                trade_time="2026-09-25T20:30:00Z",
+            )
+            snapshot = SnapshotConsistencyEvidence(
+                provider_id="SIM",
+                account_id="acct",
+                environment="SIMULATION",
+                mode="ATOMIC",
+                query_started_at="2026-09-25T20:40:00Z",
+                query_completed_at="2026-09-25T20:50:00Z",
+            )
+            record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="foreign-owner-resolution",
+                result=reconciliation(
                     provider_id="SIM",
                     account_id="acct",
                     environment="SIMULATION",
-                )
+                    provider_fills=[provider_fill],
+                    unknown_submissions=[unknown],
+                    coverage_start="2026-09-25T19:00:00Z",
+                    coverage_end="2026-09-25T21:00:00Z",
+                    snapshot_consistency=snapshot,
+                ),
+                observed_at="2026-09-25T21:00:00Z",
+                host_id="different-owner",
+                owner_epoch="99",
+            )
 
-            self.assertEqual(evidence["event_id"], "reconciliation-event-1")
-            self.assertEqual(recovery.unresolved_attempts, set())
-            self.assertEqual(recovery.state, HostState.READY)
-            recovery.validate_admission(owner.epoch)
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            recovery.start("host-a")
+            self.assertEqual(recovery.unresolved_attempts, {"attempt-1"})
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+
 
     def test_observed_execution_without_execution_identity_cannot_clear_unknown(self):
         with TemporaryDirectory() as directory:
@@ -522,6 +643,133 @@ class DurableUnknownRestartTests(unittest.TestCase):
                     )
 
             self.assertEqual(recovery.unresolved_attempts, {"attempt-1"})
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+
+
+    def test_live_sender_validation_rescans_new_durable_unknown_before_next_wire(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            owner = recovery.start("host-a")
+            checkpoint = {
+                "event_id": "ready-event",
+                "payload_hash": "sha256:" + "a" * 64,
+                "journal_sequence": 1,
+                "payload": {
+                    "provider_id": "SIM",
+                    "account_id": "acct",
+                    "environment": "SIMULATION",
+                    "complete": True,
+                    "snapshot_consistent": True,
+                    "activity_coverage_complete": True,
+                    "blocking_resources": [],
+                    "submission_resolutions": [],
+                },
+            }
+            with patch(
+                "mvp.autotrade_mvp.recovery.load_reconciliation_checkpoint_for_readiness",
+                return_value=checkpoint,
+            ):
+                recovery.record_reconciliation_checkpoint(
+                    reconciliation_id="ready",
+                    provider_id="SIM",
+                    account_id="acct",
+                    environment="SIMULATION",
+                )
+            self.assertEqual(recovery.state, HostState.READY)
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
+            )
+            wire_calls = []
+
+            def ambiguous_transport(_client_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("first")
+                raise TimeoutError("ambiguous provider result")
+
+            first = dispatcher.dispatch(
+                attempt_id="same-process-unknown-1",
+                intent_id="same-process-intent-1",
+                intent_hash="same-process-hash-1",
+                provider="sim",
+                request={"side": "BUY"},
+                now="2026-09-30T18:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=ambiguous_transport,
+                sender_check=recovery.validate_sender,
+            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(wire_calls, ["first"])
+
+            with self.assertRaisesRegex(PermissionError, "not ready|unresolved"):
+                recovery.validate_sender(owner.owner_id, owner.epoch)
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"same-process-unknown-1"},
+            )
+
+            def forbidden_second_wire(_client_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("second")
+                return {"provider_order_id": "must-not-send"}
+
+            second = dispatcher.dispatch(
+                attempt_id="same-process-unknown-2",
+                intent_id="same-process-intent-2",
+                intent_hash="same-process-hash-2",
+                provider="sim",
+                request={"side": "SELL"},
+                now="2026-09-30T18:00:01Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=forbidden_second_wire,
+                sender_check=recovery.validate_sender,
+            )
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertEqual(wire_calls, ["first"])
+
+    def test_durable_unknown_cannot_be_cleared_by_caller_attempt_object(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            self._unknown_dispatch(store, attempt_id="durable-caller-resolution")
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            owner = recovery.start("host-a")
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"durable-caller-resolution"},
+            )
+
+            forged_terminal = OutboundAttempt(
+                "durable-caller-resolution",
+                "intent-1",
+                owner.epoch,
+            )
+            forged_terminal.persist()
+            forged_terminal.mark_send_started("caller:forged-send")
+            forged_terminal.acknowledge(
+                "caller-provider-order",
+                "caller:forged-terminal",
+            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "journal-issued reconciliation checkpoint",
+            ):
+                recovery.resolve_attempt(forged_terminal)
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"durable-caller-resolution"},
+            )
             self.assertEqual(recovery.state, HostState.DEGRADED)
 
 

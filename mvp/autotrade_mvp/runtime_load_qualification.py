@@ -526,6 +526,11 @@ def begin_runtime_campaign(
         raise RuntimeBudgetError("runtime campaign plan does not match budget spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
         raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
+    # Freeze the durable start cut before sampling the start clock. An event
+    # admitted after the clock must never be hidden inside the starting journal
+    # cursor. Events that race between this cut and the clock are conservatively
+    # included in the campaign evidence rather than silently excluded.
+    start_journal_sequence = journal.current_journal_sequence()
     started_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="started_monotonic_ns",
@@ -534,7 +539,7 @@ def begin_runtime_campaign(
     return RuntimeCampaignCut(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
-        start_journal_sequence=journal.current_journal_sequence(),
+        start_journal_sequence=start_journal_sequence,
         started_monotonic_ns=started_monotonic_ns,
         _token=_CUT_TOKEN,
     )

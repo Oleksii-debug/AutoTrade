@@ -1100,6 +1100,18 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(redacted_dict["self"], "[REDACTED:CYCLE]")
         self.assertEqual(redacted_list[0], "[REDACTED:CYCLE]")
 
+    def test_diagnostic_redaction_bounds_deep_acyclic_payloads(self):
+        value: object = "safe-leaf"
+        for _ in range(100):
+            value = [value]
+
+        redacted = self.boundary.redact(value)
+        cursor = redacted
+        for _ in range(65):
+            self.assertIsInstance(cursor, list)
+            cursor = cursor[0]
+        self.assertEqual(cursor, "[REDACTED:DEPTH]")
+
     def test_diagnostic_redaction_scrubs_sensitive_values_from_mapping_keys(self):
         redacted = self.boundary.redact_for_diagnostics(
             {"prefix-top-secret-suffix": "visible"},

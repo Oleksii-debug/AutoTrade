@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+from mvp.autotrade_mvp import qualification_attestation as qualification_module
 from mvp.autotrade_mvp import runtime_target_host_composed_authority as composed_authority
 from mvp.autotrade_mvp import runtime_target_host_qualification as signed_module
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
@@ -31,6 +32,7 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
         *,
         signed_verifier,
         signed_dependency_guard,
+        signed_external_dependency_guard=None,
         signed_campaign_matcher=None,
     ):
         measurement = cls._measurement()
@@ -61,6 +63,7 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             projection_digest_builder=lambda _measurement: {},
             composed_type=lambda **kwargs: kwargs,
             signed_dependency_guard=signed_dependency_guard,
+            signed_external_dependency_guard=signed_external_dependency_guard,
         )
         return verifier, measurement
 
@@ -150,6 +153,103 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
 
         composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD()
 
+    def test_external_guard_runs_at_all_signed_authority_boundaries(self) -> None:
+        external_guard = Mock()
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=Mock(),
+            signed_external_dependency_guard=external_guard,
+        )
+
+        self._invoke(verifier, measurement)
+
+        self.assertEqual(external_guard.call_count, 3)
+
+    def test_canonical_qualification_guard_rejects_transitive_rebinding(self) -> None:
+        signed_verifier = Mock(return_value=object())
+        verifier, measurement = self._build(
+            signed_verifier=signed_verifier,
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            signed_external_dependency_guard=(
+                composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD
+            ),
+        )
+        original = qualification_module._qualification_trust_policy_id_exact
+        qualification_module._qualification_trust_policy_id_exact = lambda _policy: (
+            "sha256:" + "0" * 64
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "canonical qualification verifier sealed dependency changed: _qualification_trust_policy_id_exact",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            qualification_module._qualification_trust_policy_id_exact = original
+
+        signed_verifier.assert_not_called()
+        composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD()
+
+    def test_canonical_guard_rechecks_after_signed_callback(self) -> None:
+        original = qualification_module._qualification_trust_policy_id_exact
+
+        def mutating_signed_verifier(*_args, **_kwargs):
+            qualification_module._qualification_trust_policy_id_exact = (
+                lambda _policy: "sha256:" + "0" * 64
+            )
+            return object()
+
+        verifier, measurement = self._build(
+            signed_verifier=mutating_signed_verifier,
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            signed_external_dependency_guard=(
+                composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD
+            ),
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "canonical qualification verifier sealed dependency changed: _qualification_trust_policy_id_exact",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            qualification_module._qualification_trust_policy_id_exact = original
+
+        composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD()
+
+    def test_canonical_guard_rechecks_at_composed_return_boundary(self) -> None:
+        original = qualification_module._qualification_trust_policy_id_exact
+
+        def mutating_campaign_matcher(*_args, **_kwargs):
+            qualification_module._qualification_trust_policy_id_exact = (
+                lambda _policy: "sha256:" + "0" * 64
+            )
+
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            signed_external_dependency_guard=(
+                composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD
+            ),
+            signed_campaign_matcher=mutating_campaign_matcher,
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "canonical qualification verifier sealed dependency changed: _qualification_trust_policy_id_exact",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            qualification_module._qualification_trust_policy_id_exact = original
+
+        composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD()
+
     def test_stable_signed_graph_reaches_composed_result(self) -> None:
         accepted = object()
         signed_verifier = Mock(return_value=accepted)
@@ -157,6 +257,9 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             signed_verifier=signed_verifier,
             signed_dependency_guard=(
                 composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            signed_external_dependency_guard=(
+                composed_authority._PRODUCTION_CANONICAL_QUALIFICATION_GUARD
             ),
         )
 

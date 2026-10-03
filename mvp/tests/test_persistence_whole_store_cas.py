@@ -166,6 +166,26 @@ class JournalWholeStoreCasTests(unittest.TestCase):
             self.assertEqual(saved, {"status": "ACCEPTED"})
             self.assertEqual(store.current_journal_sequence(), 1)
 
+    def test_expected_whole_store_counts_rejects_mapping_subclasses(self):
+        class CountsSubclass(dict):
+            pass
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            cut = store.whole_store_state_cut()
+            hostile = CountsSubclass(cut["counts"])
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact dict",
+            ):
+                store.append_event(
+                    event(),
+                    expected_journal_sequence=cut["journal_sequence"],
+                    expected_whole_store_counts=hostile,
+                )
+            self.assertEqual(store.current_journal_sequence(), 0)
+
     def test_expected_whole_store_counts_requires_exact_table_shape(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

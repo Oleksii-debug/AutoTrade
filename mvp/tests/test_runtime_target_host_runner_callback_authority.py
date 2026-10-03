@@ -29,6 +29,18 @@ class FakeClock:
         return self.value
 
 
+class HostileOperationKey(str):
+    calls = 0
+
+    def __hash__(self) -> int:
+        type(self).calls += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        type(self).calls += 1
+        return super().__eq__(other)
+
+
 def runtime_spec() -> RuntimeBudgetSpec:
     host = host_identity_fingerprint(capture_runtime_host_identity())
     return RuntimeBudgetSpec(
@@ -77,6 +89,37 @@ class RuntimeTargetHostRunnerCallbackAuthorityTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_operation_keys_reject_executable_text_subclasses_before_hash_dispatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            self._declared(journal, spec)
+            key = HostileOperationKey("fin-1")
+            operations = {key: lambda: append_expected(journal, "fin-1")}
+            HostileOperationKey.calls = 0
+            before = journal.current_journal_sequence()
+
+            with (
+                patch.object(runner, "_require_shared_clock_contract", return_value=None),
+                self.assertRaisesRegex(
+                    runner.RuntimeTargetHostRunnerError,
+                    r"operation keys must be exact strings",
+                ),
+            ):
+                runner.run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="callback-authority-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations=operations,
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertEqual(HostileOperationKey.calls, 0)
+            self.assertEqual(journal.current_journal_sequence(), before)
 
     def test_resource_probe_cannot_rebind_pending_outbox_authority(self) -> None:
         with TemporaryDirectory() as directory:

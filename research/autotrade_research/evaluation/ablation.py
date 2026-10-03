@@ -25,6 +25,7 @@ from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
     as_fraction,
     bounded_fraction,
+    parse_bounded_exact_decimal,
     terminating_decimal,
 )
 from autotrade_research.artifacts.store import ArtifactStore
@@ -40,19 +41,19 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 def _decimal(value: Decimal | int | str, field: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{field} must use Decimal, string or integer input")
+    # Decimal is subclassable and its semantic methods are virtual. Reject a
+    # caller-controlled subtype before is_finite/as_tuple/format/comparison can
+    # influence scientific or economic-evidence authority.
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(
+            f"{field} must use exact built-in Decimal, string or integer input"
+        )
     try:
-        number = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{field} must be a finite decimal") from error
-    if not number.is_finite():
-        raise ValueError(f"{field} must be finite")
-    try:
-        as_fraction(number)
+        return parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:
         raise ValueError(
-            f"{field} exceeds the shared exact numeric resource envelope"
+            f"{field} must be a finite decimal within the shared exact numeric resource envelope"
         ) from error
-    return number
 
 
 _ABLATION_REPORT_QUANTUM = Decimal("1e-50")

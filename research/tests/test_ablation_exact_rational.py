@@ -47,7 +47,50 @@ def _pair(case_id: str, full_utility: str, ablated_utility: str = "0", *, full_c
     )
 
 
+class HostileDecimal(Decimal):
+    """Decimal subtype whose virtual semantics must never reach evidence authority."""
+
+    def is_finite(self):
+        raise AssertionError("Decimal subclass is_finite() was dispatched")
+
+    def as_tuple(self):
+        raise AssertionError("Decimal subclass as_tuple() was dispatched")
+
+    def __format__(self, format_spec):
+        raise AssertionError("Decimal subclass __format__() was dispatched")
+
+    def __eq__(self, other):
+        raise AssertionError("Decimal subclass equality was dispatched")
+
+    def __lt__(self, other):
+        raise AssertionError("Decimal subclass ordering was dispatched")
+
+    def __le__(self, other):
+        raise AssertionError("Decimal subclass ordering was dispatched")
+
+    def __gt__(self, other):
+        raise AssertionError("Decimal subclass ordering was dispatched")
+
+    def __ge__(self, other):
+        raise AssertionError("Decimal subclass ordering was dispatched")
+
+
 class ExactRationalAblationTests(unittest.TestCase):
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        cases = [_pair("subclass-a", "1"), _pair("subclass-b", "1")]
+        hostile = HostileDecimal("0")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            evaluate_incremental_value(
+                "agent",
+                cases,
+                minimum_pairs=2,
+                required_lower_bound=hostile,
+            )
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            replace(cases[0].full, utility=hostile)
+
     def test_huge_negative_delta_cannot_round_into_pass(self):
         cases=[_pair("neg-a","1E100","1E100",full_cost="2",ablated_cost="1"),_pair("neg-b","1E100","1E100",full_cost="2",ablated_cost="1")]
         result=evaluate_incremental_value("agent",cases,minimum_pairs=2,required_lower_bound=Decimal("0"))

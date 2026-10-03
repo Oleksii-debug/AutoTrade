@@ -958,6 +958,79 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         self.assertIn("state.scopeEpoch += 1", pagehide)
 
+    def test_snapshot_and_event_stream_responses_are_generation_fenced(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshSnapshot(options = {})"):
+            js.index("function eventMessage")
+        ]
+        self.assertIn("state.scopeEpoch += 1", refresh)
+        self.assertIn("const refreshEpoch = state.scopeEpoch", refresh)
+        self.assertIn("if (refreshEpoch !== state.scopeEpoch)", refresh)
+        self.assertLess(
+            refresh.index("if (refreshEpoch !== state.scopeEpoch)"),
+            refresh.index("renderSnapshot(snapshot, options)"),
+        )
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("const pollEpoch = state.scopeEpoch", poll)
+        self.assertIn("const renderedAccountId = state.renderedAccountId", poll)
+        self.assertIn("const renderedEnvironment = state.renderedEnvironment", poll)
+        self.assertIn("pollEpoch !== state.scopeEpoch", poll)
+        response = poll.index("const response = await jsonFetch(")
+        fence = poll.index("pollEpoch !== state.scopeEpoch", response)
+        event_render = poll.index("renderHostEvent(event, cursor, version)", fence)
+        self.assertLess(response, fence)
+        self.assertLess(fence, event_render)
+
+    def test_scope_change_clears_unscoped_command_and_notification_feedback(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetNotificationsForScope()", js)
+        self.assertIn("window.clearTimeout(state.announcementTimer)", js)
+        self.assertIn("window.clearTimeout(state.urgentAnnouncementTimer)", js)
+        self.assertIn("state.pendingAnnouncements = []", js)
+        self.assertIn("state.pendingUrgentAnnouncements = []", js)
+        self.assertIn(
+            "No material notifications recorded in this account/environment session.",
+            js,
+        )
+        self.assertIn(
+            "function resetCommandFeedbackForScope(accountId, environment)",
+            js,
+        )
+        self.assertIn(
+            "An unresolved command from a different account/environment scope is retained with its original identity and will not be retargeted.",
+            js,
+        )
+        self.assertIn(
+            "No host command has been submitted for this account/environment session.",
+            js,
+        )
+        self.assertIn('renderCommandValidationDetails([], "scope_changed")', js)
+        self.assertIn(
+            "Field-validation details from the previous account/environment scope are not shown in this scope.",
+            js,
+        )
+
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        notifications = snapshot.index("resetNotificationsForScope();")
+        filters = snapshot.index("resetTableFiltersForScopeChange();")
+        operations = snapshot.index("resetOperationsForScope();")
+        history = snapshot.index("resetEventHistoryForScope();")
+        command = snapshot.index(
+            "resetCommandFeedbackForScope(parsed.accountId, parsed.environment);"
+        )
+        self.assertLess(notifications, filters)
+        self.assertLess(filters, operations)
+        self.assertLess(operations, history)
+        self.assertLess(history, command)
+
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
         html = INDEX.read_text(encoding="utf-8")

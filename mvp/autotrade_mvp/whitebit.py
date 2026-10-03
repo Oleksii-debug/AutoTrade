@@ -24,6 +24,7 @@ from autotrade_numeric import (
     ExactDecimalError,
     as_fraction,
     exact_multiply,
+    is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
     parse_bounded_json_number_token,
@@ -461,7 +462,13 @@ class WhiteBitMarketRules:
 
 
 def _require_multiple(value: Decimal, step: Decimal, *, field: str) -> None:
-    if value % step != 0:
+    try:
+        aligned = is_exact_decimal_multiple(value, step)
+    except ExactDecimalError as error:
+        raise WhiteBitAdapterError(
+            f"{field} grid check exceeds the shared exact resource envelope"
+        ) from error
+    if not aligned:
         raise WhiteBitAdapterError(
             f"{field} must be an exact multiple of provider {field} step"
         )
@@ -501,7 +508,12 @@ def validate_intent_market_rules(
     _require_multiple(intent.amount, rules.step_size, field="amount")
     if intent.price is not None:
         _require_multiple(intent.price, rules.tick_size, field="price")
-        total = intent.amount * intent.price
+        try:
+            total = exact_multiply(intent.amount, intent.price)
+        except ExactDecimalError as error:
+            raise WhiteBitAdapterError(
+                "order total exceeds the shared exact resource envelope"
+            ) from error
         if total < rules.min_total:
             raise WhiteBitAdapterError("order total is below provider minTotal")
         if rules.max_total is not None and total > rules.max_total:

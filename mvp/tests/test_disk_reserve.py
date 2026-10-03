@@ -170,6 +170,30 @@ class EmergencyDiskReserveTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertTrue(alias.exists())
 
+    def test_windows_nt_error_classification_is_explicit(self):
+        class SyntheticWinError(OSError):
+            def __init__(self, winerror: int):
+                super().__init__(f"winerror {winerror}")
+                self.winerror = winerror
+
+        for code in (2, 3):
+            with self.subTest(missing=code):
+                self.assertTrue(
+                    disk_reserve_module._windows_error_is_missing(
+                        SyntheticWinError(code)
+                    )
+                )
+        for code in (80, 183):
+            with self.subTest(collision=code):
+                self.assertTrue(
+                    disk_reserve_module._windows_error_is_collision(
+                        SyntheticWinError(code)
+                    )
+                )
+        denied = SyntheticWinError(5)
+        self.assertFalse(disk_reserve_module._windows_error_is_missing(denied))
+        self.assertFalse(disk_reserve_module._windows_error_is_collision(denied))
+
     @unittest.skipUnless(sys.platform == "win32", "native Windows reserve authority")
     def test_windows_locality_rejection_precedes_parent_creation(self):
         with tempfile.TemporaryDirectory() as directory:

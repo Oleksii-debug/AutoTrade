@@ -33,6 +33,25 @@ class DiskReserveError(ValueError):
 
 
 _RESERVE_MAGIC = b"AUTOTRADE_EMERGENCY_DISK_RESERVE_V1\n"
+_WINDOWS_NOT_FOUND_ERRORS = frozenset({2, 3})
+_WINDOWS_ALREADY_EXISTS_ERRORS = frozenset({80, 183})
+
+
+def _windows_error_code(error: OSError) -> int | None:
+    code = getattr(error, "winerror", None)
+    return code if type(code) is int else None
+
+
+def _windows_error_is_missing(error: OSError) -> bool:
+    return isinstance(error, FileNotFoundError) or (
+        _windows_error_code(error) in _WINDOWS_NOT_FOUND_ERRORS
+    )
+
+
+def _windows_error_is_collision(error: OSError) -> bool:
+    return isinstance(error, FileExistsError) or (
+        _windows_error_code(error) in _WINDOWS_ALREADY_EXISTS_ERRORS
+    )
 
 
 class ReserveReleaseReason(StrEnum):
@@ -117,9 +136,13 @@ class EmergencyDiskReserve:
                     subject="emergency reserve file",
                 ) as descriptor:
                     return self._status_from_descriptor(descriptor)
-        except FileNotFoundError:
-            return self._absent_status()
-        except (OSError, RuntimeError, TypeError) as error:
+        except OSError as error:
+            if _windows_error_is_missing(error):
+                return self._absent_status()
+            raise DiskReserveError(
+                "emergency reserve Windows namespace authority verification failed"
+            ) from error
+        except (RuntimeError, TypeError) as error:
             raise DiskReserveError(
                 "emergency reserve Windows namespace authority verification failed"
             ) from error
@@ -189,7 +212,9 @@ class EmergencyDiskReserve:
                         subject="emergency reserve file",
                     ) as descriptor:
                         current = self._status_from_descriptor(descriptor)
-                except FileNotFoundError:
+                except OSError as error:
+                    if not _windows_error_is_missing(error):
+                        raise
                     current = None
 
                 if current is not None:
@@ -212,10 +237,12 @@ class EmergencyDiskReserve:
                                 "emergency reserve provisioning did not persist exact bytes"
                             )
                         return result
-                except FileExistsError as error:
-                    raise DiskReserveError(
-                        "emergency reserve appeared during provisioning"
-                    ) from error
+                except OSError as error:
+                    if _windows_error_is_collision(error):
+                        raise DiskReserveError(
+                            "emergency reserve appeared during provisioning"
+                        ) from error
+                    raise
         except DiskReserveError:
             raise
         except (OSError, RuntimeError, TypeError) as error:
@@ -290,13 +317,17 @@ class EmergencyDiskReserve:
                         raise DiskReserveError(
                             "no verified emergency reserve is available"
                         )
-        except FileNotFoundError as error:
+        except OSError as error:
+            if _windows_error_is_missing(error):
+                raise DiskReserveError(
+                    "no verified emergency reserve is available"
+                ) from error
             raise DiskReserveError(
-                "no verified emergency reserve is available"
+                "emergency reserve Windows release authority failed"
             ) from error
         except DiskReserveError:
             raise
-        except (OSError, RuntimeError, TypeError) as error:
+        except (RuntimeError, TypeError) as error:
             raise DiskReserveError(
                 "emergency reserve Windows release authority failed"
             ) from error

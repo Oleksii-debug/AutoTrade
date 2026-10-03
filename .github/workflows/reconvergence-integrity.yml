@@ -120,7 +120,7 @@ jobs:
           args=(--base "${BASE_SHA}" --head "${HEAD_SHA}")
           while IFS= read -r scope; do
             test -n "${scope}"
-            args+=(--allowed-scope "${scope}")
+            args+=(--trusted-root-approval "${scope}")
           done < "${APPROVED_SCOPE_FILE}"
           python -m control.tools.reconvergence_integrity "${args[@]}"
       - name: Run trusted guard regression tests

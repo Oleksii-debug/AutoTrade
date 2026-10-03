@@ -142,6 +142,43 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             finally:
                 successor.close()
 
+    def test_failed_listener_bootstrap_does_not_publish_runtime_occurrence(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    host_network,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    side_effect=RuntimeError("listener bootstrap failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "listener bootstrap failed"):
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=lambda headers, origin: None,
+                        snapshot_provider=lambda state, principal: {},
+                    )
+
+            journal = production_host.JournalStore(config.journal_path)
+            self.assertEqual(
+                journal.load_events(
+                    "production_host_runtime",
+                    config.host_id,
+                ),
+                [],
+            )
+
     def test_runtime_property_revalidates_after_returned_value_tamper(self) -> None:
         with TemporaryDirectory() as directory:
             config = self._config(directory)

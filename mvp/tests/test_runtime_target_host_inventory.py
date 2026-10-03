@@ -140,7 +140,7 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
         ):
             RuntimeTargetHostInventory.parse(tampered)
 
-    def test_publication_retains_exact_raw_identity_and_digest(self) -> None:
+    def test_publication_retains_exact_authenticated_raw_bytes(self) -> None:
         expected = host_identity_fingerprint(IDENTITY)
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "evidence")
@@ -155,12 +155,15 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
                     expected_host_fingerprint=expected,
                 )
 
-            manifest = store.load_manifest(ARTIFACT_ID)
+            manifest, raw = store.read_authenticated_snapshot(ARTIFACT_ID)
+            retained = RuntimeTargetHostInventory.parse(raw)
             self.assertEqual(published.artifact_id, ARTIFACT_ID)
             self.assertEqual(published.payload_sha256, manifest["sha256"])
+            self.assertEqual(published.payload_sha256, retained.payload_sha256)
             self.assertEqual(published.host_fingerprint, expected)
             self.assertEqual(published.collector_id, COLLECTOR_ID)
             self.assertEqual(published.collector_version, COLLECTOR_VERSION)
+            self.assertEqual(dict(retained.host_identity), IDENTITY)
             self.assertEqual(manifest["media_type"], "application/json")
             self.assertEqual(manifest["source_refs"], [f"git:{SOURCE_SHA}"])
             self.assertEqual(
@@ -172,12 +175,7 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
                     "host_fingerprint": expected,
                 },
             )
-            self.assertNotIn("created_at", RuntimeTargetHostInventory.parse(
-                RuntimeTargetHostInventory(
-                    host_identity=IDENTITY,
-                    host_fingerprint=expected,
-                ).canonical_bytes()
-            ).canonical_payload())
+            self.assertNotIn("created_at", retained.canonical_payload())
 
     def test_publication_is_idempotent_for_exact_inventory(self) -> None:
         expected = host_identity_fingerprint(IDENTITY)

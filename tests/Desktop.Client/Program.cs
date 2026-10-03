@@ -158,6 +158,7 @@ internal static class Program
             new Uri(HostOrigin, "/index.html"),
             new Uri(HostOrigin, "/api/v10/state"),
             new Uri(HostOrigin, "/api/v1evil/state"),
+            new Uri(HostOrigin, "/api/v1/state#debug"),
             new Uri("http://127.0.0.1:8766/api/v1/state"),
             new Uri("https://example.com/api/v1/state"),
         })

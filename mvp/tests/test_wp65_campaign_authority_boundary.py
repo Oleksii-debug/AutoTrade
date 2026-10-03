@@ -124,7 +124,7 @@ class RuntimeCampaignAuthorityBoundaryTests(unittest.TestCase):
                 release_artifact_sha256=exact.release_artifact_sha256,
                 journal_taxonomy_digest=exact.journal_taxonomy_digest,
             )
-            with self.assertRaisesRegex(TypeError, "plan must be RuntimeCampaignPlan"):
+            with self.assertRaisesRegex(TypeError, "exact RuntimeCampaignPlan"):
                 begin_runtime_campaign(
                     journal=journal,
                     spec=spec,
@@ -150,7 +150,7 @@ class RuntimeCampaignAuthorityBoundaryTests(unittest.TestCase):
                 "started_monotonic_ns",
                 exact.started_monotonic_ns,
             )
-            with self.assertRaisesRegex(TypeError, "cut must be RuntimeCampaignCut"):
+            with self.assertRaisesRegex(TypeError, "exact RuntimeCampaignCut"):
                 collect_runtime_campaign_evidence(
                     journal=journal,
                     spec=spec,

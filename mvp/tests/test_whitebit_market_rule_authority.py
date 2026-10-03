@@ -339,6 +339,41 @@ class WhiteBitMarketRuleAuthorityTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_prepare_ignores_instance_shadow_of_capability_admits(self):
+        capability = non_admitting_capability()
+        calls = []
+
+        def forged_admits(**_kwargs):
+            calls.append("admits")
+            return True
+
+        object.__setattr__(capability, "admits", forged_admits)
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="1",
+            price="10",
+        )
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "exact capability evidence does not admit this order",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="cid-1",
+                account_id="account-1",
+                environment="PAPER",
+                capability=capability,
+                market_rules=market_rules(),
+                at=NOW,
+            )
+
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

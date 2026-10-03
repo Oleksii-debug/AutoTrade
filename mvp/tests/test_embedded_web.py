@@ -238,6 +238,18 @@ class EmbeddedWebTests(unittest.TestCase):
                     )
                 )
 
+        for empty in ("index.html", "app.js", "host-api-routes.js", "styles.css"):
+            with self.subTest(empty=empty), self.assertRaisesRegex(
+                ValueError,
+                "empty required core assets",
+            ):
+                bundle(
+                    *tuple(
+                        asset(item.path, b"") if item.path == empty else item
+                        for item in self.web_bundle.assets
+                    )
+                )
+
         duplicate = asset("index.html", b"x")
         with self.assertRaisesRegex(ValueError, "unique"):
             bundle(duplicate, duplicate)

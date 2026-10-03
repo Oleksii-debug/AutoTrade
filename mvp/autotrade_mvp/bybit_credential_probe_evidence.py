@@ -1,15 +1,10 @@
 """Authority-free Bybit credential probe evidence for WP-49.
 
-This boundary binds one authenticated Bybit V5 credential probe to the exact
-historical TRADE credential generation used for the request and to the exact
-Bybit provider environment contacted. It retains only canonical non-secret
-request/response metadata plus a response digest; raw provider payloads and
-credential material are never retained as evidence.
-
-The resulting value is observation evidence only. It cannot retire a vault
-credential generation, prove that an old process stopped, grant send authority,
-or authorize recovery takeover. Those decisions remain owned by their
-separate canonical fences.
+The live probe is generation-locked to the exact TRADE credential leased from
+``ProtectedCredentialVault`` and endpoint-locked to Bybit's environment-specific
+``GET /v5/user/query-api`` origin. Durable evidence retains only non-secret
+request facts and a canonical response digest. It never grants send, credential
+retirement, or recovery-takeover authority.
 """
 
 from __future__ import annotations
@@ -34,6 +29,7 @@ from .provider_core import ProviderCoreError
 from .provider_response_limits import (
     DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
     require_provider_response_bytes,
 )
 from .provider_transport import (
@@ -114,7 +110,7 @@ def _exact_request_timestamp(value: object) -> int:
 
 
 def _exact_recv_window(value: object) -> int:
-    if type(value) is not int or value < 1 or value > 60000:
+    if type(value) is not int or not 1 <= value <= 60000:
         raise ProviderCoreError(
             "Bybit credential probe recv_window_ms must be exact integer 1..60000"
         )
@@ -122,8 +118,6 @@ def _exact_recv_window(value: object) -> int:
 
 
 def _require_exact_json_data(value: object, *, path: str = "$") -> None:
-    """Reject Python-only, polymorphic and non-finite values before hashing."""
-
     if value is None or type(value) in {str, int, bool}:
         return
     if type(value) is float:
@@ -150,8 +144,6 @@ def _require_exact_json_data(value: object, *, path: str = "$") -> None:
 
 
 def _response_digest(response: object) -> tuple[int, str]:
-    """Return exact retCode plus a digest without retaining provider payload."""
-
     if type(response) is not dict:
         raise ProviderCoreError(
             "Bybit credential probe response must be an exact object"
@@ -202,6 +194,12 @@ def _decode_wire_json(body: object) -> dict[str, Any]:
             "Bybit credential probe wire body must be exact non-empty bytes"
         )
     try:
+        require_provider_json_depth(body)
+    except ValueError as error:
+        raise ProviderCoreError(
+            "Bybit credential probe wire JSON exceeds structural depth budget"
+        ) from error
+    try:
         text = body.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ProviderCoreError(
@@ -227,8 +225,6 @@ def _decode_wire_json(body: object) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeWireResponse:
-    """Exact HTTP+JSON result returned by the probe's wire boundary."""
-
     http_status: int
     response: dict[str, Any]
 
@@ -249,8 +245,6 @@ BybitCredentialProbeWireQuery = Callable[..., BybitCredentialProbeWireResponse]
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeEvidence:
-    """Detached non-secret evidence for one exact credential-generation probe."""
-
     credential_handle: PersistentCredentialHandle
     provider_environment: str
     source_uri: str
@@ -327,7 +321,6 @@ class BybitCredentialProbeEvidence:
                 "Bybit credential probe response_sha256 must be canonical sha256"
             )
         observed_at = _utc_text(self.observed_at, name="observed_at")
-
         classification = classify_bybit_credential_nonacceptance(
             ret_code=self.ret_code,
             product_family=product_family,
@@ -354,8 +347,6 @@ class BybitCredentialProbeEvidence:
 def bybit_credential_probe_receipt_metadata(
     evidence: BybitCredentialProbeEvidence,
 ) -> dict[str, object]:
-    """Return deterministic non-secret metadata for an immutable receipt."""
-
     if type(evidence) is not BybitCredentialProbeEvidence:
         raise TypeError("evidence must be exact BybitCredentialProbeEvidence")
     handle = evidence.credential_handle
@@ -398,8 +389,6 @@ def capture_bybit_credential_probe_evidence(
     response: dict[str, Any],
     observed_at: str,
 ) -> BybitCredentialProbeEvidence:
-    """Scrub one authenticated ``query-api`` response into detached evidence."""
-
     ret_code, response_sha256 = _response_digest(response)
     return BybitCredentialProbeEvidence(
         credential_handle=credential_handle,
@@ -487,8 +476,6 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeHttpRequest:
-    """One endpoint-closed authenticated GET with intentionally empty query."""
-
     url: str
     headers: Mapping[str, str]
     timeout_seconds: int
@@ -502,8 +489,7 @@ class BybitCredentialProbeHttpRequest:
         headers = _validate_probe_wire_headers(self.headers)
         if (
             type(self.timeout_seconds) is not int
-            or self.timeout_seconds < 1
-            or self.timeout_seconds > 120
+            or not 1 <= self.timeout_seconds <= 120
         ):
             raise ProviderCoreError(
                 "Bybit credential probe timeout must be exact integer 1..120"
@@ -514,8 +500,6 @@ class BybitCredentialProbeHttpRequest:
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeRawHttpResponse:
-    """Status-preserving bounded bytes returned by the probe HTTP seam."""
-
     http_status: int
     body: bytes
 
@@ -575,7 +559,6 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe response byte budget is invalid"
             )
-
         outbound = Request(
             request.url,
             data=None,
@@ -613,8 +596,6 @@ class BybitCredentialProbeUrllibClient:
         except URLError:
             transport_unavailable = True
 
-        # Errors are generated only after urllib's request-bearing exception
-        # object has left scope; no API-key/signature-bearing HTTPError is chained.
         if transport_unavailable:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP transport unavailable"
@@ -655,8 +636,6 @@ def execute_bybit_credential_probe_wire_query(
     timeout_seconds: int,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeWireResponse:
-    """Execute one endpoint-closed empty-query credential-information GET."""
-
     source_uri = _exact_text(source_uri, name="source_uri")
     if source_uri not in _ALLOWED_PROBE_SOURCE_URIS:
         raise ProviderCoreError(
@@ -697,8 +676,6 @@ def probe_bybit_credential_with_vault(
     clock_utc: Callable[[], datetime],
     recv_window_ms: int = 5000,
 ) -> BybitCredentialProbeEvidence:
-    """Perform one generation-locked authenticated credential probe."""
-
     if type(vault) is not ProtectedCredentialVault:
         raise TypeError("vault must be exact ProtectedCredentialVault")
     if type(credential_handle) is not PersistentCredentialHandle:
@@ -805,8 +782,6 @@ def probe_bybit_credential_with_shared_wire(
     recv_window_ms: int = 5000,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeEvidence:
-    """Production-capable probe using the endpoint-closed direct wire seam."""
-
     def wire_query(
         *,
         source_uri: str,

@@ -130,7 +130,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "reserved_position_delta must be an exact dict",
+            "reserved_position_delta must be a mapping.*exact dict",
         ):
             RiskContext.create(
                 state_version=7,
@@ -163,7 +163,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TypeError,
-            "stress_scenarios must be an exact list or tuple",
+            "stress_scenarios must be a sequence.*exact list or tuple",
         ):
             RiskContext.create(
                 state_version=7,

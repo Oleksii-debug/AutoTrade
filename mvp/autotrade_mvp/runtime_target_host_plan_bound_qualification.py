@@ -38,7 +38,15 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
-from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
+from .runtime_target_host_qualification import (
+    AcceptedRuntimeTargetHostQualification,
+    BINDING_EVIDENCE_KIND,
+    CAMPAIGN_EVIDENCE_KIND,
+    HOST_INVENTORY_EVIDENCE_KIND,
+    INTERFERENCE_EVIDENCE_KIND,
+    RESOURCE_EVIDENCE_KIND,
+    STALENESS_EVIDENCE_KIND,
+)
 
 if TYPE_CHECKING:
     from .production_host import ProductionHostRuntime
@@ -47,6 +55,27 @@ if TYPE_CHECKING:
         AcceptedChronologyBoundRuntimeTargetHostQualification,
     )
     from .trusted_chronology_cut import TrustedChronologyCut
+
+
+_PROVENANCE_ACCEPTED_KINDS = frozenset(
+    {
+        CAMPAIGN_EVIDENCE_KIND,
+        STALENESS_EVIDENCE_KIND,
+        INTERFERENCE_EVIDENCE_KIND,
+        RESOURCE_EVIDENCE_KIND,
+        HOST_INVENTORY_EVIDENCE_KIND,
+    }
+)
+_REQUIRED_ACCEPTED_EVIDENCE_KINDS = _PROVENANCE_ACCEPTED_KINDS | {
+    BINDING_EVIDENCE_KIND
+}
+_PROJECTION_ACCEPTED_KINDS = frozenset(
+    {
+        STALENESS_EVIDENCE_KIND,
+        INTERFERENCE_EVIDENCE_KIND,
+        RESOURCE_EVIDENCE_KIND,
+    }
+)
 
 
 def _snapshot_budget_spec(
@@ -129,6 +158,9 @@ def _build_composed_acceptance_snapshotter(
     accepted_type,
     composition_error_type,
     mapping_proxy_type,
+    required_evidence_kinds,
+    provenance_kinds,
+    projection_kinds,
 ):
     """Build a detached canonical snapshotter for composed verifier output."""
 
@@ -173,12 +205,22 @@ def _build_composed_acceptance_snapshotter(
             raise composition_error_type(f"{name} must remain exact canonical UUID")
         return value
 
-    def snapshot_map(value: object, *, name: str, value_validator) -> dict[str, str]:
+    def snapshot_map(
+        value: object,
+        *,
+        name: str,
+        value_validator,
+        expected_keys,
+    ) -> dict[str, str]:
         if type(value) is not mapping_proxy_type:
             raise composition_error_type(
                 f"{name} must remain exact immutable mapping state"
             )
         detached = dict(value)
+        if frozenset(detached) != expected_keys:
+            raise composition_error_type(
+                f"{name} key set changed after canonical verification"
+            )
         for key, item in detached.items():
             key = exact_text(key, name=f"{name} key")
             value_validator(item, name=f"{name}[{key}]")
@@ -251,21 +293,25 @@ def _build_composed_acceptance_snapshotter(
                 accepted.evidence_sha256_by_kind,
                 name="accepted target-host evidence digest map",
                 value_validator=canonical_sha256,
+                expected_keys=required_evidence_kinds,
             ),
             payload_artifact_id_by_kind=snapshot_map(
                 accepted.payload_artifact_id_by_kind,
                 name="accepted target-host payload artifact map",
                 value_validator=canonical_uuid,
+                expected_keys=provenance_kinds,
             ),
             payload_sha256_by_kind=snapshot_map(
                 accepted.payload_sha256_by_kind,
                 name="accepted target-host payload digest map",
                 value_validator=canonical_sha256,
+                expected_keys=provenance_kinds,
             ),
             collector_by_kind=snapshot_map(
                 accepted.collector_by_kind,
                 name="accepted target-host collector map",
                 value_validator=exact_text,
+                expected_keys=provenance_kinds,
             ),
         )
         return composed_type(
@@ -282,6 +328,7 @@ def _build_composed_acceptance_snapshotter(
                 value.projection_sha256_by_kind,
                 name="accepted target-host projection map",
                 value_validator=canonical_sha256,
+                expected_keys=projection_kinds,
             ),
         )
 
@@ -293,6 +340,9 @@ _PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
     accepted_type=AcceptedRuntimeTargetHostQualification,
     composition_error_type=RuntimeTargetHostCompositionError,
     mapping_proxy_type=type(MappingProxyType({})),
+    required_evidence_kinds=_REQUIRED_ACCEPTED_EVIDENCE_KINDS,
+    provenance_kinds=_PROVENANCE_ACCEPTED_KINDS,
+    projection_kinds=_PROJECTION_ACCEPTED_KINDS,
 )
 
 

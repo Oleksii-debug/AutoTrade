@@ -23,7 +23,6 @@ from uuid import NAMESPACE_URL, uuid5
 from .accounting import AccountingConflict, JournalTransaction, posting, reverse_transaction
 from .exact_decimal import (
     ExactDecimalError,
-    canonical_decimal_text,
     exact_multiply,
     exact_subtract,
     parse_bounded_exact_decimal,
@@ -208,12 +207,9 @@ def _utc_text(value: datetime) -> str:
 def _decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    try:
-        return canonical_decimal_text(value)
-    except ExactDecimalError as error:
-        raise OptionLifecycleError(
-            "lifecycle decimal exceeds the supported exact-decimal resource envelope"
-        ) from error
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -425,20 +421,10 @@ def _bind_version(
     registry: InstrumentRegistry,
     observation: OptionLifecycleObservation,
 ) -> InstrumentVersion:
-    if type(registry) is not InstrumentRegistry:
-        raise TypeError("registry must be exact InstrumentRegistry")
-    if {"exact", "at"}.intersection(vars(registry)):
-        raise TypeError("InstrumentRegistry authority is shadowed")
-    version = InstrumentRegistry.exact(registry, observation.instrument_version)
-    if type(version) is not InstrumentVersion:
-        raise TypeError("registry must return exact InstrumentVersion")
-    effective = InstrumentRegistry.at(
-        registry,
-        version.instrument_id,
-        observation.effective_at,
-    )
-    if type(effective) is not InstrumentVersion:
-        raise TypeError("registry must return exact InstrumentVersion")
+    if not isinstance(registry, InstrumentRegistry):
+        raise TypeError("registry must be InstrumentRegistry")
+    version = registry.exact(observation.instrument_version)
+    effective = registry.at(version.instrument_id, observation.effective_at)
     if effective != version:
         raise OptionLifecycleError(
             "instrument_version is not the version effective for lifecycle event"
@@ -604,8 +590,8 @@ class DurableOptionLifecycleAuthority:
     ) -> None:
         if type(store) is not JournalStore:
             raise TypeError("store must be exact JournalStore")
-        if type(registry) is not InstrumentRegistry:
-            raise TypeError("registry must be exact InstrumentRegistry")
+        if not isinstance(registry, InstrumentRegistry):
+            raise TypeError("registry must be InstrumentRegistry")
         if type(economic_book) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         if economic_book.store is not store:
@@ -648,10 +634,6 @@ class DurableOptionLifecycleAuthority:
             raise TypeError("store must remain exact JournalStore")
         if {"load_events", "commit_command"}.intersection(vars(self.store)):
             raise TypeError("JournalStore authority is shadowed")
-        if type(self.registry) is not InstrumentRegistry:
-            raise TypeError("registry must remain exact InstrumentRegistry")
-        if {"exact", "at"}.intersection(vars(self.registry)):
-            raise TypeError("InstrumentRegistry authority is shadowed")
         if type(self.economic_book) is not DurableProviderEconomicBook:
             raise TypeError(
                 "economic_book must remain exact DurableProviderEconomicBook"

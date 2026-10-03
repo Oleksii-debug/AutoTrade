@@ -471,6 +471,7 @@ class PreparedSettlementMutation:
     request: dict[str, object]
     result: dict[str, object]
     aggregate_version: int
+    expected_journal_sequence: int
     already_committed: bool = False
 
 
@@ -722,6 +723,32 @@ class DurableSettlementBook:
                 scope_id,
             )
 
+    def _events_at_stable_journal_cut(
+        self,
+    ) -> tuple[list[dict[str, object]], int]:
+        """Read settlement provenance only from one quiescent journal cut.
+
+        The final mutation commit revalidates the returned global sequence under
+        the same SQLite write transaction. This prevents financial evidence
+        validated against one durable cut from surviving an intervening writer
+        elsewhere in the canonical JournalStore.
+        """
+
+        store, identity, _scope, scope_id = self._selected_authority()
+        with journal_store_authority_scope(store, identity):
+            before = JournalStore.current_journal_sequence(store)
+            events = JournalStore.load_events(
+                store,
+                _AGGREGATE_TYPE,
+                scope_id,
+            )
+            after = JournalStore.current_journal_sequence(store)
+        if before != after:
+            raise SettlementConflict(
+                "settlement journal changed while financial evidence was validated"
+            )
+        return events, after
+
     def _replay(self, events: list[dict[str, object]]) -> SettlementBook:
         _store, _identity, scope, _scope_id_value = self._selected_authority()
         book = SettlementBook()
@@ -842,7 +869,7 @@ class DurableSettlementBook:
                 expected_settlement_date=obligation.settlement_date,
             )
 
-        events = self._events()
+        events, expected_journal_sequence = self._events_at_stable_journal_cut()
         candidate = self._replay(events)
         outcomes = tuple(candidate.add(item) for item in canonical)
         raw_items = [_obligation_payload(item) for item in canonical]
@@ -877,6 +904,7 @@ class DurableSettlementBook:
                 request=request,
                 result=result,
                 aggregate_version=int(matches[0]["aggregate_version"]),
+                expected_journal_sequence=expected_journal_sequence,
                 already_committed=True,
             )
 
@@ -904,6 +932,7 @@ class DurableSettlementBook:
             request=request,
             result=result,
             aggregate_version=next_version,
+            expected_journal_sequence=expected_journal_sequence,
         )
 
     def register_obligations(
@@ -936,6 +965,7 @@ class DurableSettlementBook:
                     request=plan.request,
                     result=plan.result,
                     state_version=plan.aggregate_version,
+                    expected_journal_sequence=plan.expected_journal_sequence,
                     events=[(plan.envelope, None)],
                 )
         except Exception:
@@ -956,7 +986,7 @@ class DurableSettlementBook:
             raise TypeError("evidence must be SettlementEvidence")
         if type(as_of) is not date:
             raise TypeError("as_of must be a date value")
-        events = self._events()
+        events, expected_journal_sequence = self._events_at_stable_journal_cut()
         candidate = self._replay(events)
         obligation = next(
             (
@@ -1006,6 +1036,7 @@ class DurableSettlementBook:
                 request=request,
                 result=result,
                 aggregate_version=int(matches[0]["aggregate_version"]),
+                expected_journal_sequence=expected_journal_sequence,
                 already_committed=True,
             )
 
@@ -1037,6 +1068,7 @@ class DurableSettlementBook:
             request=request,
             result=result,
             aggregate_version=next_version,
+            expected_journal_sequence=expected_journal_sequence,
         )
 
     def apply_settlement(
@@ -1071,6 +1103,7 @@ class DurableSettlementBook:
                     request=plan.request,
                     result=plan.result,
                     state_version=plan.aggregate_version,
+                    expected_journal_sequence=plan.expected_journal_sequence,
                     events=[(plan.envelope, None)],
                 )
         except Exception:

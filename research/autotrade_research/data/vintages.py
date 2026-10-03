@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping
 from uuid import UUID
 
 from autotrade_numeric.dataset_manifest import is_valid_dataset_manifest_semantics
-from autotrade_research.artifacts import ArtifactStore
+from autotrade_research.artifacts import ArtifactStore, trusted_authenticated_reader
 from autotrade_research.artifacts.durable_publish import atomic_write_json, durable_path_lock
 from autotrade_research.io.strict_json import strict_json_loads
 
@@ -853,9 +853,12 @@ class HistoricalVintageRegistry:
                 "through canonical source_evidence"
             )
         population_ref = population_refs[0]
-        artifact_manifest, raw_population = ArtifactStore.read_authenticated_snapshot(
-            artifact_store,
-            population_ref["artifact_id"],
+        artifact_reader = trusted_authenticated_reader(
+            object.__getattribute__(artifact_store, "root"),
+            publication_store=artifact_store,
+        )
+        artifact_manifest, raw_population = artifact_reader(
+            population_ref["artifact_id"]
         )
         if artifact_manifest.get("artifact_id") != population_ref["artifact_id"]:
             raise HistoricalConflict(

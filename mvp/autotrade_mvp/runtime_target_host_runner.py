@@ -260,6 +260,118 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
             )
         return ()
 
+    dependency_bindings: list[tuple[object, ...]] = []
+    dependency_closures: list[tuple[object, ...]] = []
+    dependency_type_states: list[tuple[object, ...]] = []
+    seen_dependency_bindings: set[tuple[int, str]] = set()
+    seen_dependency_closures: set[int] = set()
+    seen_dependency_functions: set[int] = set()
+    seen_dependency_types: set[int] = set()
+
+    def is_first_party_module(value: object) -> bool:
+        return type(value) is str and (
+            value == "mvp.autotrade_mvp"
+            or value.startswith("mvp.autotrade_mvp.")
+            or value == "autotrade_runtime"
+            or value.startswith("autotrade_runtime.")
+        )
+
+    def capture_dependency_type(label: str, expected_type: type) -> None:
+        identity = id(expected_type)
+        if identity in seen_dependency_types:
+            return
+        seen_dependency_types.add(identity)
+        type_namespace = expected_type.__dict__
+        executable_states = tuple(
+            (
+                member_name,
+                function,
+                _capture_python_function_state(function),
+            )
+            for member_name, raw in type_namespace.items()
+            for function in executable_members(raw)
+        )
+        dependency_type_states.append(
+            (
+                label,
+                expected_type,
+                frozenset(type_namespace),
+                tuple(type_namespace.items()),
+                executable_states,
+            )
+        )
+        for member_name, function, _state in executable_states:
+            capture_dependency_function(f"{label}.{member_name}", function)
+
+    def capture_dependency_function(label: str, function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_dependency_functions:
+            return
+        seen_dependency_functions.add(identity)
+        function_namespace = function.__globals__
+        for dependency_name in function.__code__.co_names:
+            if dependency_name not in function_namespace:
+                continue
+            expected = function_namespace[dependency_name]
+            key = (id(function_namespace), dependency_name)
+            if key not in seen_dependency_bindings:
+                seen_dependency_bindings.add(key)
+                dependency_bindings.append(
+                    (
+                        f"{label} dependency changed: {dependency_name}",
+                        function_namespace,
+                        dependency_name,
+                        expected,
+                        _capture_python_function_state(expected),
+                    )
+                )
+            if type(expected) is FunctionType and is_first_party_module(
+                expected.__module__
+            ):
+                capture_dependency_function(
+                    f"{label}.{dependency_name}",
+                    expected,
+                )
+            elif isinstance(expected, type) and is_first_party_module(
+                expected.__module__
+            ):
+                capture_dependency_type(
+                    f"{label}.{dependency_name}",
+                    expected,
+                )
+        closure = function.__closure__ or ()
+        for freevar, cell in zip(function.__code__.co_freevars, closure):
+            cell_identity = id(cell)
+            if cell_identity in seen_dependency_closures:
+                continue
+            seen_dependency_closures.add(cell_identity)
+            try:
+                expected = cell.cell_contents
+            except ValueError:
+                expected = missing
+            dependency_closures.append(
+                (
+                    f"{label} closure changed: {freevar}",
+                    cell,
+                    expected,
+                    _capture_python_function_state(expected),
+                )
+            )
+            if type(expected) is FunctionType and is_first_party_module(
+                expected.__module__
+            ):
+                capture_dependency_function(
+                    f"{label}.{freevar}",
+                    expected,
+                )
+            elif isinstance(expected, type) and is_first_party_module(
+                expected.__module__
+            ):
+                capture_dependency_type(
+                    f"{label}.{freevar}",
+                    expected,
+                )
+
     type_states: list[tuple[object, ...]] = []
     seen_types: set[int] = set()
     for label, expected, _state in captured + campaign_to_observation_dependencies:
@@ -285,7 +397,12 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
                 executable_states,
             )
         )
+        for member_name, function, _state in executable_states:
+            capture_dependency_function(f"{label}.{member_name}", function)
     frozen_type_states = tuple(type_states)
+    frozen_dependency_bindings = tuple(dependency_bindings)
+    frozen_dependency_closures = tuple(dependency_closures)
+    frozen_dependency_type_states = tuple(dependency_type_states)
     resource_bindings = (
         (
             "JournalStore.current_journal_sequence",
@@ -329,6 +446,30 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
         elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
             raise error_type(prefix + "_require_callable_binding")
 
+    def require_type_state(
+        *,
+        prefix: str,
+        type_label: str,
+        expected_type: type,
+        expected_names: frozenset[str],
+        expected_members: tuple[tuple[str, object], ...],
+        executable_states: tuple[tuple[str, FunctionType, object], ...],
+    ) -> None:
+        current_namespace = expected_type.__dict__
+        if frozenset(current_namespace) != expected_names:
+            raise error_type(prefix + type_label)
+        for member_name, expected_member in expected_members:
+            if current_namespace.get(member_name, missing) is not expected_member:
+                raise error_type(prefix + type_label + "." + member_name)
+        for member_name, function, state in executable_states:
+            require_binding(
+                label=type_label + "." + member_name,
+                current=function,
+                expected=function,
+                function_state=state,
+                error_prefix=prefix,
+            )
+
     def require_runner_callback_authority() -> None:
         prefix = "runner callback authority changed: "
         require_guard_helper_authority()
@@ -359,27 +500,59 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
                 function_state=state,
                 error_prefix=dependency_prefix,
             )
+        for type_state in frozen_type_states:
+            require_type_state(
+                prefix=prefix,
+                type_label=type_state[0],
+                expected_type=type_state[1],
+                expected_names=type_state[2],
+                expected_members=type_state[3],
+                executable_states=type_state[4],
+            )
         for (
-            type_label,
-            expected_type,
-            expected_names,
-            expected_members,
-            executable_states,
-        ) in frozen_type_states:
-            current_namespace = expected_type.__dict__
-            if frozenset(current_namespace) != expected_names:
-                raise error_type(prefix + type_label)
-            for member_name, expected_member in expected_members:
-                if current_namespace.get(member_name, missing) is not expected_member:
-                    raise error_type(prefix + type_label + "." + member_name)
-            for member_name, function, state in executable_states:
+            dependency_label,
+            dependency_namespace,
+            dependency_name,
+            expected,
+            state,
+        ) in frozen_dependency_bindings:
+            current = dependency_namespace.get(dependency_name, missing)
+            if state is None:
+                if current is not expected:
+                    raise error_type(prefix + dependency_label)
+            else:
                 require_binding(
-                    label=type_label + "." + member_name,
-                    current=function,
-                    expected=function,
+                    label=dependency_label,
+                    current=current,
+                    expected=expected,
                     function_state=state,
                     error_prefix=prefix,
                 )
+        for dependency_label, cell, expected, state in frozen_dependency_closures:
+            try:
+                current = cell.cell_contents
+            except ValueError:
+                current = missing
+            if state is None:
+                if current is not expected:
+                    raise error_type(prefix + dependency_label)
+            else:
+                require_binding(
+                    label=dependency_label,
+                    current=current,
+                    expected=expected,
+                    function_state=state,
+                    error_prefix=prefix,
+                )
+        for type_state in frozen_dependency_type_states:
+            require_type_state(
+                prefix=prefix,
+                type_label=type_state[0],
+                expected_type=type_state[1],
+                expected_names=type_state[2],
+                expected_members=type_state[3],
+                executable_states=type_state[4],
+            )
         current_resource_values = (
             journal_store_type.current_journal_sequence,
             journal_store_type.pending_outbox_count,

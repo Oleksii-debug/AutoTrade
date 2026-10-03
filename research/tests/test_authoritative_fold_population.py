@@ -658,6 +658,87 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertTrue(state["authority_read"])
         self.assertEqual(fitted.dataset_id, self.dataset_id)
 
+    def test_caller_owned_artifact_store_method_shadow_cannot_replace_authority(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        state = {"called": False}
+
+        def hostile_snapshot(*_args, **_kwargs):
+            state["called"] = True
+            raise AssertionError("caller-owned snapshot override executed")
+
+        self.artifacts.read_authenticated_snapshot = hostile_snapshot
+        try:
+            fitted = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+        finally:
+            del self.artifacts.read_authenticated_snapshot
+
+        self.assertFalse(state["called"])
+        self.assertEqual(fitted.dataset_id, self.dataset_id)
+
+    def test_caller_owned_registry_resolver_shadow_cannot_replace_authority(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        state = {"called": False}
+
+        def hostile_resolver(*_args, **_kwargs):
+            state["called"] = True
+            raise AssertionError("caller-owned registry resolver override executed")
+
+        self.registry.resolve_market_population = hostile_resolver
+        try:
+            fitted = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+        finally:
+            del self.registry.resolve_market_population
+
+        self.assertFalse(state["called"])
+        self.assertEqual(fitted.dataset_id, self.dataset_id)
+
+    def test_caller_owned_registry_load_shadow_cannot_replace_manifest_authority(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        state = {"called": False}
+
+        def hostile_load(*_args, **_kwargs):
+            state["called"] = True
+            raise AssertionError("caller-owned registry load override executed")
+
+        self.registry.load = hostile_load
+        try:
+            fitted = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+        finally:
+            del self.registry.load
+
+        self.assertFalse(state["called"])
+        self.assertEqual(fitted.dataset_id, self.dataset_id)
+
     def test_caller_forged_validation_feature_is_rejected(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)

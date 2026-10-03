@@ -366,17 +366,22 @@ class RuntimeStateVerifier:
             raise ReplayError("runtime state snapshot authority identity mismatch")
         if snapshot.verifier_id != self.verifier_id:
             raise ReplayError("runtime state snapshot verifier identity mismatch")
-        _verify_runtime_state_signature(
-            self,
-            RuntimeStateAuthority._binding_material(
-                authority_id=snapshot.authority_id,
-                verifier_id=snapshot.verifier_id,
-                cut_id=snapshot.cut_id,
-                replay=snapshot.replay,
-                runtime_components=snapshot.runtime_components,
-            ),
-            snapshot.authority_seal,
-        )
+        try:
+            _verify_runtime_state_signature(
+                self,
+                RuntimeStateAuthority._binding_material(
+                    authority_id=snapshot.authority_id,
+                    verifier_id=snapshot.verifier_id,
+                    cut_id=snapshot.cut_id,
+                    replay=snapshot.replay,
+                    runtime_components=snapshot.runtime_components,
+                ),
+                snapshot.authority_seal,
+            )
+        except ReplayError as error:
+            raise ReplayError(
+                "runtime state snapshot authority signature mismatch"
+            ) from error
 
     def verify_checkpoint_binding(
         self,
@@ -390,19 +395,24 @@ class RuntimeStateVerifier:
             raise ReplayError("runtime state checkpoint authority identity mismatch")
         if checkpoint.runtime_verifier_id != self.verifier_id:
             raise ReplayError("runtime state checkpoint verifier identity mismatch")
-        _verify_runtime_state_signature(
-            self,
-            RuntimeStateAuthority._checkpoint_binding_material(
-                authority_id=checkpoint.runtime_authority_id,
-                verifier_id=checkpoint.runtime_verifier_id,
-                cut_id=checkpoint.runtime_cut_id,
-                replay=checkpoint.replay,
-                runtime_components=checkpoint.runtime_components,
-                build_sha=checkpoint.build_sha,
-                protocol_ref=checkpoint.protocol_ref,
-            ),
-            checkpoint.runtime_authority_seal,
-        )
+        try:
+            _verify_runtime_state_signature(
+                self,
+                RuntimeStateAuthority._checkpoint_binding_material(
+                    authority_id=checkpoint.runtime_authority_id,
+                    verifier_id=checkpoint.runtime_verifier_id,
+                    cut_id=checkpoint.runtime_cut_id,
+                    replay=checkpoint.replay,
+                    runtime_components=checkpoint.runtime_components,
+                    build_sha=checkpoint.build_sha,
+                    protocol_ref=checkpoint.protocol_ref,
+                ),
+                checkpoint.runtime_authority_seal,
+            )
+        except ReplayError as error:
+            raise ReplayError(
+                "runtime state checkpoint authority signature mismatch"
+            ) from error
 
 
 class RuntimeStateAuthority:

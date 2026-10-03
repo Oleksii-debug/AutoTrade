@@ -18,6 +18,7 @@ from autotrade_numeric import (
     MAX_INTEGER_DIGITS, MAX_SCALE,
 )
 
+from .authority import AuthorityService
 from .durable_reservations import DurableReservationBook
 from .accounting import book_external_cash_flow, canonical_transaction
 from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
@@ -158,6 +159,83 @@ def _require_completed_send(events: list[dict], *, episode_id: str, order_id: st
         raise ValueError("simulation fill submission identity differs")
 
 
+def _require_zero_wire_blocked(
+    events: list[dict],
+    reservations: DurableReservationBook,
+    *,
+    episode_id: str,
+    result: dict,
+) -> str:
+    """Re-derive completed BLOCKED and return its admitted intent hash."""
+
+    intent_id = _uuid("intent", episode_id)
+    attempt_id = _uuid("attempt", episode_id)
+    client_id = stable_client_order_id(
+        "simulated",
+        intent_id,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+    )
+    aggregate_id = submission_attempt_aggregate_id(
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        attempt_id=attempt_id,
+    )
+    submissions = [
+        event for event in events
+        if event["aggregate_type"] == "submission_attempt"
+    ]
+    if (
+        len(submissions) != 2
+        or [event["event_type"] for event in submissions]
+        != ["SubmissionPrepared", "SubmissionBlocked"]
+        or any(
+            event["aggregate_id"] != aggregate_id
+            or event["aggregate_version"] != index
+            or event.get("environment") != ENVIRONMENT
+            or event.get("host_id") != "local-mvp"
+            or event.get("owner_epoch") != "1"
+            or type(event.get("payload")) is not dict
+            for index, event in enumerate(submissions, 1)
+        )
+    ):
+        raise ValueError("completed BLOCKED submission chronology differs")
+    prepared = submissions[0]["payload"]
+    blocked = submissions[1]["payload"]
+    reason = blocked.get("reason")
+    if (
+        prepared.get("attempt_id") != attempt_id
+        or prepared.get("intent_id") != intent_id
+        or prepared.get("provider") != "simulated"
+        or prepared.get("environment") != ENVIRONMENT
+        or prepared.get("account_id") != ACCOUNT
+        or prepared.get("client_order_id") != client_id
+        or prepared.get("owner_token") != "canonical-simulation-owner"
+        or prepared.get("owner_epoch") != 1
+        or type(prepared.get("intent_hash")) is not str
+        or blocked.get("client_order_id") != client_id
+        or type(reason) is not str
+        or not reason.strip()
+        or result.get("order_id") != client_id
+        or result.get("reason") != reason.strip()
+        or result.get("fill_id") is not None
+        or result.get("new_outbound_requests") != 0
+    ):
+        raise ValueError("completed BLOCKED submission identity differs")
+    reservation = reservations.get(_uuid("reservation", episode_id))
+    if (
+        reservation.state != "REJECTED"
+        or any(value != 0 for value in reservation.remaining.values())
+        or any(value != 0 for value in reservation.consumed.values())
+        or type(reservation.resolution_evidence) is not str
+        or not reservation.resolution_evidence.startswith(
+            "journal:submission-blocked:"
+        )
+    ):
+        raise ValueError("completed BLOCKED reservation evidence differs")
+    return prepared["intent_hash"]
+
+
 def _require_recorded_admission(events: list[dict], *, episode_id: str, outcome: str) -> dict:
     """Display a recorded outcome only for the same intent and risk reference.
 
@@ -279,6 +357,9 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 _decimal(posting.get("signed_amount"))
                 if (posting.get("ledger_account"), posting.get("asset_or_currency")) not in _ECONOMIC_UNITS:
                     raise ValueError("single-episode simulation economic units differ")
+    if any(event.get("event_type") == "AccountReconciled" and
+           event.get("aggregate_type") != "account_reconciliation" for event in events):
+        raise ValueError("simulation reconciliation has an invalid aggregate owner")
     sessions = [event for event in events
                 if event["aggregate_type"] == "canonical_simulation_session"]
     if sessions:
@@ -303,6 +384,15 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
     else:
         episode_id = None
         started = {}
+
+    recorded = [event for event in events if event.get("event_type") == "AuthorityAdmissionRecorded"]
+    if recorded and recorded[0].get("payload", {}).get("outcome") == "REJECTED":
+        _require_recorded_admission(events, episode_id=episode_id, outcome="REJECTED")
+        authority = AuthorityService(store)
+        AuthorityService.historical_admission(authority, _uuid("admission", episode_id))
+    elif recorded and len(sessions) == 1:
+        # Incomplete chronology is not permission to display a forged admission.
+        _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
 
     book = DurableProviderEconomicBook(
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
@@ -360,7 +450,7 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 or _decimal(result.get("position")) != position):
             raise ValueError("completed simulation differs from durable economics")
         session_status = result.get("status")
-        if session_status not in {"HOLD", "RISK_REJECTED", "FILL_RECONCILED_ORDER_UNCONFIRMED"}:
+        if session_status not in {"HOLD", "RISK_REJECTED", "BLOCKED", "FILL_RECONCILED_ORDER_UNCONFIRMED"}:
             raise ValueError("unsupported completed simulation outcome")
         fill_id = result.get("fill_id")
         is_fill = session_status == "FILL_RECONCILED_ORDER_UNCONFIRMED"
@@ -410,6 +500,32 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 raise ValueError("completed simulation reservation differs")
             status["fills"] = {fill_id: {"instrument": INSTRUMENT,
                                         "quantity": canonical_decimal_text(position)}}
+        elif session_status == "BLOCKED":
+            if (
+                result["decision"] != "BUY"
+                or fill_id is not None
+                or position != 0
+                or active
+            ):
+                raise ValueError("completed BLOCKED contains unexpected exposure")
+            submission_intent_hash = _require_zero_wire_blocked(
+                events,
+                reservations,
+                episode_id=episode_id,
+                result=result,
+            )
+            admission = _require_recorded_admission(
+                events,
+                episode_id=episode_id,
+                outcome="ADMITTED",
+            )
+            if (
+                admission["payload"].get("intent_hash")
+                != submission_intent_hash
+            ):
+                raise ValueError(
+                    "completed BLOCKED submission does not belong to admitted intent"
+                )
         elif (fill_id is not None or result.get("order_id") is not None or position != 0 or active
               or any(event["aggregate_type"] == "submission_attempt" for event in events)
               or (session_status == "HOLD" and result["decision"] != "HOLD")
@@ -423,7 +539,13 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         status.update(
             status="awaiting_order_reconciliation" if is_fill or active else "completed",
             session_status=session_status, reconciled=True,
-            reason="order_terminal_state_unconfirmed" if is_fill or active else None,
+            reason=(
+                result.get("reason")
+                if session_status == "BLOCKED"
+                else "order_terminal_state_unconfirmed"
+                if is_fill or active
+                else None
+            ),
             reconciliation_event_id=reconciliation["event_id"],
         )
         fees = _balance(book, "FEE_EXPENSE:USD", "USD")

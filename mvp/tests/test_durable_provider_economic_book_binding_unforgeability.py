@@ -24,20 +24,65 @@ class DurableProviderEconomicBookBindingUnforgeabilityTests(unittest.TestCase):
                 environment="PAPER",
             )
 
-            # The process-local registry and its mutable authority record are
-            # importable caller-writable Python state. Retargeting the visible
-            # store and that registry record together must not redefine which
-            # durable financial history the book originally selected.
-            binding = authority._DURABLE_PROVIDER_ECONOMIC_BOOK_AUTHORITIES[book]
-            vars(book)["store"] = replacement
-            binding.store = replacement
-            binding.store_identity = require_exact_journal_store_authority(
-                replacement,
-                subject="adversarial replacement economic JournalStore",
+            # Original composition state must not be reachable as a mutable
+            # module-global registry/record. The verifier may return a detached
+            # snapshot, but rewriting that snapshot cannot rewrite issuance truth.
+            self.assertFalse(
+                hasattr(authority, "_DURABLE_PROVIDER_ECONOMIC_BOOK_AUTHORITIES")
+            )
+            self.assertFalse(
+                hasattr(authority, "_register_durable_provider_economic_book_authority")
+            )
+            self.assertFalse(
+                hasattr(authority, "_update_durable_provider_economic_projection_authority")
             )
 
-            with self.assertRaises(AccountingConflict):
+            detached = authority._require_durable_provider_economic_book_authority(book)
+            detached.store = replacement
+            detached.store_identity = require_exact_journal_store_authority(
+                replacement,
+                subject="adversarial detached replacement economic JournalStore",
+            )
+
+            # Mutating a detached verifier result cannot retarget the real book.
+            book.refresh()
+            self.assertIs(vars(book)["store"], selected)
+
+            # Even if the caller also rewrites the visible instance store, the
+            # closure-owned original binding still rejects the substitution.
+            vars(book)["store"] = replacement
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "JournalStore changed",
+            ):
                 book.refresh()
+
+    def test_reinitialization_cannot_retarget_existing_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            replacement = JournalStore(root / "replacement.sqlite3")
+            book = DurableProviderEconomicBook(
+                selected,
+                provider_id="PROVIDER-A",
+                account_id="acct-authority",
+                environment="PAPER",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "already established",
+            ):
+                authority._initialize_durable_provider_economic_book(
+                    book,
+                    replacement,
+                    provider_id="PROVIDER-A",
+                    account_id="acct-authority",
+                    environment="PAPER",
+                )
+
+            self.assertIs(vars(book)["store"], selected)
+            book.refresh()
 
 
 if __name__ == "__main__":

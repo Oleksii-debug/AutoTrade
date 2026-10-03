@@ -432,6 +432,10 @@ def prepare_chronology_challenge(
 def _validate_challenge(challenge: ChronologyChallenge) -> ChronologyChallenge:
     if type(challenge) is not ChronologyChallenge:
         raise TypeError("challenge must be exact ChronologyChallenge")
+    # frozen=True prevents normal assignment, but caller-owned dataclasses can
+    # still be changed with object.__setattr__(). Snapshot first so all later
+    # validation and use operates on one private, self-consistent value object.
+    challenge = replace(challenge)
     if challenge.schema_version != _SCHEMA_VERSION:
         raise ValueError("chronology challenge schema version is unsupported")
     if type(challenge.scope) is not ChronologyScope:

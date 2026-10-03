@@ -1013,6 +1013,7 @@ def _prepare_provider_fill_correction_binding(
     )
     conservative_usage = dict(initial_usage)
     active_fill_id = _text(initial_request.get("fill_id"), name="initial fill_id")
+    active_transaction_id = initial_transaction.transaction_id
     seen_fill_ids = {active_fill_id}
     last_event: Mapping[str, Any] | None = None
     last_request: dict[str, Any] | None = None
@@ -1083,6 +1084,34 @@ def _prepare_provider_fill_correction_binding(
             request.get("corrected_active_usage"),
             name="corrected active usage",
         )
+        replacement_transaction_digest = _text(
+            request.get("replacement_transaction_digest"),
+            name="replacement_transaction_digest",
+        )
+        replacement_transactions = [
+            transaction
+            for transaction in economic_book.transactions
+            if payload_digest(canonical_transaction(transaction))
+            == replacement_transaction_digest
+        ]
+        if len(replacement_transactions) != 1:
+            raise AccountingConflict(
+                "provider fill correction binding does not identify one durable replacement transaction"
+            )
+        historical_replacement = replacement_transactions[0]
+        if (
+            historical_replacement.economic_order_key != expected_order_key
+            or historical_replacement.corrects_transaction_id
+            != active_transaction_id
+            or historical_replacement.reverses_transaction_id is not None
+        ):
+            raise AccountingConflict(
+                "provider fill correction durable replacement lineage is invalid"
+            )
+        if _cash_outflow_usage(historical_replacement) != corrected_usage:
+            raise AccountingConflict(
+                "provider fill correction active usage does not match durable economic replacement"
+            )
         expected_resulting = {
             resource: max(
                 conservative_usage.get(resource, Decimal("0")),
@@ -1179,6 +1208,7 @@ def _prepare_provider_fill_correction_binding(
             )
         seen_fill_ids.add(corrected_fill_id)
         active_fill_id = corrected_fill_id
+        active_transaction_id = historical_replacement.transaction_id
         active_projected_digest = corrected_projected_digest
         active_provider_digest = corrected_provider_digest
         conservative_usage = expected_resulting

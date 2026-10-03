@@ -9,7 +9,10 @@ from autotrade_runtime.artifacts import ArtifactStore
 
 import _trusted_chronology_cut_cases as _cases
 from mvp.autotrade_mvp import production_host
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.recovery import RecoveryController
 from mvp.autotrade_mvp.trusted_chronology import ChronologyScope
+import mvp.autotrade_mvp.recovery as recovery_module
 import mvp.autotrade_mvp.trusted_chronology_cut as chronology
 
 
@@ -129,6 +132,154 @@ class TrustedChronologyRebindingTests(unittest.TestCase):
                 if patch_started and patcher is not None:
                     patcher.stop()
                 runtime.close()
+
+    def test_signed_verifier_cannot_rebind_recovery_owner_factory(self):
+        with _cases.TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            manifest = self._measurement_manifest(accepted, measurement)
+            stale_owner = recovery.owner
+            self.assertIsNotNone(stale_owner)
+            forged_owner_factory = Mock(return_value=stale_owner)
+            owner_patcher = patch.object(
+                recovery_module,
+                "OwnerFence",
+                forged_owner_factory,
+            )
+            patch_started = False
+            successor = type(stale_owner)(
+                owner_id="independently-authorized-successor",
+                epoch=stale_owner.epoch + 1,
+            )
+
+            def raced_verifier(*_args, **_kwargs):
+                nonlocal patch_started
+                recovery._append_durable_owner(successor)
+                owner_patcher.start()
+                patch_started = True
+                return accepted
+
+            try:
+                with (
+                    patch.object(
+                        chronology,
+                        "parse_signed_qualification_attestation",
+                        return_value=self._dummy_receipt(),
+                    ),
+                    patch.object(
+                        chronology,
+                        "verify_canonical_qualification_attestation",
+                        side_effect=raced_verifier,
+                    ),
+                    patch.object(
+                        chronology,
+                        "trusted_authenticated_reader",
+                        return_value=lambda _artifact_id: (manifest, measurement),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "trusted chronology recovery authority changed: OwnerFence",
+                    ),
+                ):
+                    verifier = chronology._build_test_current_cut_verifier()
+                    verifier(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        evidence_store=artifacts,
+                        evidence_root=str(artifacts.root),
+                        expected_source_sha=_cases.SOURCE_SHA,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                        claimed_instants=("2026-10-03T14:00:00Z",),
+                    )
+
+                forged_owner_factory.assert_not_called()
+            finally:
+                if patch_started:
+                    owner_patcher.stop()
+
+    def test_signed_verifier_cannot_swap_recovery_journal_generation(self):
+        with _cases.TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            manifest = self._measurement_manifest(accepted, measurement)
+
+            foreign_store = JournalStore(Path(directory) / "foreign-journal.sqlite3")
+            foreign_recovery = RecoveryController(
+                owner_store=foreign_store,
+                owner_scope=recovery.owner_scope,
+            )
+            foreign_recovery.start(cut.owner_id)
+            original_store = recovery._owner_store
+            original_identity = recovery._owner_store_identity
+            swapped = False
+
+            def raced_verifier(*_args, **_kwargs):
+                nonlocal swapped
+                recovery._owner_store = foreign_store
+                recovery._owner_store_identity = foreign_recovery._owner_store_identity
+                swapped = True
+                return accepted
+
+            try:
+                with (
+                    patch.object(
+                        chronology,
+                        "parse_signed_qualification_attestation",
+                        return_value=self._dummy_receipt(),
+                    ),
+                    patch.object(
+                        chronology,
+                        "verify_canonical_qualification_attestation",
+                        side_effect=raced_verifier,
+                    ),
+                    patch.object(
+                        chronology,
+                        "trusted_authenticated_reader",
+                        return_value=lambda _artifact_id: (manifest, measurement),
+                    ),
+                    self.assertRaisesRegex(
+                        PermissionError,
+                        "trusted chronology recovery JournalStore changed",
+                    ),
+                ):
+                    verifier = chronology._build_test_current_cut_verifier()
+                    verifier(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        evidence_store=artifacts,
+                        evidence_root=str(artifacts.root),
+                        expected_source_sha=_cases.SOURCE_SHA,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                        claimed_instants=("2026-10-03T14:00:00Z",),
+                    )
+                self.assertTrue(swapped)
+            finally:
+                recovery._owner_store = original_store
+                recovery._owner_store_identity = original_identity
 
     def test_signed_verifier_cannot_rebind_instant_parser_to_launder_future_horizon(self):
         with _cases.TemporaryDirectory() as directory:

@@ -112,7 +112,7 @@ def _freeze_proposal(
         frozen: dict[str, object] = {}
         for key, nested in value.items():
             if type(key) is not str:
-                raise ResearchBoundaryError(f"{label} object keys must be exact strings")
+                raise ResearchBoundaryError(f"{label} object keys must be strings; exact strings are required")
             key_size = _utf8_size(key, label=f"{label} object key")
             if key_size > _MAX_STRING_UTF8_BYTES:
                 raise ResearchBoundaryError(
@@ -508,7 +508,7 @@ def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
     if type(value) in (dict, _FrozenDict):
         for key, nested in value.items():
             if type(key) is not str:
-                raise ResearchBoundaryError("model proposal object keys must be exact strings")
+                raise ResearchBoundaryError("model proposal object keys must be strings; exact strings are required")
             normalized = _privileged_key(key.strip())
             if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
                 found.add(normalized)

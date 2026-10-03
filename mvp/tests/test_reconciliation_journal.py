@@ -1,4 +1,10 @@
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -1320,6 +1326,96 @@ class ReconciliationJournalTests(unittest.TestCase):
                     resources=("CASH:USD",),
                     now="2026-09-24T19:00:30Z",
                     max_age_seconds=HostileDecimal("60"),
+                )
+
+
+    def test_availability_freshness_verdict_ignores_ambient_decimal_context(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="context-independent-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            for precision in (6, 10, 28, 80):
+                for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                    with self.subTest(precision=precision, rounding=rounding):
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            evidence = load_account_resource_availability_evidence(
+                                store,
+                                checkpoint_event_id=checkpoint["event_id"],
+                                provider_id="TEST_PROVIDER",
+                                account_id="test-account",
+                                environment="PAPER",
+                                resources=("CASH:USD",),
+                                now="2026-09-24T19:02:03.456789Z",
+                                max_age_seconds="123.4568",
+                            )
+                        self.assertEqual(evidence["age_seconds"], "123.456789")
+
+    def test_availability_freshness_exact_boundary_and_one_microsecond_over(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="exact-freshness-boundary",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:02:03.456800Z",
+                max_age_seconds="123.4568",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+            with self.assertRaisesRegex(ValueError, "stale"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:02:03.456801Z",
+                    max_age_seconds="123.4568",
+                )
+
+    def test_availability_freshness_rejects_oversized_numeric_text(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bounded-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(ValueError, "finite bounded decimal"):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="9" * 10000,
                 )
 
 

@@ -334,10 +334,12 @@ class ModelPricingEvidenceAuthority:
         as_of = _utc(body.get("as_of"), name="as_of")
         valid_until = _utc(body.get("valid_until"), name="valid_until")
         from datetime import datetime
-        if datetime.fromisoformat(valid_until[:-1] + "+00:00") < datetime.fromisoformat(
+        if datetime.fromisoformat(valid_until[:-1] + "+00:00") <= datetime.fromisoformat(
             as_of[:-1] + "+00:00"
         ):
-            raise ModelPricingEvidenceError("pricing evidence validity precedes as_of")
+            raise ModelPricingEvidenceError(
+                "pricing evidence valid_until must follow as_of"
+            )
         currency = _text(body.get("cost_currency"), name="cost_currency")
         if _CURRENCY.fullmatch(currency) is None:
             raise ModelPricingEvidenceError("cost_currency must be uppercase alphanumeric")

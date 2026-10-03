@@ -189,12 +189,12 @@ def _knowledge_time(row: Mapping[str, object]) -> datetime:
     )
 
 
-def authoritative_source_values(
+def _source_values_from_population(
     population: FrozenMarketPopulation,
     *,
     spec: HistoricalFeatureInputSpec,
 ) -> tuple[SourceValue, ...]:
-    """Derive immutable SourceValue inputs from a registry-issued population."""
+    """Derive values from a population already authenticated in this call path."""
 
     if type(population) is not FrozenMarketPopulation:
         raise TypeError("population must be FrozenMarketPopulation")
@@ -269,14 +269,34 @@ def authoritative_source_values(
     return tuple(result)
 
 
-def authoritative_feature_points(
+def authoritative_source_values(
+    population: FrozenMarketPopulation,
+    *,
+    spec: HistoricalFeatureInputSpec,
+    registry: HistoricalVintageRegistry,
+    artifact_store: ArtifactStore,
+) -> tuple[SourceValue, ...]:
+    """Derive SourceValue inputs only after persisted-authority revalidation."""
+
+    if type(registry) is not HistoricalVintageRegistry:
+        raise TypeError("registry must be HistoricalVintageRegistry")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be exact ArtifactStore")
+    canonical = registry.revalidate_market_population(
+        population,
+        artifact_store=artifact_store,
+    )
+    return _source_values_from_population(canonical, spec=spec)
+
+
+def _feature_points_from_population(
     population: FrozenMarketPopulation,
     *,
     spec: HistoricalFeatureInputSpec,
 ) -> tuple[FeaturePoint, ...]:
-    """Derive deterministic rolling-return points from authenticated source rows."""
+    """Derive points from a population already authenticated in this call path."""
 
-    sources = authoritative_source_values(population, spec=spec)
+    sources = _source_values_from_population(population, spec=spec)
     points: list[FeaturePoint] = []
     seen: set[tuple[object, ...]] = set()
     for source in sources:
@@ -319,6 +339,26 @@ def authoritative_feature_points(
     return tuple(points)
 
 
+def authoritative_feature_points(
+    population: FrozenMarketPopulation,
+    *,
+    spec: HistoricalFeatureInputSpec,
+    registry: HistoricalVintageRegistry,
+    artifact_store: ArtifactStore,
+) -> tuple[FeaturePoint, ...]:
+    """Derive feature points only after persisted-authority revalidation."""
+
+    if type(registry) is not HistoricalVintageRegistry:
+        raise TypeError("registry must be HistoricalVintageRegistry")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be exact ArtifactStore")
+    canonical = registry.revalidate_market_population(
+        population,
+        artifact_store=artifact_store,
+    )
+    return _feature_points_from_population(canonical, spec=spec)
+
+
 def resolve_authoritative_feature_points(
     *,
     registry: HistoricalVintageRegistry,
@@ -345,7 +385,7 @@ def resolve_authoritative_feature_points(
         events=None,
     )
     _detach_asserted_event_cache(population, events)
-    return authoritative_feature_points(population, spec=spec)
+    return _feature_points_from_population(population, spec=spec)
 
 
 @dataclass(frozen=True)
@@ -491,7 +531,7 @@ class AuthoritativeFoldNormalizer:
         )
         candidates = [
             candidate
-            for candidate in authoritative_feature_points(
+            for candidate in _feature_points_from_population(
                 validation_population,
                 spec=spec,
             )
@@ -517,7 +557,7 @@ def _fit_from_population(
     fold: CausalFold,
     spec: HistoricalFeatureInputSpec,
 ) -> FoldNormalizer:
-    points = authoritative_feature_points(population, spec=spec)
+    points = _feature_points_from_population(population, spec=spec)
     with localcontext(_SCIENTIFIC_DECIMAL_CONTEXT):
         return fit_fold_normalizer(
             points,

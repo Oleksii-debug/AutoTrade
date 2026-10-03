@@ -25,6 +25,7 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_multiply,
+    exact_subtract,
     parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentRegistry, InstrumentVersion
@@ -541,7 +542,15 @@ def _project_position_after_reversal(
             raise OptionLifecycleConflict(
                 "prior lifecycle economics do not contain one option-position retirement"
             )
-        projected -= matching[0].signed_amount
+        try:
+            projected = exact_subtract(
+                projected,
+                matching[0].signed_amount,
+            )
+        except ExactDecimalError as error:
+            raise OptionLifecycleConflict(
+                "option position correction exceeds exact-decimal resource authority"
+            ) from error
     return projected
 
 

@@ -475,6 +475,59 @@ def _cut_id(challenge_digest: str, attestation_id: str) -> str:
     )
 
 
+def _snapshot_attempt(
+    attempt: DurableChronologyAttempt,
+) -> DurableChronologyAttempt:
+    """Detach caller-owned attempt/challenge state before authority-bearing use."""
+
+    if type(attempt) is not DurableChronologyAttempt:
+        raise TypeError("attempt must be exact DurableChronologyAttempt")
+    challenge = attempt.challenge
+    if type(challenge) is not ChronologyChallenge:
+        raise TypeError("attempt challenge must be exact ChronologyChallenge")
+
+    # frozen=True blocks ordinary assignment only.  Detach first, then re-admit
+    # through the canonical 1.1 durable challenge parser so a mixed/tampered
+    # caller snapshot cannot cross the accepted-cut boundary.
+    challenge = replace(challenge)
+    challenge = _challenge_from_payload(
+        challenge.canonical_payload(),
+        expected_digest=challenge.challenge_digest,
+    )
+    prepared_event_id = _uuid_text(
+        attempt.prepared_event_id,
+        name="prepared_event_id",
+    )
+    if prepared_event_id != _prepared_event_id(challenge.challenge_digest):
+        raise TrustedChronologyError(
+            "trusted chronology prepared event id differs from challenge"
+        )
+    return DurableChronologyAttempt(
+        challenge=challenge,
+        prepared_event_id=prepared_event_id,
+        prepared_journal_sequence=_exact_positive_int(
+            attempt.prepared_journal_sequence,
+            name="prepared_journal_sequence",
+        ),
+        started_monotonic_ns=_exact_nonnegative_int(
+            attempt.started_monotonic_ns,
+            name="started_monotonic_ns",
+        ),
+        started_wall_utc_ns=_exact_nonnegative_int(
+            attempt.started_wall_utc_ns,
+            name="started_wall_utc_ns",
+        ),
+    )
+
+
+def _snapshot_cut(cut: TrustedChronologyCut) -> TrustedChronologyCut:
+    """Detach caller-owned cut fields before durable/read-side validation."""
+
+    if type(cut) is not TrustedChronologyCut:
+        raise TypeError("cut must be exact TrustedChronologyCut")
+    return replace(cut)
+
+
 def _cut_digest(payload: dict[str, object]) -> str:
     material = dict(payload)
     material.pop("cut_digest", None)
@@ -707,8 +760,7 @@ def chronology_measurement_requirement(
 ) -> str:
     """Derive the additional signed subject requirement for one exact response."""
 
-    if type(attempt) is not DurableChronologyAttempt:
-        raise TypeError("attempt must be exact DurableChronologyAttempt")
+    attempt = _snapshot_attempt(attempt)
     if type(measurement_bytes) is not bytes:
         raise TypeError("measurement_bytes must be exact bytes")
     transcript = parse_challenge_bound_measurement(
@@ -739,8 +791,7 @@ def _require_open_attempt(
     attempt: DurableChronologyAttempt,
     runtime: ProductionHostRuntime | None,
 ) -> int:
-    if type(attempt) is not DurableChronologyAttempt:
-        raise TypeError("attempt must be exact DurableChronologyAttempt")
+    attempt = _snapshot_attempt(attempt)
     recovery = _require_exact_recovery(recovery)
     identity = _selected_store_identity(store)
     challenge = attempt.challenge
@@ -1389,6 +1440,7 @@ def accept_trusted_chronology_cut(
 
     recovery = _require_exact_recovery(recovery)
     with journal_sender_gate(store):
+        attempt = _snapshot_attempt(attempt)
         journal_cut = _require_open_attempt(
             store=store,
             recovery=recovery,
@@ -1532,8 +1584,7 @@ def require_current_trusted_chronology_cut(
 ) -> TrustedChronologyCut:
     """Reverify one durable cut and require owner/incident/runtime currentness."""
 
-    if type(cut) is not TrustedChronologyCut:
-        raise TypeError("cut must be exact TrustedChronologyCut")
+    cut = _snapshot_cut(cut)
     if type(expected_scope) is not ChronologyScope:
         raise TypeError("expected_scope must be exact ChronologyScope")
     expected_source_sha = _git_sha(
@@ -1619,8 +1670,7 @@ def require_chronology_horizon(
 ) -> None:
     """Require terminal-evidence timestamps to be covered conservatively."""
 
-    if type(cut) is not TrustedChronologyCut:
-        raise TypeError("cut must be exact TrustedChronologyCut")
+    cut = _snapshot_cut(cut)
     _covered_text, covered = _instant(cut.covered_utc, name="covered_utc")
     for index, value in enumerate(claimed_instants):
         _text, observed = _instant(value, name=f"claimed_instant[{index}]")

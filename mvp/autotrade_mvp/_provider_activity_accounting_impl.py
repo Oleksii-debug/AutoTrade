@@ -358,6 +358,37 @@ def _provider_fill_binding_payload(
     }
 
 
+def _require_plain_financial_json(
+    value: object,
+    *,
+    name: str,
+    depth: int = 0,
+) -> None:
+    if depth > 32:
+        raise AccountingConflict(f"{name} exceeds the canonical JSON depth limit")
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise AccountingConflict(f"{name} contains a non-text JSON key")
+            _require_plain_financial_json(
+                item,
+                name=name,
+                depth=depth + 1,
+            )
+        return
+    if type(value) is list:
+        for item in value:
+            _require_plain_financial_json(
+                item,
+                name=name,
+                depth=depth + 1,
+            )
+        return
+    if value is None or type(value) in {str, int, bool}:
+        return
+    raise AccountingConflict(f"{name} contains a non-canonical JSON value")
+
+
 _PROJECTED_FILL_BINDING_FIELDS = frozenset({
     "fill_id",
     "provider_execution_id",
@@ -838,6 +869,10 @@ def _prepare_provider_fill_correction_binding(
     initial_payload = initial_event.get("payload")
     if type(initial_payload) is not dict:
         raise AccountingConflict("initial provider fill binding payload is invalid")
+    _require_plain_financial_json(
+        initial_payload,
+        name="initial provider fill binding payload",
+    )
     if payload_digest(initial_payload) != initial_event.get("payload_hash"):
         raise AccountingConflict("initial provider fill binding payload hash is invalid")
     initial_request = initial_payload.get("request")
@@ -993,6 +1028,10 @@ def _prepare_provider_fill_correction_binding(
         payload = event.get("payload")
         if type(payload) is not dict:
             raise AccountingConflict("provider fill correction binding payload is invalid")
+        _require_plain_financial_json(
+            payload,
+            name="provider fill correction binding payload",
+        )
         if payload_digest(payload) != event.get("payload_hash"):
             raise AccountingConflict(
                 "provider fill correction binding payload hash is invalid"

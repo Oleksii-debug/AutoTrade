@@ -139,6 +139,60 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                 "the already-ended campaign duration",
             )
 
+    def test_post_end_clock_backlog_drain_cannot_manufacture_pass(self):
+        """Reconnect backlog present at terminal cut remains part of that evidence."""
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = _spec()
+            plan = RuntimeCampaignPlan.create(
+                spec=spec,
+                workload_profile_hash=WORKLOAD,
+                declared_duration_ms=1,
+                expected_financial_event_ids=("fin-backlog",),
+                financial_aggregate_types=("risk_decision",),
+            )
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            journal.append_event(
+                _envelope("fin-backlog"),
+                outbox_topic="runtime-qualification",
+            )
+            pending = journal.pending_outbox(limit=10)
+            self.assertEqual(len(pending), 1)
+
+            def ending_clock() -> int:
+                journal.mark_outbox_delivered(
+                    pending[0]["outbox_id"],
+                    expected_envelope_hash=pending[0]["envelope_hash"],
+                )
+                return 1_000_001_000
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(100,),
+                research_interference_us=(100,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 1},
+                monotonic_ns=ending_clock,
+            )
+
+            # The outbox did drain after the terminal-state snapshot. That later
+            # success must not retroactively rewrite the already-ended campaign.
+            self.assertEqual(journal.pending_outbox_count(), 0)
+            self.assertEqual(evidence.reconnect_backlog_remaining, 1)
+            decision = evaluate_runtime_campaign(spec, evidence)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

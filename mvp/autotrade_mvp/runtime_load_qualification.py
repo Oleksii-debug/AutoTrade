@@ -575,6 +575,14 @@ def collect_runtime_campaign_evidence(
     if end_sequence < cut.start_journal_sequence:
         raise RuntimeBudgetError("campaign journal end cut precedes its start cut")
 
+    # Backlog is part of the terminal campaign state. Snapshot it before the
+    # terminal clock so an acknowledgement that races after campaign end cannot
+    # erase reconnect pressure from the already-ended interval. A later drain is
+    # intentionally conservative for this evidence cut.
+    backlog_remaining = journal.pending_outbox_count()
+    if type(backlog_remaining) is not int or backlog_remaining < 0:
+        raise RuntimeBudgetError("campaign reconnect backlog is invalid")
+
     ended_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="ended_monotonic_ns",
@@ -639,7 +647,6 @@ def collect_runtime_campaign_evidence(
         if str(event["event_id"]) in expected
     ]
 
-    backlog_remaining = journal.pending_outbox_count()
     return RuntimeCampaignEvidence(
         plan_digest=plan.digest,
         spec_digest=spec.digest,

@@ -121,7 +121,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function resetEventHistoryForScope()", js)
+        self.assertIn("function resetEventHistoryForScope(", js)
         self.assertIn("renderedAccountId: null", js)
         self.assertIn("renderedEnvironment: null", js)
         self.assertIn("const scopeChanged = state.renderedAccountId !== null", js)
@@ -129,10 +129,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("parsed.environment !== state.renderedEnvironment", js)
         self.assertIn("state.renderedAccountId = parsed.accountId", js)
         self.assertIn("state.renderedEnvironment = parsed.environment", js)
-        scope = js.index("if (scopeChanged)")
+        scope = js.index("if (displayContextChanged)")
         cursor_reset = js.index("state.cursor = 0n", scope)
         version_reset = js.index("state.version = 0n", scope)
-        history_reset = js.index("resetEventHistoryForScope()", scope)
+        history_reset = js.index("resetEventHistoryForScope();", scope)
         regression_check = js.index("host snapshot counters regressed", scope)
         self.assertLess(cursor_reset, regression_check)
         self.assertLess(version_reset, regression_check)
@@ -327,7 +327,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("state.renderedAccountId = null", invalidation)
         self.assertNotIn("state.renderedEnvironment = null", invalidation)
         self.assertIn(
-            "last successfully rendered scope is retained only to prevent stale read-only",
+            "successfully rendered scope is retained only to prevent stale read-only",
             js,
         )
 
@@ -1203,7 +1203,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         condition = snapshot[
             snapshot.index("const skippedSameScopeEvents ="):
-            snapshot.index("if (scopeChanged)")
+            snapshot.index("if (displayContextChanged)")
         ]
         self.assertIn("!displayContextChanged", condition)
         self.assertIn("state.renderedHostId !== null", condition)

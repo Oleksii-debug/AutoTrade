@@ -2874,6 +2874,114 @@ def commit_provider_fill_with_reservation_consumption(
     )
 
 
+def _snapshot_external_cash_activity(
+    activity: ProviderActivityEvidence,
+) -> ProviderActivityEvidence:
+    """Detach one exact provider cash fact before durable financial callbacks."""
+
+    if type(activity) is not ProviderActivityEvidence:
+        raise TypeError("activity must be exact ProviderActivityEvidence")
+    raw_state = object.__getattribute__(activity, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("provider activity state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "activity_id",
+        "activity_type",
+        "origin",
+        "occurred_at",
+        "instrument",
+        "currency",
+        "client_order_id",
+        "provider_order_id",
+        "provider_execution_id",
+        "signed_amount",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("provider activity contains unexpected state fields")
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "activity_id",
+        "activity_type",
+        "origin",
+        "occurred_at",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"provider activity {name} must be exact str")
+    for name in (
+        "instrument",
+        "currency",
+        "client_order_id",
+        "provider_order_id",
+        "provider_execution_id",
+    ):
+        if state[name] is not None and type(state[name]) is not str:
+            raise TypeError(f"provider activity {name} must be exact str or None")
+    if state["signed_amount"] is not None and type(state["signed_amount"]) is not Decimal:
+        raise TypeError(
+            "provider activity signed_amount must be exact Decimal or None"
+        )
+
+    snapshot = ProviderActivityEvidence.create(
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        activity_id=state["activity_id"],
+        activity_type=state["activity_type"],
+        origin=state["origin"],
+        occurred_at=state["occurred_at"],
+        instrument=state["instrument"],
+        currency=state["currency"],
+        client_order_id=state["client_order_id"],
+        provider_order_id=state["provider_order_id"],
+        provider_execution_id=state["provider_execution_id"],
+        signed_amount=state["signed_amount"],
+    )
+    observed = tuple(
+        state[name]
+        for name in (
+            "provider_id",
+            "account_id",
+            "environment",
+            "activity_id",
+            "activity_type",
+            "origin",
+            "occurred_at",
+            "instrument",
+            "currency",
+            "client_order_id",
+            "provider_order_id",
+            "provider_execution_id",
+            "signed_amount",
+        )
+    )
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.activity_id,
+        snapshot.activity_type,
+        snapshot.origin,
+        snapshot.occurred_at,
+        snapshot.instrument,
+        snapshot.currency,
+        snapshot.client_order_id,
+        snapshot.provider_order_id,
+        snapshot.provider_execution_id,
+        snapshot.signed_amount,
+    )
+    if observed != canonical:
+        raise ValueError(
+            "provider activity changed from canonical normalized state"
+        )
+    return snapshot
+
+
 def book_external_provider_cash_activity(
     store: JournalStore,
     *,
@@ -2917,8 +3025,7 @@ def book_external_provider_cash_activity(
         with journal_store_authority_scope(store, store_identity):
             return JournalStore.commit_command(store, **kwargs)
 
-    if not isinstance(activity, ProviderActivityEvidence):
-        raise TypeError("activity must be ProviderActivityEvidence")
+    activity = _snapshot_external_cash_activity(activity)
 
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")

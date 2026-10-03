@@ -165,10 +165,7 @@ def _validate_change(change: Change) -> Change:
     if status in _SIMPLE_CHANGE_STATUSES:
         if change.previous_path is not None:
             raise ValueError(f"{status} change must not carry previous_path")
-    elif kind in {"R", "C"}:
-        score = status[1:]
-        if not score.isdigit() or not (0 <= int(score) <= 100):
-            raise ValueError(f"unsupported rename/copy status: {status!r}")
+    elif _SCORED_CHANGE_STATUS.fullmatch(status):
         if change.previous_path is None:
             raise ValueError(f"{status} change requires previous_path")
         _validate_repository_path(change.previous_path, field="previous_path")
@@ -189,13 +186,59 @@ def _normalized_protected_authorizations(
     normalized: set[str] = set()
     for raw in values:
         path = _validate_repository_path(raw, field="authorized protected path")
-        if path not in protected_sentinels:
+        if (
+            path not in MUTATION_AUTHORITY_ROOTS
+            and not _is_workflow_authority_path(path)
+        ):
             raise ValueError(
-                "protected-path authorization must name one exact protected sentinel: "
-                f"{path!r}"
+                "protected-path authorization must name one exact executable "
+                f"trust root or workflow authority: {path!r}"
             )
         normalized.add(path)
     return frozenset(normalized)
+
+
+def parse_trusted_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse one OWNER-issued exact-head protected-path approval record.
+
+    Unrelated comments and otherwise valid records for an older head are ignored.
+    A marked record for the current exact head is authority-shaped input and must
+    be fully canonical; malformed records fail closed.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
+        return None
+    if not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected approval head must be lowercase 40-hex Git SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted scope approval requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted scope approval head must be lowercase 40-hex Git SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted scope approval requires at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError("trusted scope approval permits only exact path lines")
+        path = _validate_repository_path(
+            line.removeprefix("path: "),
+            field="approved protected path",
+        )
+        paths.append(path)
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted scope approval must not repeat paths")
+    return tuple(paths)
 
 
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:

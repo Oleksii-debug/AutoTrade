@@ -63,6 +63,25 @@ class RuntimeTargetHostChronologyReceiptSnapshotTests(unittest.TestCase):
         )
         return SignedQualificationAttestation(attestation=attestation, signature_b64="AA==")
 
+    @staticmethod
+    def _verify_until_receipt_snapshot(receipt: SignedQualificationAttestation) -> None:
+        verify_chronology_bound_runtime_target_host_qualification(
+            receipt,
+            evidence_store=object(),
+            evidence_root="unused",
+            journal_store=object(),
+            recovery=object(),
+            runtime=object(),
+            chronology_cut=object(),
+            plan_id="unused",
+            spec=object(),
+            expected_release_artifact_id=RELEASE_ID,
+            expected_release_artifact_sha256=RELEASE_SHA,
+            campaign_plan=object(),
+            campaign_cut=object(),
+            measurement=object(),
+        )
+
     def test_mutated_schema_version_is_rejected_before_executable_comparison(self):
         receipt = self._receipt()
         hostile = _HostileSchemaVersion()
@@ -72,24 +91,19 @@ class RuntimeTargetHostChronologyReceiptSnapshotTests(unittest.TestCase):
             RuntimeTargetHostChronologyBindingError,
             "schema_version must remain exact inert text",
         ):
-            verify_chronology_bound_runtime_target_host_qualification(
-                receipt,
-                evidence_store=object(),
-                evidence_root="unused",
-                journal_store=object(),
-                recovery=object(),
-                runtime=object(),
-                chronology_cut=object(),
-                plan_id="unused",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
-            )
+            self._verify_until_receipt_snapshot(receipt)
 
         self.assertFalse(hostile.compared)
+
+    def test_hidden_attestation_state_cannot_cross_snapshot_boundary(self):
+        receipt = self._receipt()
+        object.__setattr__(receipt.attestation, "unreviewed_authority", "forged")
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostChronologyBindingError,
+            "receipt attestation fields mismatch",
+        ):
+            self._verify_until_receipt_snapshot(receipt)
 
 
 if __name__ == "__main__":

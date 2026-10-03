@@ -276,6 +276,66 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_replace_evidence_class_member(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.ResearchInterferenceSample.__post_init__
+
+            def poison_research_sample_authority() -> None:
+                runner_module.ResearchInterferenceSample.__post_init__ = lambda self: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ class member changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-class", poison_research_sample_authority),),
+                    )
+            finally:
+                runner_module.ResearchInterferenceSample.__post_init__ = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_mutate_evidence_class_code_in_place(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            function = runner_module.ResearchInterferenceSample.__post_init__
+            original_code = function.__code__
+
+            def permissive_post_init(self) -> None:
+                return None
+
+            def poison_research_sample_code() -> None:
+                function.__code__ = permissive_post_init.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ executable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-code", poison_research_sample_code),),
+                    )
+            finally:
+                function.__code__ = original_code
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_financial_operation_cannot_replace_latency_clock_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

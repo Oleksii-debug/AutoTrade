@@ -218,6 +218,87 @@ def _require_callable_authority(
         )
 
 
+def _class_member_executables(value: object) -> tuple[FunctionType, ...]:
+    if type(value) is FunctionType:
+        return (value,)
+    if type(value) is staticmethod or type(value) is classmethod:
+        function = value.__func__
+        return (function,) if type(function) is FunctionType else ()
+    if type(value) is property:
+        return tuple(
+            function
+            for function in (value.fget, value.fset, value.fdel)
+            if type(function) is FunctionType
+        )
+    return ()
+
+
+def _class_authority_state(
+    value: type,
+) -> tuple[
+    tuple[
+        str,
+        object,
+        tuple[
+            tuple[
+                FunctionType,
+                tuple[
+                    object,
+                    object | None,
+                    object | None,
+                    object | None,
+                    tuple[tuple[object, object], ...] | None,
+                ],
+            ],
+            ...,
+        ],
+    ],
+    ...,
+]:
+    if type(value) is not type:
+        raise TypeError("class authority must be an exact class")
+    return tuple(
+        (
+            key,
+            member,
+            tuple(
+                (function, _callable_authority_state(function))
+                for function in _class_member_executables(member)
+            ),
+        )
+        for key, member in sorted(vars(value).items())
+    )
+
+
+def _require_class_authority(
+    value: type,
+    state: tuple,
+    *,
+    name: str,
+) -> None:
+    if type(value) is not type:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class authority changed during campaign callback"
+        )
+    namespace = vars(value)
+    expected_keys = tuple(key for key, _member, _executables in state)
+    if tuple(sorted(namespace)) != expected_keys:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class namespace changed during campaign callback"
+        )
+    for key, member, executables in state:
+        if namespace[key] is not member:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{key} class member changed during campaign callback"
+            )
+        for function, function_state in executables:
+            _require_callable_authority(
+                function,
+                function_state,
+                name=f"{name}.{key}",
+            )
+
+
 def _capture_resource_metrics(
     store: JournalStore,
     resource_probe: Callable[[], Mapping[str, int]] | None,
@@ -397,6 +478,35 @@ def run_declared_target_host_campaign(
     resource_sample_type = ResourceTargetHostSample
     retained_campaign_type = RuntimeLoadCampaignEvidence
     run_result_type = RuntimeTargetHostRunResult
+    budget_spec_type = RuntimeBudgetSpec
+    budget_decision_type = RuntimeBudgetDecision
+    declared_plan_type = DeclaredRuntimeEventPlan
+    campaign_plan_type = RuntimeCampaignPlan
+    campaign_cut_type = RuntimeCampaignCut
+    campaign_evidence_type = RuntimeCampaignEvidence
+    durable_sample_type = DurableFinancialLatencySample
+    inventory_type = RuntimeTargetHostInventory
+
+    class_states = tuple(
+        (name, value, _class_authority_state(value))
+        for name, value in (
+            ("RuntimeBudgetSpec", budget_spec_type),
+            ("RuntimeBudgetDecision", budget_decision_type),
+            ("DeclaredRuntimeEventPlan", declared_plan_type),
+            ("RuntimeCampaignPlan", campaign_plan_type),
+            ("RuntimeCampaignCut", campaign_cut_type),
+            ("RuntimeCampaignEvidence", campaign_evidence_type),
+            ("DurableFinancialLatencySample", durable_sample_type),
+            ("RuntimeTargetHostInventory", inventory_type),
+            ("ParsedRuntimeTargetHostCampaign", parsed_campaign_type),
+            ("TargetHostMeasurementArtifact", measurement_type),
+            ("FinancialTargetHostSample", financial_sample_type),
+            ("ResearchInterferenceSample", research_sample_type),
+            ("ResourceTargetHostSample", resource_sample_type),
+            ("RuntimeLoadCampaignEvidence", retained_campaign_type),
+            ("RuntimeTargetHostRunResult", run_result_type),
+        )
+    )
 
     callable_states = (
         ("runner monotonic clock", lambda: time.monotonic_ns, _callable_authority_state(monotonic_ns)),
@@ -418,6 +528,14 @@ def run_declared_target_host_campaign(
                 "JournalStore authority changed during campaign callback"
             )
         class_bindings = (
+            ("budget spec type", RuntimeBudgetSpec, budget_spec_type),
+            ("budget decision type", RuntimeBudgetDecision, budget_decision_type),
+            ("declared plan type", DeclaredRuntimeEventPlan, declared_plan_type),
+            ("campaign plan type", RuntimeCampaignPlan, campaign_plan_type),
+            ("campaign cut type", RuntimeCampaignCut, campaign_cut_type),
+            ("campaign evidence type", RuntimeCampaignEvidence, campaign_evidence_type),
+            ("durable sample type", DurableFinancialLatencySample, durable_sample_type),
+            ("inventory type", RuntimeTargetHostInventory, inventory_type),
             ("terminal campaign type", ParsedRuntimeTargetHostCampaign, parsed_campaign_type),
             ("measurement type", TargetHostMeasurementArtifact, measurement_type),
             ("financial sample type", FinancialTargetHostSample, financial_sample_type),
@@ -433,6 +551,8 @@ def run_declared_target_host_campaign(
                 )
         for name, resolve, state in callable_states:
             _require_callable_authority(resolve(), state, name=name)
+        for name, value, state in class_states:
+            _require_class_authority(value, state, name=name)
 
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,

@@ -238,6 +238,43 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertEqual(fitted.fold_normalizer.training_point_count, 3)
         self.assertTrue(fitted.fingerprint.startswith("sha256:"))
 
+    def test_artifact_store_is_sufficient_without_caller_population(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        fitted = fit_authoritative_fold_normalizer(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
+            fold=self.fold,
+            spec=self.spec,
+        )
+        points = resolve_authoritative_feature_points(
+            registry=self.registry,
+            dataset_id=self.dataset_id,
+            dataset_version=1,
+            manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
+            cutoff=BASE + timedelta(days=4, minutes=2),
+            spec=self.spec,
+        )
+        point = next(
+            candidate
+            for candidate in points
+            if self.fold.validation_start
+            <= candidate.decision_time
+            <= self.fold.validation_end
+        )
+        transformed = fitted.transform_validation(
+            point,
+            fold=self.fold,
+            registry=self.registry,
+            artifact_store=self.artifacts,
+            spec=self.spec,
+        )
+        self.assertIsInstance(transformed, Decimal)
+
     def test_same_ids_and_revisions_with_altered_value_are_not_authority(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)

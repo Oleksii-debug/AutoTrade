@@ -264,6 +264,31 @@ def _build_external_function_graph_guard(*, root, label: str):
         executable_states = []
         for member_name, raw in members:
             for function in executable_members(raw):
+                dependency_namespace = function.__globals__
+                for dependency_name in function.__code__.co_names:
+                    if dependency_name not in dependency_namespace:
+                        continue
+                    expected_dependency = dependency_namespace[dependency_name]
+                    dependency_key = (id(dependency_namespace), dependency_name)
+                    if dependency_key not in seen_globals:
+                        seen_globals.add(dependency_key)
+                        global_bindings.append(
+                            (
+                                dependency_namespace,
+                                dependency_name,
+                                expected_dependency,
+                            )
+                        )
+                for cell in function.__closure__ or ():
+                    cell_identity = id(cell)
+                    if cell_identity in seen_closures:
+                        continue
+                    seen_closures.add(cell_identity)
+                    try:
+                        expected_cell_value = cell.cell_contents
+                    except ValueError:
+                        expected_cell_value = missing
+                    closure_bindings.append((cell, expected_cell_value))
                 executable_states.append(
                     (
                         member_name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tempfile import TemporaryDirectory
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.runtime_load_plan import declare_runtime_event_plan
 from mvp.autotrade_mvp.runtime_target_host_inventory import host_identity_fingerprint
 from mvp.autotrade_mvp.runtime_target_host_runner import (
     RuntimeTargetHostRunnerError,
+    _require_shared_clock_contract,
     run_cpu_pressure_probe,
     run_declared_target_host_campaign,
 )
@@ -276,6 +278,95 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_replace_evidence_class_member(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.ResearchInterferenceSample.__post_init__
+
+            def poison_research_sample_authority() -> None:
+                runner_module.ResearchInterferenceSample.__post_init__ = lambda self: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ class member changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-class", poison_research_sample_authority),),
+                    )
+            finally:
+                runner_module.ResearchInterferenceSample.__post_init__ = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_mutate_evidence_class_code_in_place(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            function = runner_module.ResearchInterferenceSample.__post_init__
+            original_code = function.__code__
+
+            def permissive_post_init(self) -> None:
+                return None
+
+            def poison_research_sample_code() -> None:
+                function.__code__ = permissive_post_init.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ executable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-code", poison_research_sample_code),),
+                    )
+            finally:
+                function.__code__ = original_code
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_replace_budget_transitive_dependency(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            namespace = runner_module.evaluate_runtime_budget.__globals__
+            original = namespace["nearest_rank_percentile"]
+
+            def poison_budget_dependency() -> None:
+                namespace["nearest_rank_percentile"] = lambda *_args, **_kwargs: 0
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "budget evaluator global dependency changed.*nearest_rank_percentile",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget-dependency", poison_budget_dependency),),
+                    )
+            finally:
+                namespace["nearest_rank_percentile"] = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_financial_operation_cannot_replace_latency_clock_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")
@@ -299,6 +390,33 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(journal.get_event("fin-1"))
+
+    @unittest.skipUnless(
+        sys.version_info >= (3, 13),
+        "language-level shared perf_counter/monotonic clock contract requires Python 3.13+",
+    )
+    def test_supported_runtime_executes_unpatched_shared_clock_campaign(self):
+        _require_shared_clock_contract()
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            result = run_declared_target_host_campaign(
+                journal=journal,
+                spec=spec,
+                declared_plan_id="runner-plan",
+                release_artifact_id=RELEASE_ID,
+                release_artifact_sha256=RELEASE_SHA,
+                declared_duration_ms=1_000,
+                operations={"fin-1": lambda: append_expected(journal, "fin-1")},
+                research_operations=(
+                    ("cpu-contention", lambda: run_cpu_pressure_probe(iterations=1)),
+                ),
+            )
+            self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
+            self.assertEqual(len(result.measurement.financial_latency_us), 1)
+            self.assertEqual(len(result.measurement.research_interference_us), 1)
+            self.assertIn(result.budget_decision.status, {"PASS", "FAIL"})
 
     def test_cpu_pressure_probe_is_bounded_and_deterministic(self):
         first = run_cpu_pressure_probe(iterations=3)

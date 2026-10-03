@@ -160,27 +160,94 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
     return value
 
 
-def _callable_authority_state(
-    value: object,
-) -> tuple[
+def _callable_authority_state(value: object) -> tuple[
     object,
-    object | None,
-    object | None,
-    object | None,
-    tuple[tuple[object, object], ...] | None,
+    tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+    tuple[tuple[dict[str, object], str, object], ...],
+    tuple[tuple[object, bool, object | None], ...],
 ]:
-    """Capture exact executable state for a callback-adjacent authority callable."""
+    """Capture callback-adjacent callable plus first-party transitive dependencies."""
 
     target = value.__func__ if type(value) is MethodType else value
     if type(target) is not FunctionType:
-        return (target, None, None, None, None)
-    kwdefaults = target.__kwdefaults__
+        return (target, (), (), ())
+
+    function_states: list[
+        tuple[
+            FunctionType,
+            object,
+            object,
+            object,
+            tuple[tuple[object, object], ...] | None,
+        ]
+    ] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    closure_bindings: list[tuple[object, bool, object | None]] = []
+    seen_functions: set[int] = set()
+
+    def capture(function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        kwdefaults = function.__kwdefaults__
+        function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                kwdefaults,
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+            )
+        )
+        namespace = function.__globals__
+        for dependency_name in function.__code__.co_names:
+            if dependency_name not in namespace:
+                continue
+            expected_dependency = namespace[dependency_name]
+            global_bindings.append(
+                (namespace, dependency_name, expected_dependency)
+            )
+            dependency_target = (
+                expected_dependency.__func__
+                if type(expected_dependency) is MethodType
+                else expected_dependency
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+        for cell in function.__closure__ or ():
+            try:
+                expected_value = cell.cell_contents
+            except ValueError:
+                closure_bindings.append((cell, False, None))
+                continue
+            closure_bindings.append((cell, True, expected_value))
+            dependency_target = (
+                expected_value.__func__
+                if type(expected_value) is MethodType
+                else expected_value
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+
+    capture(target)
     return (
         target,
-        target.__code__,
-        target.__defaults__,
-        kwdefaults,
-        None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+        tuple(function_states),
+        tuple(global_bindings),
+        tuple(closure_bindings),
     )
 
 
@@ -188,34 +255,123 @@ def _require_callable_authority(
     value: object,
     state: tuple[
         object,
-        object | None,
-        object | None,
-        object | None,
-        tuple[tuple[object, object], ...] | None,
+        tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+        tuple[tuple[dict[str, object], str, object], ...],
+        tuple[tuple[object, bool, object | None], ...],
     ],
     *,
     name: str,
 ) -> None:
     target = value.__func__ if type(value) is MethodType else value
-    expected_target, code, defaults, kwdefaults, kwdefault_items = state
+    expected_target, function_states, global_bindings, closure_bindings = state
     if target is not expected_target:
         raise RuntimeTargetHostRunnerError(
             f"{name} callable authority changed during campaign callback"
         )
-    if code is None:
-        return
-    if (
-        target.__code__ is not code
-        or target.__defaults__ is not defaults
-        or target.__kwdefaults__ is not kwdefaults
-        or (
-            kwdefaults is not None
-            and tuple(sorted(kwdefaults.items())) != kwdefault_items
+    for function, code, defaults, kwdefaults, kwdefault_items in function_states:
+        if (
+            function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or (
+                kwdefaults is not None
+                and tuple(sorted(kwdefaults.items())) != kwdefault_items
+            )
+        ):
+            raise RuntimeTargetHostRunnerError(
+                f"{name} executable authority changed during campaign callback"
+            )
+    missing = object()
+    for namespace, dependency_name, expected_dependency in global_bindings:
+        if namespace.get(dependency_name, missing) is not expected_dependency:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} global dependency changed during campaign callback: "
+                f"{dependency_name}"
+            )
+    for cell, had_value, expected_value in closure_bindings:
+        try:
+            current_value = cell.cell_contents
+        except ValueError:
+            if had_value:
+                raise RuntimeTargetHostRunnerError(
+                    f"{name} closure dependency changed during campaign callback"
+                )
+            continue
+        if not had_value or current_value is not expected_value:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} closure dependency changed during campaign callback"
+            )
+
+def _class_member_executables(value: object) -> tuple[FunctionType, ...]:
+    if type(value) is FunctionType:
+        return (value,)
+    if type(value) is staticmethod or type(value) is classmethod:
+        function = value.__func__
+        return (function,) if type(function) is FunctionType else ()
+    if type(value) is property:
+        return tuple(
+            function
+            for function in (value.fget, value.fset, value.fdel)
+            if type(function) is FunctionType
         )
-    ):
+    return ()
+
+
+def _class_authority_state(
+    value: type,
+) -> tuple[
+    tuple[
+        str,
+        object,
+        tuple[
+            tuple[FunctionType, tuple],
+            ...,
+        ],
+    ],
+    ...,
+]:
+    if type(value) is not type:
+        raise TypeError("class authority must be an exact class")
+    return tuple(
+        (
+            key,
+            member,
+            tuple(
+                (function, _callable_authority_state(function))
+                for function in _class_member_executables(member)
+            ),
+        )
+        for key, member in sorted(vars(value).items())
+    )
+
+
+def _require_class_authority(
+    value: type,
+    state: tuple,
+    *,
+    name: str,
+) -> None:
+    if type(value) is not type:
         raise RuntimeTargetHostRunnerError(
-            f"{name} executable authority changed during campaign callback"
+            f"{name} class authority changed during campaign callback"
         )
+    namespace = vars(value)
+    expected_keys = tuple(key for key, _member, _executables in state)
+    if tuple(sorted(namespace)) != expected_keys:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class namespace changed during campaign callback"
+        )
+    for key, member, executables in state:
+        if namespace[key] is not member:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{key} class member changed during campaign callback"
+            )
+        for function, function_state in executables:
+            _require_callable_authority(
+                function,
+                function_state,
+                name=f"{name}.{key}",
+            )
 
 
 def _capture_resource_metrics(
@@ -397,6 +553,35 @@ def run_declared_target_host_campaign(
     resource_sample_type = ResourceTargetHostSample
     retained_campaign_type = RuntimeLoadCampaignEvidence
     run_result_type = RuntimeTargetHostRunResult
+    budget_spec_type = RuntimeBudgetSpec
+    budget_decision_type = RuntimeBudgetDecision
+    declared_plan_type = DeclaredRuntimeEventPlan
+    campaign_plan_type = RuntimeCampaignPlan
+    campaign_cut_type = RuntimeCampaignCut
+    campaign_evidence_type = RuntimeCampaignEvidence
+    durable_sample_type = DurableFinancialLatencySample
+    inventory_type = RuntimeTargetHostInventory
+
+    class_states = tuple(
+        (name, value, _class_authority_state(value))
+        for name, value in (
+            ("RuntimeBudgetSpec", budget_spec_type),
+            ("RuntimeBudgetDecision", budget_decision_type),
+            ("DeclaredRuntimeEventPlan", declared_plan_type),
+            ("RuntimeCampaignPlan", campaign_plan_type),
+            ("RuntimeCampaignCut", campaign_cut_type),
+            ("RuntimeCampaignEvidence", campaign_evidence_type),
+            ("DurableFinancialLatencySample", durable_sample_type),
+            ("RuntimeTargetHostInventory", inventory_type),
+            ("ParsedRuntimeTargetHostCampaign", parsed_campaign_type),
+            ("TargetHostMeasurementArtifact", measurement_type),
+            ("FinancialTargetHostSample", financial_sample_type),
+            ("ResearchInterferenceSample", research_sample_type),
+            ("ResourceTargetHostSample", resource_sample_type),
+            ("RuntimeLoadCampaignEvidence", retained_campaign_type),
+            ("RuntimeTargetHostRunResult", run_result_type),
+        )
+    )
 
     callable_states = (
         ("runner monotonic clock", lambda: time.monotonic_ns, _callable_authority_state(monotonic_ns)),
@@ -418,6 +603,14 @@ def run_declared_target_host_campaign(
                 "JournalStore authority changed during campaign callback"
             )
         class_bindings = (
+            ("budget spec type", RuntimeBudgetSpec, budget_spec_type),
+            ("budget decision type", RuntimeBudgetDecision, budget_decision_type),
+            ("declared plan type", DeclaredRuntimeEventPlan, declared_plan_type),
+            ("campaign plan type", RuntimeCampaignPlan, campaign_plan_type),
+            ("campaign cut type", RuntimeCampaignCut, campaign_cut_type),
+            ("campaign evidence type", RuntimeCampaignEvidence, campaign_evidence_type),
+            ("durable sample type", DurableFinancialLatencySample, durable_sample_type),
+            ("inventory type", RuntimeTargetHostInventory, inventory_type),
             ("terminal campaign type", ParsedRuntimeTargetHostCampaign, parsed_campaign_type),
             ("measurement type", TargetHostMeasurementArtifact, measurement_type),
             ("financial sample type", FinancialTargetHostSample, financial_sample_type),
@@ -433,6 +626,8 @@ def run_declared_target_host_campaign(
                 )
         for name, resolve, state in callable_states:
             _require_callable_authority(resolve(), state, name=name)
+        for name, value, state in class_states:
+            _require_class_authority(value, state, name=name)
 
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,

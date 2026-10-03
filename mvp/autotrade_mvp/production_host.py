@@ -985,15 +985,13 @@ def build_production_host(
         raise ValueError("TLS listener requires HTTPS public_origin")
 
     instance_fence = _InstanceFence.acquire(config.journal_path)
+    server: AuthenticatedHostServer | None = None
+    runtime: ProductionHostRuntime | None = None
     try:
         artifact_reader = _product_trusted_authenticated_reader(
             _product_artifact_root(config.journal_path)
         )
         journal = JournalStore(config.journal_path)
-        runtime_occurrence = _issue_production_host_runtime_occurrence(
-            journal,
-            config,
-        )
         application = AuthenticatedHostApplication(
             journal,
             security_boundary=security_boundary,
@@ -1015,17 +1013,36 @@ def build_production_host(
         )
         server.daemon_threads = False
         server.block_on_close = True
-    except BaseException:
-        instance_fence.release()
+        runtime = ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=application,
+            server=server,
+            instance_fence=instance_fence,
+            admission_gate=admission_gate,
+        )
+        runtime._bind_product_artifact_reader(artifact_reader)
+
+        # Only a successfully composed host may become the current durable
+        # runtime occurrence. A listener/bootstrap failure must not leave a
+        # chronology-eligible occurrence for a runtime that never existed.
+        runtime_occurrence = _issue_production_host_runtime_occurrence(
+            journal,
+            config,
+        )
+        runtime._bind_runtime_occurrence(runtime_occurrence)
+        return runtime
+    except BaseException as error:
+        try:
+            if runtime is not None:
+                runtime.close()
+            else:
+                if server is not None:
+                    server.server_close()
+                instance_fence.release()
+        except BaseException as cleanup_error:
+            error.add_note(
+                "production host bootstrap cleanup also failed: "
+                + repr(cleanup_error)
+            )
         raise
-    runtime = ProductionHostRuntime(
-        config=config,
-        journal=journal,
-        application=application,
-        server=server,
-        instance_fence=instance_fence,
-        admission_gate=admission_gate,
-    )
-    runtime._bind_runtime_occurrence(runtime_occurrence)
-    runtime._bind_product_artifact_reader(artifact_reader)
-    return runtime

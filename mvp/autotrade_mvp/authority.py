@@ -2483,9 +2483,17 @@ class AuthorityService:
     def epoch(self) -> int:
         return self._epoch
 
-    def register_policy(self, policy: AuthorityPolicy) -> bool:
+    def register_policy(self, policy: AuthorityPolicy, *, simulation_time: str | None = None) -> bool:
         if not isinstance(policy, AuthorityPolicy):
             raise TypeError("policy must be AuthorityPolicy")
+        if simulation_time is not None:
+            if policy.environments != frozenset({"SIMULATION"}):
+                raise ValueError("simulation_time requires a SIMULATION-only policy")
+            if type(simulation_time) is not str:
+                raise TypeError("simulation_time must be an exact timestamp string")
+            committed_at = _instant(simulation_time, name="simulation_time").isoformat().replace("+00:00", "Z")
+        else:
+            committed_at = datetime.now(timezone.utc).isoformat()
         existing = self._policies.get(policy.policy_id)
         if existing is not None:
             if existing != policy:
@@ -2495,7 +2503,7 @@ class AuthorityService:
             "AuthorityPolicyRegistered",
             policy.policy_id,
             self._policy_payload(policy),
-            committed_at=datetime.now(timezone.utc).isoformat(),
+            committed_at=committed_at,
         )
         self._policies[policy.policy_id] = policy
         self._epoch += 1
@@ -4590,6 +4598,20 @@ class AuthorityService:
 
         return check
 
+
+    def historical_admission(self, admission_id: str) -> dict[str, Any]:
+        """Read a durably validated outcome without granting current authority.
+
+        This narrow replay adapter uses the same original-command validation as
+        financial idempotency. It cannot admit, dispatch, refresh risk or resend.
+        """
+        aid = _text(admission_id, name="admission_id")
+        record = self._admissions.get(aid)
+        if record is None:
+            raise AuthorityConflict("historical admission is not recorded")
+        policy = self._policies[record.policy_id]
+        self._validate_historical_financial_retry_evidence(record, policy)
+        return self._admission_payload(record)
 
     def export_state(self) -> dict:
         """Return a canonical JSON-compatible snapshot of authority state.

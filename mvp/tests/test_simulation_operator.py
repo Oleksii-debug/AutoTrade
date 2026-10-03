@@ -43,7 +43,7 @@ def command(directory, *args):
 
 
 class SimulationOperatorTests(unittest.TestCase):
-    def _invalid_journal(self, transform, prices=BUY):
+    def _invalid_journal(self, transform, prices=BUY, *, runtime_rejection=None):
         """Produce integrity-valid malformed fixtures at the canonical write seam."""
         append = JournalStore.append_event
         commit = JournalStore.commit_command
@@ -59,7 +59,11 @@ class SimulationOperatorTests(unittest.TestCase):
             return commit(store, **kwargs)
         with TemporaryDirectory() as directory:
             with patch.object(JournalStore, "append_event", altered), patch.object(JournalStore, "commit_command", altered_command):
-                run(directory, prices)
+                if runtime_rejection is None:
+                    run(directory, prices)
+                else:
+                    with self.assertRaisesRegex(ValueError, runtime_rejection):
+                        run(directory, prices)
             self._assert_untrusted_read(directory)
 
     def _assert_untrusted_read(self, directory):
@@ -80,7 +84,7 @@ class SimulationOperatorTests(unittest.TestCase):
         def alter(event):
             if event["event_type"] == "AccountReconciled":
                 event["aggregate_type"] = "unrelated_checkpoint"
-        self._invalid_journal(alter, ["100", "101"])
+        self._invalid_journal(alter, ["100", "101"], runtime_rejection="requires one admission reconciliation")
 
     def test_reconciliation_envelope_environment_must_match_payload(self):
         def alter(event):
@@ -224,7 +228,7 @@ class SimulationOperatorTests(unittest.TestCase):
         def alter(event):
             if event["event_type"] == "AuthorityAdmissionRecorded":
                 event["payload"]["outcome"] = "ADMITTED"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='complete risk/reservation evidence')
 
     def test_risk_rejected_summary_requires_the_same_intent(self):
         for key in ("intent_id", "admission_id", "financial_command_id", "account_id"):
@@ -232,25 +236,25 @@ class SimulationOperatorTests(unittest.TestCase):
                 def alter(event):
                     if event["event_type"] == "AuthorityAdmissionRecorded":
                         event["payload"][key] = "another-identity"
-                self._invalid_journal(alter, ["1000", "1001", "1003"])
+                self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='durable admission identity differs')
 
     def test_risk_rejected_summary_requires_the_canonical_risk_owner(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["aggregate_type"] = "another-risk-owner"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='risk evidence is missing or ambiguous')
 
     def test_risk_rejected_summary_requires_the_bound_risk_verdict(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["payload"]["verdict"] = "ALLOW"
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='historical risk decision does not match admission')
 
     def test_risk_rejected_summary_cannot_replace_risk_intent_hash(self):
         def alter(event):
             if event["event_type"] == "RiskDecisionRecorded":
                 event["payload"]["intent_hash"] = "sha256:" + "0" * 64
-        self._invalid_journal(alter, ["1000", "1001", "1003"])
+        self._invalid_journal(alter, ["1000", "1001", "1003"], runtime_rejection='historical risk decision does not match admission')
 
     def test_completed_hold_cannot_hide_extra_economic_units(self):
         for transaction in (
@@ -260,26 +264,28 @@ class SimulationOperatorTests(unittest.TestCase):
         ):
             with self.subTest(transaction=transaction.transaction_id), TemporaryDirectory() as directory:
                 event = simulation_session._event
-                def extra(store, kind, episode_id, payload, now):
+                def extra(store, kind, episode_id, payload, now, **kwargs):
                     if kind == "SimulationSessionCompleted":
                         book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
                         book.append(transaction)
-                    return event(store, kind, episode_id, payload, now)
+                    return event(store, kind, episode_id, payload, now, **kwargs)
                 with patch.object(simulation_session, "_event", extra):
-                    run(directory, ["100", "101"])
+                    with self.assertRaisesRegex(ValueError, "journal sequence changed after whole-store validation"):
+                        run(directory, ["100", "101"])
                 self._assert_untrusted_read(directory)
 
     def test_completed_hold_cannot_ignore_another_economic_book(self):
         with TemporaryDirectory() as directory:
             event = simulation_session._event
-            def extra(store, kind, episode_id, payload, now):
+            def extra(store, kind, episode_id, payload, now, **kwargs):
                 if kind == "SimulationSessionCompleted":
                     seed = store.load_events_by_aggregate_type("economic_book")[0]
                     seed = {**seed, "event_id": "other-book-event", "aggregate_id": "another-book", "aggregate_version": "1"}
                     store.append_event(seed)
-                return event(store, kind, episode_id, payload, now)
+                return event(store, kind, episode_id, payload, now, **kwargs)
             with patch.object(simulation_session, "_event", extra):
-                run(directory, ["100", "101"])
+                with self.assertRaisesRegex(ValueError, "journal sequence changed after whole-store validation"):
+                    run(directory, ["100", "101"])
             self._assert_untrusted_read(directory)
 
     def test_missing_directory_is_not_created_by_status(self):
@@ -486,10 +492,10 @@ class SimulationOperatorTests(unittest.TestCase):
 
     def _invalid_completion(self, changes):
         original = simulation_session._event
-        def altered(store, kind, episode_id, payload, now):
+        def altered(store, kind, episode_id, payload, now, **kwargs):
             if kind == "SimulationSessionCompleted":
                 payload = {**payload, **changes}
-            return original(store, kind, episode_id, payload, now)
+            return original(store, kind, episode_id, payload, now, **kwargs)
         with TemporaryDirectory() as directory:
             with patch.object(simulation_session, "_event", altered):
                 run(directory)

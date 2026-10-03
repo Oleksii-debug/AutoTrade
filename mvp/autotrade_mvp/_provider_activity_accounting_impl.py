@@ -1232,11 +1232,30 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
 
         self._reload()
 
-    def append(self, transaction: JournalTransaction) -> bool:
-        return self.append_batch((transaction,))
+    def append(
+        self,
+        transaction: JournalTransaction,
+        *,
+        committed_at: str | None = None,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
+    ) -> bool:
+        return self.append_batch(
+            (transaction,),
+            committed_at=committed_at,
+            expected_journal_sequence=expected_journal_sequence,
+            expected_whole_store_counts=expected_whole_store_counts,
+        )
 
-    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
-        plan = self.prepare_batch_mutation(transactions)
+    def append_batch(
+        self,
+        transactions: Iterable[JournalTransaction],
+        *,
+        committed_at: str | None = None,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
+    ) -> bool:
+        plan = self.prepare_batch_mutation(transactions, committed_at=committed_at)
         if plan.already_committed:
             self._reload()
             return False
@@ -1266,6 +1285,8 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 result=plan.result,
                 state_version=plan.aggregate_version,
                 events=[(plan.envelope, "autotrade.economic.events")],
+                expected_journal_sequence=expected_journal_sequence,
+                expected_whole_store_counts=expected_whole_store_counts,
             )
         except Exception:
             self._reload()

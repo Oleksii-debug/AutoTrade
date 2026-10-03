@@ -290,6 +290,8 @@ def record_reconciliation_checkpoint(
     host_id: str,
     owner_epoch: str,
     evidence_artifact_store: ArtifactStore | None = None,
+    expected_journal_sequence: int | None = None,
+    expected_whole_store_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
@@ -346,6 +348,8 @@ def record_reconciliation_checkpoint(
     store.append_event(
         envelope,
         outbox_topic="autotrade.reconciliation.events",
+        expected_journal_sequence=expected_journal_sequence,
+        expected_whole_store_counts=expected_whole_store_counts,
     )
     event = store.get_event(event_id)
     if event is None:

@@ -430,6 +430,45 @@ def _detached_attempt(attempt: DurableChronologyAttempt) -> DurableChronologyAtt
     )
 
 
+def _detached_cut(cut: TrustedChronologyCut) -> TrustedChronologyCut:
+    """Copy one caller-owned cut before read-side authority validation."""
+
+    if type(cut) is not TrustedChronologyCut:
+        raise TypeError("cut must be exact TrustedChronologyCut")
+    return TrustedChronologyCut(
+        cut_id=cut.cut_id,
+        challenge_digest=cut.challenge_digest,
+        scope=cut.scope,
+        source_sha=cut.source_sha,
+        store_identity_digest=cut.store_identity_digest,
+        owner_scope=cut.owner_scope,
+        owner_id=cut.owner_id,
+        owner_epoch=cut.owner_epoch,
+        clock_incident_generation=cut.clock_incident_generation,
+        runtime_environment=cut.runtime_environment,
+        runtime_occurrence_id=cut.runtime_occurrence_id,
+        host_id=cut.host_id,
+        account_id=cut.account_id,
+        release_artifact_id=cut.release_artifact_id,
+        release_artifact_sha256=cut.release_artifact_sha256,
+        covered_utc=cut.covered_utc,
+        utc_lower_bound=cut.utc_lower_bound,
+        utc_upper_bound=cut.utc_upper_bound,
+        external_authority_id=cut.external_authority_id,
+        external_protocol_id=cut.external_protocol_id,
+        external_protocol_version=cut.external_protocol_version,
+        external_response_id=cut.external_response_id,
+        measurement_artifact_id=cut.measurement_artifact_id,
+        measurement_sha256=cut.measurement_sha256,
+        accepted_attestation_id=cut.accepted_attestation_id,
+        accepted_attestation_digest=cut.accepted_attestation_digest,
+        accepted_policy_id=cut.accepted_policy_id,
+        accepted_trust_root_id=cut.accepted_trust_root_id,
+        accepted_journal_sequence=cut.accepted_journal_sequence,
+        cut_digest=cut.cut_digest,
+    )
+
+
 def _cut_digest(payload: dict[str, object]) -> str:
     material = dict(payload)
     material.pop("cut_digest", None)
@@ -1247,8 +1286,7 @@ def require_current_trusted_chronology_cut(
 ) -> TrustedChronologyCut:
     """Re-read one accepted cut and require its runtime/incident scope is current."""
 
-    if type(cut) is not TrustedChronologyCut:
-        raise TypeError("cut must be exact TrustedChronologyCut")
+    cut = _detached_cut(cut)
     if type(expected_scope) is not ChronologyScope:
         raise TypeError("expected_scope must be exact ChronologyScope")
     expected_source_sha = _git_sha(
@@ -1328,8 +1366,7 @@ def require_chronology_horizon(
 ) -> None:
     """Require each terminal-evidence instant to be at/before the conservative cut."""
 
-    if type(cut) is not TrustedChronologyCut:
-        raise TypeError("cut must be exact TrustedChronologyCut")
+    cut = _detached_cut(cut)
     _covered_text, covered = _instant(cut.covered_utc, name="covered_utc")
     for index, value in enumerate(claimed_instants):
         _text, observed = _instant(value, name=f"claimed_instant[{index}]")

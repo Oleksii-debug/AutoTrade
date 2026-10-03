@@ -20,7 +20,13 @@ from research.autotrade_research.artifacts.store import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .settlement import (
     SettlementAccountScope,
     SettlementBook,
@@ -478,11 +484,13 @@ class DurableSettlementBook:
         environment: str,
         evidence_artifact_store: ArtifactStore,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        self._store_identity = require_exact_journal_store_authority(
+            store,
+            subject="durable settlement JournalStore",
+        )
         self.store = store
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.evidence_artifact_store = evidence_artifact_store
         self.scope = SettlementAccountScope(
             provider_id=provider_id,
@@ -493,8 +501,26 @@ class DurableSettlementBook:
         self._book = SettlementBook()
         self._reload()
 
+    def _selected_store(self):
+        store = self.store
+        identity = require_exact_journal_store_authority(
+            store,
+            subject="durable settlement JournalStore",
+        )
+        if identity != self._store_identity:
+            raise SettlementConflict(
+                "durable settlement JournalStore generation changed"
+            )
+        return store, identity
+
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.scope_id)
+        store, identity = self._selected_store()
+        with journal_store_authority_scope(store, identity):
+            return JournalStore.load_events(
+                store,
+                _AGGREGATE_TYPE,
+                self.scope_id,
+            )
 
     def _replay(self, events: list[dict[str, object]]) -> SettlementBook:
         book = SettlementBook()
@@ -693,18 +719,21 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
-                command_id=_text(command_id, name="command_id"),
-                actor=_ACTOR,
-                environment=self.scope.environment,
-                idempotency_key=_text(
-                    idempotency_key, name="idempotency_key"
-                ),
-                request=plan.request,
-                result=plan.result,
-                state_version=plan.aggregate_version,
-                events=[(plan.envelope, None)],
-            )
+            store, identity = self._selected_store()
+            with journal_store_authority_scope(store, identity):
+                _, inserted, _ = JournalStore.commit_command(
+                    store,
+                    command_id=_text(command_id, name="command_id"),
+                    actor=_ACTOR,
+                    environment=self.scope.environment,
+                    idempotency_key=_text(
+                        idempotency_key, name="idempotency_key"
+                    ),
+                    request=plan.request,
+                    result=plan.result,
+                    state_version=plan.aggregate_version,
+                    events=[(plan.envelope, None)],
+                )
         except Exception:
             self._reload()
             raise
@@ -824,18 +853,21 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            _, inserted, _ = self.store.commit_command(
-                command_id=_text(command_id, name="command_id"),
-                actor=_ACTOR,
-                environment=self.scope.environment,
-                idempotency_key=_text(
-                    idempotency_key, name="idempotency_key"
-                ),
-                request=plan.request,
-                result=plan.result,
-                state_version=plan.aggregate_version,
-                events=[(plan.envelope, None)],
-            )
+            store, identity = self._selected_store()
+            with journal_store_authority_scope(store, identity):
+                _, inserted, _ = JournalStore.commit_command(
+                    store,
+                    command_id=_text(command_id, name="command_id"),
+                    actor=_ACTOR,
+                    environment=self.scope.environment,
+                    idempotency_key=_text(
+                        idempotency_key, name="idempotency_key"
+                    ),
+                    request=plan.request,
+                    result=plan.result,
+                    state_version=plan.aggregate_version,
+                    events=[(plan.envelope, None)],
+                )
         except Exception:
             self._reload()
             raise

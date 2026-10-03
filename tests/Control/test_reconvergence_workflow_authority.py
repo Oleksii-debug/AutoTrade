@@ -395,6 +395,30 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertIn("expected_head_sha=head_sha", resolver)
         self.assertIn("/issues/{pr_number}/comments", resolver)
         self.assertIn('args+=(--allowed-scope "${scope}")', guard)
+        approval_recheck = workflow.split(
+            "- name: Reverify trusted exact-path scope approval is unchanged",
+            1,
+        )[1].split("- name: Reverify event base is still live target tip", 1)[0]
+        regression_tests_offset = workflow.index("- name: Run trusted guard regression tests")
+        approval_recheck_offset = workflow.index(
+            "- name: Reverify trusted exact-path scope approval is unchanged"
+        )
+        final_base_recheck_offset = workflow.index(
+            "- name: Reverify event base is still live target tip"
+        )
+        self.assertLess(regression_tests_offset, approval_recheck_offset)
+        self.assertLess(approval_recheck_offset, final_base_recheck_offset)
+        self.assertIn('comment.get("author_association") != "OWNER"', approval_recheck)
+        self.assertIn("parse_trusted_scope_approval", approval_recheck)
+        self.assertIn("expected_head_sha=head_sha", approval_recheck)
+        self.assertIn("/issues/{pr_number}/comments", approval_recheck)
+        self.assertIn("APPROVED_SCOPE_FILE", approval_recheck)
+        self.assertIn("RECHECK_SCOPE_FILE", approval_recheck)
+        self.assertIn("target.read_bytes() != original.read_bytes()", approval_recheck)
+        self.assertIn(
+            "trusted exact-path scope approval changed during reconvergence run",
+            approval_recheck,
+        )
         self.assertNotIn("pull_request.body", resolver)
         self.assertNotIn("pull_request.title", resolver)
 

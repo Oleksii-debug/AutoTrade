@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 import ssl
-from threading import Condition, Thread, current_thread
+from threading import Condition, RLock, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 from autotrade_runtime.artifacts import require_product_trusted_authenticated_reader
 from autotrade_runtime.artifacts._root_authority import (
@@ -66,6 +67,8 @@ _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 _RUNTIME_OCCURRENCE_SCHEMA_VERSION = "1.0.0"
 _RUNTIME_OCCURRENCE_AGGREGATE_TYPE = "production_host_runtime"
 _RUNTIME_OCCURRENCE_EVENT_TYPE = "ProductionHostRuntimeOccurrenceIssued"
+_RUNTIME_OCCURRENCE_BINDINGS = WeakKeyDictionary()
+_RUNTIME_OCCURRENCE_BINDINGS_LOCK = RLock()
 _RUNTIME_OCCURRENCE_PAYLOAD_FIELDS = frozenset(
     {
         "account_id",
@@ -733,7 +736,6 @@ class ProductionHostRuntime:
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
         self._product_artifact_reader: object | None = None
-        self._runtime_occurrence_id: str | None = None
 
     def _bind_runtime_occurrence(
         self,
@@ -743,17 +745,19 @@ class ProductionHostRuntime:
             raise TypeError(
                 "runtime occurrence must be exact ProductionHostRuntimeOccurrence"
             )
-        if self._runtime_occurrence_id is not None:
-            raise RuntimeError("production host runtime occurrence is already bound")
-        # Issuance and binding occur before the runtime escapes. Keep this
-        # post-listener bind side-effect free; durable revalidation belongs on
-        # every public read so teardown cannot acquire a new failure edge here.
-        self._runtime_occurrence_id = occurrence.runtime_occurrence_id
+        # Keep the selector outside caller-writable runtime instance state.
+        # ProductionHostRuntime is a Python object, so frozen/private attributes
+        # are not an authority boundary against object.__setattr__().
+        with _RUNTIME_OCCURRENCE_BINDINGS_LOCK:
+            if self in _RUNTIME_OCCURRENCE_BINDINGS:
+                raise RuntimeError("production host runtime occurrence is already bound")
+            _RUNTIME_OCCURRENCE_BINDINGS[self] = occurrence.runtime_occurrence_id
 
     @property
     def runtime_occurrence(self) -> ProductionHostRuntimeOccurrence:
-        occurrence_id = self._runtime_occurrence_id
-        if occurrence_id is None:
+        with _RUNTIME_OCCURRENCE_BINDINGS_LOCK:
+            occurrence_id = _RUNTIME_OCCURRENCE_BINDINGS.get(self)
+        if type(occurrence_id) is not str:
             raise RuntimeError("production host runtime occurrence is not bound")
         durable = _load_production_host_runtime_occurrences(
             self.journal,

@@ -166,15 +166,11 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             runtime = self._build(config)
             try:
                 durable = runtime.runtime_occurrence
-                forged = production_host.ProductionHostRuntimeOccurrence(
-                    runtime_occurrence_id="33333333-3333-4333-8333-333333333333",
-                    host_id=durable.host_id,
-                    account_id=durable.account_id,
-                    environment=durable.environment,
-                    aggregate_version=durable.aggregate_version,
-                    journal_sequence=durable.journal_sequence,
+                object.__setattr__(
+                    runtime,
+                    "_runtime_occurrence_id",
+                    "33333333-3333-4333-8333-333333333333",
                 )
-                object.__setattr__(runtime, "_runtime_occurrence", forged)
                 self.assertEqual(
                     runtime.runtime_occurrence.runtime_occurrence_id,
                     durable.runtime_occurrence_id,
@@ -198,6 +194,59 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
                     _ = runtime.runtime_occurrence
+            finally:
+                runtime.close()
+
+    def test_stale_runtime_cannot_adopt_successor_occurrence_by_field_injection(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            first = self._build(config)
+            first_id = first.runtime_occurrence.runtime_occurrence_id
+            first.close()
+
+            successor = self._build(config)
+            try:
+                successor_id = successor.runtime_occurrence.runtime_occurrence_id
+                self.assertNotEqual(first_id, successor_id)
+                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                    _ = first.runtime_occurrence
+
+                object.__setattr__(
+                    first,
+                    "_runtime_occurrence_id",
+                    successor_id,
+                )
+                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                    _ = first.runtime_occurrence
+            finally:
+                successor.close()
+
+    def test_executable_injected_selector_is_not_evaluated(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                durable_id = runtime.runtime_occurrence.runtime_occurrence_id
+
+                class ExecutableSelector:
+                    invoked = False
+
+                    def __eq__(self, other):
+                        self.invoked = True
+                        raise AssertionError("injected selector executed")
+
+                    def __ne__(self, other):
+                        self.invoked = True
+                        raise AssertionError("injected selector executed")
+
+                hostile = ExecutableSelector()
+                object.__setattr__(runtime, "_runtime_occurrence_id", hostile)
+
+                self.assertEqual(
+                    runtime.runtime_occurrence.runtime_occurrence_id,
+                    durable_id,
+                )
+                self.assertFalse(hostile.invoked)
             finally:
                 runtime.close()
 

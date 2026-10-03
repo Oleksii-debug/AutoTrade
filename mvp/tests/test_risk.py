@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskIntent,
     RiskPolicy,
+    RISK_ARITHMETIC_POLICY_ID,
     evaluate_risk,
     risk_decision_fingerprint,
     stress_scenario_digest,
@@ -2360,6 +2361,274 @@ class IndependentRiskTests(unittest.TestCase):
             stress_scenario_digest({"ABC": "0.1000"}),
             stress_scenario_digest({"ABC": "0.1"}),
         )
+
+
+    def test_hard_leverage_verdict_and_fingerprint_ignore_ambient_decimal_context(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            context(
+                                equity="3",
+                                positions={"ABC": "0"},
+                                marks={"ABC": "1"},
+                                stress_scenarios=({"ABC": "0"},),
+                                equivalent_exposure_per_unit={"ABC": "1"},
+                                instrument_types={"ABC": "GENERIC"},
+                            ),
+                            policy(
+                                max_single_notional="10",
+                                max_gross_leverage="0.3333331",
+                                max_net_leverage="2",
+                                max_stress_loss="10",
+                            ),
+                        )
+                    gross_rule = next(
+                        item
+                        for item in decision.rules
+                        if item.rule == "gross_leverage"
+                    )
+                    self.assertFalse(gross_rule.passed)
+                    self.assertFalse(decision.admitted)
+                    self.assertEqual(
+                        decision.gross_leverage,
+                        Decimal("0.333333333333333334"),
+                    )
+                    self.assertEqual(
+                        decision.arithmetic_policy_id,
+                        RISK_ARITHMETIC_POLICY_ID,
+                    )
+                    observed.append(
+                        (
+                            decision.admitted,
+                            gross_rule.observed,
+                            decision.gross_leverage,
+                            decision.net_leverage,
+                            risk_decision_fingerprint(decision),
+                        )
+                    )
+        self.assertTrue(observed)
+        self.assertTrue(all(item == observed[0] for item in observed))
+
+    def test_expected_shortfall_exact_one_third_rejects_under_all_decimal_contexts(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        frozen_tail = (
+            {"ABC": "-1"},
+            {"ABC": "0"},
+            {"ABC": "0"},
+        )
+        tail_digest = tail_scenario_set_digest(frozen_tail)
+        outcomes = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            context(
+                                equity="10",
+                                positions={"ABC": "0"},
+                                marks={"ABC": "1"},
+                                stress_scenarios=({"ABC": "0"},),
+                                tail_scenarios=frozen_tail,
+                                equivalent_exposure_per_unit={"ABC": "1"},
+                                instrument_types={"ABC": "GENERIC"},
+                            ),
+                            policy(
+                                max_single_notional="10",
+                                max_gross_leverage="10",
+                                max_net_leverage="10",
+                                max_stress_loss="10",
+                                max_expected_shortfall="0.3333331",
+                                expected_shortfall_tail_fraction="1",
+                                required_tail_scenario_set_digest=tail_digest,
+                            ),
+                        )
+                    rule = next(
+                        item
+                        for item in decision.rules
+                        if item.rule == "expected_shortfall"
+                    )
+                    self.assertFalse(rule.passed)
+                    self.assertEqual(rule.observed, "0.333333333333333334")
+                    self.assertFalse(decision.admitted)
+                    outcomes.append(
+                        (rule.passed, rule.observed, risk_decision_fingerprint(decision))
+                    )
+        self.assertTrue(all(item == outcomes[0] for item in outcomes))
+
+    def test_expected_shortfall_tail_count_uses_exact_fraction_ceiling(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        frozen_tail = (
+            {"ABC": "-9"},
+            {"ABC": "-3"},
+            {"ABC": "0"},
+        )
+        tail_digest = tail_scenario_set_digest(frozen_tail)
+
+        def decision_for(tail_fraction):
+            return evaluate_risk(
+                intent,
+                context(
+                    equity="100",
+                    positions={"ABC": "0"},
+                    marks={"ABC": "1"},
+                    stress_scenarios=({"ABC": "0"},),
+                    tail_scenarios=frozen_tail,
+                    equivalent_exposure_per_unit={"ABC": "1"},
+                    instrument_types={"ABC": "GENERIC"},
+                ),
+                policy(
+                    max_single_notional="10",
+                    max_gross_leverage="10",
+                    max_net_leverage="10",
+                    max_stress_loss="10",
+                    max_expected_shortfall="7",
+                    expected_shortfall_tail_fraction=tail_fraction,
+                    required_tail_scenario_set_digest=tail_digest,
+                ),
+            )
+
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        one_tail = decision_for("0.333333333333333333")
+                        two_tail = decision_for("0.333333333333333334")
+                    one_rule = next(
+                        item
+                        for item in one_tail.rules
+                        if item.rule == "expected_shortfall"
+                    )
+                    two_rule = next(
+                        item
+                        for item in two_tail.rules
+                        if item.rule == "expected_shortfall"
+                    )
+                    self.assertEqual(one_rule.observed, "9")
+                    self.assertFalse(one_rule.passed)
+                    self.assertEqual(two_rule.observed, "6")
+                    self.assertTrue(two_rule.passed)
+                    self.assertFalse(one_tail.admitted)
+                    self.assertTrue(two_tail.admitted)
+
+    def test_high_significance_stress_cancellation_is_exact_under_hostile_contexts(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1234567890123456789012345678.1",
+            expected_state_version=7,
+        )
+        outcomes = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            context(
+                                equity="10000000000000000000000000000",
+                                positions={"ABC": "0", "XYZ": "-1"},
+                                marks={
+                                    "ABC": "1234567890123456789012345678.1",
+                                    "XYZ": "1234567890123456789012345677.2",
+                                },
+                                stress_scenarios=({"ABC": "-1", "XYZ": "-1"},),
+                                equivalent_exposure_per_unit={
+                                    "ABC": "1",
+                                    "XYZ": "1",
+                                },
+                                instrument_types={
+                                    "ABC": "GENERIC",
+                                    "XYZ": "GENERIC",
+                                },
+                            ),
+                            policy(
+                                max_single_notional="2000000000000000000000000000",
+                                max_gross_leverage="3",
+                                max_net_leverage="3",
+                                max_stress_loss="0.8",
+                            ),
+                        )
+                    rule = next(
+                        item for item in decision.rules if item.rule == "stress_loss"
+                    )
+                    self.assertFalse(rule.passed)
+                    self.assertEqual(rule.observed, "0.9")
+                    outcomes.append(
+                        (rule.passed, rule.observed, risk_decision_fingerprint(decision))
+                    )
+        self.assertTrue(all(item == outcomes[0] for item in outcomes))
+
+    def test_risk_decimal_resource_envelope_fails_closed_before_authority(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "quantity exceeds the exact Decimal resource envelope",
+        ):
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="9" * 257,
+                price="1",
+                expected_state_version=7,
+            )
+
+    def test_risk_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal.is_finite() dispatched")
+
+            def as_tuple(self):
+                raise AssertionError("hostile Decimal.as_tuple() dispatched")
+
+            def __format__(self, format_spec):
+                raise AssertionError("hostile Decimal.__format__() dispatched")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile Decimal.__eq__() dispatched")
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "quantity must use Decimal, string or integer input",
+        ):
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity=HostileDecimal("1"),
+                price="1",
+                expected_state_version=7,
+            )
 
 
 if __name__ == "__main__":

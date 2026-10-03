@@ -48,6 +48,23 @@ def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30",
     }
 
 
+
+def _canonical_for_test(payload):
+    import json
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _hash_for_test(payload):
+    from hashlib import sha256
+    return "sha256:" + sha256(_canonical_for_test(payload).encode("utf-8")).hexdigest()
+
+
 class ScientificRegistryTests(unittest.TestCase):
     def test_protocol_is_immutable_after_registration(self):
         with TemporaryDirectory() as directory:
@@ -226,6 +243,120 @@ class ScientificRegistryTests(unittest.TestCase):
             first.record_trial(p.protocol_id, status="CANCELLED", payload={"reason": "budget"})
             second = ScientificRegistry(path)
             self.assertEqual(second.completeness(p.protocol_id)["statuses"]["CANCELLED"], 1)
+
+
+    def test_trial_completeness_evidence_binds_protocol_and_population(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+
+            before = store.trial_completeness_evidence(registered.protocol_id)
+            self.assertEqual(before.protocol_id, registered.protocol_id)
+            self.assertEqual(before.protocol_hash, registered.protocol_hash)
+            self.assertEqual(before.trial_budget, 3)
+            self.assertEqual(before.recorded_trials, 0)
+            self.assertEqual(before.remaining_trial_budget, 3)
+            self.assertFalse(before.complete)
+            self.assertEqual(before.statuses, ())
+            self.assertTrue(before.digest.startswith("sha256:"))
+
+            store.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "fit"},
+            )
+            after = store.trial_completeness_evidence(registered.protocol_id)
+            self.assertEqual(after.protocol_hash, registered.protocol_hash)
+            self.assertEqual(after.recorded_trials, 1)
+            self.assertEqual(after.remaining_trial_budget, 2)
+            self.assertEqual(after.statuses, (("FAILED", 1),))
+            self.assertTrue(after.includes_non_successes)
+            self.assertNotEqual(after.trial_log_hash, before.trial_log_hash)
+            self.assertNotEqual(after.digest, before.digest)
+
+    def test_trial_completeness_evidence_complete_only_at_full_budget(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 2
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial": 1},
+            )
+            self.assertFalse(
+                store.trial_completeness_evidence(registered.protocol_id).complete
+            )
+            store.record_trial(
+                registered.protocol_id,
+                status="DISCARDED",
+                payload={"trial": 2},
+            )
+            evidence = store.trial_completeness_evidence(registered.protocol_id)
+            self.assertTrue(evidence.complete)
+            self.assertEqual(evidence.remaining_trial_budget, 0)
+            self.assertEqual(
+                evidence.statuses,
+                (("COMPLETED", 1), ("DISCARDED", 1)),
+            )
+
+    def test_trial_completeness_evidence_rejects_corrupt_status(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = store.register_protocol(protocol())
+            trial_id = store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial": 1},
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE trials SET status=? WHERE trial_id=?",
+                    ("FORGED", trial_id),
+                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "registered trial status is corrupt",
+            ):
+                store.trial_completeness_evidence(registered.protocol_id)
+
+    def test_trial_completeness_evidence_rejects_population_above_budget(self):
+        with TemporaryDirectory() as directory:
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial": 1},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+            # Simulate storage corruption/non-cooperating mutation rather than
+            # using record_trial(), which correctly rejects budget overflow.
+            payload = {"trial": 2}
+            with store._connect() as con:
+                con.execute(
+                    """
+                    INSERT INTO trials(
+                        trial_id,protocol_id,status,payload_hash,payload_json,created_at
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        "22222222-2222-4222-8222-222222222222",
+                        registered.protocol_id,
+                        "COMPLETED",
+                        _hash_for_test(payload),
+                        _canonical_for_test(payload),
+                        "2026-10-04T00:00:00+00:00",
+                    ),
+                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "population exceeds immutable trial budget",
+            ):
+                store.trial_completeness_evidence(registered.protocol_id)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+import threading
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.host_api import HostCommandStore
 from mvp.autotrade_mvp.security import SecurityBoundary
@@ -55,6 +59,18 @@ class SecurityBoundaryTests(unittest.TestCase):
             provider="SIMULATED",
             environment="PAPER",
             purpose="TRADE",
+            secret_value="top-secret",
+        )
+
+    def _read_credential(self):
+        return self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
             secret_value="top-secret",
         )
 
@@ -332,6 +348,323 @@ class SecurityBoundaryTests(unittest.TestCase):
                 origin=session.origin,
             )
 
+    def test_failed_refresh_does_not_roll_back_newer_concurrent_idle_state(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = [0]
+
+        def authorize(subject, role, origin):
+            calls[0] += 1
+            if calls[0] == 2:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+                return False
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh-cas",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=20,
+        )
+        self.clock[0] = 1005.0
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                session.token,
+                origin=session.origin,
+                ttl_seconds=60,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            self.clock[0] = 1010.0
+            touched = boundary.validate_session(
+                session.token,
+                required_roles={"OPERATOR"},
+                origin=session.origin,
+            )
+            self.assertEqual(touched.idle_expires_at, 1030.0)
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "not authenticated"):
+                refresh.result(timeout=2)
+
+        self.clock[0] = 1026.0
+        still_valid = boundary.validate_session(
+            session.token,
+            required_roles={"OPERATOR"},
+            origin=session.origin,
+        )
+        self.assertEqual(still_valid.subject, session.subject)
+
+    def test_concurrent_refreshes_mint_at_most_one_successor(self):
+        barrier = threading.Barrier(2)
+        block_refresh = [False]
+
+        def authorize(subject, role, origin):
+            if block_refresh[0]:
+                barrier.wait(timeout=2)
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-double-refresh",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        block_refresh[0] = True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    boundary.refresh_session,
+                    session.token,
+                    origin=session.origin,
+                )
+                for _ in range(2)
+            ]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(("ok", future.result(timeout=2)))
+                except PermissionError as error:
+                    outcomes.append(("denied", str(error)))
+
+        winners = [value for status, value in outcomes if status == "ok"]
+        denied = [value for status, value in outcomes if status == "denied"]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(denied), 1)
+        self.assertIn("Unknown session", denied[0])
+        self.assertNotEqual(winners[0].token, session.token)
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+        self.assertEqual(
+            boundary.validate_session(
+                winners[0].token,
+                required_roles={"OPERATOR"},
+                origin=winners[0].origin,
+            ).subject,
+            session.subject,
+        )
+
+    def test_refresh_cannot_revive_a_concurrently_revoked_session(self):
+        entered = threading.Event()
+        release = threading.Event()
+        block_refresh = [False]
+
+        def authorize(subject, role, origin):
+            if block_refresh[0]:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh-revoke",
+            role="OPERATOR",
+            origin=self.owner.origin,
+        )
+        block_refresh[0] = True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                session.token,
+                origin=session.origin,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.revoke_session(session.token)
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "Unknown session"):
+                refresh.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(session.token, origin=session.origin)
+
+    def test_session_creation_cannot_cross_concurrent_origin_unpair(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def authorize(subject, role, origin):
+            if subject == "blocked-operator":
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired.autotrade.invalid",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            create = executor.submit(
+                boundary.create_session,
+                subject="blocked-operator",
+                role="OPERATOR",
+                origin=paired,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "no longer paired"):
+                create.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "not paired"):
+            boundary.create_session(
+                subject="operator-after-unpair",
+                role="OPERATOR",
+                origin=paired,
+            )
+
+    def test_session_creation_cannot_cross_unpair_repair_generation(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def authorize(subject, role, origin):
+            if subject == "blocked-repair":
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired-generation.autotrade.invalid",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            create = executor.submit(
+                boundary.create_session,
+                subject="blocked-repair",
+                role="OPERATOR",
+                origin=paired,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            self.assertEqual(
+                boundary.pair_origin(
+                    owner.token,
+                    origin=owner.origin,
+                    new_origin=paired,
+                ),
+                paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "pairing changed"):
+                create.result(timeout=2)
+
+        replacement = boundary.create_session(
+            subject="operator-after-repair",
+            role="OPERATOR",
+            origin=paired,
+        )
+        self.assertEqual(replacement.origin, paired)
+
+    def test_refresh_cannot_cross_concurrent_origin_unpair(self):
+        entered = threading.Event()
+        release = threading.Event()
+        blocked_subject = [""]
+
+        def authorize(subject, role, origin):
+            if subject == blocked_subject[0]:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired-refresh.autotrade.invalid",
+        )
+        operator = boundary.create_session(
+            subject="operator-unpair-refresh",
+            role="OPERATOR",
+            origin=paired,
+        )
+        blocked_subject[0] = operator.subject
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                operator.token,
+                origin=operator.origin,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "Unknown session"):
+                refresh.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            boundary.validate_session(operator.token, origin=operator.origin)
+
     def test_origin_binding_blocks_browser_replay(self):
         handle = self._credential()
         with self.assertRaisesRegex(PermissionError, "origin"):
@@ -346,8 +679,39 @@ class SecurityBoundaryTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
-    def test_rotation_invalidates_old_generation(self):
-        old_handle = self._credential()
+    def test_trade_rotation_requires_external_fence_and_reconciliation(self):
+        handle = self._credential()
+        before = self.vault_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "sender-fence.*reconciliation",
+        ):
+            self.boundary.rotate_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="must-not-activate",
+            )
+
+        self.assertEqual(self.vault_path.read_bytes(), before)
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "top-secret",
+        )
+
+    def test_read_rotation_invalidates_old_generation(self):
+        old_handle = self._read_credential()
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,
@@ -365,7 +729,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 account_id="paper-1",
                 provider="SIMULATED",
                 environment="PAPER",
-                purpose="TRADE",
+                purpose="READ",
             )
         resolved = self.boundary.resolve_for_execution(
             self.owner.token,
@@ -375,7 +739,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-1",
             provider="SIMULATED",
             environment="PAPER",
-            purpose="TRADE",
+            purpose="READ",
         )
         self.assertEqual(resolved, "rotated-secret")
 
@@ -738,6 +1102,134 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("must-hide-by-key", rendered)
         self.assertIn("[REDACTED]", rendered)
 
+    def test_diagnostic_redaction_scrubs_embedded_secret_mapping_keys(self):
+        redacted = self.boundary.redact(
+            {
+                "Authorization: Bearer bearer-key-secret": "bearer-value",
+                "https://user:url-password@provider.invalid/path": "url-value",
+                "api_key=first-key-secret": "first-value",
+                "api_key=second-key-secret": "second-value",
+                "safe": "visible",
+            }
+        )
+
+        rendered = repr(redacted)
+        for secret in (
+            "bearer-key-secret",
+            "url-password",
+            "first-key-secret",
+            "second-key-secret",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("Authorization: [REDACTED]", redacted)
+        self.assertIn("https://[REDACTED]@provider.invalid/path", redacted)
+        self.assertIn("api_key=[REDACTED]", redacted)
+        self.assertIn("api_key=[REDACTED] [2]", redacted)
+        self.assertEqual(redacted["safe"], "visible")
+
+    def test_diagnostic_redaction_fails_closed_if_key_sanitizer_errors(self):
+        with patch(
+            "mvp.autotrade_mvp.security._redact_embedded_secret_text",
+            side_effect=RecursionError("pathological diagnostic key"),
+        ):
+            redacted = self.boundary.redact(
+                {"safe-looking-key": "must-not-be-retained-under-failed-key"}
+            )
+
+        self.assertEqual(
+            redacted,
+            {"[REDACTED:KEY]": "[REDACTED]"},
+        )
+
+    def test_diagnostic_redaction_preserves_synthetic_key_collisions(self):
+        class HostileKey:
+            def __hash__(self):
+                return 11
+
+        redacted = self.boundary.redact(
+            {
+                "[UNSUPPORTED_KEY_1]": "safe-visible",
+                HostileKey(): "must-never-surface",
+            }
+        )
+        self.assertEqual(redacted["[UNSUPPORTED_KEY_1]"], "safe-visible")
+        self.assertEqual(
+            redacted["[UNSUPPORTED_KEY_1] [2]"],
+            "[REDACTED]",
+        )
+
+    def test_diagnostic_redaction_never_executes_hostile_key_or_value_hooks(self):
+        class HostileKey:
+            def __hash__(self):
+                return 7
+
+            def __str__(self):
+                raise AssertionError("diagnostic redaction must not call hostile __str__")
+
+            def __repr__(self):
+                raise AssertionError("diagnostic redaction must not retain hostile keys")
+
+        class HostileValue:
+            def __str__(self):
+                raise AssertionError("diagnostic redaction must not call hostile __str__")
+
+            def __repr__(self):
+                raise AssertionError("diagnostic redaction must not retain hostile values")
+
+        redacted = self.boundary.redact_for_diagnostics(
+            {
+                HostileKey(): "must-never-surface",
+                "safe": HostileValue(),
+            },
+            sensitive_values=("must-never-surface",),
+        )
+        rendered = repr(redacted)
+        self.assertNotIn("must-never-surface", rendered)
+        self.assertIn("[REDACTED]", rendered)
+        self.assertEqual(redacted["safe"], "[REDACTED:UNSUPPORTED]")
+
+    def test_diagnostic_redaction_breaks_container_cycles_fail_closed(self):
+        cyclic_dict = {}
+        cyclic_dict["self"] = cyclic_dict
+        cyclic_list = []
+        cyclic_list.append(cyclic_list)
+
+        redacted_dict = self.boundary.redact(cyclic_dict)
+        redacted_list = self.boundary.redact(cyclic_list)
+
+        self.assertEqual(redacted_dict["self"], "[REDACTED:CYCLE]")
+        self.assertEqual(redacted_list[0], "[REDACTED:CYCLE]")
+
+    def test_diagnostic_redaction_bounds_deep_acyclic_payloads(self):
+        value: object = "safe-leaf"
+        for _ in range(100):
+            value = [value]
+
+        redacted = self.boundary.redact(value)
+        cursor = redacted
+        for _ in range(65):
+            self.assertIsInstance(cursor, list)
+            cursor = cursor[0]
+        self.assertEqual(cursor, "[REDACTED:DEPTH]")
+
+    def test_diagnostic_redaction_scrubs_sensitive_values_from_mapping_keys(self):
+        redacted = self.boundary.redact_for_diagnostics(
+            {"prefix-top-secret-suffix": "visible"},
+            sensitive_values=("top-secret",),
+        )
+        rendered = repr(redacted)
+        self.assertNotIn("top-secret", rendered)
+        self.assertEqual(
+            redacted["prefix-[REDACTED]-suffix"],
+            "[REDACTED]",
+        )
+
+    def test_diagnostic_redaction_never_emits_binary_payload_bytes(self):
+        redacted = self.boundary.redact(
+            {"wire": b"Authorization: Bearer should-never-log"}
+        )
+        self.assertEqual(redacted["wire"], "[REDACTED:BINARY]")
+
     def test_unpair_then_repair_never_revives_old_token(self):
         paired = self.boundary.pair_origin(
             self.owner.token,
@@ -761,6 +1253,238 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(PermissionError):
             self.boundary.validate_session(old.token, origin=paired)
+
+    def test_session_revoke_cannot_cut_through_secret_registration(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_register = self.vault.register
+
+        def blocking_register(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential registration")
+            return original_register(*args, **kwargs)
+
+        self.vault.register = blocking_register
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            registering = pool.submit(
+                self.boundary.register_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                owner_identity="windows-user-1",
+                account_id="paper-register-race",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value="register-race-secret",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through credential registration",
+            )
+            release.set()
+            registered = registering.result(timeout=5)
+            self.assertEqual(registered.account_id, "paper-register-race")
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_cannot_cut_through_secret_rotation(self):
+        handle = self._read_credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_rotate = self.vault.rotate
+
+        def blocking_rotate(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential rotation")
+            return original_rotate(*args, **kwargs)
+
+        self.vault.rotate = blocking_rotate
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rotating = pool.submit(
+                self.boundary.rotate_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="rotated-race-secret",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through credential rotation",
+            )
+            release.set()
+            rotated = rotating.result(timeout=5)
+            self.assertEqual(rotated.generation, handle.generation + 1)
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_cannot_cut_through_secret_revocation(self):
+        handle = self._credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_revoke = self.vault.revoke
+
+        def blocking_revoke(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential revocation")
+            return original_revoke(*args, **kwargs)
+
+        self.vault.revoke = blocking_revoke
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            revoking_secret = pool.submit(
+                self.boundary.revoke_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking_session = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking_session.done(),
+                "session revocation must not cut through credential revocation",
+            )
+            release.set()
+            revoking_secret.result(timeout=5)
+            revoking_session.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_cannot_linearize_mid_secret_resolution(self):
+        handle = self._credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_resolve = self.vault.resolve
+
+        def blocking_resolve(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential resolution")
+            return original_resolve(*args, **kwargs)
+
+        self.vault.resolve = blocking_resolve
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            resolving = pool.submit(
+                self.boundary.resolve_for_execution,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through an already-authorized vault call",
+            )
+            release.set()
+            self.assertEqual(resolving.result(timeout=5), "top-secret")
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_waits_only_for_credential_lease_acquisition(self):
+        handle = self._credential()
+        entering = threading.Event()
+        allow_enter = threading.Event()
+        in_use = threading.Event()
+        allow_finish = threading.Event()
+        original_lease = self.vault.lease
+
+        @contextmanager
+        def blocking_lease(*args, **kwargs):
+            entering.set()
+            if not allow_enter.wait(5):
+                raise AssertionError("timed out waiting to enter credential lease")
+            with original_lease(*args, **kwargs) as plaintext:
+                yield plaintext
+
+        self.vault.lease = blocking_lease
+
+        def use_credential():
+            with self.boundary.lease_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ) as plaintext:
+                in_use.set()
+                if not allow_finish.wait(5):
+                    raise AssertionError("timed out waiting to finish credential use")
+                return plaintext
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            using = pool.submit(use_credential)
+            self.assertTrue(entering.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "revocation must wait until the credential lease is acquired",
+            )
+
+            allow_enter.set()
+            self.assertTrue(in_use.wait(5))
+            revoking.result(timeout=5)
+            self.assertFalse(
+                using.done(),
+                "revocation must not wait for already-linearized terminal credential use",
+            )
+            allow_finish.set()
+            self.assertEqual(using.result(timeout=5), "top-secret")
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
 
     def test_owner_can_pair_new_origin_and_non_owner_cannot(self):
         new_origin = "https://paired.autotrade.invalid"
@@ -849,7 +1573,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("[REDACTED]", repr(redacted))
 
     def test_rotated_and_revoked_secret_values_remain_redacted(self):
-        old_handle = self._credential()
+        old_handle = self._read_credential()
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,

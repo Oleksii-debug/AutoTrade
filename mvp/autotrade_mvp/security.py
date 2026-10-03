@@ -9,16 +9,19 @@ It deliberately does not keep a second plaintext credential store.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import math
 import re
 import secrets
+import threading
 import time
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .host_actions import required_roles_for_host_action
+from .decision_trace import _redact_embedded_secret_text
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -92,7 +95,13 @@ class SecurityBoundary:
             raise ValueError("At least one authenticated origin is required")
         if not isinstance(credential_vault, ProtectedCredentialVault):
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
-        self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
+        self._state_lock = threading.RLock()
+        self._paired_origins = {
+            _authenticated_origin(value) for value in allowed_origins
+        }
+        self._origin_generations = {
+            origin: 1 for origin in self._paired_origins
+        }
         self._credential_vault = credential_vault
         if session_authorizer is not None and not callable(session_authorizer):
             raise TypeError("session_authorizer must be callable or None")
@@ -149,17 +158,21 @@ class SecurityBoundary:
     ) -> Session:
         idle_timeout = min(idle_timeout_seconds, ttl_seconds)
         expires_at = now + ttl_seconds
-        session = Session(
-            token=secrets.token_urlsafe(32),
-            subject=subject,
-            role=role,
-            origin=origin,
-            expires_at=expires_at,
-            idle_timeout_seconds=idle_timeout,
-            idle_expires_at=min(expires_at, now + idle_timeout),
-        )
-        self._sessions[session.token] = session
-        return session
+        with self._state_lock:
+            token = secrets.token_urlsafe(32)
+            while token in self._sessions:
+                token = secrets.token_urlsafe(32)
+            session = Session(
+                token=token,
+                subject=subject,
+                role=role,
+                origin=origin,
+                expires_at=expires_at,
+                idle_timeout_seconds=idle_timeout,
+                idle_expires_at=min(expires_at, now + idle_timeout),
+            )
+            self._sessions[session.token] = session
+            return session
 
     def create_session(
         self,
@@ -175,8 +188,10 @@ class SecurityBoundary:
         normalized_origin = _authenticated_origin(origin)
         if normalized_role not in self._ROLES:
             raise PermissionError("Unknown role")
-        if normalized_origin not in self._paired_origins:
-            raise PermissionError("Origin is not paired")
+        with self._state_lock:
+            if normalized_origin not in self._paired_origins:
+                raise PermissionError("Origin is not paired")
+            origin_generation = self._origin_generations[normalized_origin]
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
             min(300, ttl)
@@ -192,14 +207,19 @@ class SecurityBoundary:
             origin=normalized_origin,
         )
         now = self._now_value()
-        return self._issue_session(
-            subject=normalized_subject,
-            role=normalized_role,
-            origin=normalized_origin,
-            ttl_seconds=ttl,
-            idle_timeout_seconds=idle_timeout,
-            now=now,
-        )
+        with self._state_lock:
+            if normalized_origin not in self._paired_origins:
+                raise PermissionError("Origin is no longer paired")
+            if self._origin_generations.get(normalized_origin) != origin_generation:
+                raise PermissionError("Origin pairing changed during authentication")
+            return self._issue_session(
+                subject=normalized_subject,
+                role=normalized_role,
+                origin=normalized_origin,
+                ttl_seconds=ttl,
+                idle_timeout_seconds=idle_timeout,
+                now=now,
+            )
 
     def validate_session(
         self,
@@ -209,45 +229,51 @@ class SecurityBoundary:
         origin: str | None = None,
     ) -> Session:
         normalized_token = _required_text(token, name="session token")
-        session = self._sessions.get(normalized_token)
-        if session is None:
-            raise PermissionError("Unknown session")
-        if session.origin not in self._paired_origins:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session origin is no longer paired")
-        now = self._now_value()
-        if now >= session.expires_at:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session expired")
-        if now >= session.idle_expires_at:
-            self._sessions.pop(normalized_token, None)
-            raise PermissionError("Session idle timeout expired")
-        if origin is not None and _authenticated_origin(origin) != session.origin:
-            raise PermissionError("Session origin mismatch")
+        normalized_origin = (
+            _authenticated_origin(origin) if origin is not None else None
+        )
+        normalized_roles = None
         if required_roles is not None:
             normalized_roles = {
                 _required_text(role, name="required role").upper() for role in required_roles
             }
             if not normalized_roles or not normalized_roles.issubset(self._ROLES):
                 raise PermissionError("Unknown required role")
-            if session.role not in normalized_roles:
+
+        with self._state_lock:
+            session = self._sessions.get(normalized_token)
+            if session is None:
+                raise PermissionError("Unknown session")
+            if session.origin not in self._paired_origins:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session origin is no longer paired")
+            now = self._now_value()
+            if now >= session.expires_at:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session expired")
+            if now >= session.idle_expires_at:
+                self._sessions.pop(normalized_token, None)
+                raise PermissionError("Session idle timeout expired")
+            if normalized_origin is not None and normalized_origin != session.origin:
+                raise PermissionError("Session origin mismatch")
+            if normalized_roles is not None and session.role not in normalized_roles:
                 raise PermissionError("Role is not authorized")
-        refreshed_idle = min(
-            session.expires_at,
-            now + session.idle_timeout_seconds,
-        )
-        if refreshed_idle != session.idle_expires_at:
-            session = Session(
-                token=session.token,
-                subject=session.subject,
-                role=session.role,
-                origin=session.origin,
-                expires_at=session.expires_at,
-                idle_timeout_seconds=session.idle_timeout_seconds,
-                idle_expires_at=refreshed_idle,
+            refreshed_idle = min(
+                session.expires_at,
+                now + session.idle_timeout_seconds,
             )
-            self._sessions[normalized_token] = session
-        return session
+            if refreshed_idle != session.idle_expires_at:
+                session = Session(
+                    token=session.token,
+                    subject=session.subject,
+                    role=session.role,
+                    origin=session.origin,
+                    expires_at=session.expires_at,
+                    idle_timeout_seconds=session.idle_timeout_seconds,
+                    idle_expires_at=refreshed_idle,
+                )
+                self._sessions[normalized_token] = session
+            return session
 
     def refresh_session(
         self,
@@ -257,10 +283,11 @@ class SecurityBoundary:
         ttl_seconds: int = 900,
         idle_timeout_seconds: int | None = None,
     ) -> Session:
-        """Re-authenticate and rotate a session without changing its identity scope."""
+        """Re-authenticate and atomically rotate a still-current session."""
 
         normalized_token = _required_text(token, name="session token")
-        prior = self._sessions.get(normalized_token)
+        with self._state_lock:
+            prior = self._sessions.get(normalized_token)
         current = self.validate_session(normalized_token, origin=origin)
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
@@ -278,20 +305,31 @@ class SecurityBoundary:
                 origin=current.origin,
             )
         except PermissionError:
-            if prior is not None and normalized_token in self._sessions:
-                self._sessions[normalized_token] = prior
+            with self._state_lock:
+                live = self._sessions.get(normalized_token)
+                if prior is not None and live == current:
+                    self._sessions[normalized_token] = prior
             raise
         now = self._now_value()
-        replacement = self._issue_session(
-            subject=current.subject,
-            role=current.role,
-            origin=current.origin,
-            ttl_seconds=ttl,
-            idle_timeout_seconds=idle_timeout,
-            now=now,
-        )
-        self._sessions.pop(current.token, None)
-        return replacement
+        with self._state_lock:
+            live = self.validate_session(normalized_token, origin=origin)
+            if (
+                live.subject != current.subject
+                or live.role != current.role
+                or live.origin != current.origin
+                or live.expires_at != current.expires_at
+            ):
+                raise PermissionError("Session changed during refresh")
+            replacement = self._issue_session(
+                subject=live.subject,
+                role=live.role,
+                origin=live.origin,
+                ttl_seconds=ttl,
+                idle_timeout_seconds=idle_timeout,
+                now=now,
+            )
+            self._sessions.pop(normalized_token, None)
+            return replacement
 
     def validate_host_session(
         self,
@@ -322,8 +360,9 @@ class SecurityBoundary:
 
     def revoke_session(self, token: str) -> None:
         normalized_token = _required_text(token, name="session token")
-        if self._sessions.pop(normalized_token, None) is None:
-            raise PermissionError("Unknown session")
+        with self._state_lock:
+            if self._sessions.pop(normalized_token, None) is None:
+                raise PermissionError("Unknown session")
 
     def pair_origin(
         self,
@@ -332,10 +371,13 @@ class SecurityBoundary:
         origin: str,
         new_origin: str,
     ) -> str:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized = _authenticated_origin(new_origin)
-        self._paired_origins.add(normalized)
-        return normalized
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            if normalized not in self._paired_origins:
+                self._origin_generations.setdefault(normalized, 1)
+                self._paired_origins.add(normalized)
+            return normalized
 
     def unpair_origin(
         self,
@@ -344,16 +386,24 @@ class SecurityBoundary:
         origin: str,
         paired_origin: str,
     ) -> None:
-        owner = self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         normalized = _authenticated_origin(paired_origin)
-        if normalized not in self._paired_origins:
-            raise PermissionError("Origin is not paired")
-        if normalized == owner.origin and len(self._paired_origins) == 1:
-            raise PermissionError("Cannot remove the final authenticated origin")
-        self._paired_origins.remove(normalized)
-        for session_token, session in list(self._sessions.items()):
-            if session.origin == normalized:
-                self._sessions.pop(session_token, None)
+        with self._state_lock:
+            owner = self.validate_session(
+                token,
+                required_roles={"OWNER"},
+                origin=origin,
+            )
+            if normalized not in self._paired_origins:
+                raise PermissionError("Origin is not paired")
+            if normalized == owner.origin and len(self._paired_origins) == 1:
+                raise PermissionError("Cannot remove the final authenticated origin")
+            self._paired_origins.remove(normalized)
+            self._origin_generations[normalized] = (
+                self._origin_generations.get(normalized, 0) + 1
+            )
+            for session_token, session in list(self._sessions.items()):
+                if session.origin == normalized:
+                    self._sessions.pop(session_token, None)
 
     def register_secret(
         self,
@@ -367,18 +417,25 @@ class SecurityBoundary:
         purpose: str,
         secret_value: str,
     ) -> CredentialHandle:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
         normalized_purpose = _required_text(purpose, name="purpose").upper()
         if normalized_purpose not in self._CREDENTIAL_PURPOSES:
             raise PermissionError("Credential purpose is unsupported")
-        return self._credential_vault.register(
-            owner_identity=_required_text(owner_identity, name="owner_identity"),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=normalized_purpose,
-            secret_value=secret_value,
-        )
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            return self._credential_vault.register(
+                owner_identity=normalized_owner,
+                account_id=normalized_account,
+                provider=normalized_provider,
+                environment=normalized_environment,
+                purpose=normalized_purpose,
+                secret_value=secret_value,
+            )
 
     def _current_handle(self, handle_id: str) -> CredentialHandle:
         metadata = self._credential_vault.describe(
@@ -402,13 +459,21 @@ class SecurityBoundary:
         owner_identity: str,
         new_secret_value: str,
     ) -> CredentialHandle:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        current = self._current_handle(handle_id)
-        return self._credential_vault.rotate(
-            current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
-            new_secret_value=new_secret_value,
-        )
+        normalized_handle = _required_text(handle_id, name="handle_id")
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            current = self._current_handle(normalized_handle)
+            if current.purpose == "TRADE":
+                raise PermissionError(
+                    "TRADE credential rotation requires verified sender-fence "
+                    "and reconciliation handover before successor activation"
+                )
+            return self._credential_vault.rotate(
+                current,
+                execution_identity=normalized_owner,
+                new_secret_value=new_secret_value,
+            )
 
     def revoke_secret(
         self,
@@ -418,12 +483,15 @@ class SecurityBoundary:
         handle_id: str,
         owner_identity: str,
     ) -> None:
-        self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        current = self._current_handle(handle_id)
-        self._credential_vault.revoke(
-            current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
-        )
+        normalized_handle = _required_text(handle_id, name="handle_id")
+        normalized_owner = _required_text(owner_identity, name="owner_identity")
+        with self._state_lock:
+            self.validate_session(token, required_roles={"OWNER"}, origin=origin)
+            current = self._current_handle(normalized_handle)
+            self._credential_vault.revoke(
+                current,
+                execution_identity=normalized_owner,
+            )
 
     def resolve_for_execution(
         self,
@@ -437,19 +505,31 @@ class SecurityBoundary:
         environment: str,
         purpose: str,
     ) -> str:
-        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        return self._credential_vault.resolve(
-            handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
-            ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
+        normalized_identity = _required_text(
+            execution_identity, name="execution_identity"
         )
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
+        normalized_purpose = _required_text(purpose, name="purpose").upper()
+        with self._state_lock:
+            self.validate_session(
+                token,
+                required_roles=self._EXECUTION_ROLES,
+                origin=origin,
+            )
+            return self._credential_vault.resolve(
+                handle,
+                execution_identity=normalized_identity,
+                account_id=normalized_account,
+                provider=normalized_provider,
+                environment=normalized_environment,
+                purpose=normalized_purpose,
+            )
 
 
     @contextmanager
@@ -466,19 +546,35 @@ class SecurityBoundary:
         purpose: str,
     ):
         """Authorize and hold one exact credential generation for terminal use."""
-        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        with self._credential_vault.lease(
-            handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
-            ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
-        ) as plaintext:
+        normalized_identity = _required_text(
+            execution_identity, name="execution_identity"
+        )
+        normalized_account = _required_text(account_id, name="account_id")
+        normalized_provider = _required_text(provider, name="provider")
+        normalized_environment = _required_text(
+            environment, name="environment"
+        ).upper()
+        normalized_purpose = _required_text(purpose, name="purpose").upper()
+
+        with ExitStack() as stack:
+            with self._state_lock:
+                self.validate_session(
+                    token,
+                    required_roles=self._EXECUTION_ROLES,
+                    origin=origin,
+                )
+                plaintext = stack.enter_context(
+                    self._credential_vault.lease(
+                        handle,
+                        execution_identity=normalized_identity,
+                        account_id=normalized_account,
+                        provider=normalized_provider,
+                        environment=normalized_environment,
+                        purpose=normalized_purpose,
+                    )
+                )
             yield plaintext
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:
@@ -488,24 +584,88 @@ class SecurityBoundary:
 
     @staticmethod
     def redact(value: object) -> object:
-        if isinstance(value, Mapping):
-            return {
-                key: "[REDACTED]"
-                if _REDACT_RE.search(str(key))
-                else SecurityBoundary.redact(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [SecurityBoundary.redact(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(SecurityBoundary.redact(item) for item in value)
-        if isinstance(value, set):
-            return {SecurityBoundary.redact(item) for item in value}
-        if isinstance(value, frozenset):
-            return frozenset(SecurityBoundary.redact(item) for item in value)
-        if isinstance(value, str) and _REDACT_RE.search(value):
-            return "[REDACTED]"
-        return value
+        """Return a diagnostic-safe tree without executing hostile object hooks."""
+
+        active_containers: set[int] = set()
+
+        def scrub(item: object, *, depth: int = 0) -> object:
+            if depth > 64:
+                return "[REDACTED:DEPTH]"
+            item_type = type(item)
+            if item_type is dict or item_type is MappingProxyType:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    result: dict[object, object] = {}
+                    unsupported_key = 0
+
+                    def unique_key(candidate: str) -> str:
+                        if candidate not in result:
+                            return candidate
+                        suffix = 2
+                        while f"{candidate} [{suffix}]" in result:
+                            suffix += 1
+                        return f"{candidate} [{suffix}]"
+
+                    for key, child in item.items():
+                        if type(key) is not str:
+                            unsupported_key += 1
+                            safe_key = unique_key(
+                                f"[UNSUPPORTED_KEY_{unsupported_key}]"
+                            )
+                            result[safe_key] = "[REDACTED]"
+                            continue
+
+                        sanitization_failed = False
+                        try:
+                            sanitized_key = _redact_embedded_secret_text(key)
+                        except Exception:
+                            sanitized_key = "[REDACTED:KEY]"
+                            sanitization_failed = True
+                        safe_key = unique_key(sanitized_key)
+                        if sanitization_failed or _REDACT_RE.search(key):
+                            result[safe_key] = "[REDACTED]"
+                        else:
+                            result[safe_key] = scrub(
+                                child,
+                                depth=depth + 1,
+                            )
+                    return result
+                finally:
+                    active_containers.remove(identity)
+            if item_type is list:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    return [scrub(child, depth=depth + 1) for child in item]
+                finally:
+                    active_containers.remove(identity)
+            if item_type is tuple:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    return tuple(scrub(child, depth=depth + 1) for child in item)
+                finally:
+                    active_containers.remove(identity)
+            if item_type is set:
+                return {scrub(child, depth=depth + 1) for child in item}
+            if item_type is frozenset:
+                return frozenset(scrub(child, depth=depth + 1) for child in item)
+            if item_type is str:
+                return "[REDACTED]" if _REDACT_RE.search(item) else item
+            if item is None or item_type in {bool, int, float}:
+                return item
+            if item_type in {bytes, bytearray, memoryview}:
+                return "[REDACTED:BINARY]"
+            return "[REDACTED:UNSUPPORTED]"
+
+        return scrub(value)
 
     @staticmethod
     def redact_for_diagnostics(
@@ -522,28 +682,35 @@ class SecurityBoundary:
         keyed = SecurityBoundary.redact(value)
         known: list[str] = []
         for candidate in sensitive_values:
-            if not isinstance(candidate, str) or not candidate:
+            if type(candidate) is not str or not candidate:
                 raise ValueError("sensitive_values must contain non-empty strings")
             known.append(candidate)
         known.sort(key=len, reverse=True)
 
+        def scrub_text(item: str) -> str:
+            result = item
+            for secret_value in known:
+                if secret_value in result:
+                    result = result.replace(secret_value, "[REDACTED]")
+            return result
+
         def scrub(item: object) -> object:
-            if isinstance(item, Mapping):
-                return {key: scrub(child) for key, child in item.items()}
-            if isinstance(item, list):
+            item_type = type(item)
+            if item_type is dict:
+                return {
+                    scrub_text(key) if type(key) is str else "[UNSUPPORTED_KEY]": scrub(child)
+                    for key, child in item.items()
+                }
+            if item_type is list:
                 return [scrub(child) for child in item]
-            if isinstance(item, tuple):
+            if item_type is tuple:
                 return tuple(scrub(child) for child in item)
-            if isinstance(item, set):
+            if item_type is set:
                 return {scrub(child) for child in item}
-            if isinstance(item, frozenset):
+            if item_type is frozenset:
                 return frozenset(scrub(child) for child in item)
-            if isinstance(item, str):
-                result = item
-                for secret_value in known:
-                    if secret_value in result:
-                        result = result.replace(secret_value, "[REDACTED]")
-                return result
+            if item_type is str:
+                return scrub_text(item)
             return item
 
         return scrub(keyed)

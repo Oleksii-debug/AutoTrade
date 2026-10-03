@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
+from http.client import HTTPException
 import hmac
 import json
 import math
@@ -733,11 +734,11 @@ class BybitCredentialProbeUrllibClient:
                 else:
                     try:
                         raw = error.read(budget + 1)
-                    except Exception:
+                    except (OSError, HTTPException, ValueError):
                         read_failed = True
             else:
                 read_failed = True
-        except Exception:
+        except (OSError, HTTPException, ValueError):
             transport_unavailable = True
 
         if transport_unavailable:

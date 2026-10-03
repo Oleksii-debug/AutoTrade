@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.replay import (
     ReplayEvent,
     RuntimeStateAuthority,
     RuntimeStateSnapshot,
+    _issue_runtime_state_authority,
     dataset_digest,
     resume_from_composite_checkpoint,
 )
@@ -156,7 +157,7 @@ class CausalReplayTests(unittest.TestCase):
         def resolve():
             return cut_id, replay.checkpoint(), components
 
-        return RuntimeStateAuthority(
+        return _issue_runtime_state_authority(
             authority_id=authority_id,
             secret=secret,
             cut_resolver=resolve,
@@ -292,7 +293,7 @@ class CausalReplayTests(unittest.TestCase):
                 echoed_components,
             )
 
-        attacker = RuntimeStateAuthority(
+        attacker = _issue_runtime_state_authority(
             authority_id=checkpoint.runtime_authority_id,
             secret=b"attacker-runtime-authority-secret-00000001",
             cut_resolver=echo_checkpoint,
@@ -713,7 +714,7 @@ class CausalReplayTests(unittest.TestCase):
             "changed during runtime snapshot capture",
         ):
             replay.composite_checkpoint(
-                runtime_state_authority=RuntimeStateAuthority(
+                runtime_state_authority=_issue_runtime_state_authority(
                     authority_id="runtime:test",
                     secret=b"runtime-test-authority-secret-0000000001",
                     cut_resolver=moving_authority,
@@ -760,7 +761,7 @@ class CausalReplayTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ReplayError, "not bound to the current replay cut"):
             replay.composite_checkpoint(
-                runtime_state_authority=RuntimeStateAuthority(
+                runtime_state_authority=_issue_runtime_state_authority(
                     authority_id="runtime:test",
                     secret=b"runtime-test-authority-secret-0000000001",
                     cut_resolver=stale_authority,

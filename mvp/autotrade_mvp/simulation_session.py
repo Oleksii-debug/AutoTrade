@@ -25,6 +25,7 @@ from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
+    commit_order_fill_with_reservation_consumption,
 )
 from .reconciliation import (
     ProviderFillEvidence,
@@ -805,15 +806,32 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     raise ValueError("ACK is not fill evidence")
                 fill = fresh_fills[0]
                 fill_id = fill["provider_execution_id"]
-                orders.record_fill(event_key=f"{key}:fill", client_order_id=order_id, fill_id=fill_id,
-                    provider_execution_id=fill_id, quantity=fill["last_quantity"]["value"], price=fill["last_price"],
-                    committed_at=timestamp, evidence_refs=fill["evidence"])
-                commit_economic_batch_with_reservation_consumption(economic, reservations,
-                    command_id=_uuid("loop-fill-command", key), idempotency_key=_uuid("loop-fill-command", key),
-                    reservation_id=reservation_id, usage={resource: required}, transactions=(book_equity_fill(
-                        transaction_id=_uuid("loop-fill-transaction", key), cause_event_id=fill_id, instrument=INSTRUMENT,
-                        settlement_currency="USD", side=fill["side"], quantity=fill["last_quantity"]["value"],
-                        price=fill["last_price"], fee=fill["fees"][0]["amount"], fee_currency="USD"),), committed_at=timestamp)
+                commit_order_fill_with_reservation_consumption(
+                    orders, economic, reservations,
+                    order_event_key=f"{key}:fill",
+                    client_order_id=order_id,
+                    fill_id=fill_id,
+                    provider_execution_id=fill_id,
+                    quantity=fill["last_quantity"]["value"],
+                    price=fill["last_price"],
+                    order_evidence_refs=fill["evidence"],
+                    command_id=_uuid("loop-fill-command", key),
+                    idempotency_key=_uuid("loop-fill-command", key),
+                    reservation_id=reservation_id,
+                    usage={resource: required},
+                    transactions=(book_equity_fill(
+                        transaction_id=_uuid("loop-fill-transaction", key),
+                        cause_event_id=fill_id,
+                        instrument=INSTRUMENT,
+                        settlement_currency="USD",
+                        side=fill["side"],
+                        quantity=fill["last_quantity"]["value"],
+                        price=fill["last_price"],
+                        fee=fill["fees"][0]["amount"],
+                        fee_currency="USD",
+                    ),),
+                    committed_at=timestamp,
+                )
                 if orders.order(order_id).state != "FILLED":
                     raise ValueError("canonical OMS has not confirmed complete fill")
                 status = "FILLED"

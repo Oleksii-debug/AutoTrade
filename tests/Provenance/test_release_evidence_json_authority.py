@@ -2,7 +2,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tools.build_provenance_manifest import release_evidence_snapshot
+from tools.build_provenance_manifest import (
+    _strict_json_loads_bytes,
+    release_evidence_snapshot,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -29,6 +32,22 @@ def valid_evidence_json(*, extra: str = "") -> bytes:
         f"{suffix}"
         "}"
     ).encode("utf-8")
+
+
+class StrictProvenanceJsonTests(unittest.TestCase):
+    def test_valid_source_json_remains_available(self):
+        self.assertEqual(
+            _strict_json_loads_bytes(b'{"sdk":{"version":"10.0.100"}}'),
+            {"sdk": {"version": "10.0.100"}},
+        )
+
+    def test_duplicate_source_json_key_fails_closed(self):
+        with self.assertRaises(ValueError):
+            _strict_json_loads_bytes(b'{"sdk":{"version":"1","version":"2"}}')
+
+    def test_nonfinite_source_json_number_fails_closed(self):
+        with self.assertRaises(ValueError):
+            _strict_json_loads_bytes(b'{"metadata":{"number":NaN}}')
 
 
 class ReleaseEvidenceJsonAuthorityTests(unittest.TestCase):

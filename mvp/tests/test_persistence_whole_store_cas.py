@@ -80,12 +80,9 @@ class JournalWholeStoreCasTests(unittest.TestCase):
 
             self.assertEqual(store.current_journal_sequence(), 0)
             self.assertEqual(store.load_events("account", "paper-cas"), [])
-            self.assertIsNone(
-                store.get_command(
-                    actor="candidate",
-                    environment="SIMULATION",
-                    idempotency_key="candidate-key",
-                )
+            self.assertEqual(
+                store.whole_store_state_counts()["command_dedupe"],
+                1,
             )
 
     def test_outbox_delivery_rejects_command_only_writer_at_same_journal_sequence(self):

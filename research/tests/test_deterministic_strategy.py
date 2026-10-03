@@ -1352,5 +1352,38 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+
+    def test_numeric_ingress_rejects_oversized_text_before_decimal_construction(self):
+        class DecimalTrap:
+            called = False
+
+        hostile = "9" * 260
+        with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold=hostile,
+                proposal_quantity="1",
+            )
+
+    def test_numeric_ingress_rejects_extreme_exponent_and_large_integer(self):
+        for hostile in ("1e999999999999999999999999", 10 ** 256):
+            with self.subTest(hostile_type=type(hostile).__name__):
+                with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
+                    ReturnThresholdBaseline(
+                        lookback=2,
+                        threshold=hostile,
+                        proposal_quantity="1",
+                    )
+
+    def test_numeric_ingress_preserves_supported_domain_presentation(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="+1.00e-2",
+            proposal_quantity="2.0",
+        )
+        self.assertEqual(strategy.threshold, Decimal("0.0100"))
+        self.assertEqual(strategy.proposal_quantity, Decimal("2.0"))
+
+
 if __name__ == "__main__":
     unittest.main()

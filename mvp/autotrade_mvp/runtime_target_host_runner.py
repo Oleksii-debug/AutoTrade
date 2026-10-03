@@ -28,6 +28,7 @@ from . import runtime_load_measurement as _runtime_load_measurement
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetSpec,
+    RuntimeLoadObservation,
     evaluate_runtime_budget,
 )
 from .persistence import JournalStore, require_exact_journal_store_authority
@@ -304,6 +305,7 @@ def _require_callable_authority(
             raise RuntimeTargetHostRunnerError(
                 f"{name} closure dependency changed during campaign callback"
             )
+
 
 def _class_member_executables(value: object) -> tuple[FunctionType, ...]:
     if type(value) is FunctionType:
@@ -699,10 +701,12 @@ def run_declared_target_host_campaign(
     run_result_type = RuntimeTargetHostRunResult
     budget_spec_type = RuntimeBudgetSpec
     budget_decision_type = RuntimeBudgetDecision
+    observation_type = RuntimeLoadObservation
     declared_plan_type = DeclaredRuntimeEventPlan
     campaign_plan_type = RuntimeCampaignPlan
     campaign_cut_type = RuntimeCampaignCut
     campaign_evidence_type = RuntimeCampaignEvidence
+    campaign_to_observation = RuntimeCampaignEvidence.to_observation
     durable_sample_type = DurableFinancialLatencySample
     inventory_type = RuntimeTargetHostInventory
     error_type = RuntimeTargetHostRunnerError
@@ -748,6 +752,7 @@ def run_declared_target_host_campaign(
         for name, value in (
             ("RuntimeBudgetSpec", budget_spec_type),
             ("RuntimeBudgetDecision", budget_decision_type),
+            ("RuntimeLoadObservation", observation_type),
             ("DeclaredRuntimeEventPlan", declared_plan_type),
             ("RuntimeCampaignPlan", campaign_plan_type),
             ("RuntimeCampaignCut", campaign_cut_type),
@@ -774,6 +779,7 @@ def run_declared_target_host_campaign(
         ("financial measurement authority", lambda: measure_declared_financial_operation, _callable_authority_state(measure_financial)),
         ("resource capture authority", lambda: _capture_resource_metrics, _callable_authority_state(capture_resource_metrics)),
         ("campaign evidence collector", lambda: collect_runtime_campaign_evidence_from_measurement_artifact, _callable_authority_state(collect_campaign_evidence)),
+        ("campaign observation adapter", lambda: RuntimeCampaignEvidence.to_observation, _callable_authority_state(campaign_to_observation)),
         ("budget evaluator", lambda: evaluate_runtime_budget, _callable_authority_state(evaluate_budget)),
         ("terminal campaign parser", lambda: ParsedRuntimeTargetHostCampaign.parse, _callable_authority_state(parse_campaign)),
     )
@@ -882,6 +888,7 @@ def run_declared_target_host_campaign(
         class_bindings = (
             ("budget spec type", RuntimeBudgetSpec, budget_spec_type),
             ("budget decision type", RuntimeBudgetDecision, budget_decision_type),
+            ("runtime observation type", RuntimeLoadObservation, observation_type),
             ("declared plan type", DeclaredRuntimeEventPlan, declared_plan_type),
             ("campaign plan type", RuntimeCampaignPlan, campaign_plan_type),
             ("campaign cut type", RuntimeCampaignCut, campaign_cut_type),
@@ -1041,7 +1048,7 @@ def run_declared_target_host_campaign(
         expected_release_artifact_id=release_artifact_id,
     )
     require_callback_authority()
-    observation = campaign_evidence.to_observation(spec)
+    observation = campaign_to_observation(campaign_evidence, spec)
     require_callback_authority()
     decision = evaluate_budget(spec, observation)
     require_callback_authority()

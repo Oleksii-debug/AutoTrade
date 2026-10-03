@@ -2076,13 +2076,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-forged-initial-usage",
             )
 
-            real_load_events = store.load_events
+            real_load_events = JournalStore.load_events
 
             def load_events_with_inflated_initial_usage(
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(aggregate_type, aggregate_id)
+                events = real_load_events(self, aggregate_type, aggregate_id)
                 if aggregate_type != "provider_fill_financial_binding" or not events:
                     return events
                 forged = deepcopy(events)
@@ -2098,7 +2098,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             before_correction_bindings = store.load_events_by_aggregate_type(
                 "provider_fill_reservation_correction_binding"
             )
-            store.load_events = load_events_with_inflated_initial_usage
+            JournalStore.load_events = load_events_with_inflated_initial_usage
             try:
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -2122,7 +2122,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T12:40:32Z",
                     )
             finally:
-                store.load_events = real_load_events
+                JournalStore.load_events = real_load_events
 
             self.assertEqual(reservations.get("reservation-1"), before_reservation)
             self.assertEqual(economics.transactions, before_transactions)
@@ -2204,13 +2204,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-forged-high-water-2",
             )
 
-            real_load_events = store.load_events
+            real_load_events = JournalStore.load_events
 
             def load_events_with_inflated_correction_high_water(
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(aggregate_type, aggregate_id)
+                events = real_load_events(self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2232,7 +2232,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             before_bindings = store.load_events_by_aggregate_type(
                 "provider_fill_reservation_correction_binding"
             )
-            store.load_events = load_events_with_inflated_correction_high_water
+            JournalStore.load_events = load_events_with_inflated_correction_high_water
             try:
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -2256,7 +2256,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T12:40:52Z",
                     )
             finally:
-                store.load_events = real_load_events
+                JournalStore.load_events = real_load_events
 
             self.assertEqual(reservations.get("reservation-1"), before_reservation)
             self.assertEqual(economics.transactions, before_transactions)
@@ -2343,13 +2343,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-revision-2",
             )
 
-            real_load_events = store.load_events
+            real_load_events = JournalStore.load_events
 
             def load_events_with_retargeted_revision(
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(aggregate_type, aggregate_id)
+                events = real_load_events(self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2372,7 +2372,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             before_bindings = store.load_events_by_aggregate_type(
                 "provider_fill_reservation_correction_binding"
             )
-            store.load_events = load_events_with_retargeted_revision
+            JournalStore.load_events = load_events_with_retargeted_revision
             try:
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -2396,7 +2396,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T12:40:54Z",
                     )
             finally:
-                store.load_events = real_load_events
+                JournalStore.load_events = real_load_events
 
             self.assertEqual(reservations.get("reservation-1"), before_reservation)
             self.assertEqual(economics.transactions, before_transactions)
@@ -2499,13 +2499,13 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-rehash-2",
             )
 
-            real_load_events = store.load_events
+            real_load_events = JournalStore.load_events
 
             def load_events_with_rehashed_semantic_transplant(
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(aggregate_type, aggregate_id)
+                events = real_load_events(self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2536,7 +2536,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             before_bindings = store.load_events_by_aggregate_type(
                 "provider_fill_reservation_correction_binding"
             )
-            store.load_events = load_events_with_rehashed_semantic_transplant
+            JournalStore.load_events = load_events_with_rehashed_semantic_transplant
             try:
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -2560,7 +2560,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T12:42:02Z",
                     )
             finally:
-                store.load_events = real_load_events
+                JournalStore.load_events = real_load_events
 
             self.assertEqual(reservations.get("reservation-1"), before_reservation)
             self.assertEqual(economics.transactions, before_transactions)
@@ -2605,7 +2605,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 aggregate_type,
                 aggregate_id,
             ):
-                events = real_load_events(aggregate_type, aggregate_id)
+                events = real_load_events(self, aggregate_type, aggregate_id)
                 if (
                     aggregate_type
                     != "provider_fill_reservation_correction_binding"
@@ -2619,7 +2619,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 )
                 return forged
 
-            store.load_events = load_events_with_hostile_nested_container
+            JournalStore.load_events = load_events_with_hostile_nested_container
             try:
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -2643,7 +2643,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T12:43:02Z",
                     )
             finally:
-                store.load_events = real_load_events
+                JournalStore.load_events = real_load_events
 
             self.assertEqual(reservations.get("reservation-1"), before_reservation)
             self.assertEqual(economics.transactions, before_transactions)

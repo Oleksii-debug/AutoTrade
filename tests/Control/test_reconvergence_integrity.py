@@ -310,7 +310,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             ".github/workflows/reconvergence-integrity.yml"
         ).read_text(encoding="utf-8")
         blocks = re.findall(
-            r"          python - <<'PY'\\n(.*?)\\n          PY",
+            r"          python - <<\'PY\'\n(.*?)\n          PY",
             workflow,
             flags=re.DOTALL,
         )

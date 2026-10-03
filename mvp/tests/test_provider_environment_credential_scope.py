@@ -209,16 +209,18 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
             new_secret_value="scoped-secret-v2",
         )
         self.assertEqual(rotated.provider_environment, "TESTNET")
+        self.assertEqual(
+            boundary.describe_handle(rotated.handle_id)["provider_environment"],
+            "TESTNET",
+        )
         boundary.revoke_secret(
             session.token,
             origin="https://localhost",
             handle_id=rotated.handle_id,
             owner_identity="windows-user-1",
         )
-        self.assertEqual(
-            boundary.describe_handle(rotated.handle_id)["provider_environment"],
-            "TESTNET",
-        )
+        with self.assertRaises(PermissionError):
+            boundary.describe_handle(rotated.handle_id)
 
     def test_security_boundary_cannot_guess_bybit_provider_domain(self):
         boundary = SecurityBoundary(

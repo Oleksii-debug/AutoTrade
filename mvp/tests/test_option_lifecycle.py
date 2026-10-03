@@ -23,9 +23,13 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleError,
     OptionLifecycleObservation,
     canonical_option_lifecycle_observation,
+    _project_position_after_reversal,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+    EconomicBookCut,
+)
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -342,6 +346,56 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(
             payloads[0]["cash_settlement_amount"],
             "0.000000000000000000123456789",
+        )
+
+    def test_correction_position_projection_is_context_independent(self):
+        instrument = f"{OPTION_ID}@1"
+        current = book_equity_fill(
+            transaction_id="projection-current",
+            cause_event_id="projection-current-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="BUY",
+            quantity=Decimal("123456789012345678901234567890"),
+            price=Decimal("0"),
+        )
+        prior_retirement = book_equity_fill(
+            transaction_id="projection-prior",
+            cause_event_id="projection-prior-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="SELL",
+            quantity=Decimal("1"),
+            price=Decimal("0"),
+        )
+        cut = EconomicBookCut(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            transactions=(current,),
+            book_digest="sha256:" + "a" * 64,
+            aggregate_version=1,
+        )
+
+        values = []
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (80, ROUND_CEILING),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                values.append(
+                    _project_position_after_reversal(
+                        economic_cut=cut,
+                        instrument=instrument,
+                        old_active_transactions=(prior_retirement,),
+                    )
+                )
+        self.assertEqual(values[0], values[1])
+        self.assertEqual(
+            values[0],
+            Decimal("123456789012345678901234567891"),
         )
 
     def test_physical_exercise_strike_cash_is_context_independent(self):

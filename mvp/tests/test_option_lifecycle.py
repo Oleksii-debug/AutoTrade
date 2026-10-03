@@ -1068,7 +1068,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             self.authority.apply(self.evidence(event_kind="CASH_IN_LIEU"))
 
 
-    def test_demo_lifecycle_evidence_cannot_enter_testnet_economic_book(self):
+    def test_mismatched_provider_environment_cannot_enter_economic_book(self):
         before = tuple(self.book.transactions)
         reference = self.evidence(
             external_event_id="demo-domain-life",

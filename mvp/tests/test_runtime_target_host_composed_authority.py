@@ -9,6 +9,9 @@ from mvp.autotrade_mvp import performance_qualification as performance
 from mvp.autotrade_mvp import runtime_target_host_composed_authority as authority
 from mvp.autotrade_mvp import runtime_target_host_composed_qualification as composed
 from mvp.autotrade_mvp import runtime_target_host_durable_financial as durable
+from mvp.autotrade_mvp import (
+    runtime_target_host_durable_financial_authority as durable_authority,
+)
 from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as plan_bound
 from mvp.autotrade_mvp import runtime_target_host_qualification as signed
 from mvp.autotrade_mvp.runtime_target_host_composed_authority import (
@@ -16,6 +19,9 @@ from mvp.autotrade_mvp.runtime_target_host_composed_authority import (
     _PRODUCTION_SIGNED_CAMPAIGN_MATCHER,
     _build_composed_production_verifier,
     verify_sealed_composed_runtime_target_host_qualification,
+)
+from mvp.autotrade_mvp.runtime_target_host_durable_financial_authority import (
+    bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement,
 )
 from mvp.tests.test_runtime_target_host_composed_qualification import (
     RELEASE_ID,
@@ -78,7 +84,7 @@ class RuntimeTargetHostComposedAuthorityTests(unittest.TestCase):
 
     def test_production_adapter_retains_original_direct_authorities_after_rebind(self) -> None:
         original_binder = (
-            durable.bind_release_bound_durable_financial_latency_to_target_host_measurement
+            bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement
         )
         original_signed = signed.verify_runtime_target_host_qualification
         before = getclosurevars(
@@ -93,6 +99,11 @@ class RuntimeTargetHostComposedAuthorityTests(unittest.TestCase):
             patch.object(
                 durable,
                 "bind_release_bound_durable_financial_latency_to_target_host_measurement",
+                forged_binder,
+            ),
+            patch.object(
+                durable_authority,
+                "bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement",
                 forged_binder,
             ),
             patch.object(

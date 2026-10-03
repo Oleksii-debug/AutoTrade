@@ -44,9 +44,9 @@ from .runtime_target_host_composed_qualification import (
     _snapshot_measurement,
     _snapshot_spec,
 )
-from .runtime_target_host_durable_financial import (
-    DurableTargetHostFinancialBinding,
-    bind_release_bound_durable_financial_latency_to_target_host_measurement,
+from .runtime_target_host_durable_financial import DurableTargetHostFinancialBinding
+from .runtime_target_host_durable_financial_authority import (
+    bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
 from .runtime_target_host_qualification import (
@@ -441,7 +441,7 @@ verify_sealed_composed_runtime_target_host_qualification = (
         campaign_cut_type=RuntimeCampaignCut,
         campaign_cut_snapshotter=_snapshot_campaign_cut,
         durable_binder=(
-            bind_release_bound_durable_financial_latency_to_target_host_measurement
+            bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement
         ),
         composition_error_type=RuntimeTargetHostCompositionError,
         durable_plan_matcher=_PRODUCTION_DURABLE_PLAN_MATCHER,

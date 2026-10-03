@@ -503,6 +503,9 @@ def _prepare_provider_fill_binding(
     provider_fill: ProviderFillEvidence,
     committed_at: str,
 ) -> PreparedProviderFillBinding:
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    _require_durable_provider_economic_book_authority(economic_book)
     if not isinstance(plan, ProviderFillFinancialPlan):
         raise TypeError("plan must be ProviderFillFinancialPlan")
     if not isinstance(projected_fill, ProjectedFillEvidence):
@@ -2346,12 +2349,12 @@ def commit_economic_correction_with_settlement_replacement(
                 "reservation correction arguments require reservation_book"
             )
     else:
-        if not isinstance(reservation_book, DurableReservationBook):
-            raise TypeError("reservation_book must be DurableReservationBook")
-        if economic_book.store is not reservation_book.store:
-            raise ValueError(
-                "economic, settlement and reservation books must share one JournalStore"
-            )
+        _require_same_financial_journal_generation(
+            economic_book,
+            reservation_book,
+            expected_type=DurableReservationBook,
+            subject="reservation book",
+        )
         if (
             reservation_book.account_id != economic_book.account_id
             or reservation_book.environment != economic_book.environment

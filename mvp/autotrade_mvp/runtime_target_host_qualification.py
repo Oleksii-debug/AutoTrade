@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import re
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 from typing import Callable, Mapping
 from uuid import UUID
 
@@ -37,6 +37,9 @@ from .qualification_attestation import (
 from .runtime_target_host_campaign import (
     ParsedRuntimeTargetHostCampaign,
     RuntimeTargetHostCampaignError,
+)
+from .runtime_target_host_durable_financial_authority import (
+    _build_module_authority_guard,
 )
 from .runtime_target_host_inventory import (
     RuntimeTargetHostInventory,
@@ -78,6 +81,50 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def _build_exact_class_authority_guard(*, owner_type, label: str):
+    """Freeze one parser class namespace and each executable member graph."""
+
+    expected_namespace = dict(owner_type.__dict__)
+    expected_keys = frozenset(expected_namespace)
+    executable_guards = []
+
+    def add(member_name: str, function) -> None:
+        if type(function) is FunctionType:
+            executable_guards.append(
+                _build_module_authority_guard(
+                    root=function,
+                    error_type=RuntimeTargetHostQualificationError,
+                    label=f"{label}.{member_name}",
+                )
+            )
+
+    for name, member in expected_namespace.items():
+        if type(member) is FunctionType:
+            add(name, member)
+        elif type(member) in {classmethod, staticmethod}:
+            add(name, member.__func__)
+        elif type(member) is property:
+            add(f"{name}.fget", member.fget)
+            add(f"{name}.fset", member.fset)
+            add(f"{name}.fdel", member.fdel)
+
+    def guard() -> None:
+        current = dict(owner_type.__dict__)
+        if frozenset(current) != expected_keys:
+            raise RuntimeTargetHostQualificationError(
+                f"{label} sealed class namespace key set changed"
+            )
+        for name, expected in expected_namespace.items():
+            if current.get(name) is not expected:
+                raise RuntimeTargetHostQualificationError(
+                    f"{label} sealed class member changed: {name}"
+                )
+        for executable_guard in executable_guards:
+            executable_guard()
+
+    return guard
+
+
 def _text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise RuntimeTargetHostQualificationError(
@@ -117,6 +164,7 @@ def _uuid(value: object, *, name: str) -> str:
             f"{name} must be a canonical UUID"
         )
     return text
+
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
@@ -561,6 +609,7 @@ def _verify_campaign_payload(
     raw_payload: bytes,
     provenance: RuntimeTargetHostProvenance,
     *,
+    parser,
     expected_source_sha: str,
     expected_scenario_id: str,
     expected_spec_digest: str,
@@ -568,7 +617,7 @@ def _verify_campaign_payload(
     expected_host_fingerprint: str,
 ) -> None:
     try:
-        campaign = ParsedRuntimeTargetHostCampaign.parse(raw_payload)
+        campaign = parser(raw_payload)
     except RuntimeTargetHostCampaignError as error:
         raise RuntimeTargetHostQualificationError(
             "retained target-host campaign payload is not canonical"
@@ -597,10 +646,11 @@ def _verify_host_inventory_payload(
     raw_payload: bytes,
     provenance: RuntimeTargetHostProvenance,
     *,
+    parser,
     expected_host_fingerprint: str,
 ) -> None:
     try:
-        inventory = RuntimeTargetHostInventory.parse(raw_payload)
+        inventory = parser(raw_payload)
     except RuntimeTargetHostInventoryError as error:
         raise RuntimeTargetHostQualificationError(
             "retained target-host inventory payload is not canonical"
@@ -639,6 +689,54 @@ def verify_runtime_target_host_qualification(
         raise TypeError("receipt must be exact SignedQualificationAttestation")
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")
+
+    # Freeze direct executable seams before the first callback-capable trust/read
+    # operation. A later callback cannot swap a global and restore it from inside
+    # the forged parser because all dispatch below uses these retained callables.
+    canonical_verifier = verify_canonical_qualification_attestation
+    reader_factory = trusted_authenticated_reader
+    required_refs = _required_refs
+    read_artifact_bytes = _read_artifact_bytes
+    read_bound_payload = _read_bound_payload
+    identity_tuple = _identity_tuple
+    provenance_identity = _provenance_identity
+    campaign_payload_verifier = _verify_campaign_payload
+    inventory_payload_verifier = _verify_host_inventory_payload
+    canonical_uuid = _uuid
+    canonical_digest = _digest
+    binding_parser = RuntimeTargetHostBinding.parse
+    provenance_parser = RuntimeTargetHostProvenance.parse
+    campaign_parser = ParsedRuntimeTargetHostCampaign.parse
+    inventory_parser = RuntimeTargetHostInventory.parse
+
+    parser_guards = (
+        _build_exact_class_authority_guard(
+            owner_type=RuntimeTargetHostBinding,
+            label="target-host binding parser",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=RuntimeTargetHostProvenance,
+            label="target-host provenance parser",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=ParsedRuntimeTargetHostCampaign,
+            label="target-host campaign parser",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=RuntimeTargetHostInventory,
+            label="target-host inventory parser",
+        ),
+        _build_module_authority_guard(
+            root=strict_json_loads,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host strict JSON parser",
+        ),
+    )
+
+    def require_parser_authority() -> None:
+        for guard in parser_guards:
+            guard()
+
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     scenario_id = _text(expected_scenario_id, name="expected_scenario_id")
     spec_digest = _digest(expected_spec_digest, name="expected_spec_digest")
@@ -655,15 +753,15 @@ def verify_runtime_target_host_qualification(
         expected_journal_store_identity_digest,
         name="expected_journal_store_identity_digest",
     )
-    release_artifact_id = _uuid(
+    release_artifact_id = canonical_uuid(
         expected_release_artifact_id,
         name="expected_release_artifact_id",
     )
-    release_artifact_sha256 = _digest(
+    release_artifact_sha256 = canonical_digest(
         expected_release_artifact_sha256,
         name="expected_release_artifact_sha256",
     )
-    expected_identity = _identity_tuple(
+    expected_identity = identity_tuple(
         source_sha=source_sha,
         scenario_id=scenario_id,
         spec_digest=spec_digest,
@@ -675,7 +773,7 @@ def verify_runtime_target_host_qualification(
         release_artifact_sha256=release_artifact_sha256,
     )
 
-    accepted = verify_canonical_qualification_attestation(
+    accepted = canonical_verifier(
         receipt,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
@@ -689,15 +787,16 @@ def verify_runtime_target_host_qualification(
         expected_release_artifact_id=release_artifact_id,
         expected_release_artifact_sha256=release_artifact_sha256,
     )
+    require_parser_authority()
     if type(accepted) is not AcceptedQualificationAttestation:
         raise RuntimeTargetHostQualificationError(
             "canonical verifier returned non-canonical accepted attestation"
         )
-    attestation_id = _uuid(
+    attestation_id = canonical_uuid(
         accepted.attestation_id,
         name="accepted attestation_id",
     )
-    attestation_digest = _digest(
+    attestation_digest = canonical_digest(
         accepted.attestation_digest,
         name="accepted attestation_digest",
     )
@@ -716,7 +815,7 @@ def verify_runtime_target_host_qualification(
             "terminal target-host qualification cannot retain unresolved limits"
         )
 
-    refs = _required_refs(accepted, expected_source_sha=source_sha)
+    refs = required_refs(accepted, expected_source_sha=source_sha)
     if any(ref.artifact_id == release_artifact_id for ref in refs.values()):
         raise RuntimeTargetHostQualificationError(
             "target-host evidence artifact cannot alias delivered release artifact"
@@ -726,7 +825,7 @@ def verify_runtime_target_host_qualification(
             "target-host evidence bytes cannot alias delivered release bytes"
         )
     try:
-        reader = trusted_authenticated_reader(
+        reader = reader_factory(
             evidence_root,
             publication_store=evidence_store,
         )
@@ -734,12 +833,14 @@ def verify_runtime_target_host_qualification(
         raise RuntimeTargetHostQualificationError(
             "target-host evidence authority cannot be bound"
         ) from error
+    require_parser_authority()
 
     binding_ref = refs[BINDING_EVIDENCE_KIND]
-    binding = RuntimeTargetHostBinding.parse(
-        _read_artifact_bytes(reader, binding_ref)
-    )
-    binding_identity = _identity_tuple(
+    binding_raw = read_artifact_bytes(reader, binding_ref)
+    require_parser_authority()
+    binding = binding_parser(binding_raw)
+    require_parser_authority()
+    binding_identity = identity_tuple(
         source_sha=binding.source_sha,
         scenario_id=binding.scenario_id,
         spec_digest=binding.spec_digest,
@@ -775,18 +876,19 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host binding does not match {kind} artifact"
             )
-        provenance = RuntimeTargetHostProvenance.parse(
-            _read_artifact_bytes(reader, ref)
-        )
+        provenance_raw = read_artifact_bytes(reader, ref)
+        require_parser_authority()
+        provenance = provenance_parser(provenance_raw)
+        require_parser_authority()
         if provenance.evidence_kind != kind:
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance kind conflicts for {kind}"
             )
-        if _provenance_identity(provenance) != expected_identity:
+        if provenance_identity(provenance) != expected_identity:
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance identity conflicts for {kind}"
             )
-        raw_payload = _read_bound_payload(
+        raw_payload = read_bound_payload(
             reader,
             provenance,
             forbidden_artifact_ids=(
@@ -796,28 +898,34 @@ def verify_runtime_target_host_qualification(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
         )
+        require_parser_authority()
         if kind == CAMPAIGN_EVIDENCE_KIND:
-            _verify_campaign_payload(
+            campaign_payload_verifier(
                 raw_payload,
                 provenance,
+                parser=campaign_parser,
                 expected_source_sha=source_sha,
                 expected_scenario_id=scenario_id,
                 expected_spec_digest=spec_digest,
                 expected_configuration_hash=configuration_hash,
                 expected_host_fingerprint=host_fingerprint,
             )
+            require_parser_authority()
         elif kind == HOST_INVENTORY_EVIDENCE_KIND:
-            _verify_host_inventory_payload(
+            inventory_payload_verifier(
                 raw_payload,
                 provenance,
+                parser=inventory_parser,
                 expected_host_fingerprint=host_fingerprint,
             )
+            require_parser_authority()
         payload_artifact_ids.add(provenance.payload_artifact_id)
         payload_sha256.add(provenance.payload_sha256)
         payload_id_by_kind[kind] = provenance.payload_artifact_id
         payload_digest_by_kind[kind] = provenance.payload_sha256
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
+    require_parser_authority()
     return AcceptedRuntimeTargetHostQualification(
         attestation_id=attestation_id,
         attestation_digest=attestation_digest,

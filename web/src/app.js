@@ -44,6 +44,7 @@
     sessionIdentity: null,
     accountId: null,
     environment: null,
+    renderedHostId: null,
     renderedAccountId: null,
     renderedEnvironment: null,
     scopeEpoch: 0,
@@ -55,7 +56,8 @@
     urgentAnnouncementTimer: null,
     pendingUrgentAnnouncements: [],
     restoreFocusId: null,
-    pendingCommand: null
+    pendingCommand: null,
+    pendingCommandHostId: null
   };
 
   const byId = (id) => document.getElementById(id);
@@ -269,8 +271,9 @@
     return true;
   }
 
-  function pendingCommandMatchesCurrentScope() {
+  function pendingCommandMatchesCurrentContext() {
     return state.pendingCommand === null || (
+      state.pendingCommandHostId === state.renderedHostId &&
       state.sessionIdentity !== null &&
       state.pendingCommand.actor === state.sessionIdentity.actor &&
       state.pendingCommand.session === state.sessionIdentity.session &&
@@ -294,6 +297,7 @@
     const actor = state.sessionIdentity === null ? "" : state.sessionIdentity.actor;
     const session = state.sessionIdentity === null ? "" : state.sessionIdentity.session;
     return [
+      String(state.renderedHostId ?? ""),
       actor,
       session,
       String(state.accountId ?? ""),
@@ -368,6 +372,7 @@
       input.disabled = !active || (lockedForRetry && id !== "authority-policy-confirm");
       input.required = active && id === "authority-policy-confirm";
     }
+    text("authority-policy-host", active ? state.renderedHostId : null);
     text("authority-policy-account", active ? state.accountId : null);
     text("authority-policy-environment", active ? state.environment : null);
   }
@@ -432,6 +437,7 @@
     byId("authority-policy-version").value = String(policy.version);
     byId("authority-autonomous").checked = policy.autonomous === true;
     byId("authority-protection-only").checked = policy.protection_only === true;
+    text("authority-policy-host", state.pendingCommandHostId);
     text("authority-policy-account", state.pendingCommand.account_id);
     text("authority-policy-environment", state.pendingCommand.environment);
   }
@@ -578,8 +584,10 @@
     const roleAllowed = state.sessionIdentity !== null &&
       effectiveAction !== null &&
       actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction);
-    const pendingScopeMatches = pendingCommandMatchesCurrentScope();
-    if (button) button.disabled = !enabled || !roleAllowed || !pendingScopeMatches;
+    const pendingContextMatches = pendingCommandMatchesCurrentContext();
+    if (button) {
+      button.disabled = !enabled || !roleAllowed || !pendingContextMatches;
+    }
   }
 
   function freshnessText(parsed) {
@@ -1025,6 +1033,7 @@
 
   async function refreshOperation(operationId) {
     const scopeEpoch = state.scopeEpoch;
+    const renderedHostId = state.renderedHostId;
     const renderedAccountId = state.renderedAccountId;
     const renderedEnvironment = state.renderedEnvironment;
     let raw;
@@ -1034,6 +1043,7 @@
     } catch (error) {
       if (
         scopeEpoch !== state.scopeEpoch ||
+        renderedHostId !== state.renderedHostId ||
         renderedAccountId !== state.renderedAccountId ||
         renderedEnvironment !== state.renderedEnvironment
       ) {
@@ -1044,6 +1054,7 @@
     const operation = parseOperationResult(raw, operationId);
     if (
       scopeEpoch !== state.scopeEpoch ||
+      renderedHostId !== state.renderedHostId ||
       renderedAccountId !== state.renderedAccountId ||
       renderedEnvironment !== state.renderedEnvironment
     ) {
@@ -1111,20 +1122,29 @@
     history.appendChild(item);
   }
 
-  function resetCommandFeedbackForScope(accountId, environment) {
+  function resetCommandFeedbackForContext(
+    hostId,
+    accountId,
+    environment,
+    sessionIdentity
+  ) {
     if (state.pendingCommand !== null) {
-      const belongsToNewScope =
+      const belongsToNewContext =
+        state.pendingCommandHostId === hostId &&
+        sessionIdentity !== null &&
+        state.pendingCommand.actor === sessionIdentity.actor &&
+        state.pendingCommand.session === sessionIdentity.session &&
         state.pendingCommand.account_id === accountId &&
         state.pendingCommand.environment === environment;
       text(
         "command-result",
-        belongsToNewScope
-          ? "An unresolved command for this account/environment is retained with its original identity. Review current host state before exact retry."
-          : "An unresolved command from a different account/environment scope is retained with its original identity and will not be retargeted.");
+        belongsToNewContext
+          ? "An unresolved command for this exact authenticated host/account/environment context is retained with its original identity. Review current host state before exact retry."
+          : "An unresolved command from a different host/session/account/environment context is retained with its original identity and will not be retargeted.");
     } else {
       text(
         "command-result",
-        "No host command has been submitted for this account/environment session.");
+        "No host command has been submitted for this host/account/environment session.");
     }
     renderCommandValidationDetails([], "scope_changed");
   }
@@ -1164,15 +1184,19 @@
     // Command authority is intentionally cleared on trust loss, but the last
     // successfully rendered scope is retained only to prevent stale read-only
     // evidence from crossing into a later account/environment view.
+    const hostChanged =
+      state.renderedHostId !== null &&
+      parsed.hostId !== state.renderedHostId;
     const scopeChanged = state.renderedAccountId !== null && (
       parsed.accountId !== state.renderedAccountId ||
       parsed.environment !== state.renderedEnvironment);
+    const displayContextChanged = hostChanged || scopeChanged;
     const priorCursor = state.cursor;
     const skippedSameScopeEvents =
-      !scopeChanged &&
-      state.renderedAccountId !== null &&
+      !displayContextChanged &&
+      state.renderedHostId !== null &&
       parsed.cursor > priorCursor;
-    if (scopeChanged) {
+    if (displayContextChanged) {
       state.scopeEpoch += 1;
       state.cursor = 0n;
       state.version = 0n;
@@ -1180,7 +1204,11 @@
       resetTableFiltersForScopeChange();
       resetOperationsForScope();
       resetEventHistoryForScope();
-      resetCommandFeedbackForScope(parsed.accountId, parsed.environment);
+      resetCommandFeedbackForContext(
+        parsed.hostId,
+        parsed.accountId,
+        parsed.environment,
+        parsed.sessionIdentity);
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
@@ -1237,14 +1265,16 @@
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.");
     renderJobs(parsed.jobs);
+    state.renderedHostId = parsed.hostId;
     state.renderedAccountId = parsed.accountId;
     state.renderedEnvironment = parsed.environment;
-    if (scopeChanged) {
+    if (displayContextChanged) {
       announce(
-        "Host scope changed to account " + parsed.accountId +
+        "Host display context changed to host " + parsed.hostId +
+          ", account " + parsed.accountId +
           " in " + parsed.environment +
-          ". Old-scope operation, event, notification, and command-validation evidence was cleared.",
-        parsed.environment === "LIVE");
+          ". Old-context operation, event, notification, and command-validation evidence was cleared.",
+        parsed.environment === "LIVE" || hostChanged);
     }
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
@@ -1314,6 +1344,7 @@
     if (state.polling || state.stopped) return;
     state.polling = true;
     let pollEpoch = null;
+    let pollRenderedHostId = null;
     let pollRenderedAccountId = null;
     let pollRenderedEnvironment = null;
     try {
@@ -1328,6 +1359,7 @@
         }
       }
       pollEpoch = state.scopeEpoch;
+      pollRenderedHostId = state.renderedHostId;
       pollRenderedAccountId = state.renderedAccountId;
       pollRenderedEnvironment = state.renderedEnvironment;
       const response = await jsonFetch(
@@ -1335,6 +1367,7 @@
           encodeURIComponent(state.cursor.toString()));
       if (
         pollEpoch !== state.scopeEpoch ||
+        pollRenderedHostId !== state.renderedHostId ||
         pollRenderedAccountId !== state.renderedAccountId ||
         pollRenderedEnvironment !== state.renderedEnvironment
       ) {
@@ -1392,6 +1425,7 @@
         pollEpoch !== null &&
         (
           pollEpoch !== state.scopeEpoch ||
+          pollRenderedHostId !== state.renderedHostId ||
           pollRenderedAccountId !== state.renderedAccountId ||
           pollRenderedEnvironment !== state.renderedEnvironment
         )
@@ -1560,18 +1594,21 @@
     }
     const payload = newCommandPayload(action);
     state.pendingCommand = payload;
+    state.pendingCommandHostId = state.renderedHostId;
     return payload;
   }
 
   function clearConfirmedCommand(payload) {
     if (state.pendingCommand === payload) {
       state.pendingCommand = null;
+      state.pendingCommandHostId = null;
     }
   }
 
-  function commandScopeMatchesCurrentSnapshot(payload) {
+  function commandContextMatchesCurrentSnapshot(payload, submittedHostId) {
     return state.snapshotReady &&
       state.sessionIdentity !== null &&
+      submittedHostId === state.renderedHostId &&
       payload.actor === state.sessionIdentity.actor &&
       payload.session === state.sessionIdentity.session &&
       payload.account_id === state.accountId &&
@@ -1596,6 +1633,7 @@
     const action = byId("host-action").value;
     const recovering = state.pendingCommand !== null;
     if (recovering && (
+        state.pendingCommandHostId !== state.renderedHostId ||
         state.pendingCommand.actor !== state.sessionIdentity.actor ||
         state.pendingCommand.session !== state.sessionIdentity.session ||
         state.pendingCommand.account_id !== state.accountId ||
@@ -1643,6 +1681,7 @@
     // that differ from the in-flight request.
     syncHostActionOptions(state.sessionIdentity.role);
     renderPendingAuthorityPolicyForRetry();
+    const submittedHostId = state.pendingCommandHostId;
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
@@ -1658,7 +1697,7 @@
     byId("command-result").focus();
     try {
       const result = await submitCanonicalCommand(payload);
-      const responseScopeCurrent = commandScopeMatchesCurrentSnapshot(payload);
+      const responseScopeCurrent = commandContextMatchesCurrentSnapshot(payload, submittedHostId);
       clearConfirmedCommand(payload);
       if (!responseScopeCurrent) {
         renderCommandValidationDetails([], "unavailable");
@@ -1735,7 +1774,7 @@
           true);
       }
     } catch {
-      if (commandScopeMatchesCurrentSnapshot(payload)) {
+      if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
         state.scopeEpoch += 1;
         state.snapshotReady = false;
         state.sessionIdentity = null;

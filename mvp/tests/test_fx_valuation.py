@@ -923,6 +923,35 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(result.rounding_quantum, Decimal("0.01"))
         self.assertIsNotNone(result.rounding_policy_id)
 
+    def test_held_object_state_rejects_hostile_mapping_key_without_callbacks(self):
+        touched = []
+
+        class HostileKey:
+            def __hash__(self):
+                touched.append("hash")
+                return 123456789
+
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile state key equality")
+
+        quote = eurusd()
+        state = object.__getattribute__(quote, "__dict__")
+        state[HostileKey()] = "forged"
+        touched.clear()
+
+        with self.assertRaisesRegex(FxValuationError, "unexpected fields"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(touched, [])
+
     def test_exact_domain_objects_with_injected_fields_fail_closed(self):
         quote = eurusd()
         object.__setattr__(quote, "unexpected", "forged")

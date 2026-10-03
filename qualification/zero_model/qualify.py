@@ -67,8 +67,8 @@ def _trusted_git_candidate_paths() -> tuple[Path, ...]:
 
     if os.name == "nt":
         return (
-            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
-            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+            Path(r"C:\Program Files\Git\cmd\git.exe"),
+            Path(r"C:\Program Files\Git\bin\git.exe"),
         )
     return (Path("/usr/bin/git"), Path("/bin/git"))
 
@@ -341,6 +341,7 @@ def qualify(source_sha: str) -> dict[str, object]:
             if first_report.economic_edge_claim != "UNPROVEN_SIMULATION_ONLY":
                 raise RuntimeError("zero-model campaign manufactured an economic-edge claim")
 
+        observed_source_sha = _require_exact_checkout(source_sha)
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "execution_platform": {
@@ -350,7 +351,7 @@ def qualify(source_sha: str) -> dict[str, object]:
             },
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
-            "observed_source_sha": source_sha,
+            "observed_source_sha": observed_source_sha,
             "source_checkout_clean": True,
             "qualifier_sha256": qualifier_sha256,
             "model_route": {

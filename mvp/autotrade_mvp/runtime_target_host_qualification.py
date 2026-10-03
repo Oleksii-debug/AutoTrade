@@ -637,6 +637,14 @@ def verify_runtime_target_host_qualification(
         )
 
     refs = _required_refs(accepted, expected_source_sha=source_sha)
+    if any(ref.artifact_id == release_artifact_id for ref in refs.values()):
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence artifact cannot alias delivered release artifact"
+        )
+    if any(ref.sha256 == release_artifact_sha256 for ref in refs.values()):
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence bytes cannot alias delivered release bytes"
+        )
     try:
         reader = trusted_authenticated_reader(
             evidence_root,

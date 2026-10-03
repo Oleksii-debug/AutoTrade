@@ -32,6 +32,7 @@ from research.autotrade_research.artifacts.durable_publish import (
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY = os.name == "nt"
 _WINDOWS_RESERVED_BASENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -346,7 +347,10 @@ def _assert_open_file_identity(
         raise InstallerManifestError(f"{name} must not be a Windows reparse point")
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
-    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    if (
+        not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+        and (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
         raise InstallerManifestError(f"{name} changed during verification")
     if opened.st_nlink > 1 or current.st_nlink > 1:
         raise InstallerManifestError(f"{name} must not have hard-link aliases")

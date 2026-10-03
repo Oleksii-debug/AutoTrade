@@ -28,6 +28,10 @@ from .qualification_attestation import (
     SignedQualificationAttestation,
     verify_canonical_qualification_attestation,
 )
+from .runtime_target_host_inventory import (
+    RuntimeTargetHostInventory,
+    RuntimeTargetHostInventoryError,
+)
 
 
 class RuntimeTargetHostQualificationError(ValueError):
@@ -546,6 +550,31 @@ def _provenance_identity(value: RuntimeTargetHostProvenance) -> tuple[str, ...]:
     )
 
 
+def _verify_host_inventory_payload(
+    raw_payload: bytes,
+    provenance: RuntimeTargetHostProvenance,
+    *,
+    expected_host_fingerprint: str,
+) -> None:
+    try:
+        inventory = RuntimeTargetHostInventory.parse(raw_payload)
+    except RuntimeTargetHostInventoryError as error:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host inventory payload is not canonical"
+        ) from error
+    if inventory.host_fingerprint != expected_host_fingerprint:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host inventory belongs to another host"
+        )
+    if (
+        provenance.collector_id != inventory.collector_id
+        or provenance.collector_version != inventory.collector_version
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "target-host inventory provenance collector conflicts with raw payload"
+        )
+
+
 def verify_runtime_target_host_qualification(
     receipt: SignedQualificationAttestation,
     *,
@@ -706,7 +735,7 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance identity conflicts for {kind}"
             )
-        _read_bound_payload(
+        raw_payload = _read_bound_payload(
             reader,
             provenance,
             forbidden_artifact_ids=(
@@ -716,6 +745,12 @@ def verify_runtime_target_host_qualification(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
         )
+        if kind == HOST_INVENTORY_EVIDENCE_KIND:
+            _verify_host_inventory_payload(
+                raw_payload,
+                provenance,
+                expected_host_fingerprint=host_fingerprint,
+            )
         payload_artifact_ids.add(provenance.payload_artifact_id)
         payload_sha256.add(provenance.payload_sha256)
         payload_id_by_kind[kind] = provenance.payload_artifact_id

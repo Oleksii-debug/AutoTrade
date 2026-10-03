@@ -57,6 +57,7 @@ class WindowsUpdateTrustContext:
             evidence_root,
             publication_store=self.evidence_store,
         )
+        object.__setattr__(self, "evidence_root", evidence_root)
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")

@@ -986,6 +986,51 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertLess(response, fence)
         self.assertLess(fence, event_render)
 
+    def test_old_command_failure_cannot_invalidate_new_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        catch_start = submit.rindex("    } catch {")
+        catch_block = submit[catch_start:]
+        self.assertIn("if (commandScopeMatchesCurrentSnapshot(payload))", catch_block)
+        self.assertIn("state.snapshotReady = false", catch_block)
+        self.assertIn(
+            "The current scope snapshot is not invalidated by this older request.",
+            catch_block,
+        )
+        self.assertIn(
+            "Its original command_id and idempotency_key are retained and will not be retargeted.",
+            catch_block,
+        )
+
+    def test_accepted_operation_scope_change_stops_old_submit_flow(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        null_fence = submit.index("if (operation === null)")
+        post_refresh = submit.index("await refreshSnapshot();", null_fence)
+        self.assertIn("This accepted response belongs to the original scope", submit)
+        self.assertIn('byId("command-result").focus();', submit[null_fence:post_refresh])
+        self.assertIn("return;", submit[null_fence:post_refresh])
+
+    def test_clipboard_completion_feedback_is_scope_fenced(self):
+        js = APP.read_text(encoding="utf-8")
+        copy = js[
+            js.index("async function copyVisibleTableRows(tool)"):
+            js.index("function bindTableTools()")
+        ]
+        self.assertIn("const scopeEpoch = state.scopeEpoch", copy)
+        self.assertGreaterEqual(copy.count("if (scopeEpoch !== state.scopeEpoch)"), 2)
+        write = copy.index("await navigator.clipboard.writeText(payload)")
+        success_fence = copy.index("if (scopeEpoch !== state.scopeEpoch)", write)
+        success_message = copy.index('" visible " + tool.label + " rows copied."', success_fence)
+        self.assertLess(write, success_fence)
+        self.assertLess(success_fence, success_message)
+
     def test_scope_change_clears_unscoped_command_and_notification_feedback(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function resetNotificationsForScope()", js)

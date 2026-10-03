@@ -89,6 +89,7 @@ class DurableChronologyAttempt:
 @dataclass(frozen=True, slots=True)
 class TrustedChronologyCut:
     cut_id: str
+    challenge_digest: str
     scope: ChronologyScope
     source_sha: str
     store_identity_digest: str
@@ -126,6 +127,7 @@ class TrustedChronologyCut:
             "accepted_policy_id": self.accepted_policy_id,
             "accepted_trust_root_id": self.accepted_trust_root_id,
             "account_id": self.account_id,
+            "challenge_digest": self.challenge_digest,
             "clock_incident_generation": str(self.clock_incident_generation),
             "covered_utc": self.covered_utc,
             "cut_id": self.cut_id,
@@ -213,6 +215,29 @@ def _digest(value: object, *, name: str) -> str:
         or any(ch not in "0123456789abcdef" for ch in value[7:])
     ):
         raise TrustedChronologyError(f"{name} must be canonical sha256:<hex>")
+    return value
+
+
+def _git_sha(value: object, *, name: str = "source_sha") -> str:
+    if (
+        type(value) is not str
+        or len(value) != 40
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise TrustedChronologyError(
+            f"{name} must be a lowercase 40-character Git SHA"
+        )
+    return value
+
+
+def _runtime_environment(value: object) -> str:
+    if type(value) is not str or value not in {
+        "REPLAY",
+        "SIMULATION",
+        "PAPER",
+        "LIVE",
+    }:
+        raise TrustedChronologyError("runtime_environment is not canonical")
     return value
 
 
@@ -788,12 +813,118 @@ def _validate_accepted_event(event: object) -> tuple[dict[str, object], int]:
     }
     if set(payload) != expected or payload.get("schema_version") != _SCHEMA_VERSION:
         raise TrustedChronologyError("trusted chronology accepted payload schema is invalid")
-    if event.get("aggregate_id") != payload.get("challenge_digest"):
+    challenge_digest = _digest(
+        payload.get("challenge_digest"),
+        name="challenge_digest",
+    )
+    if event.get("aggregate_id") != challenge_digest:
         raise TrustedChronologyError("trusted chronology cut aggregate binding is invalid")
+
+    attestation_id = _uuid_text(
+        payload.get("accepted_attestation_id"),
+        name="accepted_attestation_id",
+    )
+    cut_id = _uuid_text(payload.get("cut_id"), name="cut_id")
+    if cut_id != _cut_id(challenge_digest, attestation_id):
+        raise TrustedChronologyError("trusted chronology cut identity is invalid")
+    if event.get("event_id") != cut_id:
+        raise TrustedChronologyError("trusted chronology cut event id is invalid")
     if payload.get("cut_digest") != _cut_digest(payload):
         raise TrustedChronologyError("trusted chronology cut digest mismatch")
-    if event.get("event_id") != payload.get("cut_id"):
-        raise TrustedChronologyError("trusted chronology cut event id is invalid")
+
+    try:
+        scope = ChronologyScope(payload.get("scope"))
+    except (ValueError, TypeError) as error:
+        raise TrustedChronologyError("trusted chronology cut scope is invalid") from error
+    _git_sha(payload.get("source_sha"))
+    _digest(payload.get("store_identity_digest"), name="store_identity_digest")
+    _token(payload.get("owner_scope"), name="owner_scope")
+    _token(payload.get("owner_id"), name="owner_id")
+    _decimal_int(payload.get("owner_epoch"), name="owner_epoch", positive=True)
+    _decimal_int(
+        payload.get("clock_incident_generation"),
+        name="clock_incident_generation",
+    )
+    _runtime_environment(payload.get("runtime_environment"))
+    _uuid_text(payload.get("runtime_occurrence_id"), name="runtime_occurrence_id")
+    _token(payload.get("host_id"), name="host_id")
+    _token(payload.get("account_id"), name="account_id")
+
+    release_id = payload.get("release_artifact_id")
+    release_sha = payload.get("release_artifact_sha256")
+    if scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if release_id is not None or release_sha is not None:
+            raise TrustedChronologyError(
+                "source chronology cut cannot carry release identity"
+            )
+    else:
+        _uuid_text(release_id, name="release_artifact_id")
+        _digest(release_sha, name="release_artifact_sha256")
+
+    covered_text, covered = _instant(payload.get("covered_utc"), name="covered_utc")
+    lower_text, lower = _instant(
+        payload.get("utc_lower_bound"),
+        name="utc_lower_bound",
+    )
+    _upper_text, upper = _instant(
+        payload.get("utc_upper_bound"),
+        name="utc_upper_bound",
+    )
+    if covered_text != lower_text or covered != lower:
+        raise TrustedChronologyError(
+            "trusted chronology cut must use the conservative lower UTC bound"
+        )
+    if upper < lower:
+        raise TrustedChronologyError("trusted chronology cut UTC interval is reversed")
+
+    for name in (
+        "external_authority_id",
+        "external_protocol_id",
+        "external_protocol_version",
+        "external_response_id",
+    ):
+        _token(payload.get(name), name=name)
+    _uuid_text(
+        payload.get("measurement_artifact_id"),
+        name="measurement_artifact_id",
+    )
+    _digest(payload.get("measurement_sha256"), name="measurement_sha256")
+    _digest(
+        payload.get("accepted_attestation_digest"),
+        name="accepted_attestation_digest",
+    )
+    _digest(payload.get("accepted_policy_id"), name="accepted_policy_id")
+    _digest(
+        payload.get("accepted_trust_root_id"),
+        name="accepted_trust_root_id",
+    )
+
+    declared_limits = {
+        "max_request_elapsed_ns": _MAX_REQUEST_ELAPSED_NS,
+        "max_local_rate_divergence_ns": _MAX_LOCAL_RATE_DIVERGENCE_NS,
+        "max_external_uncertainty_us": _MAX_EXTERNAL_UNCERTAINTY_US,
+        "max_external_local_offset_us": _MAX_EXTERNAL_LOCAL_OFFSET_US,
+    }
+    for name, expected_limit in declared_limits.items():
+        observed_limit = _decimal_int(payload.get(name), name=name, positive=True)
+        if observed_limit != expected_limit:
+            raise TrustedChronologyError(
+                f"trusted chronology cut {name} differs from protocol-v1 policy"
+            )
+
+    bounded_metrics = {
+        "request_elapsed_ns": _MAX_REQUEST_ELAPSED_NS,
+        "local_rate_divergence_ns": _MAX_LOCAL_RATE_DIVERGENCE_NS,
+        "external_uncertainty_us": _MAX_EXTERNAL_UNCERTAINTY_US,
+        "external_local_offset_us": _MAX_EXTERNAL_LOCAL_OFFSET_US,
+    }
+    for name, limit in bounded_metrics.items():
+        observed = _decimal_int(payload.get(name), name=name)
+        if observed > limit:
+            raise TrustedChronologyError(
+                f"trusted chronology cut {name} exceeds protocol-v1 policy"
+            )
+
     sequence = event.get("journal_sequence")
     if type(sequence) is not int or sequence <= 0:
         raise TrustedChronologyError("trusted chronology accepted sequence is invalid")
@@ -808,8 +939,12 @@ def _cut_from_event(event: object) -> TrustedChronologyCut:
         raise TrustedChronologyError("trusted chronology cut scope is invalid") from error
     return TrustedChronologyCut(
         cut_id=_uuid_text(payload["cut_id"], name="cut_id"),
+        challenge_digest=_digest(
+            payload["challenge_digest"],
+            name="challenge_digest",
+        ),
         scope=scope,
-        source_sha=_token(payload["source_sha"], name="source_sha"),
+        source_sha=_git_sha(payload["source_sha"]),
         store_identity_digest=_digest(
             payload["store_identity_digest"],
             name="store_identity_digest",
@@ -821,9 +956,8 @@ def _cut_from_event(event: object) -> TrustedChronologyCut:
             payload["clock_incident_generation"],
             name="clock_incident_generation",
         ),
-        runtime_environment=_token(
+        runtime_environment=_runtime_environment(
             payload["runtime_environment"],
-            name="runtime_environment",
         ),
         runtime_occurrence_id=_uuid_text(
             payload["runtime_occurrence_id"],
@@ -1045,6 +1179,28 @@ def require_current_trusted_chronology_cut(
         raise TypeError("cut must be exact TrustedChronologyCut")
     if type(expected_scope) is not ChronologyScope:
         raise TypeError("expected_scope must be exact ChronologyScope")
+    expected_source_sha = _git_sha(
+        expected_source_sha,
+        name="expected_source_sha",
+    )
+    if expected_scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if (
+            expected_release_artifact_id is not None
+            or expected_release_artifact_sha256 is not None
+        ):
+            raise PermissionError(
+                "source chronology expectation cannot carry release identity"
+            )
+    else:
+        expected_release_artifact_id = _uuid_text(
+            expected_release_artifact_id,
+            name="expected_release_artifact_id",
+        )
+        expected_release_artifact_sha256 = _digest(
+            expected_release_artifact_sha256,
+            name="expected_release_artifact_sha256",
+        )
+
     recovery = _require_exact_recovery(recovery)
     identity = _selected_store_identity(store)
     if journal_store_identity_digest(identity) != cut.store_identity_digest:
@@ -1074,36 +1230,21 @@ def require_current_trusted_chronology_cut(
     if expected_source_sha != cut.source_sha or expected_scope is not cut.scope:
         raise PermissionError("trusted chronology source/scope mismatch")
     if expected_scope is ChronologyScope.SOURCE_QUALIFICATION:
-        if (
-            expected_release_artifact_id is not None
-            or expected_release_artifact_sha256 is not None
-            or cut.release_artifact_id is not None
-            or cut.release_artifact_sha256 is not None
-        ):
+        if cut.release_artifact_id is not None or cut.release_artifact_sha256 is not None:
             raise PermissionError("source chronology cannot satisfy release scope")
-    else:
-        if (
-            expected_release_artifact_id != cut.release_artifact_id
-            or expected_release_artifact_sha256 != cut.release_artifact_sha256
-        ):
-            raise PermissionError("trusted chronology release identity mismatch")
+    elif (
+        expected_release_artifact_id != cut.release_artifact_id
+        or expected_release_artifact_sha256 != cut.release_artifact_sha256
+    ):
+        raise PermissionError("trusted chronology release identity mismatch")
 
-    # The cut aggregate id is the challenge digest, which is not carried on the
-    # public cut because consumers do not use challenge internals. Find the
-    # accepted event by exact immutable cut id across this dedicated aggregate
-    # family and require one unique match.
-    identity = _selected_store_identity(store)
-    with journal_store_authority_scope(store, identity):
-        all_events = JournalStore.load_events_by_aggregate_type(store, _AGGREGATE_TYPE)
-    matching = tuple(
-        event
-        for event in all_events
-        if event.get("event_type") == _ACCEPTED_EVENT
-        and event.get("event_id") == cut.cut_id
-    )
-    if len(matching) != 1:
+    events = _load_events(store, cut.challenge_digest)
+    if len(events) != 2:
         raise PermissionError("trusted chronology cut durable event is unavailable")
-    durable = _cut_from_event(matching[0])
+    prepared = _validate_prepared_event(events[0])
+    if prepared.get("challenge_digest") != cut.challenge_digest:
+        raise PermissionError("trusted chronology prepared/cut binding changed")
+    durable = _cut_from_event(events[1])
     if durable != cut:
         raise PermissionError("trusted chronology cut differs from durable authority")
     return durable

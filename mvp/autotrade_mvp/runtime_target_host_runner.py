@@ -206,6 +206,16 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
     campaign_to_observation_state = _capture_python_function_state(
         campaign_to_observation
     )
+    campaign_to_observation_namespace = campaign_to_observation.__globals__
+    campaign_to_observation_dependencies = tuple(
+        (
+            name,
+            campaign_to_observation_namespace[name],
+            _capture_python_function_state(campaign_to_observation_namespace[name]),
+        )
+        for name in campaign_to_observation.__code__.co_names
+        if name in campaign_to_observation_namespace
+    )
     require_binding = _require_callable_binding
     require_binding_state = _capture_python_function_state(require_binding)
     names = (
@@ -294,6 +304,18 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
             function_state=campaign_to_observation_state,
             error_prefix=prefix,
         )
+        dependency_prefix = (
+            prefix
+            + "RuntimeCampaignEvidence.to_observation dependency changed: "
+        )
+        for name, expected, state in campaign_to_observation_dependencies:
+            require_binding(
+                label=name,
+                current=campaign_to_observation_namespace.get(name),
+                expected=expected,
+                function_state=state,
+                error_prefix=dependency_prefix,
+            )
         current_resource_values = (
             journal_store_type.current_journal_sequence,
             journal_store_type.pending_outbox_count,

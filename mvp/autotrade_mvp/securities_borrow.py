@@ -220,9 +220,9 @@ def verify_provider_borrow_evidence(
     evidence: object,
     artifact_store: ArtifactStore,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise BorrowEvidenceError(
-            "provider borrow evidence requires trusted ArtifactStore"
+            "provider borrow evidence requires canonical ArtifactStore"
         )
     artifact_id, digest, canonical_ref = _immutable_evidence_ref(
         evidence.evidence_ref
@@ -230,7 +230,10 @@ def verify_provider_borrow_evidence(
     expected_receipt = provider_borrow_evidence_receipt(evidence)
     expected_metadata = provider_borrow_evidence_metadata(evidence)
     try:
-        manifest, raw = artifact_store.read_authenticated_snapshot(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)

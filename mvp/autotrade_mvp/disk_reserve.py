@@ -62,10 +62,10 @@ class EmergencyDiskReserve:
                 "reserve_bytes must be an integer large enough for the reserve header"
             )
 
-        candidate = Path(path).expanduser()
+        candidate = Path(path)
         if sys.platform == "win32":
             try:
-                frozen = Path(freeze_local_filesystem_path(candidate))
+                frozen = Path(freeze_local_filesystem_path(candidate.expanduser()))
                 require_qualified_local_filesystem_path(frozen)
                 require_windows_namespace_component(
                     frozen.name,

@@ -966,6 +966,24 @@ def retain_windows_regular_file(
         os.close(descriptor)
 
 
+def _require_windows_descriptor_single_link(
+    descriptor: int,
+    *,
+    subject: str,
+) -> None:
+    """Revalidate one retained regular-file descriptor immediately before commit."""
+
+    _require_windows()
+    if type(descriptor) is not int or descriptor < 0:
+        raise TypeError(f"{subject} descriptor must be a non-negative exact int")
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(descriptor)
+    info = windows_handle_information(handle, subject=subject)
+    if info.number_of_links != 1:
+        raise RuntimeError(f"{subject} must not have hard-link aliases")
+
+
 @contextmanager
 def create_windows_regular_file_exclusive(
     authority: RetainedWindowsDirectory,
@@ -1001,6 +1019,10 @@ def create_windows_regular_file_exclusive(
     primary: BaseException | None = None
     try:
         yield descriptor
+        _require_windows_descriptor_single_link(
+            descriptor,
+            subject=subject,
+        )
     except BaseException as error:
         primary = error
         try:
@@ -1060,6 +1082,10 @@ def retain_windows_regular_file_for_delete(
     primary: BaseException | None = None
     try:
         yield descriptor
+        _require_windows_descriptor_single_link(
+            descriptor,
+            subject=subject,
+        )
         _mark_descriptor_delete_on_close(descriptor)
     except BaseException as error:
         primary = error

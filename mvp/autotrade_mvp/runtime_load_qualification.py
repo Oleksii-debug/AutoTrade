@@ -216,8 +216,8 @@ class RuntimeCampaignPlan:
         financial_aggregate_types: Sequence[str],
         release_artifact_sha256: str | None = None,
     ) -> "RuntimeCampaignPlan":
-        if not isinstance(spec, RuntimeBudgetSpec):
-            raise TypeError("spec must be RuntimeBudgetSpec")
+        if type(spec) is not RuntimeBudgetSpec:
+            raise TypeError("spec must be exact RuntimeBudgetSpec")
         if (
             isinstance(expected_financial_event_ids, (str, bytes))
             or not isinstance(expected_financial_event_ids, Sequence)
@@ -232,7 +232,7 @@ class RuntimeCampaignPlan:
             raise RuntimeBudgetError(
                 "financial_aggregate_types must be a sequence"
             )
-        return cls(
+        return RuntimeCampaignPlan(
             scenario_id=spec.scenario_id,
             spec_digest=spec.digest,
             release_sha=spec.release_sha,
@@ -519,8 +519,8 @@ class RuntimeCampaignEvidence:
         )
 
     def to_observation(self, spec: RuntimeBudgetSpec) -> RuntimeLoadObservation:
-        if not isinstance(spec, RuntimeBudgetSpec):
-            raise TypeError("spec must be RuntimeBudgetSpec")
+        if type(spec) is not RuntimeBudgetSpec:
+            raise TypeError("spec must be exact RuntimeBudgetSpec")
         if (
             spec.digest != self.spec_digest
             or spec.release_sha != self.release_sha
@@ -557,10 +557,10 @@ def begin_runtime_campaign(
         journal,
         subject="runtime qualification JournalStore",
     )
-    if not isinstance(spec, RuntimeBudgetSpec):
-        raise TypeError("spec must be RuntimeBudgetSpec")
-    if not isinstance(plan, RuntimeCampaignPlan):
-        raise TypeError("plan must be RuntimeCampaignPlan")
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    if type(plan) is not RuntimeCampaignPlan:
+        raise TypeError("plan must be exact RuntimeCampaignPlan")
     if (
         plan.scenario_id != spec.scenario_id
         or plan.spec_digest != spec.digest
@@ -613,12 +613,12 @@ def collect_runtime_campaign_evidence(
         journal,
         subject="runtime qualification JournalStore",
     )
-    if not isinstance(spec, RuntimeBudgetSpec):
-        raise TypeError("spec must be RuntimeBudgetSpec")
-    if not isinstance(plan, RuntimeCampaignPlan):
-        raise TypeError("plan must be RuntimeCampaignPlan")
-    if not isinstance(cut, RuntimeCampaignCut):
-        raise TypeError("cut must be RuntimeCampaignCut")
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    if type(plan) is not RuntimeCampaignPlan:
+        raise TypeError("plan must be exact RuntimeCampaignPlan")
+    if type(cut) is not RuntimeCampaignCut:
+        raise TypeError("cut must be exact RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
@@ -735,6 +735,8 @@ def evaluate_runtime_campaign(
     spec: RuntimeBudgetSpec,
     evidence: RuntimeCampaignEvidence,
 ) -> RuntimeBudgetDecision:
-    if not isinstance(evidence, RuntimeCampaignEvidence):
-        raise TypeError("evidence must be RuntimeCampaignEvidence")
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    if type(evidence) is not RuntimeCampaignEvidence:
+        raise TypeError("evidence must be exact RuntimeCampaignEvidence")
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

@@ -328,6 +328,30 @@ def _confirm_success_api_key_echo(
     return True
 
 
+def _classify_query_api_credential_nonacceptance(
+    *,
+    ret_code: int,
+    product_family: str,
+    response_surface: str,
+) -> BybitCredentialNonAcceptance:
+    """Classify only semantics bound by the familyless query-api request itself.
+
+    The query-api endpoint has no category/product-family request parameter.  A
+    caller-selected family therefore cannot safely promote family-specific
+    expiry codes (-2015/33004) into exact-domain rejection evidence.  Those
+    codes remain inconclusive here; the generic classifier remains available to
+    boundaries whose request itself binds the relevant product family.
+    """
+
+    if ret_code not in {0, 10003}:
+        return BybitCredentialNonAcceptance.INCONCLUSIVE
+    return classify_bybit_credential_nonacceptance(
+        ret_code=ret_code,
+        product_family=product_family,
+        response_surface=response_surface,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeWireResponse:
     """Scrubbed HTTP result: raw provider JSON is consumed, not retained."""
@@ -459,7 +483,7 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe observed_at cannot precede signed request timestamp"
             )
-        classification = classify_bybit_credential_nonacceptance(
+        classification = _classify_query_api_credential_nonacceptance(
             ret_code=self.ret_code,
             product_family=product_family,
             response_surface=response_surface,

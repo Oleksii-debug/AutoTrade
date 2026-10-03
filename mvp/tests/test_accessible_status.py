@@ -198,6 +198,7 @@ class AccessibleStatusTests(unittest.TestCase):
             {"CASH:USD": "-1"},
             {"CASH:USD": "NaN"},
             {"CASH:USD": "Infinity"},
+            {"CASH:USD": "9" * 1000},
             {"": "1"},
             {" CASH:USD": "1"},
         )

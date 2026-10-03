@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -146,6 +147,75 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_name_status(["R100\tonly-old-path"])
 
+    def test_parser_rejects_unsupported_unmerged_and_invalid_scores(self):
+        for record in (
+            "U\tcontrol/INDEX.json",
+            "X\tcontrol/INDEX.json",
+            "R101\told.py\tnew.py",
+            "R-1\told.py\tnew.py",
+            "C101\told.py\tnew.py",
+        ):
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    parse_name_status([record])
+
+    def test_parser_and_synthetic_changes_reject_noncanonical_paths(self):
+        for path in (
+            "../control/INDEX.json",
+            "/control/INDEX.json",
+            "control//INDEX.json",
+            "control/./INDEX.json",
+            "control\\INDEX.json",
+            "control/INDEX.json\x00suffix",
+            "control/INDEX.json\talias",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises((TypeError, ValueError)):
+                    assess_reconvergence(
+                        base_paths=["README.md"],
+                        changes=[Change(status="M", path=path)],
+                        protected_sentinels=frozenset(),
+                    )
+
+    def test_synthetic_change_cannot_smuggle_previous_path_on_modify(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[
+                    Change(
+                        status="M",
+                        path="README.md",
+                        previous_path="control/INDEX.json",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_base_tree_paths_are_validated_before_assessment(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md", "../control/INDEX.json"],
+                changes=[],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_public_module_entrypoint_boots_from_repository_root(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--help",
+            ],
+            cwd=Path.cwd(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--allow-protected-path", completed.stdout)
+
 
     def test_guard_itself_and_canonical_control_authorities_are_protected(self):
         for path in (
@@ -172,6 +242,139 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             [],
             "every checked-in workflow authority must be a protected sentinel",
         )
+
+    def test_protected_sentinel_modification_requires_exact_authorization(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{sentinel} (modified)",),
+        )
+        self.assertEqual(result.scope_violations, ())
+        self.assertIn("protected canonical sentinel damage", result.reasons[0])
+
+    def test_exact_protected_path_authorization_allows_modification(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+            authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, ())
+
+    def test_directory_scope_never_authorizes_protected_path(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(".github/workflows",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{sentinel} (modified)",),
+        )
+
+    def test_protected_authorization_rejects_directory_or_non_sentinel(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        for unauthorized in ("control/tools", "README.md"):
+            with self.subTest(unauthorized=unauthorized):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=[sentinel, "README.md"],
+                        changes=[Change(status="M", path=sentinel)],
+                        authorized_protected_paths=(unauthorized,),
+                    )
+
+    def test_copy_into_protected_path_requires_destination_authorization(self):
+        sentinel = "control/INDEX.json"
+        blocked = assess_reconvergence(
+            base_paths=["template/INDEX.json", "README.md"],
+            changes=[
+                Change(
+                    status="C100",
+                    previous_path="template/INDEX.json",
+                    path=sentinel,
+                )
+            ],
+        )
+        allowed = assess_reconvergence(
+            base_paths=["template/INDEX.json", "README.md"],
+            changes=[
+                Change(
+                    status="C100",
+                    previous_path="template/INDEX.json",
+                    path=sentinel,
+                )
+            ],
+            authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.protected_violations,
+            (f"{sentinel} (copy destination)",),
+        )
+        self.assertTrue(allowed.allowed)
+
+    def test_rename_into_protected_path_requires_destination_authorization(self):
+        sentinel = "control/qualification.json"
+        blocked = assess_reconvergence(
+            base_paths=["candidate.json", "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path="candidate.json",
+                    path=sentinel,
+                )
+            ],
+        )
+        allowed = assess_reconvergence(
+            base_paths=["candidate.json", "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path="candidate.json",
+                    path=sentinel,
+                )
+            ],
+            authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.protected_violations,
+            (f"{sentinel} (rename destination)",),
+        )
+        self.assertTrue(allowed.allowed)
+
+    def test_exact_authorization_can_cover_intentional_sentinel_rename(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path=sentinel,
+                    path="control/INDEX.retired.json",
+                )
+            ],
+            authorized_protected_paths=(sentinel,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
 
     def test_protected_sentinel_rename_away_fails_closed(self):
         sentinel = "control/INDEX.json"
@@ -310,6 +513,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
+        self.assertNotIn("--allow-protected-path", workflow)
         self.assertNotIn("edited", workflow)
 
 

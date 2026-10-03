@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
+from unittest.mock import patch
 
+import mvp.autotrade_mvp.fx_valuation as fx_valuation
 from mvp.autotrade_mvp.fx_valuation import (
     FxQuote,
     FxRoundingPolicy,
@@ -658,6 +660,40 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
             )
 
         self.assertEqual(touched, [])
+
+    def test_portfolio_valuation_holds_balance_and_quote_bindings_once(self):
+        balances = {"EUR": "100"}
+        quotes = {"EUR": eurusd(bid="1.1000", ask="1.1002")}
+        original_currency = fx_valuation._currency
+        mutated = False
+
+        def mutate_callers_after_snapshot(value, name):
+            nonlocal mutated
+            if name == "reporting_currency" and not mutated:
+                mutated = True
+                balances["EUR"] = "999"
+                quotes["EUR"] = eurusd(bid="9", ask="9")
+            return original_currency(value, name)
+
+        with patch(
+            "mvp.autotrade_mvp.fx_valuation._currency",
+            side_effect=mutate_callers_after_snapshot,
+        ):
+            result = value_cash_balances(
+                balances,
+                reporting_currency="USD",
+                quotes=quotes,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertTrue(mutated)
+        self.assertEqual(balances["EUR"], "999")
+        self.assertEqual(quotes["EUR"].bid, Decimal("9"))
+        self.assertEqual(result.status, "CERTAIN")
+        self.assertEqual(result.components[0].source_amount, Decimal("100"))
+        self.assertEqual(result.components[0].rate_used, Decimal("1.1000"))
+        self.assertEqual(result.total, Decimal("110.0000"))
 
     def test_mapping_subclasses_are_rejected_before_mapping_callbacks(self):
         touched = []

@@ -272,6 +272,7 @@ def release_evidence_snapshot(
         if (
             type(artifact_id) is not str
             or not artifact_id.strip()
+            or artifact_id != artifact_id.strip()
             or type(digest) is not str
             or SHA256_ID.fullmatch(digest) is None
             or type(observed_at) is not str
@@ -288,7 +289,7 @@ def release_evidence_snapshot(
             != observed_at
         ):
             return False, "invalid_evidence_refs", None
-        canonical_artifact_id = artifact_id.strip()
+        canonical_artifact_id = artifact_id
         if canonical_artifact_id in seen_artifact_ids:
             return False, "invalid_evidence_refs", None
         seen_artifact_ids.add(canonical_artifact_id)

@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeEvidence,
     BybitCredentialProbeHttpRequest,
     BybitCredentialProbeRawHttpResponse,
+    BybitCredentialProbeUrllibClient,
     BybitCredentialProbeWireResponse,
     bybit_credential_probe_receipt_metadata,
     capture_bybit_credential_probe_evidence,
@@ -888,6 +889,38 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertNotIn(marker.decode("ascii"), repr(raw))
         self.assertNotIn("probe-key", repr(request))
         self.assertNotIn("X-BAPI-SIGN", repr(request))
+
+    def test_urllib_transport_normalizes_io_failure_without_masking_programmer_error(self):
+        class RaisingOpener:
+            def __init__(self, error):
+                self.error = error
+
+            def open(self, request, *, timeout):
+                del request, timeout
+                raise self.error
+
+        request = BybitCredentialProbeHttpRequest(
+            url="https://api.bybit.com/v5/user/query-api",
+            headers=_wire_headers(),
+            timeout_seconds=15,
+        )
+        client = BybitCredentialProbeUrllibClient()
+        client._opener = RaisingOpener(OSError("probe-key must stay hidden"))
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport unavailable",
+        ) as caught:
+            client.send(request)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn("probe-key", str(caught.exception))
+
+        programmer_error = RuntimeError("programmer failure")
+        client = BybitCredentialProbeUrllibClient()
+        client._opener = RaisingOpener(programmer_error)
+        with self.assertRaises(RuntimeError) as caught_runtime:
+            client.send(request)
+        self.assertIs(caught_runtime.exception, programmer_error)
 
     def test_wire_exception_produces_no_evidence_and_propagates(self):
         with tempfile.TemporaryDirectory() as directory:

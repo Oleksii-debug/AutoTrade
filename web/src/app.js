@@ -1064,8 +1064,7 @@
           await refreshSnapshot({announceRefresh: true});
         } catch {
           state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+          state.snapshotReady = false;
           state.sessionIdentity = null;
           state.accountId = null;
           state.environment = null;
@@ -1079,8 +1078,7 @@
         }
       } else {
         state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+        state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
         state.environment = null;
@@ -1249,8 +1247,7 @@
         await refreshSnapshot();
       } catch {
         state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+        state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
         state.environment = null;
@@ -1261,8 +1258,7 @@
       }
     } catch {
       state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+      state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1286,8 +1282,7 @@
       announce("Host state refreshed from the canonical snapshot.");
     } catch {
       state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+      state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1311,8 +1306,7 @@
       await refreshSnapshot();
     } catch {
       state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+      state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1348,8 +1342,7 @@
       announce("Host state refreshed after page restoration.");
     } catch {
       state.scopeEpoch += 1;
-      state.scopeEpoch += 1;
-    state.snapshotReady = false;
+      state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;

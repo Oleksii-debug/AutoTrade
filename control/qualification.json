@@ -16,7 +16,7 @@
     "quality_pipeline": "ACTIVE_WINDOWS_AND_LINUX_EXACT_HEAD_VERIFICATION_REQUIRED",
     "canonical_contracts": "IN_PROGRESS_FULL_SCHEMA_SURFACE_AND_OPENAPI_COMMITTED",
     "dependency_provenance": "IN_PROGRESS_EXACT_UPSTREAM_LICENSE_SNAPSHOT_RECORDED",
-    "control_plane": "SINGLE_PRIMARY_DEVELOPER_CANONICAL_INTEGRATION_ACTIVE",
+    "control_plane": "UNBOUNDED_AUTONOMOUS_PARALLEL_DELIVERY_ACTIVE",
     "selected_first_party_reuse": "TRANSFER_COMPLETE_APPROVED_NEUTRAL_PRIMITIVES_AND_SWARM_INVARIANTS",
     "restart_recovery": "IN_PROGRESS_SIMULATED_CHECKPOINT_AND_EVIDENCE_RECOVERY",
     "command_surface": "IN_PROGRESS_MVP_CLI",
@@ -39,6 +39,6 @@
     "Economic edge remains unproven. No backtest, paper result or simulated result is treated as evidence of expected profitability.",
     "PR head 4f5ed15d1afff0c20bc2e71672e152d78bef899e completed both repository verification and the Windows/Ubuntu baseline matrix successfully. This is historical cross-platform evidence only and is not exact-head qualification of the current canonical integration lineage.",
     "Canonical contract generation/codegen, release dependency locks, Windows packaging, NVDA qualification, recovery release evidence and later owner-authorized provider/bounded-real qualification remain open.",
-    "The repository execution mode is now SINGLE_PRIMARY_DEVELOPER. Direct bounded commits are permitted on the designated canonical integration lineage with live-head readback and exact-head verification. Real provider integration, credentials, paper-provider orders and live trading remain deferred unless the owner explicitly re-authorizes them."
+    "The repository execution mode is UNBOUNDED_AUTONOMOUS_PARALLEL_DELIVERY. Claims, leases, ownership metadata and registry state are advisory coordination only; they do not block safe commits, pull requests, integration or continued work. Real provider integration, credentials, paper-provider orders and live trading remain deferred unless the owner explicitly re-authorizes them."
   ]
 }

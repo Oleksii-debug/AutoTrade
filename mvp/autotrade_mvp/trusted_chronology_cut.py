@@ -504,6 +504,170 @@ def _prepared_payload(
     }
 
 
+def _validate_prepared_challenge_payload(
+    payload: dict[str, object],
+) -> ChronologyChallenge:
+    challenge_payload = payload.get("challenge")
+    expected_fields = {
+        "clock_incident_generation",
+        "journal_sequence",
+        "owner_epoch",
+        "owner_id",
+        "owner_scope",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "request_nonce",
+        "runtime_environment",
+        "schema_version",
+        "scope",
+        "source_sha",
+        "store_identity_digest",
+    }
+    if type(challenge_payload) is not dict or set(challenge_payload) != expected_fields:
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge schema is invalid"
+        )
+    if challenge_payload.get("schema_version") != _SCHEMA_VERSION:
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge version is invalid"
+        )
+    try:
+        scope = ChronologyScope(challenge_payload.get("scope"))
+    except (TypeError, ValueError) as error:
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge scope is invalid"
+        ) from error
+
+    source_sha = _git_sha(challenge_payload.get("source_sha"))
+    store_identity_digest = _digest(
+        challenge_payload.get("store_identity_digest"),
+        name="store_identity_digest",
+    )
+    owner_scope = _token(challenge_payload.get("owner_scope"), name="owner_scope")
+    owner_id = _token(challenge_payload.get("owner_id"), name="owner_id")
+    owner_epoch = _decimal_int(
+        challenge_payload.get("owner_epoch"),
+        name="owner_epoch",
+        positive=True,
+    )
+    clock_incident_generation = _decimal_int(
+        challenge_payload.get("clock_incident_generation"),
+        name="clock_incident_generation",
+    )
+    journal_sequence = _decimal_int(
+        challenge_payload.get("journal_sequence"),
+        name="journal_sequence",
+    )
+    runtime_environment = _runtime_environment(
+        challenge_payload.get("runtime_environment")
+    )
+    owner_environment, separator, owner_subject = owner_scope.partition(":")
+    if (
+        separator != ":"
+        or not owner_subject
+        or owner_subject != owner_subject.strip()
+        or owner_environment.strip().upper() != runtime_environment
+    ):
+        raise TrustedChronologyError(
+            "trusted chronology prepared owner/runtime scope is invalid"
+        )
+
+    release_artifact_id = challenge_payload.get("release_artifact_id")
+    release_artifact_sha256 = challenge_payload.get("release_artifact_sha256")
+    if scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if release_artifact_id is not None or release_artifact_sha256 is not None:
+            raise TrustedChronologyError(
+                "source chronology challenge cannot carry release identity"
+            )
+    else:
+        release_artifact_id = _uuid_text(
+            release_artifact_id,
+            name="release_artifact_id",
+        )
+        release_artifact_sha256 = _digest(
+            release_artifact_sha256,
+            name="release_artifact_sha256",
+        )
+
+    request_nonce = challenge_payload.get("request_nonce")
+    if (
+        type(request_nonce) is not str
+        or len(request_nonce) != 64
+        or any(ch not in "0123456789abcdef" for ch in request_nonce)
+    ):
+        raise TrustedChronologyError(
+            "trusted chronology prepared request nonce is invalid"
+        )
+
+    challenge_digest = _digest(
+        payload.get("challenge_digest"),
+        name="challenge_digest",
+    )
+    expected_digest = "sha256:" + sha256(
+        _canonical_json_bytes(challenge_payload)
+    ).hexdigest()
+    if challenge_digest != expected_digest:
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge digest mismatch"
+        )
+
+    challenge = ChronologyChallenge(
+        schema_version=_SCHEMA_VERSION,
+        scope=scope,
+        source_sha=source_sha,
+        store_identity_digest=store_identity_digest,
+        owner_scope=owner_scope,
+        owner_id=owner_id,
+        owner_epoch=owner_epoch,
+        clock_incident_generation=clock_incident_generation,
+        journal_sequence=journal_sequence,
+        runtime_environment=runtime_environment,
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
+        request_nonce=request_nonce,
+        challenge_digest=challenge_digest,
+    )
+    if challenge.canonical_payload() != challenge_payload:
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge is non-canonical"
+        )
+    return challenge
+
+
+def _require_cut_prepared_binding(
+    prepared: dict[str, object],
+    cut: TrustedChronologyCut,
+) -> None:
+    challenge = _validate_prepared_challenge_payload(prepared)
+    occurrence_bindings = (
+        (prepared.get("runtime_occurrence_id"), cut.runtime_occurrence_id),
+        (prepared.get("host_id"), cut.host_id),
+        (prepared.get("account_id"), cut.account_id),
+        (prepared.get("runtime_environment"), cut.runtime_environment),
+    )
+    if any(expected != observed for expected, observed in occurrence_bindings):
+        raise TrustedChronologyError(
+            "trusted chronology cut runtime binding differs from prepared event"
+        )
+    challenge_bindings = (
+        (challenge.challenge_digest, cut.challenge_digest),
+        (challenge.scope, cut.scope),
+        (challenge.source_sha, cut.source_sha),
+        (challenge.store_identity_digest, cut.store_identity_digest),
+        (challenge.owner_scope, cut.owner_scope),
+        (challenge.owner_id, cut.owner_id),
+        (challenge.owner_epoch, cut.owner_epoch),
+        (challenge.clock_incident_generation, cut.clock_incident_generation),
+        (challenge.runtime_environment, cut.runtime_environment),
+        (challenge.release_artifact_id, cut.release_artifact_id),
+        (challenge.release_artifact_sha256, cut.release_artifact_sha256),
+    )
+    if any(expected != observed for expected, observed in challenge_bindings):
+        raise TrustedChronologyError(
+            "trusted chronology cut challenge binding differs from prepared event"
+        )
+
+
 def _validate_prepared_event(
     event: object,
     *,
@@ -544,10 +708,68 @@ def _validate_prepared_event(
     }
     if set(payload) != expected_keys or payload.get("schema_version") != _SCHEMA_VERSION:
         raise TrustedChronologyError("trusted chronology prepared payload schema is invalid")
-    if event.get("aggregate_id") != payload.get("challenge_digest"):
+
+    challenge = _validate_prepared_challenge_payload(payload)
+    duplicate_bindings = (
+        (payload.get("challenge_digest"), challenge.challenge_digest),
+        (payload.get("clock_incident_generation"), str(challenge.clock_incident_generation)),
+        (payload.get("owner_epoch"), str(challenge.owner_epoch)),
+        (payload.get("owner_id"), challenge.owner_id),
+        (payload.get("owner_scope"), challenge.owner_scope),
+        (payload.get("runtime_environment"), challenge.runtime_environment),
+        (payload.get("store_identity_digest"), challenge.store_identity_digest),
+    )
+    if any(expected != observed for expected, observed in duplicate_bindings):
+        raise TrustedChronologyError(
+            "trusted chronology prepared challenge projection mismatch"
+        )
+
+    _token(payload.get("account_id"), name="account_id")
+    _token(payload.get("host_id"), name="host_id")
+    _uuid_text(
+        payload.get("runtime_occurrence_id"),
+        name="runtime_occurrence_id",
+    )
+    _decimal_int(
+        payload.get("runtime_occurrence_aggregate_version"),
+        name="runtime_occurrence_aggregate_version",
+        positive=True,
+    )
+    _decimal_int(
+        payload.get("runtime_occurrence_journal_sequence"),
+        name="runtime_occurrence_journal_sequence",
+        positive=True,
+    )
+    _decimal_int(
+        payload.get("started_monotonic_ns"),
+        name="started_monotonic_ns",
+    )
+    _decimal_int(
+        payload.get("started_wall_utc_ns"),
+        name="started_wall_utc_ns",
+    )
+    declared_limits = {
+        "max_request_elapsed_ns": _MAX_REQUEST_ELAPSED_NS,
+        "max_local_rate_divergence_ns": _MAX_LOCAL_RATE_DIVERGENCE_NS,
+        "max_external_uncertainty_us": _MAX_EXTERNAL_UNCERTAINTY_US,
+        "max_external_local_offset_us": _MAX_EXTERNAL_LOCAL_OFFSET_US,
+    }
+    for name, expected_limit in declared_limits.items():
+        observed_limit = _decimal_int(payload.get(name), name=name, positive=True)
+        if observed_limit != expected_limit:
+            raise TrustedChronologyError(
+                f"trusted chronology prepared {name} differs from protocol-v1 policy"
+            )
+
+    if event.get("aggregate_id") != challenge.challenge_digest:
         raise TrustedChronologyError("trusted chronology aggregate/challenge binding is invalid")
-    if event.get("event_id") != _prepared_event_id(str(payload.get("challenge_digest"))):
+    if event.get("event_id") != _prepared_event_id(challenge.challenge_digest):
         raise TrustedChronologyError("trusted chronology prepared event id is invalid")
+    journal_sequence = event.get("journal_sequence")
+    if type(journal_sequence) is not int or journal_sequence <= 0:
+        raise TrustedChronologyError(
+            "trusted chronology prepared journal sequence is invalid"
+        )
     if attempt is not None and payload != _prepared_payload(attempt):
         raise TrustedChronologyError("durable chronology attempt differs from prepared event")
     return payload
@@ -1268,8 +1490,9 @@ def accept_trusted_chronology_cut(
         events = _load_events(store, attempt.challenge.challenge_digest)
         if len(events) != 2:
             raise TrustedChronologyError("trusted chronology cut did not round-trip")
-        _validate_prepared_event(events[0], attempt=attempt)
+        prepared = _validate_prepared_event(events[0], attempt=attempt)
         cut = _cut_from_event(events[1])
+        _require_cut_prepared_binding(prepared, cut)
         return cut
 
 
@@ -1355,6 +1578,12 @@ def require_current_trusted_chronology_cut(
     if prepared.get("challenge_digest") != cut.challenge_digest:
         raise PermissionError("trusted chronology prepared/cut binding changed")
     durable = _cut_from_event(events[1])
+    try:
+        _require_cut_prepared_binding(prepared, durable)
+    except TrustedChronologyError as error:
+        raise PermissionError(
+            "trusted chronology prepared/cut authority binding is invalid"
+        ) from error
     if durable != cut:
         raise PermissionError("trusted chronology cut differs from durable authority")
     return durable

@@ -61,13 +61,18 @@ public sealed class WebExperienceSecurityPolicy
 
         string path = target.AbsolutePath;
         if (string.Equals(path, StatePath, StringComparison.Ordinal)
-            || string.Equals(path, CommandPath, StringComparison.Ordinal)
-            || string.Equals(path, EventPath, StringComparison.Ordinal))
+            || string.Equals(path, CommandPath, StringComparison.Ordinal))
         {
-            return true;
+            return string.IsNullOrEmpty(target.Query);
         }
 
-        if (!path.StartsWith(CanonicalOperationPrefix, StringComparison.Ordinal))
+        if (string.Equals(path, EventPath, StringComparison.Ordinal))
+        {
+            return HasCanonicalEventQuery(target.Query);
+        }
+
+        if (!string.IsNullOrEmpty(target.Query)
+            || !path.StartsWith(CanonicalOperationPrefix, StringComparison.Ordinal))
         {
             return false;
         }
@@ -78,6 +83,46 @@ public sealed class WebExperienceSecurityPolicy
                 parsedOperationId.ToString("D"),
                 operationId,
                 StringComparison.Ordinal);
+    }
+
+    private static bool HasCanonicalEventQuery(string query)
+    {
+        if (string.IsNullOrEmpty(query))
+        {
+            return true;
+        }
+
+        const string prefix = "?after=";
+        if (!query.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string value = query[prefix.Length..];
+        if (value.Length == 0 || value.Contains('&', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (value == "0")
+        {
+            return true;
+        }
+
+        if (value[0] is < '1' or > '9')
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            if (character is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

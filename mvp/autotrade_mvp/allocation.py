@@ -6,12 +6,13 @@ treats simulated or expected returns as evidence of profitability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -1659,34 +1660,118 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 )
 
 
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
+_SEALED_ALLOCATION_PAYLOADS: dict[int, weakref.ReferenceType] = {}
+
+
+class _SealedAllocationPayload:
+    """Private provenance owner for one canonical frozen mapping node."""
+
+    __slots__ = ("proxy", "canonical_json", "__weakref__")
+
+    def __init__(self, proxy, canonical_json: str) -> None:
+        self.proxy = proxy
+        self.canonical_json = canonical_json
+
+
+def _registered_allocation_payload(value):
+    """Return sealed provenance without invoking mapping-proxy operations."""
+
+    if type(value) is not _MAPPING_PROXY_TYPE:
+        return None
+    reference = _SEALED_ALLOCATION_PAYLOADS.get(id(value))
+    if reference is None:
+        return None
+    owner = reference()
+    if owner is None or owner.proxy is not value:
+        return None
+    return owner
+
+
+def _register_allocation_payload(owner: _SealedAllocationPayload) -> None:
+    key = id(owner.proxy)
+
+    def _cleanup(reference, *, key=key) -> None:
+        if _SEALED_ALLOCATION_PAYLOADS.get(key) is reference:
+            _SEALED_ALLOCATION_PAYLOADS.pop(key, None)
+
+    _SEALED_ALLOCATION_PAYLOADS[key] = weakref.ref(owner, _cleanup)
+
+
 def _canonical_evidence_value(value):
-    if isinstance(value, Decimal):
+    """Reduce untrusted evidence to exact built-in JSON-domain values.
+
+    Mapping provenance is checked before any mapping operation.  In particular,
+    a MappingProxyType wrapped around a caller-defined Mapping is not equivalent
+    to a proxy minted by ImmutableAllocationEvidence.
+    """
+
+    if type(value) is Decimal:
         return str(value)
-    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+    if value is None or type(value) is bool:
         return value
-    if isinstance(value, float):
+    if type(value) is str or type(value) is int:
+        return value
+    if type(value) is float:
         raise TypeError("allocation evidence cannot contain binary floating-point values")
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         normalized = {}
-        for raw_key, raw_value in value.items():
+        for raw_key, raw_value in dict.items(value):
+            if type(raw_key) is not str:
+                raise TypeError("allocation evidence payload keys must be exact strings")
             key = _text(raw_key, name="allocation evidence payload key")
             if key in normalized:
                 raise ValueError("allocation evidence payload keys must be unique")
             normalized[key] = _canonical_evidence_value(raw_value)
         return normalized
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if type(value) is _MAPPING_PROXY_TYPE:
+        owner = _registered_allocation_payload(value)
+        if owner is None:
+            raise TypeError(
+                "allocation evidence mappingproxy lacks sealed canonical provenance"
+            )
+        decoded = json.loads(owner.canonical_json)
+        if type(decoded) is not dict:
+            raise RuntimeError("sealed allocation payload provenance is invalid")
+        return decoded
+    if type(value) is list or type(value) is tuple:
         return [_canonical_evidence_value(item) for item in value]
     raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
 
 
 def _freeze_evidence_value(value):
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_evidence_value(item) for key, item in value.items()}
+    """Freeze exact canonical values and register every mapping node."""
+
+    if type(value) is dict:
+        frozen_items = {}
+        owners = []
+        for key, item in dict.items(value):
+            frozen_item, nested_owners = _freeze_evidence_value(item)
+            frozen_items[key] = frozen_item
+            owners.extend(nested_owners)
+        proxy = MappingProxyType(frozen_items)
+        owner = _SealedAllocationPayload(
+            proxy,
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
         )
-    if isinstance(value, list):
-        return tuple(_freeze_evidence_value(item) for item in value)
-    return value
+        _register_allocation_payload(owner)
+        owners.append(owner)
+        return proxy, tuple(owners)
+    if type(value) is list:
+        frozen_items = []
+        owners = []
+        for item in value:
+            frozen_item, nested_owners = _freeze_evidence_value(item)
+            frozen_items.append(frozen_item)
+            owners.extend(nested_owners)
+        return tuple(frozen_items), tuple(owners)
+    return value, ()
 
 
 def _canonical_evidence_json(value) -> str:
@@ -1738,6 +1823,11 @@ class ImmutableAllocationEvidence:
     valid_until: str
     payload: Mapping[str, object]
     digest: str
+    _payload_owners: tuple[_SealedAllocationPayload, ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         evidence_id = _text(self.evidence_id, name="allocation evidence_id")
@@ -1758,11 +1848,9 @@ class ImmutableAllocationEvidence:
         valid_until = _instant(self.valid_until, name="allocation evidence valid_until")
         if valid_until < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
-        if not isinstance(self.payload, Mapping) or not self.payload:
-            raise ValueError("allocation evidence payload must be a non-empty mapping")
         normalized_payload = _canonical_evidence_value(self.payload)
-        if not isinstance(normalized_payload, dict):
-            raise TypeError("allocation evidence payload must normalize to an object")
+        if type(normalized_payload) is not dict or not normalized_payload:
+            raise ValueError("allocation evidence payload must be a non-empty mapping")
         digest = _text(self.digest, name="allocation evidence digest")
         if (
             len(digest) != 64
@@ -1789,7 +1877,9 @@ class ImmutableAllocationEvidence:
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "observed_at", normalized_observed)
         object.__setattr__(self, "valid_until", normalized_valid_until)
-        object.__setattr__(self, "payload", _freeze_evidence_value(normalized_payload))
+        frozen_payload, payload_owners = _freeze_evidence_value(normalized_payload)
+        object.__setattr__(self, "payload", frozen_payload)
+        object.__setattr__(self, "_payload_owners", payload_owners)
         object.__setattr__(self, "digest", digest)
 
     @classmethod
@@ -1819,7 +1909,7 @@ class ImmutableAllocationEvidence:
         if valid < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
         normalized_payload = _canonical_evidence_value(payload)
-        if not isinstance(normalized_payload, dict) or not normalized_payload:
+        if type(normalized_payload) is not dict or not normalized_payload:
             raise ValueError("allocation evidence payload must be a non-empty mapping")
         normalized_observed = observed.isoformat().replace("+00:00", "Z")
         normalized_valid = valid.isoformat().replace("+00:00", "Z")
@@ -1850,6 +1940,24 @@ class ImmutableAllocationEvidence:
             <= point
             <= _instant(self.valid_until, name="allocation evidence valid_until")
         )
+
+
+def _allocation_payload_snapshot(
+    evidence: ImmutableAllocationEvidence,
+) -> dict[str, object]:
+    """Return a detached exact-dict snapshot only from this issuer's seal."""
+
+    if type(evidence) is not ImmutableAllocationEvidence:
+        raise TypeError("allocation evidence must use the canonical evidence type")
+    payload = object.__getattribute__(evidence, "payload")
+    owner = _registered_allocation_payload(payload)
+    owners = object.__getattribute__(evidence, "_payload_owners")
+    if owner is None or not any(candidate is owner for candidate in owners):
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    decoded = json.loads(owner.canonical_json)
+    if type(decoded) is not dict:
+        raise RuntimeError("sealed allocation payload provenance is invalid")
+    return decoded
 
 
 @dataclass(frozen=True)
@@ -2373,8 +2481,10 @@ def allocate_evidence_bound_objective_targets(
         try:
             normalized = normalize_allocation_valuation(
                 symbol=symbol,
-                market_payload=resolved_market[symbol].payload,
-                valuation_payload=valuation.payload,
+                market_payload=_allocation_payload_snapshot(
+                    resolved_market[symbol]
+                ),
+                valuation_payload=_allocation_payload_snapshot(valuation),
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,

@@ -602,7 +602,23 @@ class DurableSettlementBook:
             raise SettlementConflict(
                 "durable settlement JournalStore generation changed"
             )
-        if visible_scope != scope or visible_scope_id != scope_id:
+        if type(visible_scope) is not SettlementAccountScope:
+            raise SettlementConflict(
+                "durable settlement scope changed after construction"
+            )
+        visible_provider_id = object.__getattribute__(visible_scope, "provider_id")
+        visible_account_id = object.__getattribute__(visible_scope, "account_id")
+        visible_environment = object.__getattribute__(visible_scope, "environment")
+        if (
+            type(visible_provider_id) is not str
+            or type(visible_account_id) is not str
+            or type(visible_environment) is not str
+            or type(visible_scope_id) is not str
+            or visible_provider_id != scope.provider_id
+            or visible_account_id != scope.account_id
+            or visible_environment != scope.environment
+            or visible_scope_id != scope_id
+        ):
             raise SettlementConflict(
                 "durable settlement scope changed after construction"
             )

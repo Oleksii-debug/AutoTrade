@@ -8,7 +8,11 @@ on:
       - "mvp/autotrade_mvp/model_gateway.py"
       - "mvp/autotrade_mvp/pipeline.py"
       - "mvp/autotrade_mvp/economics.py"
+      - "mvp/autotrade_mvp/allocation.py"
+      - "mvp/autotrade_mvp/simulated_provider.py"
+      - "research/autotrade_research/economics/after_cost.py"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
   push:
     branches: [main]
@@ -17,7 +21,11 @@ on:
       - "mvp/autotrade_mvp/model_gateway.py"
       - "mvp/autotrade_mvp/pipeline.py"
       - "mvp/autotrade_mvp/economics.py"
+      - "mvp/autotrade_mvp/allocation.py"
+      - "mvp/autotrade_mvp/simulated_provider.py"
+      - "research/autotrade_research/economics/after_cost.py"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
 
 concurrency:
@@ -43,7 +51,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
-      - run: python -m unittest mvp.tests.test_zero_model_qualification -v
+      - name: Run zero-model qualification and economics regressions
+        run: >-
+          python -m unittest
+          mvp.tests.test_zero_model_qualification
+          mvp.tests.test_zero_model_economics
+          -v
       - name: Assert and generate exact-head qualification evidence
         shell: bash
         run: |

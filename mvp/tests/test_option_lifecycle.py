@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
 from mvp.autotrade_mvp.capabilities import (
@@ -21,9 +22,13 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleConflict,
     OptionLifecycleError,
     OptionLifecycleObservation,
+    _project_position_after_reversal,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+    EconomicBookCut,
+)
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -266,6 +271,209 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self._evidence[source.evidence_ref] = source
         return source.evidence_ref
 
+    def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal subclass must not dispatch")
+
+        base = {
+            "provider_id": "BYBIT",
+            "account_id": "paper-1",
+            "environment": "PAPER",
+            "venue_id": "OPTIONS",
+            "instrument_version": f"{OPTION_ID}@1",
+            "external_event_id": "hostile-life",
+            "event_kind": "EXERCISE",
+            "signed_contracts": Decimal("1"),
+            "effective_at": utc(12, 18, 19),
+            "observed_at": utc(12, 18, 19, 1),
+            "raw_evidence_digest": "sha256:" + "e" * 64,
+            "provider_revision": "hostile-r1",
+        }
+        for field in (
+            "signed_contracts",
+            "underlying_price",
+            "cash_settlement_amount",
+        ):
+            with self.subTest(field=field):
+                values = dict(base)
+                values[field] = HostileDecimal("1.25")
+                with self.assertRaisesRegex(
+                    OptionLifecycleError,
+                    "bounded exact decimal input",
+                ):
+                    OptionLifecycleObservation(**values)
+
+    def test_oversized_provider_numeric_text_fails_before_mutation(self):
+        reference = self.evidence(
+            external_event_id="oversized-life",
+            signed_contracts="1" * 2048,
+        )
+        self.assertEqual(self.book.transactions, ())
+        self.assertEqual(self.authority._events(), [])
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "invalid financial values",
+        ):
+            self.authority.apply(reference)
+        self.assertEqual(self.book.transactions, ())
+        self.assertEqual(self.authority._events(), [])
+
+    def test_authority_rejects_economic_book_subclass_before_virtual_dispatch(self):
+        class HostileEconomicBook(DurableProviderEconomicBook):
+            def read_cut(self):
+                raise AssertionError("hostile economic read-cut dispatch")
+
+        hostile = HostileEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "economic_book must be exact DurableProviderEconomicBook",
+        ):
+            self._authority(
+                registry=self.registry,
+                economic_book=hostile,
+            )
+
+    def test_lifecycle_rejects_post_construction_economic_method_shadow(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="shadowed-owner")
+        self.book.read_cut = lambda: (_ for _ in ()).throw(
+            AssertionError("shadowed economic cut dispatch")
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "DurableProviderEconomicBook authority is shadowed",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            self.book.position(f"{OPTION_ID}@1"),
+            Decimal("1"),
+        )
+
+    def test_evidence_callback_cannot_retarget_economic_book_scope(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="retarget-owner")
+        original_resolver = self.authority.evidence_resolver
+
+        def hostile_resolver(reference):
+            source = original_resolver(reference)
+            self.book.account_id = "attacker-account"
+            return source
+
+        self.authority.evidence_resolver = hostile_resolver
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "economic-book scope changed after lifecycle construction",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
+    def test_correction_position_projection_is_context_independent(self):
+        instrument = f"{OPTION_ID}@1"
+        current = book_equity_fill(
+            transaction_id="projection-current",
+            cause_event_id="projection-current-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="BUY",
+            quantity=Decimal("123456789012345678901234567890"),
+            price=Decimal("1"),
+        )
+        prior_retirement = book_equity_fill(
+            transaction_id="projection-prior",
+            cause_event_id="projection-prior-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="SELL",
+            quantity=Decimal("1"),
+            price=Decimal("1"),
+        )
+        cut = EconomicBookCut(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            transactions=(current,),
+            book_digest="sha256:" + "a" * 64,
+            aggregate_version=1,
+        )
+
+        values = []
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (80, ROUND_CEILING),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                values.append(
+                    _project_position_after_reversal(
+                        economic_cut=cut,
+                        instrument=instrument,
+                        old_active_transactions=(prior_retirement,),
+                    )
+                )
+        self.assertEqual(values[0], values[1])
+        self.assertEqual(
+            values[0],
+            Decimal("123456789012345678901234567891"),
+        )
+
+    def test_physical_exercise_strike_cash_is_context_independent(self):
+        high_precision_version = option_version(
+            strike="12345678901234567890.123456789",
+        )
+        registry = InstrumentRegistry(versions=(high_precision_version,))
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("2")
+
+        cash_amounts = []
+        contexts = (
+            (6, ROUND_FLOOR, "context-low", "context-low-r1"),
+            (80, ROUND_CEILING, "context-high", "context-high-r1"),
+        )
+        for precision, rounding, event_id, revision in contexts:
+            evidence_ref = self.evidence(
+                external_event_id=event_id,
+                provider_revision=revision,
+            )
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                result = authority.apply(evidence_ref)
+            by_id = {
+                item.transaction_id: item
+                for item in self.book.transactions
+            }
+            transaction = by_id[result.active_transaction_ids[0]]
+            cash_amounts.append(
+                next(
+                    posting.signed_amount
+                    for posting in transaction.postings
+                    if posting.asset_or_currency == "USD"
+                )
+            )
+
+        self.assertEqual(cash_amounts[0], cash_amounts[1])
+        self.assertEqual(
+            cash_amounts[0],
+            Decimal("-1234567890123456789012.3456789"),
+        )
+
     def seed_option_position(self, signed_contracts: str) -> None:
         quantity = Decimal(signed_contracts)
         if quantity == 0:
@@ -430,6 +638,103 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             self.store.load_events("option_lifecycle", self.authority.aggregate_id),
             [],
         )
+
+    def test_stale_facade_cannot_authorize_option_position_consumption(self):
+        self.seed_option_position("1")
+        stale_position = self.book.position(f"{OPTION_ID}@1")
+        self.assertEqual(stale_position, Decimal("1"))
+
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        competing_book.append(
+            book_equity_fill(
+                transaction_id="competing-option-consume",
+                cause_event_id="competing-option-consume-cause",
+                instrument=f"{OPTION_ID}@1",
+                settlement_currency="USD",
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+            )
+        )
+        self.assertEqual(competing_book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+
+        before_economic = tuple(
+            self.store.load_events("economic_book", self.book.book_id)
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "exceed canonical option position",
+        ):
+            self.authority.apply(self.evidence(external_event_id="stale-cut-life"))
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            tuple(self.store.load_events("economic_book", self.book.book_id)),
+            before_economic,
+        )
+
+    def test_economic_writer_between_position_cut_and_prepare_fails_closed(self):
+        self.seed_option_position("1")
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
+        raced = False
+
+        def racing_prepare(book, transactions, **kwargs):
+            nonlocal raced
+            if book is self.book and not raced:
+                raced = True
+                competing_book.append(
+                    book_equity_fill(
+                        transaction_id="racing-option-consume",
+                        cause_event_id="racing-option-consume-cause",
+                        instrument=f"{OPTION_ID}@1",
+                        settlement_currency="USD",
+                        side="SELL",
+                        quantity=Decimal("1"),
+                        price=Decimal("1"),
+                    )
+                )
+            return original_prepare(book, transactions, **kwargs)
+
+        with patch.object(
+            DurableProviderEconomicBook,
+            "prepare_batch_mutation",
+            new=racing_prepare,
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleConflict,
+                "changed after lifecycle position validation",
+            ):
+                self.authority.apply(
+                    self.evidence(external_event_id="race-cut-life")
+                )
+
+        self.assertTrue(raced)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        current = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        self.assertEqual(current.position(f"{OPTION_ID}@1"), Decimal("0"))
 
     def test_physical_exercise_is_exactly_once_across_restart(self):
         self.seed_option_position("1")

@@ -15,12 +15,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import re
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import JournalTransaction, posting, reverse_transaction
+from .accounting import AccountingConflict, JournalTransaction, posting, reverse_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_multiply,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -31,7 +37,7 @@ from .options import (
     physical_exercise_obligation,
 )
 from .persistence import JournalStore, payload_digest
-from .provider_activity_accounting import DurableProviderEconomicBook
+from .provider_activity_accounting import DurableProviderEconomicBook, EconomicBookCut
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -136,7 +142,7 @@ def _canonical_observation_from_sealed_response(
                 "cash_settlement_amount",
             )
         )
-    except (InvalidOperation, TypeError, ValueError) as error:
+    except (TypeError, ValueError) as error:
         raise OptionLifecycleError(
             "provider lifecycle payload contains invalid financial values"
         ) from error
@@ -180,15 +186,12 @@ def _text(value: str, name: str) -> str:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise OptionLifecycleError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionLifecycleError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionLifecycleError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -206,8 +209,7 @@ def _decimal_text(value: Decimal | None) -> str | None:
         return None
     if value == 0:
         return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered
+    return format(value.normalize(), "f")
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -279,6 +281,12 @@ class OptionLifecycleObservation:
             underlying = _decimal(underlying, "underlying_price")
             if underlying <= 0:
                 raise OptionLifecycleError("underlying_price must be positive")
+        cash_settlement = self.cash_settlement_amount
+        if cash_settlement is not None:
+            cash_settlement = _decimal(
+                cash_settlement,
+                "cash_settlement_amount",
+            )
         correction = self.corrects_external_event_id
         if correction is not None:
             correction = _text(correction, "corrects_external_event_id")
@@ -297,6 +305,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "provider_revision", revision)
         object.__setattr__(self, "underlying_price", underlying)
+        object.__setattr__(self, "cash_settlement_amount", cash_settlement)
         object.__setattr__(self, "corrects_external_event_id", correction)
 
 
@@ -356,7 +365,12 @@ def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
         raise OptionLifecycleError(
             "adjusted physical deliverable requires explicit canonical exercise cash evidence"
         )
-    return version.strike * version.contract_multiplier
+    try:
+        return exact_multiply(version.strike, version.contract_multiplier)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "physical exercise cash exceeds exact-decimal resource authority"
+        ) from error
 
 
 def _contract_from_version(version: InstrumentVersion) -> OptionContract:
@@ -508,11 +522,11 @@ def _economic_transaction(
 
 def _project_position_after_reversal(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     instrument: str,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> Decimal:
-    projected = economic_book.position(instrument)
+    projected = economic_cut.position(instrument)
     for transaction in old_active_transactions:
         matching = [
             item
@@ -524,20 +538,28 @@ def _project_position_after_reversal(
             raise OptionLifecycleConflict(
                 "prior lifecycle economics do not contain one option-position retirement"
             )
-        projected -= matching[0].signed_amount
+        try:
+            projected = exact_subtract(
+                projected,
+                matching[0].signed_amount,
+            )
+        except ExactDecimalError as error:
+            raise OptionLifecycleConflict(
+                "option position correction exceeds exact-decimal resource authority"
+            ) from error
     return projected
 
 
 def _require_consumable_option_position(
     *,
-    economic_book: DurableProviderEconomicBook,
+    economic_cut: EconomicBookCut,
     observation: OptionLifecycleObservation,
     version: InstrumentVersion,
     old_active_transactions: tuple[JournalTransaction, ...],
 ) -> None:
     instrument = f"{version.instrument_id}@{version.version}"
     available = _project_position_after_reversal(
-        economic_book=economic_book,
+        economic_cut=economic_cut,
         instrument=instrument,
         old_active_transactions=old_active_transactions,
     )
@@ -566,12 +588,12 @@ class DurableOptionLifecycleAuthority:
         lifecycle_endpoints: frozenset[str],
         permission_scope: str,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
         if not isinstance(registry, InstrumentRegistry):
             raise TypeError("registry must be InstrumentRegistry")
-        if not isinstance(economic_book, DurableProviderEconomicBook):
-            raise TypeError("economic_book must be DurableProviderEconomicBook")
+        if type(economic_book) is not DurableProviderEconomicBook:
+            raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         if economic_book.store is not store:
             raise ValueError("lifecycle and economic authorities must share one JournalStore")
         if not callable(evidence_resolver):
@@ -593,6 +615,13 @@ class DurableOptionLifecycleAuthority:
         self.evidence_resolver = evidence_resolver
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
+        self._expected_economic_scope = (
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            economic_book.book_id,
+        )
+        self._require_canonical_authorities()
         self.aggregate_id = _identity(
             "option-lifecycle-book",
             economic_book.provider_id,
@@ -600,8 +629,45 @@ class DurableOptionLifecycleAuthority:
             economic_book.environment,
         )
 
+    def _require_canonical_authorities(self) -> None:
+        if type(self.store) is not JournalStore:
+            raise TypeError("store must remain exact JournalStore")
+        if {"load_events", "commit_command"}.intersection(vars(self.store)):
+            raise TypeError("JournalStore authority is shadowed")
+        if type(self.economic_book) is not DurableProviderEconomicBook:
+            raise TypeError(
+                "economic_book must remain exact DurableProviderEconomicBook"
+            )
+        if {
+            "read_cut",
+            "prepare_batch_mutation",
+            "refresh",
+            "_events",
+            "_replay",
+        }.intersection(vars(self.economic_book)):
+            raise TypeError("DurableProviderEconomicBook authority is shadowed")
+        if self.economic_book.store is not self.store:
+            raise OptionLifecycleConflict(
+                "lifecycle and economic authorities no longer share one JournalStore"
+            )
+        current_scope = (
+            self.economic_book.provider_id,
+            self.economic_book.account_id,
+            self.economic_book.environment,
+            self.economic_book.book_id,
+        )
+        if current_scope != self._expected_economic_scope:
+            raise OptionLifecycleConflict(
+                "durable economic-book scope changed after lifecycle construction"
+            )
+
     def _events(self) -> list[dict[str, Any]]:
-        return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
+        self._require_canonical_authorities()
+        return JournalStore.load_events(
+            self.store,
+            self._AGGREGATE_TYPE,
+            self.aggregate_id,
+        )
 
     @staticmethod
     def _payload(event: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -621,6 +687,9 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
+        # Revalidate captured scope immediately after caller code, before
+        # interpreting the response using any retargeted financial owner.
+        self._require_canonical_authorities()
         if not isinstance(source, ProviderResponseObservation):
             raise OptionLifecycleError(
                 "provider lifecycle evidence must be a sealed ProviderResponseObservation"
@@ -672,7 +741,11 @@ class DurableOptionLifecycleAuthority:
         self,
         evidence_ref: str,
     ) -> OptionLifecycleApplyResult:
+        self._require_canonical_authorities()
         observation, provider_evidence = self._observation_from_evidence(evidence_ref)
+        # The evidence resolver is caller-supplied and may execute arbitrary code.
+        # Revalidate every canonical financial owner after crossing that callback.
+        self._require_canonical_authorities()
         if observation.provider_id != self.economic_book.provider_id:
             raise OptionLifecycleError("provider scope does not match economic book")
         if observation.account_id != self.economic_book.account_id:
@@ -735,6 +808,8 @@ class DurableOptionLifecycleAuthority:
                 ),
             )
 
+        economic_cut = DurableProviderEconomicBook.read_cut(self.economic_book)
+
         prior_event: Mapping[str, Any] | None = None
         prior_payload: Mapping[str, Any] | None = None
         root_external_id = observation.external_event_id
@@ -793,7 +868,7 @@ class DurableOptionLifecycleAuthority:
                 or prior_payload.get("external_event_id")
             )
             active_ids = tuple(prior_payload.get("active_transaction_ids", ()))
-            by_id = {item.transaction_id: item for item in self.economic_book.transactions}
+            by_id = {item.transaction_id: item for item in economic_cut.transactions}
             missing = [transaction_id for transaction_id in active_ids if transaction_id not in by_id]
             if missing:
                 raise OptionLifecycleConflict(
@@ -806,7 +881,7 @@ class DurableOptionLifecycleAuthority:
                 )
 
         _require_consumable_option_position(
-            economic_book=self.economic_book,
+            economic_cut=economic_cut,
             observation=observation,
             version=version,
             old_active_transactions=old_active_transactions,
@@ -863,14 +938,24 @@ class DurableOptionLifecycleAuthority:
         )
         economic_transactions = tuple(reversal_transactions + [replacement])
 
-        plan = (
-            self.economic_book.prepare_batch_mutation(
-                economic_transactions,
-                committed_at=_utc_text(observation.observed_at),
+        try:
+            plan = (
+                DurableProviderEconomicBook.prepare_batch_mutation(
+                    self.economic_book,
+                    economic_transactions,
+                    committed_at=_utc_text(observation.observed_at),
+                    expected_previous_book_digest=economic_cut.book_digest,
+                )
+                if economic_transactions
+                else None
             )
-            if economic_transactions
-            else None
-        )
+        except AccountingConflict as error:
+            DurableProviderEconomicBook.refresh(self.economic_book)
+            if str(error) == "economic book changed after validated read cut":
+                raise OptionLifecycleConflict(
+                    "canonical economic book changed after lifecycle position validation"
+                ) from error
+            raise
         if plan is not None and plan.already_committed:
             raise OptionLifecycleConflict(
                 "fresh lifecycle identity maps to economics already committed elsewhere"
@@ -945,7 +1030,9 @@ class DurableOptionLifecycleAuthority:
             observation.environment,
             observation.external_event_id,
         )
-        _, inserted, _ = self.store.commit_command(
+        self._require_canonical_authorities()
+        _, inserted, _ = JournalStore.commit_command(
+            self.store,
             command_id=command_id,
             actor=self._ACTOR,
             environment=observation.environment,
@@ -957,7 +1044,7 @@ class DurableOptionLifecycleAuthority:
             state_version=next_version,
             events=commit_events,
         )
-        self.economic_book.refresh()
+        DurableProviderEconomicBook.refresh(self.economic_book)
         return OptionLifecycleApplyResult(
             lifecycle_event_id=lifecycle_event_id,
             inserted=inserted,

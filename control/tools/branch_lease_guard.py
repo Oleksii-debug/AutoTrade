@@ -242,8 +242,17 @@ def evaluate_guard(
             return {**base, "status": "AMBIGUOUS", "mutation_writer_run_ids": writers, "evidence": [f"non-contiguous mutation evidence at {index}"]}
         if not isinstance(run_id, str) or not run_id.strip():
             return {**base, "status": "AMBIGUOUS", "mutation_writer_run_ids": writers, "evidence": [f"mutations[{index}] missing run_id"]}
-        if not isinstance(record_claim_id, str) or not record_claim_id.strip():
-            return {**base, "status": "AMBIGUOUS", "mutation_writer_run_ids": writers, "evidence": [f"mutations[{index}] missing claim_id"]}
+        if (
+            type(record_claim_id) is not str
+            or not record_claim_id
+            or record_claim_id != record_claim_id.strip()
+        ):
+            return {
+                **base,
+                "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
+                "evidence": [f"mutations[{index}] missing or non-canonical claim_id"],
+            }
         try:
             normalized_record_generation = _positive_generation(
                 record_claim_generation,
@@ -251,7 +260,7 @@ def evaluate_guard(
             )
         except ValueError as exc:
             return {**base, "status": "AMBIGUOUS", "mutation_writer_run_ids": writers, "evidence": [str(exc)]}
-        if record_claim_id.strip() != owner_claim_id or normalized_record_generation != owner_claim_generation:
+        if record_claim_id != owner_claim_id or normalized_record_generation != owner_claim_generation:
             return {
                 **base,
                 "status": "COLLISION",

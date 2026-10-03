@@ -211,6 +211,9 @@ internal static class Program
             !policy.AllowsDeveloperTools,
             "release-mode developer tools were admitted by the trust policy");
         Check.True(
+            !policy.AllowsServiceWorkers,
+            "service workers acquired same-origin interception authority");
+        Check.True(
             !policy.AllowsDownloads,
             "embedded downloads were admitted by the trust policy");
         Check.True(

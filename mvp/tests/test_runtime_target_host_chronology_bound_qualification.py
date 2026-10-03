@@ -140,7 +140,9 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
     def _qualification(*, store_digest: str = STORE_DIGEST):
         accepted = AcceptedRuntimeTargetHostQualification(
             attestation_id=ATTESTATION_ID,
-            attestation_digest=ATTESTATION_DIGEST,
+            attestation_digest=(
+                RuntimeTargetHostChronologyBoundTests._receipt().attestation.content_digest
+            ),
             source_sha=SOURCE_SHA,
             scenario_id="target-host-pressure",
             spec_digest="sha256:" + "9" * 64,
@@ -318,6 +320,34 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeTargetHostChronologyBindingError,
             "signed WP-65 JournalStore identity",
+        ):
+            self._verify(chronology, qualification=bad)
+
+    def test_signed_wp65_acceptance_must_match_exact_receipt_attestation_id(self):
+        chronology = self._chronology()
+        bad = self._qualification()
+        object.__setattr__(
+            bad.qualification,
+            "attestation_id",
+            str(uuid5(NAMESPACE_URL, "substituted-wp65-attestation")),
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostChronologyBindingError,
+            "signed WP-65 attestation id",
+        ):
+            self._verify(chronology, qualification=bad)
+
+    def test_signed_wp65_acceptance_must_match_exact_receipt_attestation_digest(self):
+        chronology = self._chronology()
+        bad = self._qualification()
+        object.__setattr__(
+            bad.qualification,
+            "attestation_digest",
+            "sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostChronologyBindingError,
+            "signed WP-65 attestation digest",
         ):
             self._verify(chronology, qualification=bad)
 

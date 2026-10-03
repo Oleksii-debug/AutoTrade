@@ -10,7 +10,7 @@ from __future__ import annotations
 from math import isfinite
 from typing import Any
 
-from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 
 
 STATE_TEXT = {
@@ -46,7 +46,7 @@ def _reservation_amount_text(value: Any) -> str:
     if type(value) is not str or not value or value != value.strip():
         return ""
     try:
-        amount = parse_bounded_exact_decimal(value)
+        amount = parse_canonical_decimal_text(value)
     except ExactDecimalError:
         return ""
     if amount < 0:

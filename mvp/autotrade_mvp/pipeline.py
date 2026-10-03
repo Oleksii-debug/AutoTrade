@@ -35,21 +35,45 @@ def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     return parse_bounded_exact_decimal(value)
 
 
-def _money(value: Decimal | str | int) -> Decimal:
+def _money_fraction(value: Fraction) -> Decimal:
     return round_fraction_to_quantum(
-        as_fraction(_exact_decimal(value, name="money")),
-        MONEY_QUANTUM, mode="HALF_EVEN",
+        bounded_fraction(value), MONEY_QUANTUM, mode="HALF_EVEN",
     )
 
 
-def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
+def _money(value: Decimal | str | int) -> Decimal:
+    return _money_fraction(as_fraction(_exact_decimal(value, name="money")))
+
+
+def _bounded_product(*values: Decimal) -> Fraction:
+    result = Fraction(1, 1)
+    for value in values:
+        result = bounded_fraction(result * as_fraction(value))
+    return result
+
+
+def _bounded_sum(values: Iterable[Decimal]) -> Fraction:
+    result = Fraction(0, 1)
+    for value in values:
+        result = bounded_fraction(result + as_fraction(value))
+    return result
+
+
+def handle_market_data(prices: Iterable[float | int | str | Decimal]) -> list[Decimal]:
     normalized: list[Decimal] = []
     for value in prices:
         try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
+            # Preserve the legacy float-facing simulation seam, but perform a
+            # bounded textual admission before Decimal construction.  Every
+            # other scalar goes through the shared exact authority directly.
+            numeric = (
+                parse_bounded_exact_decimal(repr(value))
+                if type(value) is float
+                else _exact_decimal(value, name="price")
+            )
+        except (TypeError, ValueError, ArithmeticError) as error:
             raise ValueError("Prices must be finite and positive") from error
-        if not numeric.is_finite() or numeric <= 0:
+        if numeric <= 0:
             raise ValueError("Prices must be finite and positive")
         normalized_price = _money(numeric)
         if normalized_price <= 0:
@@ -85,7 +109,10 @@ def handle_reconciliation(provider: SimulatedProvider, ledger: EconomicLedger) -
 
 
 def handle_portfolio(ledger: EconomicLedger, last_price: Decimal) -> Decimal:
-    return _money(ledger.cash + ledger.position * last_price)
+    equity = bounded_fraction(
+        as_fraction(ledger.cash) + _bounded_product(ledger.position, last_price)
+    )
+    return _money_fraction(equity)
 
 
 def handle_restart_recovery(state_dir: str | Path, initial_cash: Decimal) -> tuple[dict, bool]:
@@ -264,13 +291,19 @@ class RiskGate:
 
     def admit(self, decision: Decision, current_position: Decimal, current_cash: Decimal,
               fee_rate: Decimal) -> tuple[bool, str]:
-        signed = decision.quantity if decision.side == "BUY" else -decision.quantity
-        if abs(current_position + signed) > self.max_abs_position:
+        quantity = as_fraction(decision.quantity)
+        signed = quantity if decision.side == "BUY" else -quantity
+        next_position = bounded_fraction(as_fraction(current_position) + signed)
+        if abs(next_position) > as_fraction(self.max_abs_position):
             return False, "max_position"
-        if decision.quantity * decision.price > self.max_notional:
+        notional = bounded_fraction(quantity * as_fraction(decision.price))
+        if notional > as_fraction(self.max_notional):
             return False, "max_notional"
-        if decision.side == "BUY" and decision.quantity * decision.price * (1 + fee_rate) > current_cash:
-            return False, "insufficient_cash"
+        if decision.side == "BUY":
+            fee_multiplier = bounded_fraction(Fraction(1, 1) + as_fraction(fee_rate))
+            cash_required = bounded_fraction(notional * fee_multiplier)
+            if cash_required > as_fraction(current_cash):
+                return False, "insufficient_cash"
         return True, "admitted"
 
 
@@ -283,6 +316,7 @@ class SimulatedProvider:
         if previous is not None:
             return previous
         fill_id = "fill-" + sha256(intent.client_order_id.encode("utf-8")).hexdigest()[:20]
+        fee = _money_fraction(_bounded_product(intent.quantity, intent.price, fee_rate))
         fill = Fill(
             fill_id=fill_id,
             client_order_id=intent.client_order_id,
@@ -290,7 +324,7 @@ class SimulatedProvider:
             side=intent.side,
             quantity=intent.quantity,
             price=intent.price,
-            fee=_money(intent.quantity * intent.price * fee_rate),
+            fee=fee,
         )
         self.fills[intent.client_order_id] = fill
         return fill
@@ -304,12 +338,19 @@ class EconomicLedger:
     def apply_fill(self, fill: Fill) -> bool:
         if any(row["fill_id"] == fill.fill_id for row in self.postings):
             return False
-        signed_quantity = fill.quantity if fill.side == "BUY" else -fill.quantity
-        cash_delta = -(signed_quantity * fill.price) - fill.fee
+        signed_fraction = (
+            as_fraction(fill.quantity)
+            if fill.side == "BUY"
+            else -as_fraction(fill.quantity)
+        )
+        signed_quantity = terminating_decimal(bounded_fraction(signed_fraction))
+        cash_delta = bounded_fraction(
+            -(signed_fraction * as_fraction(fill.price)) - as_fraction(fill.fee)
+        )
         self.postings.append(
             {
                 "fill_id": fill.fill_id,
-                "cash_delta": str(_money(cash_delta)),
+                "cash_delta": str(_money_fraction(cash_delta)),
                 "position_delta": str(signed_quantity),
                 "fee": str(fill.fee),
             }
@@ -318,11 +359,20 @@ class EconomicLedger:
 
     @property
     def cash(self) -> Decimal:
-        return _money(self.initial_cash + sum((Decimal(row["cash_delta"]) for row in self.postings), Decimal("0")))
+        deltas = (
+            _exact_decimal(row["cash_delta"], name="checkpoint cash_delta")
+            for row in self.postings
+        )
+        total = bounded_fraction(as_fraction(self.initial_cash) + _bounded_sum(deltas))
+        return _money_fraction(total)
 
     @property
     def position(self) -> Decimal:
-        return sum((Decimal(row["position_delta"]) for row in self.postings), Decimal("0"))
+        deltas = (
+            _exact_decimal(row["position_delta"], name="checkpoint position_delta")
+            for row in self.postings
+        )
+        return terminating_decimal(_bounded_sum(deltas))
 
 
 def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
@@ -399,9 +449,20 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
         raise ValueError("Fill and ledger counts do not reconcile")
     for fill in provider.fills.values():
         row = postings.get(fill.fill_id)
-        signed = fill.quantity if fill.side == "BUY" else -fill.quantity
-        expected_cash = _money(-signed * fill.price - fill.fee)
-        if row is None or Decimal(row["position_delta"]) != signed or _money(row["cash_delta"]) != expected_cash:
+        signed_fraction = (
+            as_fraction(fill.quantity)
+            if fill.side == "BUY"
+            else -as_fraction(fill.quantity)
+        )
+        signed = terminating_decimal(bounded_fraction(signed_fraction))
+        expected_cash = _money_fraction(
+            bounded_fraction(-(signed_fraction * as_fraction(fill.price)) - as_fraction(fill.fee))
+        )
+        if row is None:
+            raise ValueError("Fill and economic ledger do not reconcile")
+        row_position = _exact_decimal(row["position_delta"], name="checkpoint position_delta")
+        row_cash = _exact_decimal(row["cash_delta"], name="checkpoint cash_delta")
+        if row_position != signed or row_cash != expected_cash:
             raise ValueError("Fill and economic ledger do not reconcile")
     return True
 
@@ -428,7 +489,7 @@ def verify_replay(state_dir: str | Path) -> bool:
 
 
 def run_vertical_slice(
-    prices: Iterable[float | str | Decimal],
+    prices: Iterable[float | int | str | Decimal],
     state_dir: str | Path,
     *,
     symbol: str = "SIM",
@@ -449,7 +510,7 @@ def run_vertical_slice(
     rate = _exact_decimal(fee_rate, name="fee_rate")
     if starting_cash <= 0 or quantity <= 0 or position_limit <= 0 or notional_limit <= 0:
         raise ValueError("Cash, order quantity and risk limits must be positive")
-    if not rate.is_finite() or rate < 0 or rate >= 1:
+    if rate < 0 or rate >= 1:
         raise ValueError("Fee rate must be finite and between zero and one")
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
@@ -457,15 +518,25 @@ def run_vertical_slice(
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed and state.get("symbol", symbol) != symbol:
         raise ValueError("Checkpoint belongs to another symbol")
-    ledger = EconomicLedger(Decimal(state["initial_cash"]), list(state.get("postings", [])))
-    restored_fills = {
-        key: Fill(
-            fill_id=value["fill_id"], client_order_id=value["client_order_id"], symbol=value["symbol"],
-            side=value["side"], quantity=Decimal(value["quantity"]), price=Decimal(value["price"]),
-            fee=Decimal(value["fee"]),
+    try:
+        restored_initial_cash = _exact_decimal(
+            state["initial_cash"], name="checkpoint initial_cash"
         )
-        for key, value in state.get("fills", {}).items()
-    }
+        restored_fills = {
+            key: Fill(
+                fill_id=value["fill_id"],
+                client_order_id=value["client_order_id"],
+                symbol=value["symbol"],
+                side=value["side"],
+                quantity=_exact_decimal(value["quantity"], name="checkpoint fill quantity"),
+                price=_exact_decimal(value["price"], name="checkpoint fill price"),
+                fee=_exact_decimal(value["fee"], name="checkpoint fill fee"),
+            )
+            for key, value in state.get("fills", {}).items()
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Corrupt checkpoint financial scalar") from error
+    ledger = EconomicLedger(restored_initial_cash, list(state.get("postings", [])))
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
     normalized = handle_market_data(prices)
@@ -567,7 +638,7 @@ def run_vertical_slice(
 
 
 def run_multi_episode(
-    episodes: Iterable[Iterable[float | str | Decimal]],
+    episodes: Iterable[Iterable[float | int | str | Decimal]],
     state_dir: str | Path,
     **kwargs,
 ) -> list[RunResult]:

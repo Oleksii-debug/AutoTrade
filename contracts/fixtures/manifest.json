@@ -1,5 +1,5 @@
 {
-  "corpus_version": "5.0.0",
+  "corpus_version": "6.0.0",
   "fixtures": [
     {
       "path": "dataset-manifest.valid.json",
@@ -17,6 +17,12 @@
       "path": "instrument-version.valid.json",
       "schema": "market.schema.json",
       "definition": "InstrumentVersion",
+      "expected": "valid"
+    },
+    {
+      "path": "market-event.valid.json",
+      "schema": "market.schema.json",
+      "definition": "MarketEvent",
       "expected": "valid"
     },
     {

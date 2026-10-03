@@ -28,6 +28,7 @@ from .accounting import (
     book_external_cash_flow,
     canonical_transaction,
 )
+from .exact_decimal import ExactDecimalError, exact_sum
 from .durable_reservations import (
     DurableReservationBook,
     reservation_snapshot_digest,
@@ -254,12 +255,19 @@ class EconomicBookCut:
     aggregate_version: int
 
     def position(self, instrument: str) -> Decimal:
-        projection = ScopedEconomicBook(
-            environment=self.environment,
-            account_id=self.account_id,
-            transactions=self.transactions,
-        )
-        return projection.position(instrument)
+        value = _text(instrument, name="instrument")
+        try:
+            return exact_sum(
+                item.signed_amount
+                for transaction in self.transactions
+                for item in transaction.postings
+                if item.ledger_account == f"POSITION:{value}"
+                and item.asset_or_currency == value
+            )
+        except ExactDecimalError as error:
+            raise AccountingConflict(
+                "economic cut position exceeds exact-decimal resource authority"
+            ) from error
 
 
 _PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"

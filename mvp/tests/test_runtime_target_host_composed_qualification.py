@@ -720,7 +720,7 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
-            "resource sample metrics must remain canonical mappingproxy",
+            "resource sample metrics must remain canonical exact-dict mappingproxy",
         ):
             target_host_measurement_projection_digests(current)
 

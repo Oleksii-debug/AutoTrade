@@ -36,6 +36,14 @@ def _required_text(value: object, *, name: str) -> str:
     return value.strip()
 
 
+def _credential_text(value: object, *, name: str, uppercase: bool = False) -> str:
+    """Reject executable text subclasses before credential-scope callbacks."""
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be exact non-empty text")
+    normalized = value.strip()
+    return normalized.upper() if uppercase else normalized
+
+
 def _authenticated_origin(value: object) -> str:
     origin = _required_text(value, name="origin")
     parsed = urlsplit(origin)
@@ -369,14 +377,25 @@ class SecurityBoundary:
         provider_environment: str | None = None,
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-        normalized_purpose = _required_text(purpose, name="purpose").upper()
+        normalized_purpose = _credential_text(
+            purpose,
+            name="purpose",
+            uppercase=True,
+        )
         if normalized_purpose not in self._CREDENTIAL_PURPOSES:
             raise PermissionError("Credential purpose is unsupported")
         return self._credential_vault.register(
-            owner_identity=_required_text(owner_identity, name="owner_identity"),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
+            owner_identity=_credential_text(
+                owner_identity,
+                name="owner_identity",
+            ),
+            account_id=_credential_text(account_id, name="account_id"),
+            provider=_credential_text(provider, name="provider"),
+            environment=_credential_text(
+                environment,
+                name="environment",
+                uppercase=True,
+            ),
             purpose=normalized_purpose,
             secret_value=secret_value,
             provider_environment=provider_environment,
@@ -384,16 +403,16 @@ class SecurityBoundary:
 
     def _current_handle(self, handle_id: str) -> CredentialHandle:
         metadata = self._credential_vault.describe(
-            _required_text(handle_id, name="handle_id")
+            _credential_text(handle_id, name="handle_id")
         )
         return CredentialHandle(
-            handle_id=str(metadata["handle_id"]),
-            account_id=str(metadata["account_id"]),
-            provider=str(metadata["provider"]),
-            environment=str(metadata["environment"]),
-            provider_environment=str(metadata["provider_environment"]),
-            purpose=str(metadata["purpose"]),
-            generation=int(metadata["generation"]),
+            handle_id=metadata["handle_id"],
+            account_id=metadata["account_id"],
+            provider=metadata["provider"],
+            environment=metadata["environment"],
+            provider_environment=metadata["provider_environment"],
+            purpose=metadata["purpose"],
+            generation=metadata["generation"],
         )
 
     def rotate_secret(
@@ -409,7 +428,10 @@ class SecurityBoundary:
         current = self._current_handle(handle_id)
         return self._credential_vault.rotate(
             current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
+            execution_identity=_credential_text(
+                owner_identity,
+                name="owner_identity",
+            ),
             new_secret_value=new_secret_value,
         )
 
@@ -425,7 +447,10 @@ class SecurityBoundary:
         current = self._current_handle(handle_id)
         self._credential_vault.revoke(
             current,
-            execution_identity=_required_text(owner_identity, name="owner_identity"),
+            execution_identity=_credential_text(
+                owner_identity,
+                name="owner_identity",
+            ),
         )
 
     def resolve_for_execution(
@@ -446,13 +471,22 @@ class SecurityBoundary:
             raise PermissionError("Credential handle is invalid")
         return self._credential_vault.resolve(
             handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
+            execution_identity=_credential_text(
+                execution_identity,
+                name="execution_identity",
             ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
+            account_id=_credential_text(account_id, name="account_id"),
+            provider=_credential_text(provider, name="provider"),
+            environment=_credential_text(
+                environment,
+                name="environment",
+                uppercase=True,
+            ),
+            purpose=_credential_text(
+                purpose,
+                name="purpose",
+                uppercase=True,
+            ),
             provider_environment=provider_environment,
         )
 
@@ -477,20 +511,29 @@ class SecurityBoundary:
             raise PermissionError("Credential handle is invalid")
         with self._credential_vault.lease(
             handle,
-            execution_identity=_required_text(
-                execution_identity, name="execution_identity"
+            execution_identity=_credential_text(
+                execution_identity,
+                name="execution_identity",
             ),
-            account_id=_required_text(account_id, name="account_id"),
-            provider=_required_text(provider, name="provider"),
-            environment=_required_text(environment, name="environment").upper(),
-            purpose=_required_text(purpose, name="purpose").upper(),
+            account_id=_credential_text(account_id, name="account_id"),
+            provider=_credential_text(provider, name="provider"),
+            environment=_credential_text(
+                environment,
+                name="environment",
+                uppercase=True,
+            ),
+            purpose=_credential_text(
+                purpose,
+                name="purpose",
+                uppercase=True,
+            ),
             provider_environment=provider_environment,
         ) as plaintext:
             yield plaintext
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:
         return self._credential_vault.describe(
-            _required_text(handle_id, name="handle_id")
+            _credential_text(handle_id, name="handle_id")
         )
 
     @staticmethod

@@ -334,6 +334,18 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             ):
                 _capture(response=response)
 
+    def test_direct_capture_structural_depth_is_bounded(self):
+        nested = 0
+        for _ in range(65):
+            nested = [nested]
+        with self.assertRaisesRegex(ProviderCoreError, "depth"):
+            _capture(
+                response={
+                    "retCode": 10003,
+                    "nested": nested,
+                }
+            )
+
     def test_exact_json_lists_and_finite_scalars_remain_digestible(self):
         evidence = _capture(
             response={
@@ -887,10 +899,21 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             self.assertNotIn("?", request.url)
             self.assertEqual(request.headers["X-BAPI-API-KEY"], "probe-key")
             self.assertNotIn("probe-secret", repr(request.headers))
+            self.assertNotIn("probe-key", repr(request))
+            self.assertNotIn(request.headers["X-BAPI-SIGN"], repr(request))
             self.assertIs(
                 evidence.classification,
                 BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
             )
+
+    def test_transport_repr_redacts_raw_provider_body(self):
+        marker = b'RAW-PROVIDER-BODY-MUST-NOT-ENTER-REPR'
+        raw = BybitCredentialProbeRawHttpResponse(
+            http_status=200,
+            body=marker,
+        )
+        self.assertNotIn(marker.decode("ascii"), repr(raw))
+        self.assertIn("http_status=200", repr(raw))
 
     def test_shared_wire_adapter_rejects_origin_escape_before_send(self):
         client = _FakeProbeWireClient(

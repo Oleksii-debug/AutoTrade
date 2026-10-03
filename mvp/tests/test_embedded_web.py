@@ -1,7 +1,10 @@
 from hashlib import sha256
+import http.client
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Thread
+import socket
 import unittest
 
 from mvp.autotrade_mvp.embedded_web import (
@@ -12,6 +15,7 @@ from mvp.autotrade_mvp.embedded_web import (
     load_immutable_web_bundle,
 )
 from mvp.autotrade_mvp.host_network import (
+    AuthenticatedHostServer,
     header_principal_resolver,
     public_session_reference,
 )
@@ -460,6 +464,102 @@ class EmbeddedWebTests(unittest.TestCase):
         )
         self.assertEqual(encoded.status, 404)
         self.assertEqual(absolute.status, 400)
+
+    def test_concrete_host_server_serves_ui_and_api_on_one_origin(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        origin = f"http://127.0.0.1:{port}"
+
+        vault = ProtectedCredentialVault(
+            Path(self.directory.name) / f"wire-{port}-credentials.json",
+            protector=DeterministicProtector(),
+        )
+        boundary = SecurityBoundary(
+            allowed_origins={origin},
+            credential_vault=vault,
+            session_authorizer=lambda subject, role, paired_origin: True,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=origin,
+            ttl_seconds=600,
+        )
+        app = EmbeddedWebHostApplication(
+            JournalStore(str(Path(self.directory.name) / f"wire-{port}.sqlite3")),
+            security_boundary=boundary,
+            account_id="paper-account-1",
+            environment="PAPER",
+            host_id="host-local-1",
+            public_origin=origin,
+            principal_resolver=header_principal_resolver,
+            snapshot_provider=self._snapshot,
+            now=lambda: "2026-09-25T09:30:00Z",
+            web_bundle=self.web_bundle,
+        )
+        server = AuthenticatedHostServer(("127.0.0.1", port), app)
+        self.addCleanup(server.server_close)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", "/index.html")
+        ui = conn.getresponse()
+        ui_body = ui.read()
+        self.assertEqual(ui.status, 200)
+        self.assertEqual(
+            ui_body,
+            self.web_bundle.asset_for_path("/index.html").body,
+        )
+        self.assertEqual(ui.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(
+            ui.getheader("X-AutoTrade-Web-Bundle"),
+            self.web_bundle.bundle_sha256,
+        )
+        self.assertEqual(
+            ui.getheader("X-AutoTrade-Host-Api-Contract"),
+            HOST_API_CONTRACT_VERSION,
+        )
+        self.assertIsNone(ui.getheader("Location"))
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "GET",
+            "/api/v1/state",
+            headers={
+                "Authorization": "AutoTrade-Session " + session.token,
+                "X-AutoTrade-Actor": "owner",
+                "Origin": origin,
+                "Accept": "application/json",
+            },
+        )
+        api = conn.getresponse()
+        payload = json.loads(api.read().decode("utf-8"))
+        self.assertEqual(api.status, 200)
+        self.assertEqual(payload["account_id"], "paper-account-1")
+        self.assertEqual(payload["environment"], "PAPER")
+        self.assertNotIn(session.token, json.dumps(payload))
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "GET",
+            "/app.js",
+            headers={
+                "Authorization": "AutoTrade-Session " + session.token,
+                "X-AutoTrade-Actor": "owner",
+            },
+        )
+        leaked = conn.getresponse()
+        leaked_body = leaked.read().decode("utf-8")
+        self.assertEqual(leaked.status, 400)
+        self.assertNotIn(session.token, leaked_body)
+        conn.close()
 
     def test_api_routes_delegate_unchanged_to_canonical_authenticated_host(self):
         denied = self.app.dispatch(

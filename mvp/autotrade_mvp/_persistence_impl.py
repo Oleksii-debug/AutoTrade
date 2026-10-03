@@ -52,8 +52,8 @@ def _validated_expected_whole_store_counts(
 ) -> dict[str, int] | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping):
-        raise TypeError("expected_whole_store_counts must be a mapping or None")
+    if type(value) is not dict:
+        raise TypeError("expected_whole_store_counts must be an exact dict or None")
     if set(value) != set(_WHOLE_STORE_STATE_TABLES):
         raise ValueError(
             "expected_whole_store_counts must cover the exact business-state tables"

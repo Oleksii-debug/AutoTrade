@@ -2,10 +2,13 @@
 
 This module is a measurement adapter over the canonical JournalStore and the
 existing performance evaluator. It does not schedule financial work, throttle
-the runtime, or create trading authority. A campaign plan predeclares the exact
-financial event identities and aggregate types it expects; completion derives
-recovery from the durable journal cut rather than accepting caller-authored
-event counts.
+the runtime, or create trading authority. A campaign plan predeclares exact
+financial event identities; completion derives recovery from the durable journal
+cut rather than accepting caller-authored event counts.
+
+Financial classification is not caller authority. The full contiguous journal
+cut is classified through the versioned persistence/domain taxonomy before the
+financial subset is selected. Unknown durable aggregate families fail closed.
 """
 
 from __future__ import annotations
@@ -18,6 +21,11 @@ import json
 import re
 import time
 
+from .journal_taxonomy import (
+    JournalTaxonomyError,
+    is_financial_for_qualification,
+    taxonomy_digest,
+)
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetError,
@@ -30,6 +38,7 @@ from .persistence import JournalStore
 
 _CUT_TOKEN = object()
 _EVIDENCE_TOKEN = object()
+_CURRENT_TAXONOMY_DIGEST = taxonomy_digest()
 
 
 def _text(value: object, *, name: str) -> str:
@@ -88,7 +97,11 @@ def _digest(payload: Mapping[str, object]) -> str:
 
 @dataclass(frozen=True)
 class RuntimeCampaignPlan:
-    """Frozen workload identity and durable financial conservation expectation."""
+    """Frozen workload identity and durable financial conservation expectation.
+
+    ``financial_aggregate_types`` is retained as compatibility/assertion metadata
+    only. It is deliberately not used to select financial events from the cut.
+    """
 
     scenario_id: str
     spec_digest: str
@@ -100,6 +113,7 @@ class RuntimeCampaignPlan:
     expected_financial_event_ids: tuple[str, ...]
     financial_aggregate_types: tuple[str, ...]
     release_artifact_sha256: str | None = None
+    journal_taxonomy_digest: str = _CURRENT_TAXONOMY_DIGEST
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scenario_id", _text(self.scenario_id, name="scenario_id"))
@@ -156,6 +170,15 @@ class RuntimeCampaignPlan:
                     name="release_artifact_sha256",
                 ),
             )
+        bound_taxonomy = _sha256_identity(
+            self.journal_taxonomy_digest,
+            name="journal_taxonomy_digest",
+        )
+        if bound_taxonomy != _CURRENT_TAXONOMY_DIGEST:
+            raise RuntimeBudgetError(
+                "runtime campaign plan belongs to another journal taxonomy"
+            )
+        object.__setattr__(self, "journal_taxonomy_digest", bound_taxonomy)
 
     @classmethod
     def create(
@@ -195,6 +218,7 @@ class RuntimeCampaignPlan:
             expected_financial_event_ids=tuple(expected_financial_event_ids),
             financial_aggregate_types=tuple(financial_aggregate_types),
             release_artifact_sha256=release_artifact_sha256,
+            journal_taxonomy_digest=_CURRENT_TAXONOMY_DIGEST,
         )
 
     @property
@@ -211,6 +235,7 @@ class RuntimeCampaignPlan:
                 "expected_financial_event_ids": list(self.expected_financial_event_ids),
                 "financial_aggregate_types": list(self.financial_aggregate_types),
                 "release_artifact_sha256": self.release_artifact_sha256,
+                "journal_taxonomy_digest": self.journal_taxonomy_digest,
             }
         )
 
@@ -271,6 +296,7 @@ class RuntimeCampaignEvidence:
     reconnect_backlog_remaining: int
     resource_evidence_hash: str
     resource_metrics: Mapping[str, int]
+    journal_taxonomy_digest: str = ""
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -335,11 +361,10 @@ class RuntimeCampaignEvidence:
         seen: set[str] = set()
         previous_sequence = start
         for value in self.recovered_financial_event_bindings:
-            if (
-                not isinstance(value, tuple)
-                or len(value) != 3
-            ):
-                raise RuntimeBudgetError("recovered event binding must be (id, digest, sequence)")
+            if not isinstance(value, tuple) or len(value) != 3:
+                raise RuntimeBudgetError(
+                    "recovered event binding must be (id, digest, sequence)"
+                )
             event_id = _text(value[0], name="recovered event_id")
             event_digest = _sha256_identity(value[1], name="recovered payload_hash")
             sequence = _positive_int(value[2], name="recovered journal_sequence")
@@ -402,8 +427,19 @@ class RuntimeCampaignEvidence:
                 allow_zero=True,
             )
         object.__setattr__(
-            self, "resource_metrics", MappingProxyType(dict(sorted(normalized_metrics.items())))
+            self,
+            "resource_metrics",
+            MappingProxyType(dict(sorted(normalized_metrics.items()))),
         )
+        bound_taxonomy = _sha256_identity(
+            self.journal_taxonomy_digest,
+            name="journal_taxonomy_digest",
+        )
+        if bound_taxonomy != _CURRENT_TAXONOMY_DIGEST:
+            raise RuntimeBudgetError(
+                "runtime campaign evidence belongs to another journal taxonomy"
+            )
+        object.__setattr__(self, "journal_taxonomy_digest", bound_taxonomy)
 
     @property
     def recovered_financial_event_ids(self) -> tuple[str, ...]:
@@ -434,6 +470,7 @@ class RuntimeCampaignEvidence:
                 "reconnect_backlog_remaining": self.reconnect_backlog_remaining,
                 "resource_evidence_hash": self.resource_evidence_hash,
                 "resource_metrics": dict(self.resource_metrics),
+                "journal_taxonomy_digest": self.journal_taxonomy_digest,
             }
         )
 
@@ -446,7 +483,9 @@ class RuntimeCampaignEvidence:
             or spec.configuration_hash != self.configuration_hash
             or spec.host_fingerprint != self.host_fingerprint
         ):
-            raise RuntimeBudgetError("campaign evidence identity does not match runtime budget spec")
+            raise RuntimeBudgetError(
+                "campaign evidence identity does not match runtime budget spec"
+            )
         return RuntimeLoadObservation.create(
             scenario_id=spec.scenario_id,
             spec_digest=spec.digest,
@@ -485,6 +524,8 @@ def begin_runtime_campaign(
         or plan.host_fingerprint != spec.host_fingerprint
     ):
         raise RuntimeBudgetError("runtime campaign plan does not match budget spec")
+    if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
+        raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
     started_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="started_monotonic_ns",
@@ -523,13 +564,18 @@ def collect_runtime_campaign_evidence(
         raise TypeError("cut must be RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
+    if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
+        raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
+
     ended_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="ended_monotonic_ns",
         allow_zero=True,
     )
     if ended_monotonic_ns < cut.started_monotonic_ns:
-        raise RuntimeBudgetError("monotonic clock moved backwards during runtime campaign")
+        raise RuntimeBudgetError(
+            "monotonic clock moved backwards during runtime campaign"
+        )
     elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
     observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
     declared_duration_us = plan.declared_duration_ms * 1000
@@ -544,15 +590,27 @@ def collect_runtime_campaign_evidence(
                 "campaign journal range exceeds collector bound; evidence is incomplete"
             )
 
+    # Classification happens over the full durable cut. The caller-provided
+    # financial_aggregate_types field is never a filter authority.
+    financial_events: list[dict[str, object]] = []
+    for event in events:
+        try:
+            is_financial = is_financial_for_qualification(
+                event.get("aggregate_type")
+            )
+        except JournalTaxonomyError as error:
+            raise RuntimeBudgetError(
+                "campaign journal contains an unclassified durable aggregate"
+            ) from error
+        if is_financial:
+            financial_events.append(event)
+
     expected = set(plan.expected_financial_event_ids)
-    financial_events = [
-        event
-        for event in events
-        if event.get("aggregate_type") in plan.financial_aggregate_types
-    ]
     financial_ids = [str(event.get("event_id")) for event in financial_events]
     if len(financial_ids) != len(set(financial_ids)):
-        raise RuntimeBudgetError("financial event identity is duplicated in campaign cut")
+        raise RuntimeBudgetError(
+            "financial event identity is duplicated in campaign cut"
+        )
     unexpected = sorted(set(financial_ids) - expected)
     if unexpected:
         raise RuntimeBudgetError(
@@ -588,6 +646,7 @@ def collect_runtime_campaign_evidence(
         reconnect_backlog_remaining=backlog_remaining,
         resource_evidence_hash=resource_evidence_hash,
         resource_metrics=resource_metrics,
+        journal_taxonomy_digest=plan.journal_taxonomy_digest,
         _token=_EVIDENCE_TOKEN,
     )
 

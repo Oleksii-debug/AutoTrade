@@ -358,6 +358,78 @@ def _cut_id(challenge_digest: str, attestation_id: str) -> str:
     )
 
 
+def _detached_attempt(attempt: DurableChronologyAttempt) -> DurableChronologyAttempt:
+    """Detach all caller-owned attempt values before authority-bearing use.
+
+    Frozen dataclasses are not a trust boundary in Python because callers can
+    still mutate them with object.__setattr__().  Reconstruct the nested
+    challenge and runtime occurrence from scalar values once, then use only
+    this local snapshot for requirement derivation, currentness validation and
+    accepted-cut publication.
+    """
+
+    if type(attempt) is not DurableChronologyAttempt:
+        raise TypeError("attempt must be exact DurableChronologyAttempt")
+    challenge = attempt.challenge
+    if type(challenge) is not ChronologyChallenge:
+        raise TypeError("attempt challenge must be exact ChronologyChallenge")
+    occurrence = attempt.runtime_occurrence
+    if type(occurrence) is not ProductionHostRuntimeOccurrence:
+        raise TypeError(
+            "attempt runtime_occurrence must be exact ProductionHostRuntimeOccurrence"
+        )
+
+    detached_challenge = ChronologyChallenge(
+        schema_version=challenge.schema_version,
+        scope=challenge.scope,
+        source_sha=challenge.source_sha,
+        store_identity_digest=challenge.store_identity_digest,
+        owner_scope=challenge.owner_scope,
+        owner_id=challenge.owner_id,
+        owner_epoch=challenge.owner_epoch,
+        clock_incident_generation=challenge.clock_incident_generation,
+        journal_sequence=challenge.journal_sequence,
+        runtime_environment=challenge.runtime_environment,
+        release_artifact_id=challenge.release_artifact_id,
+        release_artifact_sha256=challenge.release_artifact_sha256,
+        request_nonce=challenge.request_nonce,
+        challenge_digest=challenge.challenge_digest,
+    )
+    detached_occurrence = ProductionHostRuntimeOccurrence(
+        runtime_occurrence_id=occurrence.runtime_occurrence_id,
+        host_id=occurrence.host_id,
+        account_id=occurrence.account_id,
+        environment=occurrence.environment,
+        aggregate_version=occurrence.aggregate_version,
+        journal_sequence=occurrence.journal_sequence,
+    )
+    prepared_event_id = _uuid_text(
+        attempt.prepared_event_id,
+        name="prepared_event_id",
+    )
+    if prepared_event_id != _prepared_event_id(detached_challenge.challenge_digest):
+        raise TrustedChronologyError(
+            "prepared event id does not match chronology challenge"
+        )
+    return DurableChronologyAttempt(
+        challenge=detached_challenge,
+        runtime_occurrence=detached_occurrence,
+        prepared_event_id=prepared_event_id,
+        prepared_journal_sequence=_exact_positive_int(
+            attempt.prepared_journal_sequence,
+            name="prepared_journal_sequence",
+        ),
+        started_monotonic_ns=_exact_nonnegative_int(
+            attempt.started_monotonic_ns,
+            name="started_monotonic_ns",
+        ),
+        started_wall_utc_ns=_exact_nonnegative_int(
+            attempt.started_wall_utc_ns,
+            name="started_wall_utc_ns",
+        ),
+    )
+
+
 def _cut_digest(payload: dict[str, object]) -> str:
     material = dict(payload)
     material.pop("cut_digest", None)
@@ -529,8 +601,7 @@ def chronology_measurement_requirement(
 ) -> str:
     """Return the exact signed requirement id for this runtime/time observation."""
 
-    if type(attempt) is not DurableChronologyAttempt:
-        raise TypeError("attempt must be exact DurableChronologyAttempt")
+    attempt = _detached_attempt(attempt)
     if type(measurement_bytes) is not bytes:
         raise TypeError("measurement_bytes must be exact bytes")
     transcript = parse_challenge_bound_measurement(
@@ -1030,6 +1101,7 @@ def accept_trusted_chronology_cut(
 
     recovery = _require_exact_recovery(recovery)
     with journal_sender_gate(store):
+        attempt = _detached_attempt(attempt)
         _require_current_attempt(store=store, recovery=recovery, attempt=attempt)
         transcript = parse_challenge_bound_measurement(
             measurement_bytes,

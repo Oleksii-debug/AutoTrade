@@ -179,13 +179,28 @@ RuntimeStateCutResolver = Callable[
 def _runtime_authority_state_operations():
     states = WeakKeyDictionary()
 
-    def register(
+    def register_candidate(
         authority: "RuntimeStateAuthority",
         authority_id: str,
         secret: bytes,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
-        states[authority] = (authority_id, bytes(secret), cut_resolver)
+        states[authority] = (authority_id, bytes(secret), cut_resolver, False)
+
+    def issue(
+        *,
+        authority_id: str,
+        secret: bytes,
+        cut_resolver: RuntimeStateCutResolver,
+    ) -> "RuntimeStateAuthority":
+        authority = RuntimeStateAuthority(
+            authority_id=authority_id,
+            secret=secret,
+            cut_resolver=cut_resolver,
+        )
+        current = states[authority]
+        states[authority] = (current[0], current[1], current[2], True)
+        return authority
 
     def authority_id(authority: "RuntimeStateAuthority") -> str:
         try:
@@ -195,37 +210,49 @@ def _runtime_authority_state_operations():
                 "runtime state authority process state is unavailable"
             ) from error
 
+    def require_issued(authority: "RuntimeStateAuthority") -> None:
+        try:
+            issued = states[authority][3]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
+        if not issued:
+            raise ReplayError(
+                "runtime state authority is not composition-issued"
+            )
+
     def resolve_cut(
         authority: "RuntimeStateAuthority",
     ) -> tuple[str, "ReplayCheckpoint", Mapping[str, str]]:
-        try:
-            resolver = states[authority][2]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
+        require_issued(authority)
+        resolver = states[authority][2]
         return resolver()
 
     def seal(authority: "RuntimeStateAuthority", material: bytes) -> str:
-        try:
-            secret = states[authority][1]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
+        require_issued(authority)
+        secret = states[authority][1]
         return hmac.new(secret, material, sha256).hexdigest()
 
-    return register, authority_id, resolve_cut, seal
+    return (
+        register_candidate,
+        issue,
+        authority_id,
+        require_issued,
+        resolve_cut,
+        seal,
+    )
 
 
 (
-    _register_runtime_state_authority,
+    _register_runtime_state_authority_candidate,
+    _issue_runtime_state_authority,
     _runtime_state_authority_id,
+    _require_runtime_state_authority_issued,
     _resolve_runtime_authority_cut,
     _seal_runtime_authority_material,
 ) = _runtime_authority_state_operations()
 del _runtime_authority_state_operations
-
 
 class RuntimeStateAuthority:
     """Composition-owned issuer/verifier for common runtime cuts."""
@@ -249,7 +276,7 @@ class RuntimeStateAuthority:
             )
         if not callable(cut_resolver):
             raise TypeError("runtime cut_resolver must be callable")
-        _register_runtime_state_authority(
+        _register_runtime_state_authority_candidate(
             self,
             authority_id,
             secret,
@@ -430,6 +457,7 @@ def _resolve_runtime_snapshot(
         raise TypeError(
             "runtime_state_authority must be the canonical RuntimeStateAuthority"
         )
+    _require_runtime_state_authority_issued(authority)
     snapshot = RuntimeStateAuthority.capture(authority)
     RuntimeStateAuthority.verify_snapshot(authority, snapshot)
     return snapshot
@@ -832,6 +860,7 @@ def resume_from_composite_checkpoint(
         raise TypeError(
             "runtime_state_authority must be the canonical RuntimeStateAuthority"
         )
+    _require_runtime_state_authority_issued(runtime_state_authority)
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
     RuntimeStateAuthority.verify_checkpoint_binding(

@@ -220,9 +220,24 @@ class EmbeddedWebTests(unittest.TestCase):
         self.assertNotEqual(changed_source.bundle_sha256, self.web_bundle.bundle_sha256)
         self.assertNotEqual(changed_content.bundle_sha256, self.web_bundle.bundle_sha256)
 
-    def test_bundle_rejects_missing_index_duplicate_and_noncanonical_identity(self):
-        with self.assertRaisesRegex(ValueError, "index"):
-            bundle(asset("app.js", b"x"))
+    def test_bundle_rejects_missing_core_assets_duplicate_and_noncanonical_identity(self):
+        core = {
+            item.path: item
+            for item in self.web_bundle.assets
+        }
+        for missing in ("index.html", "app.js", "host-api-routes.js", "styles.css"):
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                ValueError,
+                "required core assets",
+            ):
+                bundle(
+                    *tuple(
+                        item
+                        for path, item in core.items()
+                        if path != missing
+                    )
+                )
+
         duplicate = asset("index.html", b"x")
         with self.assertRaisesRegex(ValueError, "unique"):
             bundle(duplicate, duplicate)

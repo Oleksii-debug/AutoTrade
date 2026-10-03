@@ -189,6 +189,8 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         self.assertEqual(first.digest, from_nested.digest)
         with self.assertRaises(TypeError):
             first.payload["fx_quote"]["source_id"] = "changed"
+        with self.assertRaisesRegex(AttributeError, "read-only"):
+            first._payload_owners[-1].canonical_json = "{}"
 
     def test_direct_valuation_rejects_hostile_outer_key_before_callbacks(self):
         key = _HostileText("instrument_version")

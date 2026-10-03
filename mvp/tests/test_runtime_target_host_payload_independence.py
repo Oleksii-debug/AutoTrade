@@ -3,7 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import unittest
 
-from autotrade_mvp.runtime_target_host_qualification import (
+from mvp.autotrade_mvp.runtime_target_host_qualification import (
     CAMPAIGN_EVIDENCE_KIND,
     RuntimeTargetHostProvenance,
     RuntimeTargetHostQualificationError,

@@ -721,6 +721,7 @@ class CausalReplayTests(unittest.TestCase):
                     runtime_components=checkpoint.runtime_components,
                     runtime_cut_id=checkpoint.runtime_cut_id,
                     runtime_authority_id=checkpoint.runtime_authority_id,
+                    runtime_verifier_id=checkpoint.runtime_verifier_id,
                     runtime_authority_seal=checkpoint.runtime_authority_seal,
                     build_sha=build_sha,
                     protocol_ref=protocol_ref,

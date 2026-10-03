@@ -691,18 +691,35 @@ class SettlementBook:
         old settlement facts cannot release capital twice.
         """
 
-        if not isinstance(economic_book, (EconomicBook, ScopedEconomicBook)):
+        if type(economic_book) is EconomicBook:
+            canonical_book = economic_book
+        elif type(economic_book) is ScopedEconomicBook:
+            canonical_book = object.__getattribute__(economic_book, "_book")
+            if type(canonical_book) is not EconomicBook:
+                raise TypeError(
+                    "ScopedEconomicBook must own an exact EconomicBook"
+                )
+        else:
             raise TypeError(
-                "economic_book must be an EconomicBook or ScopedEconomicBook"
+                "economic_book must be an exact EconomicBook or ScopedEconomicBook"
             )
+
+        # Take one canonical class-owned transaction cut and use it throughout
+        # the projection.  This keeps caller-polymorphic properties/methods and
+        # per-instance method shadows outside financial authority.
+        transactions = EconomicBook.transactions.__get__(
+            canonical_book,
+            EconomicBook,
+        )
+
         items = tuple(obligations)
         by_transaction = {
             transaction.transaction_id: transaction
-            for transaction in economic_book.transactions
+            for transaction in transactions
         }
         reversed_ids = {
             transaction.reverses_transaction_id
-            for transaction in economic_book.transactions
+            for transaction in transactions
             if transaction.reverses_transaction_id is not None
         }
 
@@ -723,7 +740,7 @@ class SettlementBook:
             source_transaction_id
             for source_transaction_id, _currency in bound_source_currencies
         }
-        for transaction in economic_book.transactions:
+        for transaction in transactions:
             corrected_id = transaction.corrects_transaction_id
             if (
                 corrected_id is None
@@ -754,7 +771,7 @@ class SettlementBook:
         active: list[SettlementObligation] = []
         active_source_currency: set[tuple[str, str]] = set()
         currencies: set[str] = set()
-        for transaction in economic_book.transactions:
+        for transaction in transactions:
             for posting in transaction.postings:
                 if (
                     posting.ledger_account.startswith("CASH:")
@@ -800,6 +817,41 @@ class SettlementBook:
             active.append(obligation)
             active_source_currency.add(source_currency)
 
+        # Never infer active trading cash as already-settled opening capital.
+        # Explicit external cash flows are intentionally outside this fence;
+        # equity/FX trading legs require source-transaction settlement coverage
+        # before their cash can participate in a settlement projection.
+        for transaction in transactions:
+            if (
+                transaction.transaction_id in reversed_ids
+                or transaction.reverses_transaction_id is not None
+            ):
+                continue
+            settlement_relevant = any(
+                posting.ledger_account.startswith("POSITION:")
+                or posting.ledger_account.startswith("FX_CLEARING:")
+                for posting in transaction.postings
+            )
+            if not settlement_relevant:
+                continue
+            transaction_cash: dict[str, Decimal] = {}
+            for posting in transaction.postings:
+                currency = posting.asset_or_currency
+                if posting.ledger_account == f"CASH:{currency}":
+                    transaction_cash[currency] = exact_add(
+                        transaction_cash.get(currency, Decimal("0")),
+                        posting.signed_amount,
+                    )
+            for currency, amount in transaction_cash.items():
+                if (
+                    amount != 0
+                    and (transaction.transaction_id, currency)
+                    not in active_source_currency
+                ):
+                    raise SettlementConflict(
+                        "active trading cash leg lacks settlement obligation"
+                    )
+
         active_ids = {item.obligation_id for item in active}
         active_evidence = {
             obligation_id: record
@@ -808,7 +860,13 @@ class SettlementBook:
         }
         opening_cash = {
             currency: exact_subtract(
-                economic_book.cash(currency),
+                exact_sum(
+                    posting.signed_amount
+                    for transaction in transactions
+                    for posting in transaction.postings
+                    if posting.ledger_account == f"CASH:{currency}"
+                    and posting.asset_or_currency == currency
+                ),
                 exact_sum(
                     item.amount
                     for item in active

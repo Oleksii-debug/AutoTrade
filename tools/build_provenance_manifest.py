@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dis
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -106,6 +107,25 @@ def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
     values: list[object] = []
     invalid_binding = object()
     target_name = "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256"
+
+    try:
+        module_code = compile(source, str(path), "exec")
+    except (SyntaxError, ValueError, TypeError) as error:
+        raise ValueError(
+            "qualification trust policy pin source is unavailable or invalid"
+        ) from error
+    module_bindings = [
+        instruction
+        for instruction in dis.get_instructions(module_code)
+        if instruction.argval == target_name
+        and instruction.opname
+        in {"STORE_NAME", "STORE_GLOBAL", "DELETE_NAME", "DELETE_GLOBAL"}
+    ]
+    if len(module_bindings) != 1:
+        raise ValueError(
+            "qualification trust policy pin must have one literal source definition"
+        )
+
     for statement in module.body:
         stores = [
             node

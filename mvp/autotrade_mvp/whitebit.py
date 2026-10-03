@@ -480,10 +480,10 @@ def validate_intent_market_rules(
     *,
     at: datetime,
 ) -> None:
-    if not isinstance(intent, WhiteBitOrderIntent):
-        raise TypeError("intent must be WhiteBitOrderIntent")
-    if not isinstance(rules, WhiteBitMarketRules):
-        raise TypeError("rules must be WhiteBitMarketRules")
+    if type(intent) is not WhiteBitOrderIntent:
+        raise TypeError("intent must be exact WhiteBitOrderIntent")
+    if type(rules) is not WhiteBitMarketRules:
+        raise TypeError("rules must be exact WhiteBitMarketRules")
     point = _instant(at, name="at")
     if rules.market != intent.market:
         raise WhiteBitAdapterError("market metadata does not match intent market")

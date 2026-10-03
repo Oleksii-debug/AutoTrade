@@ -105,7 +105,7 @@ def _canonical_evidence_refs(
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TypeError("evidence_refs must be a sequence of EvidenceRef mappings")
     normalized: list[dict[str, str]] = []
-    identities: set[str] = set()
+    seen_artifact_ids: set[str] = set()
     allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
     for index, raw in enumerate(value):
         if not isinstance(raw, Mapping):
@@ -136,10 +136,9 @@ def _canonical_evidence_refs(
         for optional in ("source_uri", "rights_id"):
             if raw.get(optional) is not None:
                 ref[optional] = _text(raw.get(optional), name=optional)
-        identity = canonical_json(ref)
-        if identity in identities:
-            raise ValueError("evidence_refs must be unique")
-        identities.add(identity)
+        if artifact_id in seen_artifact_ids:
+            raise ValueError("evidence_refs must have unique artifact_id values")
+        seen_artifact_ids.add(artifact_id)
         normalized.append(ref)
     return tuple(normalized)
 

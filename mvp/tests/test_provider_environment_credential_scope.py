@@ -184,6 +184,90 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
         ):
             verify_trade_credential_transition_receipt(self.vault, forged)
 
+    def test_coherent_vault_fork_cannot_splice_testnet_predecessor_into_demo(self):
+        seed = self.vault.register(
+            handle_id="cred-seed",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="seed-v1",
+        )
+        rotate_trade_credential_with_receipt(
+            self.vault,
+            seed,
+            execution_identity="windows-user-1",
+            new_secret_value="seed-v2",
+        )
+        common_fork = self.path.read_bytes()
+
+        testnet_first = self.vault.register(
+            handle_id="cred-forked",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            purpose="TRADE",
+            secret_value="testnet-v1",
+        )
+        rotate_trade_credential_with_receipt(
+            self.vault,
+            testnet_first,
+            execution_identity="windows-user-1",
+            new_secret_value="testnet-v2",
+        )
+        testnet_state = json.loads(self.path.read_text(encoding="utf-8"))
+        testnet_latest = testnet_state["credential_transition_authority"][
+            "latest_by_handle"
+        ]["cred-forked"]
+
+        self.path.write_bytes(common_fork)
+        demo_vault = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+        demo_first = demo_vault.register(
+            handle_id="cred-forked",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+            purpose="TRADE",
+            secret_value="demo-v1",
+        )
+        demo_current, _demo_receipt = rotate_trade_credential_with_receipt(
+            demo_vault,
+            demo_first,
+            execution_identity="windows-user-1",
+            new_secret_value="demo-v2",
+        )
+        spliced_state = json.loads(self.path.read_text(encoding="utf-8"))
+        spliced_state["credential_transition_authority"]["latest_by_handle"][
+            "cred-forked"
+        ] = testnet_latest
+        self.path.write_text(
+            json.dumps(spliced_state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        spliced = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "scope does not match current credential",
+        ):
+            rotate_trade_credential_with_receipt(
+                spliced,
+                demo_current,
+                execution_identity="windows-user-1",
+                new_secret_value="demo-v3",
+            )
+
     def test_entropy_separates_testnet_and_demo_for_same_logical_handle(self):
         common = dict(
             handle_id="cred-same",

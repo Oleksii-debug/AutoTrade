@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
@@ -54,14 +55,16 @@ def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
 
 
 def verified(snapshot_id: str, observed_at: datetime):
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=tuple(
-            claim(source, observed_at=observed_at)
-            for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-        ),
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=tuple(
+                claim(source, observed_at=observed_at)
+                for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+            ),
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -141,6 +144,50 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     permission_scope="ORDER.WRITE",
                 )
             )
+
+    def test_exact_fresh_replay_rearms_without_duplicate_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            snapshot = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            first = DurableCapabilityRegistry(JournalStore(path))
+            self.assertTrue(first.add(snapshot))
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            self.assertFalse(restarted.add(snapshot))
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+            admitted = restarted.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(admitted, snapshot)
+            self.assertTrue(
+                admitted.admits(
+                    at=NOW + timedelta(seconds=1),
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
+            )
+
+    def test_journal_store_subclass_is_rejected_before_dispatch(self):
+        class ForgedStore(JournalStore):
+            def load_events_by_aggregate_type(self, *_args, **_kwargs):
+                raise AssertionError("subclass replay must not be trusted")
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableCapabilityRegistry(
+                    ForgedStore(Path(directory) / "journal.sqlite3")
+                )
 
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):
         with TemporaryDirectory() as directory:

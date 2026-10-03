@@ -422,8 +422,12 @@ class AccessibleStatusTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("System state: Running", text)
-        self.assertIn("Final equity: 1000", text)
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn(
+            "Action required: inspect or restore the simulated state before continuing",
+            text,
+        )
+        self.assertNotIn("Final equity: 1000", text)
         self.assertNotIn("Journal sequence:", text)
         self.assertNotIn(
             "Portfolio valuation and profit or loss: unavailable",
@@ -431,6 +435,57 @@ class AccessibleStatusTests(unittest.TestCase):
         )
         self.assertIn("Economic edge: unproven", text)
 
+    def test_explicit_unknown_state_format_cannot_downgrade_to_legacy_rendering(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "unknown-format",
+                "symbol": "SIM",
+                "initial_cash": 999999999,
+                "fills": {"plausible-fill": {}},
+                "replay_verified": True,
+            },
+            {
+                "final_equity": 999999999,
+                "net_pnl": 999999999,
+                "total_fees": 0,
+                "turnover": 999999999,
+                "max_drawdown": 0,
+                "reconciled": True,
+            },
+        )
+
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Replay verification: unavailable", text)
+        self.assertNotIn("999999999", text)
+        self.assertNotIn("Recorded fills:", text)
+        self.assertNotIn("Economic reconciliation:", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_legacy_status_without_state_format_remains_readable(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "replay_verified": True,
+            },
+            {
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": True,
+            },
+        )
+
+        self.assertIn("System state: Running", text)
+        self.assertIn("Initial capital: 1000", text)
+        self.assertIn("Final equity: 1000", text)
+        self.assertNotIn("Journal sequence:", text)
+        self.assertIn("Economic edge: unproven", text)
 
     def test_hostile_nested_status_containers_fail_closed_without_execution(self):
         class HostileDict(dict):

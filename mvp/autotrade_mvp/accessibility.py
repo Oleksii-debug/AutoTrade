@@ -121,8 +121,20 @@ def format_accessible_status(
 
     if type(status) is not dict:
         status = {"status": "corrupt"}
+    has_state_format = "state_format" in status
+    state_format = (
+        _safe_text(status.get("state_format"), "")
+        if has_state_format
+        else ""
+    )
     state = _safe_text(status.get("status", "corrupt"), "corrupt")
-    if state not in STATE_TEXT:
+    if (
+        state not in STATE_TEXT
+        or (has_state_format and state_format != "canonical_journal")
+    ):
+        # Legacy status has no state_format key. An explicitly present but
+        # unknown/malformed format is therefore damaged canonical state, not
+        # permission to downgrade financial fields to the legacy renderer.
         state = "corrupt"
     lines = [
         "AutoTrade status",
@@ -159,7 +171,6 @@ def format_accessible_status(
     replay_verified = status.get("replay_verified")
     fills = status.get("fills", {})
     recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
-    state_format = _safe_text(status.get("state_format"), "")
     initial_capital = (
         _canonical_decimal_value(status, "initial_cash")
         if state_format == "canonical_journal"

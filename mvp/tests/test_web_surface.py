@@ -130,12 +130,18 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         )
 
         self.assertIn("Status remains available", html)
-        self.assertIn("<dt>State version</dt><dd>0</dd>", html)
-        self.assertIn("<dt>Event cursor</dt><dd>0</dd>", html)
+        self.assertIn("<dt>State version</dt><dd>Unavailable</dd>", html)
+        self.assertIn("<dt>Event cursor</dt><dd>Unavailable</dd>", html)
         self.assertIn(
             "Operation state is unavailable because the state shape is malformed.",
             html,
         )
+        self.assertIn(
+            "Commands are unavailable because the current state version is malformed or unavailable.",
+            html,
+        )
+        self.assertNotIn("<form", html)
+        self.assertNotIn('name="expected_state_version"', html)
         self.assertNotIn("forged", html)
 
 
@@ -182,6 +188,41 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         html = render_semantic_page(self.snapshot(), status_text="Ready")
         self.assertIn(
             'name="expected_state_version" value="7"',
+            html,
+        )
+
+    def test_malformed_state_version_keeps_status_readable_but_disables_commands(self):
+        for value in (True, 7, 7.0, -1, "", "007", "latest", "１２"):
+            with self.subTest(value=value):
+                snapshot = self.snapshot()
+                snapshot["state_version"] = value
+                html = render_semantic_page(snapshot, status_text="Ready")
+                self.assertIn("Ready", html)
+                self.assertIn("<dt>State version</dt><dd>Unavailable</dd>", html)
+                self.assertIn(
+                    "Commands are unavailable because the current state version is malformed or unavailable.",
+                    html,
+                )
+                self.assertNotIn("<form", html)
+                self.assertNotIn('name="expected_state_version"', html)
+                self.assertNotIn("<button", html)
+
+    def test_malformed_event_cursor_does_not_corrupt_command_state_authority(self):
+        snapshot = self.snapshot()
+        snapshot["event_cursor"] = True
+        html = render_semantic_page(snapshot, status_text="Ready")
+        self.assertIn("<dt>Event cursor</dt><dd>Unavailable</dd>", html)
+        self.assertIn(
+            'name="expected_state_version" value="7"',
+            html,
+        )
+
+    def test_zero_state_version_is_canonical_and_commandable(self):
+        snapshot = self.snapshot()
+        snapshot["state_version"] = "0"
+        html = render_semantic_page(snapshot, status_text="Ready")
+        self.assertIn(
+            'name="expected_state_version" value="0"',
             html,
         )
 

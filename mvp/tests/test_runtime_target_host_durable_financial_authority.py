@@ -4,6 +4,9 @@ from inspect import getclosurevars
 import unittest
 from unittest.mock import Mock, call, patch
 
+from mvp.autotrade_mvp import persistence as persistence_module
+from mvp.autotrade_mvp import runtime_load_measurement as load_measurement_module
+from mvp.autotrade_mvp import runtime_load_plan as plan_module
 from mvp.autotrade_mvp import (
     runtime_target_host_durable_financial as durable,
 )
@@ -41,6 +44,8 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         measurement_guard = Mock()
         parent_guard = Mock()
         durable_guard = Mock()
+        external_guard_a = Mock()
+        external_guard_b = Mock()
 
         binder = _build_release_bound_durable_financial_authority(
             measurement_type=Measurement,
@@ -53,6 +58,7 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
             measurement_dependency_guard=measurement_guard,
             parent_dependency_guard=parent_guard,
             durable_dependency_guard=durable_guard,
+            durable_external_dependency_guards=(external_guard_a, external_guard_b),
         )
 
         result = binder(
@@ -71,7 +77,9 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         snapshotter.assert_called_once_with(current)
         parent_guard.assert_called_once_with()
         parent.assert_called_once()
-        durable_guard.assert_called_once_with()
+        self.assertEqual(durable_guard.call_args_list, [call(), call()])
+        self.assertEqual(external_guard_a.call_args_list, [call(), call()])
+        self.assertEqual(external_guard_b.call_args_list, [call(), call()])
         mechanics.assert_called_once()
 
     def test_parent_side_effect_cannot_retarget_nested_measurement_snapshot(self) -> None:
@@ -96,6 +104,7 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         measurement_guard = Mock(side_effect=require_measurement_graph)
         parent = Mock(side_effect=mutate_measurement_graph)
         durable_guard = Mock()
+        external_guard = Mock()
         mechanics = Mock()
 
         binder = _build_release_bound_durable_financial_authority(
@@ -109,6 +118,7 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
             measurement_dependency_guard=measurement_guard,
             parent_dependency_guard=Mock(),
             durable_dependency_guard=durable_guard,
+            durable_external_dependency_guards=(external_guard,),
         )
 
         with self.assertRaisesRegex(
@@ -130,7 +140,62 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         snapshotter.assert_called_once_with(current)
         parent.assert_called_once()
         durable_guard.assert_not_called()
+        external_guard.assert_not_called()
         mechanics.assert_not_called()
+
+    def test_durable_projection_rechecks_graphs_after_mechanics(self) -> None:
+        class Measurement:
+            release_artifact_id = RELEASE_ID
+            release_artifact_sha256 = RELEASE_SHA
+
+        class DurableError(Exception):
+            pass
+
+        current = Measurement()
+        expected = object()
+        state = {"external_graph_changed": False}
+
+        def require_external_graph() -> None:
+            if state["external_graph_changed"]:
+                raise DurableError("external durable graph changed during projection")
+
+        def mutate_graph(*_args, **_kwargs):
+            state["external_graph_changed"] = True
+            return expected
+
+        durable_guard = Mock()
+        external_guard = Mock(side_effect=require_external_graph)
+        mechanics = Mock(side_effect=mutate_graph)
+        binder = _build_release_bound_durable_financial_authority(
+            measurement_type=Measurement,
+            measurement_snapshotter=lambda value: value,
+            uuid_type=__import__("uuid").UUID,
+            durable_error_type=DurableError,
+            parent_collector=Mock(),
+            parent_error_types=(ValueError,),
+            durable_binder=mechanics,
+            durable_dependency_guard=durable_guard,
+            durable_external_dependency_guards=(external_guard,),
+        )
+
+        with self.assertRaisesRegex(
+            DurableError,
+            "external durable graph changed during projection",
+        ):
+            binder(
+                store=object(),
+                spec=object(),
+                campaign_plan=object(),
+                campaign_cut=object(),
+                declared_plan_id="plan-1",
+                measurement=current,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+        mechanics.assert_called_once()
+        self.assertEqual(durable_guard.call_args_list, [call(), call()])
+        self.assertEqual(external_guard.call_args_list, [call(), call()])
 
     def test_invalid_release_identity_fails_before_parent_or_mechanics(self) -> None:
         class Measurement:
@@ -216,6 +281,7 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         self.assertIs(before["measurement_snapshotter"], original_snapshotter)
         self.assertIs(before["parent_collector"], original_parent)
         self.assertIs(before["durable_binder"], original_mechanics)
+        self.assertEqual(len(before["durable_external_dependency_guards"]), 4)
 
         forged_snapshotter = Mock()
         forged_parent = Mock()
@@ -243,6 +309,10 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
             self.assertIs(after["measurement_snapshotter"], original_snapshotter)
             self.assertIs(after["parent_collector"], original_parent)
             self.assertIs(after["durable_binder"], original_mechanics)
+            self.assertIs(
+                after["durable_external_dependency_guards"],
+                before["durable_external_dependency_guards"],
+            )
 
         forged_snapshotter.assert_not_called()
         forged_parent.assert_not_called()
@@ -283,6 +353,7 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
         measurement_guard = closure["measurement_dependency_guard"]
         parent_guard = closure["parent_dependency_guard"]
         durable_guard = closure["durable_dependency_guard"]
+        external_guards = closure["durable_external_dependency_guards"]
 
         with patch.object(measurement_module, "_text", Mock()):
             with self.assertRaisesRegex(
@@ -305,9 +376,39 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
             ):
                 durable_guard()
 
+        with patch.object(persistence_module, "_require_exact_journal_store_state", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "JournalStore authority sealed dependency changed",
+            ):
+                external_guards[0]()
+
+        with patch.object(persistence_module, "require_exact_journal_store_authority", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "JournalStore scope sealed dependency changed",
+            ):
+                external_guards[1]()
+
+        with patch.object(plan_module, "_read_plan", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "declared-plan loader sealed dependency changed",
+            ):
+                external_guards[2]()
+
+        with patch.object(load_measurement_module, "_decode_measurement", Mock()):
+            with self.assertRaisesRegex(
+                durable.RuntimeTargetHostDurableFinancialError,
+                "sample loader sealed dependency changed",
+            ):
+                external_guards[3]()
+
         measurement_guard()
         parent_guard()
         durable_guard()
+        for guard in external_guards:
+            guard()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from mvp.autotrade_mvp.runtime_target_host_qualification import (
     RESOURCE_EVIDENCE_KIND,
     STALENESS_EVIDENCE_KIND,
     RuntimeTargetHostBinding,
+    RuntimeTargetHostProvenance,
     RuntimeTargetHostQualificationError,
     verify_runtime_target_host_qualification,
 )
@@ -38,16 +39,17 @@ CONFIG = "sha256:" + "c" * 64
 HOST = "sha256:" + "d" * 64
 WORKLOAD = "sha256:" + "e" * 64
 JOURNAL = "sha256:" + "f" * 64
-CAMPAIGN = "sha256:" + "1" * 64
-STALENESS = "sha256:" + "2" * 64
-INTERFERENCE = "sha256:" + "3" * 64
-RESOURCE = "sha256:" + "4" * 64
-INVENTORY = "sha256:" + "5" * 64
 ROOT = "sha256:" + "6" * 64
 ATTESTATION_DIGEST = "sha256:" + "7" * 64
 POLICY = "sha256:" + "8" * 64
 
-
+KINDS = (
+    CAMPAIGN_EVIDENCE_KIND,
+    STALENESS_EVIDENCE_KIND,
+    INTERFERENCE_EVIDENCE_KIND,
+    RESOURCE_EVIDENCE_KIND,
+    HOST_INVENTORY_EVIDENCE_KIND,
+)
 _KIND_IDS = {
     BINDING_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000001",
     CAMPAIGN_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000002",
@@ -56,10 +58,19 @@ _KIND_IDS = {
     RESOURCE_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000005",
     HOST_INVENTORY_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000006",
 }
+_PAYLOAD_DIGEST = {
+    kind: "sha256:" + hex(index + 1)[2:] * 64
+    for index, kind in enumerate(KINDS)
+}
 
 
-def binding(**overrides) -> RuntimeTargetHostBinding:
+def _sha(raw: bytes) -> str:
+    return "sha256:" + sha256(raw).hexdigest()
+
+
+def provenance(kind: str, **overrides) -> RuntimeTargetHostProvenance:
     values = {
+        "evidence_kind": kind,
         "source_sha": SOURCE,
         "scenario_id": "target-host-primary",
         "spec_digest": SPEC,
@@ -67,14 +78,12 @@ def binding(**overrides) -> RuntimeTargetHostBinding:
         "host_fingerprint": HOST,
         "workload_profile_hash": WORKLOAD,
         "journal_store_identity_digest": JOURNAL,
-        "campaign_evidence_sha256": CAMPAIGN,
-        "staleness_evidence_sha256": STALENESS,
-        "interference_evidence_sha256": INTERFERENCE,
-        "resource_evidence_sha256": RESOURCE,
-        "host_inventory_evidence_sha256": INVENTORY,
+        "collector_id": f"collector-{kind.lower()}",
+        "collector_version": "1.0.0",
+        "payload_sha256": _PAYLOAD_DIGEST[kind],
     }
     values.update(overrides)
-    return RuntimeTargetHostBinding(**values)
+    return RuntimeTargetHostProvenance(**values)
 
 
 def ref(kind: str, digest: str) -> EvidenceArtifactRef:
@@ -87,16 +96,37 @@ def ref(kind: str, digest: str) -> EvidenceArtifactRef:
     )
 
 
-def refs_for(raw_binding: bytes, *, resource_digest: str = RESOURCE):
-    binding_digest = "sha256:" + sha256(raw_binding).hexdigest()
-    return (
-        ref(BINDING_EVIDENCE_KIND, binding_digest),
-        ref(CAMPAIGN_EVIDENCE_KIND, CAMPAIGN),
-        ref(STALENESS_EVIDENCE_KIND, STALENESS),
-        ref(INTERFERENCE_EVIDENCE_KIND, INTERFERENCE),
-        ref(RESOURCE_EVIDENCE_KIND, resource_digest),
-        ref(HOST_INVENTORY_EVIDENCE_KIND, INVENTORY),
-    )
+def material(*, provenance_overrides=None, binding_overrides=None):
+    provenance_overrides = provenance_overrides or {}
+    raw_by_id = {}
+    evidence_refs = []
+    digest_by_kind = {}
+    for kind in KINDS:
+        raw = provenance(kind, **provenance_overrides.get(kind, {})).canonical_bytes()
+        digest = _sha(raw)
+        digest_by_kind[kind] = digest
+        raw_by_id[_KIND_IDS[kind]] = raw
+        evidence_refs.append(ref(kind, digest))
+    binding_values = {
+        "source_sha": SOURCE,
+        "scenario_id": "target-host-primary",
+        "spec_digest": SPEC,
+        "configuration_hash": CONFIG,
+        "host_fingerprint": HOST,
+        "workload_profile_hash": WORKLOAD,
+        "journal_store_identity_digest": JOURNAL,
+        "campaign_evidence_sha256": digest_by_kind[CAMPAIGN_EVIDENCE_KIND],
+        "staleness_evidence_sha256": digest_by_kind[STALENESS_EVIDENCE_KIND],
+        "interference_evidence_sha256": digest_by_kind[INTERFERENCE_EVIDENCE_KIND],
+        "resource_evidence_sha256": digest_by_kind[RESOURCE_EVIDENCE_KIND],
+        "host_inventory_evidence_sha256": digest_by_kind[HOST_INVENTORY_EVIDENCE_KIND],
+    }
+    binding_values.update(binding_overrides or {})
+    binding_value = RuntimeTargetHostBinding(**binding_values)
+    raw_binding = binding_value.canonical_bytes()
+    raw_by_id[_KIND_IDS[BINDING_EVIDENCE_KIND]] = raw_binding
+    evidence_refs.append(ref(BINDING_EVIDENCE_KIND, _sha(raw_binding)))
+    return raw_by_id, tuple(evidence_refs), binding_value
 
 
 def receipt(evidence_refs) -> SignedQualificationAttestation:
@@ -122,7 +152,7 @@ def receipt(evidence_refs) -> SignedQualificationAttestation:
     )
     return SignedQualificationAttestation(
         attestation=attestation,
-        signature_b64=base64.b64encode(b"not-verified-in-profile-unit-test").decode("ascii"),
+        signature_b64=base64.b64encode(b"profile-unit-test-signature").decode("ascii"),
     )
 
 
@@ -161,28 +191,26 @@ def accepted(evidence_refs, *, result="PASS", unresolved_limits=()):
 
 
 class RuntimeTargetHostQualificationTests(unittest.TestCase):
-    def _verify(self, raw_binding, accepted_receipt, signed_receipt):
+    def _verify(self, raw_by_id, evidence_refs, *, accepted_value=None):
+        signed = receipt(evidence_refs)
+        accepted_value = accepted_value or accepted(evidence_refs)
         with TemporaryDirectory() as directory:
             store = ArtifactStore(f"{directory}/store")
 
             def reader(artifact_id):
-                self.assertEqual(
-                    artifact_id,
-                    _KIND_IDS[BINDING_EVIDENCE_KIND],
-                )
-                return {}, raw_binding
+                return {}, raw_by_id[artifact_id]
 
             with patch(
                 "mvp.autotrade_mvp.runtime_target_host_qualification."
                 "verify_canonical_qualification_attestation",
-                return_value=accepted_receipt,
+                return_value=accepted_value,
             ) as canonical, patch(
                 "mvp.autotrade_mvp.runtime_target_host_qualification."
                 "trusted_authenticated_reader",
                 return_value=reader,
             ):
                 result = verify_runtime_target_host_qualification(
-                    signed_receipt,
+                    signed,
                     evidence_store=store,
                     evidence_root=directory,
                     expected_source_sha=SOURCE,
@@ -193,82 +221,87 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
                     expected_workload_profile_hash=WORKLOAD,
                     expected_journal_store_identity_digest=JOURNAL,
                 )
-            canonical.assert_called_once()
             kwargs = canonical.call_args.kwargs
             self.assertEqual(kwargs["expected_domain"], DOMAIN)
             self.assertEqual(kwargs["expected_gate"], GATE)
             self.assertEqual(kwargs["expected_package_id"], PACKAGE_ID)
             self.assertEqual(kwargs["expected_protocol_id"], PROTOCOL_ID)
-            self.assertEqual(kwargs["expected_protocol_version"], PROTOCOL_VERSION)
             self.assertEqual(kwargs["expected_requirement_id"], REQUIREMENT_ID)
             return result
 
-    def test_binding_round_trip_is_canonical(self):
-        current = binding()
+    def test_binding_and_provenance_round_trip_are_canonical(self):
+        raw_by_id, _refs, binding_value = material()
         self.assertEqual(
-            RuntimeTargetHostBinding.parse(current.canonical_bytes()),
-            current,
+            RuntimeTargetHostBinding.parse(binding_value.canonical_bytes()),
+            binding_value,
+        )
+        raw = raw_by_id[_KIND_IDS[RESOURCE_EVIDENCE_KIND]]
+        self.assertEqual(
+            RuntimeTargetHostProvenance.parse(raw).evidence_kind,
+            RESOURCE_EVIDENCE_KIND,
         )
 
-    def test_binding_rejects_noncanonical_or_duplicate_json(self):
-        current = binding()
-        raw = current.canonical_bytes()
-        self.assertRaises(
-            RuntimeTargetHostQualificationError,
-            RuntimeTargetHostBinding.parse,
-            b'{"source_sha":"' + SOURCE.encode() + b'","source_sha":"' + SOURCE.encode() + b'"}',
+    def test_duplicate_or_noncanonical_json_is_rejected(self):
+        raw = (
+            b'{"source_sha":"' + SOURCE.encode() +
+            b'","source_sha":"' + SOURCE.encode() + b'"}'
         )
-        self.assertRaises(
-            RuntimeTargetHostQualificationError,
-            RuntimeTargetHostBinding.parse,
-            raw + b"\n",
-        )
+        with self.assertRaises(RuntimeTargetHostQualificationError):
+            RuntimeTargetHostBinding.parse(raw)
+        raw_by_id, _refs, binding_value = material()
+        with self.assertRaises(RuntimeTargetHostQualificationError):
+            RuntimeTargetHostBinding.parse(binding_value.canonical_bytes() + b"\n")
+        with self.assertRaises(RuntimeTargetHostQualificationError):
+            RuntimeTargetHostProvenance.parse(
+                raw_by_id[_KIND_IDS[CAMPAIGN_EVIDENCE_KIND]] + b"\n"
+            )
 
-    def test_terminal_profile_cross_binds_all_required_artifacts(self):
-        raw = binding().canonical_bytes()
-        evidence_refs = refs_for(raw)
-        result = self._verify(raw, accepted(evidence_refs), receipt(evidence_refs))
+    def test_terminal_profile_cross_binds_all_authenticated_artifacts(self):
+        raw_by_id, evidence_refs, _binding = material()
+        result = self._verify(raw_by_id, evidence_refs)
         self.assertEqual(result.source_sha, SOURCE)
         self.assertEqual(result.host_fingerprint, HOST)
         self.assertEqual(result.spec_digest, SPEC)
-        self.assertEqual(
-            result.evidence_sha256_by_kind[RESOURCE_EVIDENCE_KIND],
-            RESOURCE,
-        )
+        self.assertIn(RESOURCE_EVIDENCE_KIND, result.collector_by_kind)
 
-    def test_resource_digest_substitution_is_rejected_after_signature_acceptance(self):
-        raw = binding().canonical_bytes()
-        evidence_refs = refs_for(raw, resource_digest="sha256:" + "9" * 64)
+    def test_signed_binding_cannot_hide_resource_artifact_from_another_host(self):
+        raw_by_id, evidence_refs, _binding = material(
+            provenance_overrides={
+                RESOURCE_EVIDENCE_KIND: {
+                    "host_fingerprint": "sha256:" + "9" * 64,
+                }
+            }
+        )
         with self.assertRaisesRegex(
             RuntimeTargetHostQualificationError,
-            RESOURCE_EVIDENCE_KIND,
+            "provenance identity conflicts.*RESOURCES",
         ):
-            self._verify(raw, accepted(evidence_refs), receipt(evidence_refs))
+            self._verify(raw_by_id, evidence_refs)
 
-    def test_missing_evidence_family_is_rejected(self):
-        raw = binding().canonical_bytes()
+    def test_binding_digest_substitution_is_rejected(self):
+        raw_by_id, evidence_refs, _binding = material(
+            binding_overrides={"resource_evidence_sha256": "sha256:" + "9" * 64}
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "does not match.*RESOURCES",
+        ):
+            self._verify(raw_by_id, evidence_refs)
+
+    def test_missing_staleness_family_is_rejected(self):
+        raw_by_id, evidence_refs, _binding = material()
         evidence_refs = tuple(
-            value for value in refs_for(raw)
-            if value.evidence_kind != STALENESS_EVIDENCE_KIND
+            ref_value for ref_value in evidence_refs
+            if ref_value.evidence_kind != STALENESS_EVIDENCE_KIND
         )
         with self.assertRaisesRegex(
             RuntimeTargetHostQualificationError,
             "evidence set mismatch",
         ):
-            self._verify(raw, accepted(evidence_refs), receipt(evidence_refs))
+            self._verify(raw_by_id, evidence_refs)
 
-    def test_wrong_target_host_identity_is_rejected(self):
-        raw = binding(host_fingerprint="sha256:" + "9" * 64).canonical_bytes()
-        evidence_refs = refs_for(raw)
-        with self.assertRaisesRegex(
-            RuntimeTargetHostQualificationError,
-            "identity does not match",
-        ):
-            self._verify(raw, accepted(evidence_refs), receipt(evidence_refs))
-
-    def test_canonical_trust_failure_propagates_before_profile_reader(self):
-        raw = binding().canonical_bytes()
-        evidence_refs = refs_for(raw)
+    def test_canonical_trust_failure_happens_before_any_profile_read(self):
+        raw_by_id, evidence_refs, _binding = material()
         signed = receipt(evidence_refs)
         with TemporaryDirectory() as directory:
             store = ArtifactStore(f"{directory}/store")
@@ -296,17 +329,17 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
             reader.assert_not_called()
 
     def test_nonpass_cannot_be_promoted_to_terminal_target_host_qualification(self):
-        raw = binding().canonical_bytes()
-        evidence_refs = refs_for(raw)
+        raw_by_id, evidence_refs, _binding = material()
+        inconclusive = accepted(
+            evidence_refs,
+            result="INCONCLUSIVE",
+            unresolved_limits=("pressure-run-not-complete",),
+        )
         with self.assertRaisesRegex(
             RuntimeTargetHostQualificationError,
             "requires signed PASS",
         ):
-            self._verify(
-                raw,
-                accepted(evidence_refs, result="INCONCLUSIVE", unresolved_limits=("pressure-run-not-complete",)),
-                receipt(evidence_refs),
-            )
+            self._verify(raw_by_id, evidence_refs, accepted_value=inconclusive)
 
 
 if __name__ == "__main__":

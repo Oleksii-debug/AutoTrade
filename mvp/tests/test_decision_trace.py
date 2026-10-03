@@ -48,6 +48,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
             store.append(trace("trace-1"))
             second = trace("trace-2", decision="HOLD")
             second["evidence_refs"] = ["evidence-2"]
+            second["evidence_digests"] = {"evidence-2": "b" * 64}
             store.append(second)
             rows = store.records()
             self.assertEqual(rows[1]["previous_hash"], rows[0]["record_hash"])

@@ -223,6 +223,7 @@ def _runtime_authority_state_operations():
             RuntimeStateSignatureVerifier,
         ],
     ] = {}
+    product_verifier_states: dict[str, weakref.ReferenceType] = {}
     state_lock = threading.RLock()
 
     def authority_state(
@@ -327,6 +328,36 @@ def _runtime_authority_state_operations():
     def verifier_id(verifier: "RuntimeStateVerifier") -> str:
         return verifier_state(verifier)[1]
 
+    def select_product_verifier(
+        verifier: "RuntimeStateVerifier",
+    ) -> "RuntimeStateVerifier":
+        authority_id_value = verifier_authority_id(verifier)
+        with state_lock:
+            current_ref = product_verifier_states.get(authority_id_value)
+            current = current_ref() if current_ref is not None else None
+            if current is not None and current is not verifier:
+                raise ReplayError(
+                    "runtime authority already has a live product-selected verifier"
+                )
+            if current_ref is not None and current is None:
+                product_verifier_states.pop(authority_id_value, None)
+            product_verifier_states[authority_id_value] = weakref.ref(verifier)
+        return verifier
+
+    def require_product_verifier(verifier: "RuntimeStateVerifier") -> None:
+        authority_id_value = verifier_authority_id(verifier)
+        with state_lock:
+            selected_ref = product_verifier_states.get(authority_id_value)
+            selected = selected_ref() if selected_ref is not None else None
+            if selected_ref is not None and selected is None:
+                product_verifier_states.pop(authority_id_value, None)
+        if selected is None:
+            raise ReplayError("product-selected runtime verifier is unavailable")
+        if selected is not verifier:
+            raise ReplayError(
+                "runtime_state_verifier is not the product-selected trust anchor"
+            )
+
     def verify_signature(
         verifier: "RuntimeStateVerifier",
         material: bytes,
@@ -352,6 +383,8 @@ def _runtime_authority_state_operations():
         register_verifier,
         verifier_authority_id,
         verifier_id,
+        select_product_verifier,
+        require_product_verifier,
         verify_signature,
     )
 
@@ -364,13 +397,21 @@ def _runtime_authority_state_operations():
     _register_runtime_state_verifier,
     _runtime_state_verifier_authority_id,
     _runtime_state_verifier_id,
+    _select_product_runtime_state_verifier,
+    _require_product_runtime_state_verifier,
     _verify_runtime_state_signature,
 ) = _runtime_authority_state_operations()
 del _runtime_authority_state_operations
 
 
 class RuntimeStateVerifier:
-    """Separately provisioned trust anchor for one runtime-state authority."""
+    """Separately provisioned trust anchor for one runtime-state authority.
+
+    Construction alone does not make a verifier authoritative. Product
+    composition must select the verifier explicitly via select_product_trust;
+    checkpoint and resume reject caller-created substitutes even when their
+    authority/verifier identifiers match the selected trust anchor.
+    """
 
     __slots__ = ("__weakref__",)
 
@@ -398,6 +439,25 @@ class RuntimeStateVerifier:
             verify_signature,
         )
 
+    @classmethod
+    def select_product_trust(
+        cls,
+        *,
+        authority_id: str,
+        verifier_id: str,
+        verify_signature: RuntimeStateSignatureVerifier,
+    ) -> "RuntimeStateVerifier":
+        if cls is not RuntimeStateVerifier:
+            raise TypeError(
+                "product runtime trust must use canonical RuntimeStateVerifier"
+            )
+        verifier = cls(
+            authority_id=authority_id,
+            verifier_id=verifier_id,
+            verify_signature=verify_signature,
+        )
+        return _select_product_runtime_state_verifier(verifier)
+
     @property
     def authority_id(self) -> str:
         return _runtime_state_verifier_authority_id(self)
@@ -407,6 +467,7 @@ class RuntimeStateVerifier:
         return _runtime_state_verifier_id(self)
 
     def verify_snapshot(self, snapshot: RuntimeStateSnapshot) -> None:
+        _require_product_runtime_state_verifier(self)
         if type(snapshot) is not RuntimeStateSnapshot:
             raise ReplayError(
                 "runtime state verifier requires canonical RuntimeStateSnapshot"
@@ -436,6 +497,7 @@ class RuntimeStateVerifier:
         self,
         checkpoint: "CompositeReplayCheckpoint",
     ) -> None:
+        _require_product_runtime_state_verifier(self)
         if type(checkpoint) is not CompositeReplayCheckpoint:
             raise ReplayError(
                 "runtime state verifier requires canonical CompositeReplayCheckpoint"
@@ -628,6 +690,7 @@ class RuntimeStateAuthority:
             ),
         )
 
+
 def _resolve_runtime_snapshot(
     authority: RuntimeStateAuthority,
     verifier: RuntimeStateVerifier,
@@ -640,6 +703,7 @@ def _resolve_runtime_snapshot(
         raise TypeError(
             "runtime_state_verifier must be the canonical RuntimeStateVerifier"
         )
+    _require_product_runtime_state_verifier(verifier)
     if authority.authority_id != verifier.authority_id:
         raise ReplayError("runtime authority and verifier identities differ")
     snapshot = RuntimeStateAuthority.capture(
@@ -1073,6 +1137,7 @@ def resume_from_composite_checkpoint(
         raise TypeError(
             "runtime_state_verifier must be the canonical RuntimeStateVerifier"
         )
+    _require_product_runtime_state_verifier(runtime_state_verifier)
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
     if runtime_state_verifier.authority_id != checkpoint.runtime_authority_id:

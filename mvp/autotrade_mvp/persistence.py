@@ -116,7 +116,9 @@ class JournalStore(_JournalStoreImpl):
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
 
-        event_id = JournalStore._require_text(self, envelope.get("event_id"), "event_id")
+        event_id = JournalStore._require_text(
+            self, envelope.get("event_id"), "event_id"
+        )
         event_type = JournalStore._require_text(
             self, envelope.get("event_type"), "event_type"
         )

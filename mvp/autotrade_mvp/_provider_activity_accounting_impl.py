@@ -3189,6 +3189,10 @@ def commit_provider_fill_with_reservation_consumption(
             raise ValueError(
                 "order_event_key/evidence require order_book"
             )
+        if economic_book.environment in {"PAPER", "LIVE"}:
+            raise AccountingConflict(
+                "PAPER/LIVE provider fills require atomic canonical order projection"
+            )
         return commit_economic_batch_with_reservation_consumption(
             economic_book,
             reservation_book,

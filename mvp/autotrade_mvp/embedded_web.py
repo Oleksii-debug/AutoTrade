@@ -36,6 +36,9 @@ _MAX_MANIFEST_BYTES = 256 * 1024
 _MAX_ASSETS = 256
 _MAX_ASSET_BYTES = 32 * 1024 * 1024
 _MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+_REQUIRED_CORE_ASSETS = frozenset(
+    {"index.html", "app.js", "host-api-routes.js", "styles.css"}
+)
 _CSP = (
     "default-src 'self'; "
     "base-uri 'none'; "
@@ -145,8 +148,11 @@ class ImmutableWebAssetBundle:
         if sum(len(asset.body) for asset in ordered) > _MAX_BUNDLE_BYTES:
             raise ValueError("web bundle exceeds the release size envelope")
         by_path = {asset.path: asset for asset in ordered}
-        if "index.html" not in by_path:
-            raise ValueError("web bundle requires index.html")
+        missing_core = sorted(_REQUIRED_CORE_ASSETS - set(by_path))
+        if missing_core:
+            raise ValueError(
+                "web bundle is missing required core assets: " + ", ".join(missing_core)
+            )
 
         manifest = {
             "schema_version": "1",

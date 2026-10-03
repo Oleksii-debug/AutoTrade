@@ -201,12 +201,6 @@ def _build_release_bound_durable_financial_authority(
             raise durable_error_type(f"{name} must be canonical sha256:<64 hex>")
         return value
 
-    def require_durable_graphs() -> None:
-        if durable_dependency_guard is not None:
-            durable_dependency_guard()
-        for guard in durable_external_dependency_guards:
-            guard()
-
     def bind(
         *,
         store: JournalStore,
@@ -264,7 +258,10 @@ def _build_release_bound_durable_financial_authority(
         # measurement module's executable graph after the first guard passed.
         if measurement_dependency_guard is not None:
             measurement_dependency_guard()
-        require_durable_graphs()
+        if durable_dependency_guard is not None:
+            durable_dependency_guard()
+        for guard in durable_external_dependency_guards:
+            guard()
         result = durable_binder(
             store,
             spec,
@@ -273,7 +270,10 @@ def _build_release_bound_durable_financial_authority(
         )
         # Persistent mutation during durable projection must not survive into a
         # terminal accepted result even when the root callable identity is stable.
-        require_durable_graphs()
+        if durable_dependency_guard is not None:
+            durable_dependency_guard()
+        for guard in durable_external_dependency_guards:
+            guard()
         return result
 
     return bind

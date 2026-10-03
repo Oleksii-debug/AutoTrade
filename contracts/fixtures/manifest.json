@@ -1,5 +1,5 @@
 {
-  "corpus_version": "5.0.0",
+  "corpus_version": "6.0.0",
   "fixtures": [
     {
       "path": "dataset-manifest.valid.json",
@@ -42,6 +42,15 @@
     {
       "path": "common-scalars.corpus.json",
       "scope": "common-scalar-subset",
+      "languages": [
+        "python",
+        "csharp",
+        "typescript"
+      ]
+    },
+    {
+      "path": "dataset-manifest.semantic.corpus.json",
+      "scope": "dataset-manifest-content-authority-v1",
       "languages": [
         "python",
         "csharp",

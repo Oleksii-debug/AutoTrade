@@ -440,7 +440,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
             body = json.loads(decision.manifest_json)
             body["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
-                b"\\x00" * 256
+                bytes(256)
             ).decode("ascii")
             forged_json = json.dumps(
                 body,

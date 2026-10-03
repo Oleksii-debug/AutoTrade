@@ -307,6 +307,12 @@ class AdmittedResearchToolRequest:
                 label="admitted research tool arguments",
             ),
         )
+        privileged_arguments = _scan_privileged_fields(self.arguments)
+        if privileged_arguments:
+            raise PermissionError(
+                "admitted research tool arguments contain forbidden privileged fields: "
+                + ", ".join(sorted(privileged_arguments))
+            )
         refs = tuple(
             _text(item, name="evidence_ref")
             for item in self.evidence_refs
@@ -415,18 +421,39 @@ _FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
     {
         "credentials",
         "credential",
+        "credentialhandle",
+        "credentialhandleid",
+        "credentialgeneration",
+        "credentialref",
         "secret",
+        "secretref",
         "token",
+        "sessiontoken",
+        "ownertoken",
+        "authtoken",
         "apikey",
+        "apisecret",
+        "clientsecret",
         "accesstoken",
         "refreshtoken",
         "password",
         "privatekey",
         "signingkey",
         "authorization",
+        "authorizationheader",
+        "proxyauthorization",
+        "proxyauthorizationheader",
+        "authheader",
+        "cookie",
+        "xapikey",
+        "xtxcapikey",
+        "xtxcpayload",
+        "xtxcsignature",
+        "apikeyheader",
         "bearertoken",
         "sessioncookie",
         "authoritygrant",
+        "authoritytoken",
         "toolgrant",
         "tradingauthority",
         "executionauthority",

@@ -408,6 +408,16 @@ def _parse_composition(composition_bytes: bytes) -> dict[str, object]:
     return composition
 
 
+def _validate_expected_source_sha(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or _GIT_OBJECT_ID.fullmatch(value) is None:
+        raise FoundationStagingError(
+            "expected_source_sha must be an exact lowercase Git object id"
+        )
+    return value
+
+
 def _composition_index(components: object) -> tuple[dict[str, dict[str, object]], set[str]]:
     if type(components) is not list:
         raise FoundationStagingError("composition components must be an array")
@@ -1157,14 +1167,7 @@ def _stage_source_controlled_components_unserialized(
 ) -> tuple[dict[str, str], ...]:
     """Internal TCB used only with reviewed, module-owned descriptor sets."""
 
-    if expected_source_sha is not None and (
-        type(expected_source_sha) is not str
-        or _GIT_OBJECT_ID.fullmatch(expected_source_sha) is None
-    ):
-        raise FoundationStagingError(
-            "expected_source_sha must be an exact lowercase Git object id"
-        )
-
+    expected_source_sha = _validate_expected_source_sha(expected_source_sha)
     descriptors = _validate_descriptors(descriptors)
     source_root_baseline = _require_git_root(source_root)
     _require_exact_directory(staging, label="staging")
@@ -1480,6 +1483,7 @@ def _stage_source_controlled_components(
 ) -> tuple[dict[str, str], ...]:
     """Run one serialized preflight -> component publish -> manifest commit."""
 
+    expected_source_sha = _validate_expected_source_sha(expected_source_sha)
     with _composition_publish_transaction(
         composition_path.parent
     ) as composition_authority:

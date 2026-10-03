@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-import json
+
+from autotrade_runtime.strict_json import DuplicateJsonKeyError, strict_json_loads
 
 from .performance_qualification import RuntimeBudgetError, RuntimeLoadObservation
 from .runtime_load_campaign import (
@@ -35,33 +36,18 @@ class RuntimeTargetHostCampaignError(ValueError):
     """Raised when retained target-host campaign evidence is not canonical."""
 
 
-def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeTargetHostCampaignError(
-                "target-host campaign contains duplicate JSON key"
-            )
-        result[key] = value
-    return result
-
-
 def _parse_json(raw: bytes) -> dict[str, object]:
     if type(raw) is not bytes or not raw:
         raise RuntimeTargetHostCampaignError(
             "target-host campaign must be non-empty bytes"
         )
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                RuntimeTargetHostCampaignError(
-                    f"target-host campaign contains invalid JSON constant {token}"
-                )
-            ),
-        )
-    except (UnicodeError, json.JSONDecodeError) as error:
+        value = strict_json_loads(raw.decode("utf-8"))
+    except DuplicateJsonKeyError as error:
+        raise RuntimeTargetHostCampaignError(
+            "target-host campaign contains duplicate JSON key"
+        ) from error
+    except (UnicodeError, ValueError) as error:
         raise RuntimeTargetHostCampaignError(
             "target-host campaign is not valid UTF-8 JSON"
         ) from error

@@ -126,4 +126,8 @@ jobs:
           done < "$APPROVED_PATH_FILE"
           python -m control.tools.reconvergence_integrity "${args[@]}"
       - name: Run trusted guard regression tests
-        run: python -m unittest tests.Control.test_reconvergence_integrity -v
+        run: >-
+          python -m unittest
+          tests.Control.test_reconvergence_integrity
+          tests.Control.test_reconvergence_integrity_entrypoint
+          -v

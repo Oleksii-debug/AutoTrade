@@ -1,4 +1,5 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+from types import MappingProxyType
 import unittest
 
 from mvp.autotrade_mvp.allocation_valuation import (
@@ -646,7 +647,9 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
                 market_type=type(market).__name__,
                 valuation_type=type(valuation).__name__,
             ):
-                with self.assertRaisesRegex(AllocationValuationError, "exact dict"):
+                with self.assertRaisesRegex(
+                    AllocationValuationError, "exact dict or mappingproxy"
+                ):
                     self.normalize(market, valuation)
                 self.assertEqual(touched, [])
 
@@ -697,7 +700,9 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         )
         touched.clear()
 
-        with self.assertRaisesRegex(AllocationValuationError, "exact dict"):
+        with self.assertRaisesRegex(
+            AllocationValuationError, "exact dict or mappingproxy"
+        ):
             self.normalize(self.market(), valuation)
 
         self.assertEqual(touched, [])
@@ -741,6 +746,23 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
             self.normalize(self.market(quote_currency="EUR"), valuation)
 
         self.assertEqual(touched, [])
+
+
+    def test_canonical_mappingproxy_payloads_remain_accepted(self):
+        market = MappingProxyType(self.market())
+        valuation_data = self.valuation()
+        valuation_data["cost_rate_components"] = MappingProxyType(
+            dict(valuation_data["cost_rate_components"])
+        )
+        valuation_data["cost_evidence_refs"] = MappingProxyType(
+            dict(valuation_data["cost_evidence_refs"])
+        )
+        valuation = MappingProxyType(valuation_data)
+
+        result = self.normalize(market, valuation)
+
+        self.assertEqual(result.symbol, "AAA")
+        self.assertEqual(result.unit_base_notional, Decimal("10"))
 
 
 if __name__ == "__main__":

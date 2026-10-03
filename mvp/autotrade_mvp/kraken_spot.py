@@ -319,8 +319,10 @@ def _environment(value: str) -> str:
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise KrakenSpotAdapterError(f"{name} must use exact decimal input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise KrakenSpotAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise KrakenSpotAdapterError(f"{name} must be a finite decimal") from error
     if not result.is_finite():

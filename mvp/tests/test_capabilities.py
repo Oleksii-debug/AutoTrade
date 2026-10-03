@@ -39,13 +39,19 @@ def claim(
     observed_at=NOW - timedelta(minutes=1),
     expires_at=NOW + timedelta(minutes=10),
     instrument_version="instrument-v1",
+    provider_id="simulated",
+    account_id="paper-account",
+    entity_id="entity-1",
+    environment="PAPER",
+    provider_environment=None,
 ) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
-        account_id="paper-account",
-        entity_id="entity-1",
-        environment="PAPER",
+        provider_id=provider_id,
+        account_id=account_id,
+        entity_id=entity_id,
+        environment=environment,
+        provider_environment=provider_environment,
         instrument_version=instrument_version,
         observed_at=observed_at,
         expires_at=expires_at,
@@ -282,6 +288,50 @@ class CapabilityFoundationTests(unittest.TestCase):
                 claims=claims,
                 observed_at=NOW,
             )
+
+    def test_bybit_claim_never_infers_testnet_or_demo_from_paper(self):
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            claim("API", provider_id="BYBIT")
+        with self.assertRaisesRegex(CapabilityError, "does not match runtime"):
+            claim("API", provider_id="BYBIT", environment="LIVE", provider_environment="TESTNET")
+
+    def test_mixed_provider_environments_are_distinct_claim_identities(self):
+        claims = list(complete_claims(provider_id="BYBIT", provider_environment="TESTNET"))
+        claims[-1] = claim("INSTRUMENT", provider_id="BYBIT", provider_environment="DEMO")
+        with self.assertRaisesRegex(CapabilityError, "different identities"):
+            derive_capability_snapshot(snapshot_id=SNAPSHOT_1, claims=claims, observed_at=NOW)
+
+    def test_bybit_testnet_and_demo_coexist_without_cross_resolution(self):
+        registry = CapabilityRegistry()
+        testnet = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="TESTNET"),
+            observed_at=NOW,
+        )
+        demo = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_2,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="DEMO"),
+            observed_at=NOW,
+        )
+        registry.add(testnet)
+        registry.add(demo)
+        common = dict(
+            provider_id="BYBIT", account_id="paper-account", entity_id="entity-1",
+            environment="PAPER", instrument_version="instrument-v1", at=NOW,
+        )
+        self.assertEqual(registry.require_verified(**common, provider_environment="TESTNET").snapshot_id, SNAPSHOT_1)
+        self.assertEqual(registry.require_verified(**common, provider_environment="DEMO").snapshot_id, SNAPSHOT_2)
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            registry.latest(**common)
+
+    def test_contract_projection_preserves_provider_environment(self):
+        snapshot = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(provider_id="BYBIT", provider_environment="TESTNET"),
+            observed_at=NOW,
+        )
+        self.assertEqual(snapshot.provider_environment, "TESTNET")
+        self.assertEqual(snapshot.to_contract_dict()["provider_environment"], "TESTNET")
 
     def test_registry_uses_latest_snapshot_and_expiry(self):
         registry = CapabilityRegistry()

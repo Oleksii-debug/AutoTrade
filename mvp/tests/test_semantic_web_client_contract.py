@@ -617,6 +617,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         for field_id in (
             "authority-policy-fields",
+            "authority-policy-host",
             "authority-policy-account",
             "authority-policy-environment",
             "authority-policy-id",
@@ -727,6 +728,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_policy_review_confirmation_is_bound_to_exact_fields_and_snapshot_context(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function authorityReviewScopeKey()", js)
+        self.assertIn('String(state.renderedHostId ?? "")', js)
         self.assertIn(
             'state.sessionIdentity === null ? "" : state.sessionIdentity.actor',
             js,
@@ -844,6 +846,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn(
             'byId("authority-protection-only").checked = policy.protection_only === true',
+            render,
+        )
+        self.assertIn(
+            'text("authority-policy-host", state.pendingCommandHostId)',
             render,
         )
 
@@ -1215,6 +1221,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("function newCommandPayload")
         ]
         self.assertIn("let pollEpoch = null", poll)
+        self.assertIn("let pollRenderedHostId = null", poll)
         self.assertIn("let pollRenderedAccountId = null", poll)
         self.assertIn("let pollRenderedEnvironment = null", poll)
         catch = poll.rindex("} catch (error) {")
@@ -1264,9 +1271,11 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("function renderHostEvent")
         ]
         self.assertIn("const scopeEpoch = state.scopeEpoch", refresh)
+        self.assertIn("const renderedHostId = state.renderedHostId", refresh)
         self.assertIn("const renderedAccountId = state.renderedAccountId", refresh)
         self.assertIn("const renderedEnvironment = state.renderedEnvironment", refresh)
         self.assertIn("scopeEpoch !== state.scopeEpoch", refresh)
+        self.assertIn("renderedHostId !== state.renderedHostId", refresh)
         self.assertIn("renderedAccountId !== state.renderedAccountId", refresh)
         self.assertIn("renderedEnvironment !== state.renderedEnvironment", refresh)
         fence = refresh.index("scopeEpoch !== state.scopeEpoch")
@@ -1287,7 +1296,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_confirmed_command_response_is_scope_fenced_before_operation_rendering(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function commandScopeMatchesCurrentSnapshot(payload)", js)
+        self.assertIn("function commandContextMatchesCurrentSnapshot(payload, submittedHostId)", js)
         submit = js[
             js.index("async function submitCommand(event)"):
             js.index("async function refreshStateFromUser")
@@ -1350,25 +1359,9 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("if (!recovered)", poll)
         self.assertLess(
             poll.index("if (!recovered)"),
-            poll.index("const pollEpoch = state.scopeEpoch"),
+            poll.index("pollEpoch = state.scopeEpoch"),
         )
 
-    def test_scope_change_is_explicitly_announced_with_new_account_and_environment(self):
-        js = APP.read_text(encoding="utf-8")
-        snapshot = js[
-            js.index("function renderSnapshot(snapshot"):
-            js.index("async function refreshSnapshot")
-        ]
-        self.assertIn("Host scope changed to account ", snapshot)
-        self.assertIn('" in " + parsed.environment', snapshot)
-        self.assertIn(
-            "Old-scope operation, event, notification, and command-validation evidence was cleared.",
-            snapshot,
-        )
-        self.assertIn('parsed.environment === "LIVE"', snapshot)
-        markers = snapshot.index("state.renderedEnvironment = parsed.environment")
-        announcement = snapshot.index("Host scope changed to account ")
-        self.assertLess(markers, announcement)
 
     def test_same_scope_snapshot_cursor_jump_clears_event_derived_views(self):
         js = APP.read_text(encoding="utf-8")
@@ -1412,8 +1405,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
             snapshot.index("const skippedSameScopeEvents ="):
             snapshot.index("if (scopeChanged)")
         ]
-        self.assertIn("!scopeChanged", condition)
-        self.assertIn("state.renderedAccountId !== null", condition)
+        self.assertIn("!displayContextChanged", condition)
+        self.assertIn("state.renderedHostId !== null", condition)
         self.assertIn("parsed.cursor > priorCursor", condition)
         self.assertNotIn("parsed.cursor >= priorCursor", condition)
 
@@ -1435,7 +1428,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("async function pollEvents()"):
             js.index("function newCommandPayload")
         ]
-        self.assertIn("const pollEpoch = state.scopeEpoch", poll)
+        self.assertIn("pollEpoch = state.scopeEpoch", poll)
         self.assertIn("const renderedAccountId = state.renderedAccountId", poll)
         self.assertIn("const renderedEnvironment = state.renderedEnvironment", poll)
         self.assertIn("pollEpoch !== state.scopeEpoch", poll)
@@ -1453,7 +1446,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         catch_start = submit.rindex("    } catch {")
         catch_block = submit[catch_start:]
-        self.assertIn("if (commandScopeMatchesCurrentSnapshot(payload))", catch_block)
+        self.assertIn("if (commandContextMatchesCurrentSnapshot(payload, submittedHostId))", catch_block)
         self.assertIn("state.snapshotReady = false", catch_block)
         self.assertIn(
             "The current scope snapshot is not invalidated by this older request.",
@@ -1502,15 +1495,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "function resetCommandFeedbackForScope(accountId, environment)",
+            "function resetCommandFeedbackForContext(accountId, environment)",
             js,
         )
         self.assertIn(
-            "An unresolved command from a different account/environment scope is retained with its original identity and will not be retargeted.",
+            "An unresolved command from a different host/session/account/environment context is retained with its original identity and will not be retargeted.",
             js,
         )
         self.assertIn(
-            "No host command has been submitted for this account/environment session.",
+            "No host command has been submitted for this host/account/environment session.",
             js,
         )
         self.assertIn('renderCommandValidationDetails([], "scope_changed")', js)
@@ -1528,7 +1521,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         operations = snapshot.index("resetOperationsForScope();")
         history = snapshot.index("resetEventHistoryForScope();")
         command = snapshot.index(
-            "resetCommandFeedbackForScope(parsed.accountId, parsed.environment);"
+            "resetCommandFeedbackForContext(parsed.accountId, parsed.environment);"
         )
         self.assertLess(notifications, filters)
         self.assertLess(filters, operations)
@@ -1672,6 +1665,45 @@ class SemanticWebClientContractTests(unittest.TestCase):
         app = html.index('<script src="/app.js" defer></script>')
         self.assertLess(routes, app)
 
+    def test_authority_review_key_and_visible_scope_include_exact_host_identity(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('id="authority-policy-host"', html)
+        self.assertIn(
+            "I reviewed the exact host, account, environment, instrument, actions, notional and validity window above.",
+            html,
+        )
+        review = js[
+            js.index("function authorityReviewScopeKey()"):
+            js.index("function invalidateAuthorityPolicyReview()")
+        ]
+        self.assertIn('String(state.renderedHostId ?? "")', review)
+        self.assertIn('text("authority-policy-host", active ? state.renderedHostId : null)', js)
+
+    def test_host_identity_change_invalidates_authority_review_and_retry_context(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("renderedHostId: null", js)
+        self.assertIn("pendingCommandHostId: null", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const hostChanged =", snapshot)
+        self.assertIn("const displayContextChanged = hostChanged || scopeChanged", snapshot)
+        self.assertIn("if (displayContextChanged)", snapshot)
+        self.assertIn("state.renderedHostId = parsed.hostId", snapshot)
+        self.assertIn('parsed.environment === "LIVE" || hostChanged', snapshot)
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        self.assertIn("state.pendingCommandHostId !== state.renderedHostId", submit)
+        self.assertIn("const submittedHostId = state.pendingCommandHostId", submit)
+        self.assertIn(
+            "commandContextMatchesCurrentSnapshot(payload, submittedHostId)",
+            submit,
+        )
+
     def test_set_authority_payload_matches_current_host_validator_shape(self):
         js = APP.read_text(encoding="utf-8")
         host = (ROOT / "mvp" / "autotrade_mvp" / "operator_authority_commands.py").read_text(
@@ -1699,10 +1731,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_authority_review_reuses_current_scope_and_cursor_gap_fences(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("scopeEpoch: 0", js)
-        self.assertIn("function pendingCommandMatchesCurrentScope()", js)
-        self.assertIn("const pendingScopeMatches = pendingCommandMatchesCurrentScope()", js)
+        self.assertIn("function pendingCommandMatchesCurrentContext()", js)
+        self.assertIn("const pendingContextMatches = pendingCommandMatchesCurrentContext()", js)
         self.assertIn(
-            "button.disabled = !enabled || !roleAllowed || !pendingScopeMatches",
+            "button.disabled = !enabled || !roleAllowed || !pendingContextMatches",
             js,
         )
         self.assertIn(

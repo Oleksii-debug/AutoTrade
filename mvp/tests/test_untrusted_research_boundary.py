@@ -642,5 +642,62 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             )
 
 
+    def test_permission_effect_rejects_executable_equality_objects(self):
+        class EqualityMustNotRun:
+            def __eq__(self, other):
+                raise AssertionError("permission equality callback must not execute")
+
+            def __ne__(self, other):
+                raise AssertionError("permission inequality callback must not execute")
+
+        probe = EqualityMustNotRun()
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            ResearchEvidence(
+                evidence_id="permission-evidence",
+                source_id="source",
+                source_revision="r1",
+                content="fact",
+                rights_basis="licensed",
+                redistribution=Redistribution.FULL,
+                permission_effect=probe,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            AdmittedResearchToolRequest(
+                request_id="permission-admitted",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={},
+                evidence_refs=(),
+                permission_effect=probe,
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "cannot grant authority"):
+            ResearchModelResult(
+                result_id="permission-model",
+                proposal={"safe": True},
+                evidence_refs=("evidence:1",),
+                permission_effect=probe,
+            )
+
+    def test_canonical_export_digest_rejects_executable_container_subclasses(self):
+        class ItemsMustNotRun(dict):
+            def items(self):
+                raise AssertionError("mapping callback must not execute")
+
+        hostile = ItemsMustNotRun({"safe": 1})
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            canonical_export_digest(hostile)
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
+            canonical_export_digest({"nested": hostile})
+
+    def test_canonical_export_digest_rejects_scalar_subclass_before_encode(self):
+        class EncodeMustNotRun(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError("scalar encode callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
+            canonical_export_digest({"text": EncodeMustNotRun("safe")})
+
+
 if __name__ == "__main__":
     unittest.main()

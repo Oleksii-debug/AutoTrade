@@ -123,6 +123,7 @@ _DESCRIPTORS = (
     ),
     _descriptor("provider_nonce", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("production_host_runtime", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
+    _descriptor("trusted_chronology", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
     _descriptor("recovery_clock_incident", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("recovery_owner", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("reservation_book", FINANCIAL, QUALIFICATION_FINANCIAL),

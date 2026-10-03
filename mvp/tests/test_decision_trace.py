@@ -537,6 +537,35 @@ class DecisionTraceStoreTests(unittest.TestCase):
                     available_evidence_digests={"evidence-1": "a" * 64},
                 )
 
+    def test_exact_reconstruction_rejects_polymorphic_digest_keys_before_hash(self):
+        touched = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                touched.append("hash")
+                raise AssertionError("hostile digest-key hash executed")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile digest-key equality executed")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-hostile-available-key"))
+            hostile = HostileKey("evidence-1")
+            available_evidence = {hostile: "a" * 64}
+            touched.clear()
+
+            with self.assertRaisesRegex(ValueError, "keys must be exact strings"):
+                store.reconstruct_exact(
+                    "trace-hostile-available-key",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests=available_evidence,
+                )
+            self.assertEqual(touched, [])
+
     def test_exact_reconstruction_requires_matching_source_and_build(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

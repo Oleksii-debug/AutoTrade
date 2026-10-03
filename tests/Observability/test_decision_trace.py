@@ -335,6 +335,29 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot[-1]["labels"]["password"], "[REDACTED]")
 
+    def test_metric_backlog_rejects_scalar_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileInt(int):
+            def __le__(self, other):
+                touched.append("le")
+                raise AssertionError("hostile integer comparison executed")
+
+        class HostileName(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile metric-name strip executed")
+
+        with self.assertRaisesRegex(ValueError, "exact positive integer"):
+            BoundedMetricBacklog(max_items=HostileInt(2))
+        backlog = BoundedMetricBacklog()
+        with self.assertRaisesRegex(ValueError, "exact non-empty string"):
+            backlog.record(HostileName("queue.delay"), 1.0)
+        with self.assertRaisesRegex(ValueError, "exact finite number"):
+            backlog.record("queue.delay", HostileInt(1))
+        self.assertEqual(touched, [])
+        self.assertEqual(backlog.snapshot(), ())
+
     def test_metric_backlog_rejects_unbounded_or_non_json_labels(self):
         backlog = BoundedMetricBacklog(max_items=2, max_label_bytes=32)
         with self.assertRaisesRegex(ValueError, "bounded size"):

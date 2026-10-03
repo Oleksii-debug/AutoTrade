@@ -255,18 +255,23 @@ def _validate_digest_map(
 ) -> None:
     if type(value) is not dict:
         raise ValueError(f"{name} must be an exact object")
-    expected = set(expected_ids)
-    if set(value) != expected:
-        raise ValueError(f"{name} keys must exactly match linked identities")
+    expected_items = tuple(expected_ids)
+    if any(type(identity) is not str for identity in expected_items):
+        raise ValueError(f"{name} linked identities must be exact strings")
     for identity, digest in value.items():
+        if type(identity) is not str:
+            raise ValueError(f"{name} keys must be exact strings")
         if (
-            type(identity) is not str
-            or type(digest) is not str
+            type(digest) is not str
             or len(digest) != 64
             or digest != digest.lower()
             or any(ch not in "0123456789abcdef" for ch in digest)
         ):
             raise ValueError(f"{name} must contain lowercase SHA-256 digests")
+    # Set construction is intentionally last: after the exact-string fence no
+    # caller-controlled __hash__/__eq__ implementation can execute here.
+    if set(value) != set(expected_items):
+        raise ValueError(f"{name} keys must exactly match linked identities")
 
 
 def _hash_record(record: dict[str, Any]) -> str:
@@ -603,14 +608,10 @@ class BoundedMetricBacklog:
     """Bounded diagnostic queue; unlike durable traces, metrics may be dropped."""
 
     def __init__(self, max_items: int = 256, max_label_bytes: int = 4096) -> None:
-        if not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0:
-            raise ValueError("max_items must be a positive integer")
-        if (
-            not isinstance(max_label_bytes, int)
-            or isinstance(max_label_bytes, bool)
-            or max_label_bytes <= 0
-        ):
-            raise ValueError("max_label_bytes must be a positive integer")
+        if type(max_items) is not int or max_items <= 0:
+            raise ValueError("max_items must be an exact positive integer")
+        if type(max_label_bytes) is not int or max_label_bytes <= 0:
+            raise ValueError("max_label_bytes must be an exact positive integer")
         self._items: deque[dict[str, Any]] = deque(maxlen=max_items)
         self._max_label_bytes = max_label_bytes
         self._dropped = 0
@@ -620,14 +621,10 @@ class BoundedMetricBacklog:
         return self._dropped
 
     def record(self, name: str, value: float, **labels: Any) -> None:
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("metric name is required")
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not isfinite(value)
-        ):
-            raise ValueError("metric value must be a finite number")
+        if type(name) is not str or not name.strip():
+            raise ValueError("metric name must be an exact non-empty string")
+        if type(value) not in (int, float) or not isfinite(value):
+            raise ValueError("metric value must be an exact finite number")
         redacted_labels = _redact(dict(labels))
         try:
             encoded_labels = canonical_json(redacted_labels).encode("utf-8")

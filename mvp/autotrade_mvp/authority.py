@@ -420,24 +420,27 @@ def _authority_service_store_operations():
 
     states: dict[
         int,
-        tuple[weakref.ReferenceType, JournalStore | None, object | None],
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType | None,
+            object | None,
+        ],
     ] = {}
     state_lock = threading.RLock()
     missing = object()
 
-    def cleanup(object_id: int, service_ref: weakref.ReferenceType) -> None:
-        with state_lock:
-            current = states.get(object_id)
-            if current is not None and current[0] is service_ref:
-                states.pop(object_id, None)
-
     def register(service: object, store: JournalStore | None) -> None:
         identity = None
+        store_ref = None
         if store is not None:
             identity = require_exact_journal_store_authority(
                 store,
                 subject="AuthorityService journal store",
             )
+            # Keep process registry references callback-free. A weakref callback
+            # is discoverable from the live referent and can otherwise be
+            # invoked manually to erase a one-shot authority binding.
+            store_ref = weakref.ref(store)
 
         object_id = id(service)
         with state_lock:
@@ -453,11 +456,11 @@ def _authority_service_store_operations():
                         "AuthorityService journal binding identity collision"
                     )
                 states.pop(object_id, None)
-            service_ref = weakref.ref(
-                service,
-                lambda ref, object_id=object_id: cleanup(object_id, ref),
+            states[object_id] = (
+                weakref.ref(service),
+                store_ref,
+                identity,
             )
-            states[object_id] = (service_ref, store, identity)
 
     def binding(
         service: object,
@@ -471,8 +474,12 @@ def _authority_service_store_operations():
                 "AuthorityService journal process state is unavailable"
             )
 
-        store = state[1]
         expected_identity = state[2]
+        store = None if state[1] is None else state[1]()
+        if expected_identity is not None and store is None:
+            raise AuthorityConflict(
+                "AuthorityService selected journal store was lost"
+            )
         visible_store = vars(service).get("store", missing)
         if visible_store is not store:
             raise AuthorityConflict(

@@ -172,7 +172,7 @@ def verify_declared_plan_runtime_target_host_qualification(
         # existing exact-type checks rather than becoming accepted here.
         if type(campaign_cut) is RuntimeCampaignCut:
             campaign_cut = _snapshot_campaign_cut(campaign_cut)
-        return verify_composed_runtime_target_host_qualification(
+        accepted = verify_composed_runtime_target_host_qualification(
             receipt,
             evidence_store=evidence_store,
             evidence_root=evidence_root,
@@ -185,3 +185,32 @@ def verify_declared_plan_runtime_target_host_qualification(
             expected_release_artifact_id=expected_release_artifact_id,
             expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
+
+        # External signed/artifact verification above can execute after the first
+        # durable-plan read. Re-read the same declaration under the still-selected
+        # physical-generation scope before returning terminal acceptance. The
+        # second read is intentionally plan-specific rather than sequence-frozen:
+        # unrelated append-only journal progress is allowed, while a backing-file
+        # rebound/replacement or changed durable declaration fails closed.
+        final_plan = load_declared_runtime_event_plan(
+            journal_store,
+            plan_id=plan.plan_id,
+            spec=spec,
+        )
+        final_plan_digest = _canonical_sha256_text(
+            final_plan.digest,
+            name="revalidated durable pre-run plan digest",
+        )
+        if final_plan_digest != durable_plan_digest:
+            raise RuntimeTargetHostCompositionError(
+                "durable pre-run plan changed during terminal qualification"
+            )
+        final_journal_identity = require_exact_journal_store_authority(
+            journal_store,
+            subject="runtime target-host qualification JournalStore",
+        )
+        if final_journal_identity != selected_journal_identity:
+            raise RuntimeError(
+                "journal operation authority changed during terminal qualification"
+            )
+        return accepted

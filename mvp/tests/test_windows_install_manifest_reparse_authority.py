@@ -128,6 +128,58 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
             self.assertFalse(active["parent"])
             self.assertFalse(active["leaf"])
 
+    def test_windows_identity_admission_failure_releases_retained_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = (Path(directory) / "release.zip").absolute()
+            bundle.write_bytes(b"data")
+            closed = {"parent": False, "leaf": False}
+
+            @contextmanager
+            def retained_parent(path, *, create=False):
+                try:
+                    yield object()
+                finally:
+                    closed["parent"] = True
+
+            @contextmanager
+            def retained_leaf(authority, *, target_name, subject):
+                descriptor = os.open(bundle, os.O_RDONLY)
+                try:
+                    yield descriptor
+                finally:
+                    closed["leaf"] = True
+                    os.close(descriptor)
+
+            with patch.object(
+                installer_manifest.sys,
+                "platform",
+                "win32",
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=retained_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+                side_effect=retained_leaf,
+            ), patch.object(
+                installer_manifest,
+                "_assert_open_file_identity",
+                side_effect=installer_manifest.InstallerManifestError("identity sentinel"),
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+            ) as parser:
+                with self.assertRaisesRegex(
+                    installer_manifest.InstallerManifestError,
+                    "identity sentinel",
+                ):
+                    installer_manifest.verify_release_bundle(bundle)
+
+            self.assertTrue(closed["leaf"])
+            self.assertTrue(closed["parent"])
+            parser.assert_not_called()
+
     def test_windows_verification_body_exception_is_not_reclassified_as_namespace_failure(self) -> None:
         with TemporaryDirectory() as directory:
             bundle = (Path(directory) / "release.zip").absolute()

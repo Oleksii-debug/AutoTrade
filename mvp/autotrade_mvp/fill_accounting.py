@@ -996,6 +996,136 @@ def build_provider_fill_correction_transactions(
         corrects_transaction_id=committed_original.transaction_id,
     )
     return reversal, replacement
+
+def build_provider_fill_bust_transaction(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    bust_provider_revision: str,
+    bust_observed_at: str,
+) -> JournalTransaction:
+    """Derive one exact economic reversal for a provider-evidenced fill bust.
+
+    A bust is compensation, not a new fill. The immutable provider execution
+    remains historical truth while its currently active economic transaction is
+    reversed exactly. Exact retry resolves to the same reversal; a stale or
+    contradictory provider fact fails closed.
+    """
+
+    provider, _instrument, settlement, active_evidence = _validated_fill_evidence(
+        book=book,
+        provider_id=provider_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        allow_correction=projected_fill.correction_of is not None,
+    )
+    revision = _text(bust_provider_revision, name="bust_provider_revision")
+    if projected_fill.provider_revision == revision:
+        raise AccountingConflict(
+            "fill bust requires a provider revision distinct from the active fill"
+        )
+    observation = _utc_text(bust_observed_at, name="bust_observed_at")
+    order_key = _economic_order_key(
+        provider,
+        provider_fill.provider_execution_id,
+    )
+
+    reversed_ids = {
+        item.reverses_transaction_id
+        for item in book.transactions
+        if item.reverses_transaction_id is not None
+    }
+    candidates = [
+        item
+        for item in book.transactions
+        if item.reverses_transaction_id is None
+        and item.economic_order_key == order_key
+        and (
+            (projected_fill.correction_of is None and item.corrects_transaction_id is None)
+            or (
+                projected_fill.correction_of is not None
+                and item.corrects_transaction_id is not None
+            )
+        )
+        and _transaction_matches_provider_fill(
+            item,
+            projected_fill=projected_fill,
+            provider_fill=provider_fill,
+            settlement_currency=settlement,
+            economic_order_key=order_key,
+        )
+    ]
+    if not candidates:
+        raise AccountingConflict(
+            "provider fill bust evidence does not match any canonical economic fact"
+        )
+
+    def expected_reversal(source: JournalTransaction) -> JournalTransaction:
+        evidence = {
+            "schema_version": "1.0.0",
+            "provider_id": provider,
+            "environment": book.environment,
+            "account_id": book.account_id,
+            "provider_execution_id": provider_fill.provider_execution_id,
+            "fill_id": projected_fill.fill_id,
+            "correction_of": projected_fill.correction_of,
+            "bust_provider_revision": revision,
+            "bust_observed_at": observation,
+            "source_transaction_id": source.transaction_id,
+            "active_fill": active_evidence,
+        }
+        digest = payload_digest(evidence).removeprefix("sha256:")
+        cause_prefix = (
+            f"provider:{provider}:environment:{book.environment}:"
+            f"account:{book.account_id}:bust:{digest}"
+        )
+        return reverse_transaction(
+            source,
+            transaction_id=f"provider-fill-bust-reversal:{digest}",
+            cause_event_id=f"{cause_prefix}:reversal",
+            observed_at=observation,
+        )
+
+    active = [
+        item for item in candidates if item.transaction_id not in reversed_ids
+    ]
+    if len(active) == 1:
+        return expected_reversal(active[0])
+    if len(active) > 1:
+        raise AccountingConflict(
+            "provider execution has multiple active economic facts during bust"
+        )
+
+    # Exact retry after the bust: locate the single deterministic reversal
+    # derived from the same immutable provider evidence and source transaction.
+    replays: list[JournalTransaction] = []
+    by_id = {item.transaction_id: item for item in book.transactions}
+    for source in candidates:
+        expected = expected_reversal(source)
+        existing = by_id.get(expected.transaction_id)
+        if existing is None:
+            continue
+        if existing != expected:
+            raise AccountingConflict(
+                "existing fill bust reversal conflicts with immutable bust evidence"
+            )
+        replays.append(existing)
+    if len(replays) == 1:
+        return replays[0]
+    if len(replays) > 1:
+        raise AccountingConflict(
+            "provider fill bust evidence resolves to multiple reversal lineages"
+        )
+    raise AccountingConflict(
+        "provider fill is already inactive without the supplied bust lineage"
+    )
+
 def book_provider_fill(
     *,
     book: ScopedEconomicBook,

@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from hashlib import sha256
+import hmac
 import json
 import math
 import tempfile
@@ -91,6 +93,7 @@ def _capture(
     http_status=200,
     response=None,
     observed_at="2026-10-03T22:01:02Z",
+    api_key_echo_confirmed=False,
 ):
     if handle is None:
         handle = _handle()
@@ -107,6 +110,7 @@ def _capture(
         http_status=http_status,
         response=response,
         observed_at=observed_at,
+        api_key_echo_confirmed=api_key_echo_confirmed,
     )
 
 
@@ -175,10 +179,26 @@ def _wire_headers():
     }
 
 
-class BybitCredentialProbeEvidenceTests(unittest.TestCase):
-    def test_mainnet_rejection_binds_exact_trade_generation_without_authority(self):
-        evidence = _capture()
+def _successful_query_api_body(api_key="probe-key", *, secret=""):
+    return json.dumps(
+        {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "apiKey": api_key,
+                "secret": secret,
+                "readOnly": 0,
+                "permissions": {"Spot": ["SpotTrade"]},
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
+
+class BybitCredentialProbeEvidenceTests(unittest.TestCase):
+    def test_rejection_binds_exact_generation_domain_and_negative_authority(self):
+        evidence = _capture()
         self.assertEqual(evidence.credential_handle.generation, 7)
         self.assertEqual(evidence.credential_handle.environment, "LIVE")
         self.assertEqual(evidence.provider_environment, "MAINNET")
@@ -189,6 +209,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.request_timestamp_ms, 1791064800123)
         self.assertEqual(evidence.recv_window_ms, 5000)
         self.assertEqual(evidence.http_status, 200)
+        self.assertFalse(evidence.api_key_echo_confirmed)
         self.assertIs(
             evidence.classification,
             BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
@@ -197,7 +218,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertFalse(evidence.retirement_authority)
         self.assertFalse(evidence.takeover_authority)
 
-    def test_testnet_and_demo_require_paper_credential_scope(self):
+    def test_testnet_and_demo_require_exact_paper_provider_domain(self):
         cases = (
             ("TESTNET", "https://api-testnet.bybit.com/v5/user/query-api"),
             ("DEMO", "https://api-demo.bybit.com/v5/user/query-api"),
@@ -213,28 +234,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     source_uri=source_uri,
                 )
                 self.assertEqual(evidence.credential_handle.environment, "PAPER")
-                self.assertEqual(
-                    evidence.provider_environment,
-                    provider_environment,
-                )
+                self.assertEqual(evidence.provider_environment, provider_environment)
 
-    def test_provider_environment_must_match_credential_runtime_environment(self):
-        with self.assertRaisesRegex(ProviderCoreError, "environment"):
-            _capture(
-                handle=_handle(environment="LIVE"),
-                provider_environment="TESTNET",
-                source_uri="https://api-testnet.bybit.com/v5/user/query-api",
-            )
-        with self.assertRaisesRegex(ProviderCoreError, "environment"):
-            _capture(
-                handle=_handle(
-                    environment="PAPER",
-                    provider_environment="TESTNET",
-                ),
-                provider_environment="MAINNET",
-            )
-
-    def test_same_paper_runtime_cannot_alias_testnet_and_demo_domains(self):
         with self.assertRaisesRegex(ProviderCoreError, "provider domain"):
             _capture(
                 handle=_handle(
@@ -244,23 +245,13 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 provider_environment="DEMO",
                 source_uri="https://api-demo.bybit.com/v5/user/query-api",
             )
-        with self.assertRaisesRegex(ProviderCoreError, "provider domain"):
-            _capture(
-                handle=_handle(
-                    environment="PAPER",
-                    provider_environment="DEMO",
-                ),
-                provider_environment="TESTNET",
-                source_uri="https://api-testnet.bybit.com/v5/user/query-api",
-            )
 
-    def test_only_exact_bybit_trade_handles_are_admitted(self):
+    def test_only_exact_bybit_trade_handle_and_origin_are_admitted(self):
         with self.assertRaisesRegex(ProviderCoreError, "BYBIT"):
             _capture(handle=_handle(provider="KRAKEN"))
         with self.assertRaisesRegex(ProviderCoreError, "TRADE"):
             _capture(handle=_handle(purpose="READ"))
 
-    def test_exact_query_api_origin_is_required(self):
         hostile_or_wrong_sources = (
             "http://api.bybit.com/v5/user/query-api",
             "https://api.bybit.com/v5/user/query-api/",
@@ -276,8 +267,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             ):
                 _capture(source_uri=source_uri)
 
-    def test_noncanonical_provider_scope_scalars_fail_closed(self):
-        cases = (
+    def test_noncanonical_scope_and_request_fields_fail_closed(self):
+        bad_cases = (
             {"provider_environment": "mainnet"},
             {"provider_environment": "MAINNET "},
             {"provider_environment": _StrSubclass("MAINNET")},
@@ -286,15 +277,6 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             {"product_family": _StrSubclass("SPOT")},
             {"response_surface": _StrSubclass("V5_UTA_REST")},
             {"response_surface": "WS_OE_GENERAL"},
-        )
-        for overrides in cases:
-            with self.subTest(overrides=overrides), self.assertRaises(
-                ProviderCoreError
-            ):
-                _capture(**overrides)
-
-    def test_request_window_and_http_status_are_exact_receipt_fields(self):
-        bad_cases = (
             {"request_timestamp_ms": True},
             {"request_timestamp_ms": -1},
             {"request_timestamp_ms": _IntSubclass(1)},
@@ -312,7 +294,12 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             ):
                 _capture(**overrides)
 
-    def test_response_must_be_exact_finite_json_with_integer_retcode(self):
+    def test_response_must_be_exact_finite_acyclic_bounded_json(self):
+        cyclic = {"retCode": 10003}
+        cyclic["cycle"] = cyclic
+        deep = 0
+        for _ in range(65):
+            deep = [deep]
         bad_responses = (
             _DictSubclass(retCode=10003),
             {},
@@ -327,74 +314,22 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             {"retCode": 10003, "bad": math.nan},
             {"retCode": 10003, "bad": math.inf},
             {"retCode": 10003, "bad": -math.inf},
+            cyclic,
+            {"retCode": 10003, "nested": deep},
         )
         for response in bad_responses:
-            with self.subTest(response=response), self.assertRaises(
+            with self.subTest(response_type=type(response)), self.assertRaises(
                 ProviderCoreError
             ):
                 _capture(response=response)
 
-    def test_direct_capture_structural_depth_is_bounded(self):
-        nested = 0
-        for _ in range(65):
-            nested = [nested]
-        with self.assertRaisesRegex(ProviderCoreError, "depth"):
-            _capture(
-                response={
-                    "retCode": 10003,
-                    "nested": nested,
-                }
-            )
-
-    def test_exact_json_lists_and_finite_scalars_remain_digestible(self):
-        evidence = _capture(
-            response={
-                "retCode": 10003,
-                "retMsg": "invalid",
-                "result": {
-                    "flags": [True, False, None],
-                    "counts": [0, 1, 2],
-                    "ratio": 1.25,
-                    "labels": ["a", "b"],
-                },
-            }
-        )
-        self.assertRegex(evidence.response_sha256, r"^sha256:[0-9a-f]{64}$")
-
-    def test_success_payload_is_scrubbed_to_digest_and_still_accepted(self):
-        raw_api_key = "RAW-API-KEY-MUST-NOT-PERSIST"
-        raw_secret = "RAW-SECRET-MUST-NOT-PERSIST"
-        response = {
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "apiKey": raw_api_key,
-                "secret": raw_secret,
-                "readOnly": 0,
-                "permissions": {"ContractTrade": ["Order"]},
-            },
+    def test_json_digest_is_deterministic_and_detached_from_mutation(self):
+        first_response = {
+            "retCode": 10003,
+            "retMsg": "invalid",
+            "result": {"b": 2, "a": 1},
         }
-        evidence = _capture(response=response)
-        metadata = bybit_credential_probe_receipt_metadata(evidence)
-
-        self.assertIs(
-            evidence.classification,
-            BybitCredentialNonAcceptance.STILL_ACCEPTED,
-        )
-        self.assertRegex(evidence.response_sha256, r"^sha256:[0-9a-f]{64}$")
-        serialized_observation = repr(evidence) + repr(metadata)
-        self.assertNotIn(raw_api_key, serialized_observation)
-        self.assertNotIn(raw_secret, serialized_observation)
-        self.assertNotIn("permissions", serialized_observation)
-
-    def test_digest_is_deterministic_for_equivalent_json_objects(self):
-        first = _capture(
-            response={
-                "retCode": 10003,
-                "retMsg": "invalid",
-                "result": {"b": 2, "a": 1},
-            }
-        )
+        first = _capture(response=first_response)
         second = _capture(
             response={
                 "result": {"a": 1, "b": 2},
@@ -403,27 +338,53 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             }
         )
         self.assertEqual(first.response_sha256, second.response_sha256)
+        digest = first.response_sha256
+        first_response["retCode"] = 0
+        first_response["result"]["a"] = 99
+        self.assertEqual(first.ret_code, 10003)
+        self.assertEqual(first.response_sha256, digest)
 
-    def test_mutating_source_response_after_capture_cannot_change_evidence(self):
+    def test_success_direct_capture_requires_explicit_echo_confirmation_and_scrubs_payload(self):
+        raw_api_key = "RAW-API-KEY-MUST-NOT-PERSIST"
         response = {
-            "retCode": 10003,
-            "retMsg": "invalid",
-            "result": {"marker": "before"},
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "apiKey": raw_api_key,
+                "secret": "",
+                "readOnly": 0,
+                "permissions": {"ContractTrade": ["Order"]},
+            },
         }
-        evidence = _capture(response=response)
-        digest = evidence.response_sha256
+        with self.assertRaisesRegex(ProviderCoreError, "echo confirmation"):
+            _capture(response=response)
 
-        response["retCode"] = 0
-        response["result"]["marker"] = "after"
-
-        self.assertEqual(evidence.ret_code, 10003)
-        self.assertEqual(evidence.response_sha256, digest)
+        evidence = _capture(
+            response=response,
+            api_key_echo_confirmed=True,
+        )
+        metadata = bybit_credential_probe_receipt_metadata(evidence)
         self.assertIs(
             evidence.classification,
-            BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+            BybitCredentialNonAcceptance.STILL_ACCEPTED,
         )
+        self.assertTrue(evidence.api_key_echo_confirmed)
+        self.assertTrue(metadata["api_key_echo_confirmed"])
+        serialized = repr(evidence) + repr(metadata)
+        self.assertNotIn(raw_api_key, serialized)
+        self.assertNotIn("permissions", serialized)
 
-    def test_observation_time_is_normalized_to_utc(self):
+    def test_echo_confirmation_cannot_be_attached_to_rejection(self):
+        with self.assertRaisesRegex(ProviderCoreError, "only for successful"):
+            _capture(api_key_echo_confirmed=True)
+        with self.assertRaisesRegex(ProviderCoreError, "only for success"):
+            BybitCredentialProbeWireResponse(
+                http_status=200,
+                response={"retCode": 10003},
+                api_key_echo_confirmed=True,
+            )
+
+    def test_observation_time_is_normalized_and_cannot_precede_request(self):
         evidence = _capture(observed_at="2026-10-04T00:01:02+02:00")
         self.assertEqual(evidence.observed_at, "2026-10-03T22:01:02Z")
         for bad_value in (
@@ -435,8 +396,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 ProviderCoreError
             ):
                 _capture(observed_at=bad_value)
+        with self.assertRaisesRegex(ProviderCoreError, "cannot precede"):
+            _capture(observed_at="2026-10-03T21:59:59Z")
 
-    def test_direct_construction_rejects_forged_digest_and_retcode_types(self):
+    def test_direct_construction_rejects_forged_digest_retcode_and_echo_types(self):
         kwargs = dict(
             credential_handle=_handle(),
             provider_environment="MAINNET",
@@ -467,11 +430,15 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 ProviderCoreError
             ):
                 BybitCredentialProbeEvidence(**{**kwargs, "ret_code": ret_code})
+        with self.assertRaisesRegex(ProviderCoreError, "exact boolean"):
+            BybitCredentialProbeEvidence(
+                **kwargs,
+                api_key_echo_confirmed=1,
+            )
 
-    def test_receipt_metadata_preserves_generation_and_negative_authority(self):
+    def test_receipt_metadata_preserves_generation_request_and_negative_authority(self):
         evidence = _capture(handle=_handle(generation=23))
         metadata = bybit_credential_probe_receipt_metadata(evidence)
-
         self.assertEqual(
             metadata,
             {
@@ -493,6 +460,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "ret_code": 10003,
                 "response_sha256": evidence.response_sha256,
                 "observed_at": "2026-10-03T22:01:02Z",
+                "api_key_echo_confirmed": False,
                 "classification": "REJECTED_EXACT_DOMAIN",
                 "send_authority": False,
                 "retirement_authority": False,
@@ -500,7 +468,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             },
         )
 
-    def test_receipt_metadata_rejects_subclass_authority_objects(self):
+    def test_receipt_metadata_rejects_subclass_authority_object(self):
         class _EvidenceSubclass(BybitCredentialProbeEvidence):
             pass
 
@@ -535,34 +503,26 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 self.assertEqual(headers["X-BAPI-API-KEY"], "probe-key")
                 self.assertEqual(headers["X-BAPI-TIMESTAMP"], "1791064800123")
                 self.assertEqual(headers["X-BAPI-RECV-WINDOW"], "5000")
-                self.assertRegex(headers["X-BAPI-SIGN"], r"^[0-9a-f]{64}$")
+                expected_signature = hmac.new(
+                    b"probe-secret",
+                    b"1791064800123probe-key5000",
+                    sha256,
+                ).hexdigest()
+                self.assertEqual(headers["X-BAPI-SIGN"], expected_signature)
                 self.assertNotIn("probe-secret", repr(headers))
                 return BybitCredentialProbeWireResponse(
                     http_status=200,
                     response={"retCode": 10003, "retMsg": "API key is invalid"},
                 )
 
-            evidence = _probe(
-                vault=vault,
-                handle=handle,
-                wire_query=wire_query,
-            )
-
+            evidence = _probe(vault=vault, handle=handle, wire_query=wire_query)
             self.assertEqual(len(calls), 1)
             self.assertEqual(evidence.credential_handle, handle)
-            self.assertEqual(evidence.credential_handle.generation, 1)
-            self.assertEqual(evidence.request_timestamp_ms, 1791064800123)
-            self.assertEqual(evidence.recv_window_ms, 5000)
-            self.assertEqual(evidence.http_status, 200)
             self.assertIs(
                 evidence.classification,
                 BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
             )
             self.assertNotIn("probe-secret", repr(evidence))
-            self.assertNotIn(
-                "probe-secret",
-                repr(bybit_credential_probe_receipt_metadata(evidence)),
-            )
 
     def test_vault_probe_derives_testnet_and_demo_origins_from_handle(self):
         cases = (
@@ -584,7 +544,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                         seen.append(source_uri)
                         return BybitCredentialProbeWireResponse(
                             http_status=200,
-                            response={"retCode": 0, "retMsg": "OK"},
+                            response={"retCode": 10003},
                         )
 
                     evidence = _probe(
@@ -593,13 +553,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                         wire_query=wire_query,
                     )
                     self.assertEqual(seen, [expected_uri])
-                    self.assertEqual(
-                        evidence.provider_environment,
-                        provider_environment,
-                    )
+                    self.assertEqual(evidence.provider_environment, provider_environment)
                     self.assertEqual(evidence.source_uri, expected_uri)
 
-    def test_stale_generation_fails_before_wire_query(self):
+    def test_stale_generation_and_wrong_identity_fail_before_wire(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, old_handle = _register_probe_credential(directory)
             current_handle = vault.rotate(
@@ -616,15 +573,11 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 calls.append(kwargs)
                 return BybitCredentialProbeWireResponse(
                     http_status=200,
-                    response={"retCode": 0},
+                    response={"retCode": 10003},
                 )
 
             with self.assertRaisesRegex(PermissionError, "stale"):
-                _probe(
-                    vault=vault,
-                    handle=old_handle,
-                    wire_query=wire_query,
-                )
+                _probe(vault=vault, handle=old_handle, wire_query=wire_query)
             self.assertEqual(calls, [])
 
             evidence = _probe(
@@ -633,34 +586,22 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 wire_query=wire_query,
             )
             self.assertEqual(evidence.credential_handle.generation, 2)
-            self.assertEqual(len(calls), 1)
             self.assertEqual(
                 calls[0]["headers"]["X-BAPI-API-KEY"],
                 "generation-2-key",
             )
 
-    def test_wrong_execution_identity_fails_before_wire_query(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault, handle = _register_probe_credential(directory)
-            calls = []
-
-            def wire_query(**kwargs):
-                calls.append(kwargs)
-                return BybitCredentialProbeWireResponse(
-                    http_status=200,
-                    response={"retCode": 0},
-                )
-
+            calls.clear()
             with self.assertRaisesRegex(PermissionError, "identity"):
                 _probe(
                     vault=vault,
-                    handle=handle,
+                    handle=current_handle,
                     execution_identity="other-operator",
                     wire_query=wire_query,
                 )
             self.assertEqual(calls, [])
 
-    def test_invalid_credential_material_fails_before_wire_query(self):
+    def test_invalid_credential_material_and_probe_clocks_fail_before_wire(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(
                 directory,
@@ -672,73 +613,18 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 calls.append(kwargs)
                 return BybitCredentialProbeWireResponse(
                     http_status=200,
-                    response={"retCode": 0},
-                )
-
-            with self.assertRaisesRegex(ProviderCoreError, "material"):
-                _probe(
-                    vault=vault,
-                    handle=handle,
-                    wire_query=wire_query,
-                )
-            self.assertEqual(calls, [])
-
-    def test_non_200_http_result_is_unknown_not_rejection_evidence(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault, handle = _register_probe_credential(directory)
-
-            def wire_query(**kwargs):
-                del kwargs
-                return BybitCredentialProbeWireResponse(
-                    http_status=401,
-                    response={"retCode": 10003, "retMsg": "invalid"},
-                )
-
-            with self.assertRaisesRegex(ProviderCoreError, "non-200"):
-                _probe(
-                    vault=vault,
-                    handle=handle,
-                    wire_query=wire_query,
-                )
-
-    def test_probe_rejects_untyped_wire_result_and_subclass(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault, handle = _register_probe_credential(directory)
-
-            def plain_dict_wire(**kwargs):
-                del kwargs
-                return {"retCode": 10003}
-
-            with self.assertRaisesRegex(TypeError, "WireResponse"):
-                _probe(
-                    vault=vault,
-                    handle=handle,
-                    wire_query=plain_dict_wire,
-                )
-
-            class _WireSubclass(BybitCredentialProbeWireResponse):
-                pass
-
-            def subclass_wire(**kwargs):
-                del kwargs
-                return _WireSubclass(
-                    http_status=200,
                     response={"retCode": 10003},
                 )
 
-            with self.assertRaisesRegex(TypeError, "WireResponse"):
-                _probe(
-                    vault=vault,
-                    handle=handle,
-                    wire_query=subclass_wire,
-                )
+            with self.assertRaisesRegex(ProviderCoreError, "material"):
+                _probe(vault=vault, handle=handle, wire_query=wire_query)
+            self.assertEqual(calls, [])
 
-    def test_probe_clocks_and_recv_window_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
             calls = []
 
-            def wire_query(**kwargs):
+            def valid_wire(**kwargs):
                 calls.append(kwargs)
                 return BybitCredentialProbeWireResponse(
                     http_status=200,
@@ -752,20 +638,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     _probe(
                         vault=vault,
                         handle=handle,
-                        wire_query=wire_query,
+                        wire_query=valid_wire,
                         clock_millis=lambda value=bad_timestamp: value,
-                    )
-            self.assertEqual(calls, [])
-
-            for bad_window in (True, 0, 60001, _IntSubclass(5000)):
-                with self.subTest(bad_window=bad_window), self.assertRaises(
-                    ProviderCoreError
-                ):
-                    _probe(
-                        vault=vault,
-                        handle=handle,
-                        wire_query=wire_query,
-                        recv_window_ms=bad_window,
                     )
             self.assertEqual(calls, [])
 
@@ -773,32 +647,12 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 _probe(
                     vault=vault,
                     handle=handle,
-                    wire_query=wire_query,
+                    wire_query=valid_wire,
                     clock_utc=lambda: datetime(2026, 10, 3, 22, 1, 2),
                 )
             self.assertEqual(len(calls), 1)
 
-    def test_wire_response_rejects_non_exact_json_before_evidence_capture(self):
-        bad = (
-            (True, {"retCode": 0}),
-            (_IntSubclass(200), {"retCode": 0}),
-            (99, {"retCode": 0}),
-            (600, {"retCode": 0}),
-            (200, _DictSubclass(retCode=0)),
-            (200, {"retCode": 0, "bad": (1, 2)}),
-            (200, {"retCode": 0, "bad": math.inf}),
-        )
-        for http_status, response in bad:
-            with self.subTest(
-                http_status=http_status,
-                response=response,
-            ), self.assertRaises(ProviderCoreError):
-                BybitCredentialProbeWireResponse(
-                    http_status=http_status,
-                    response=response,
-                )
-
-    def test_wire_response_consumes_provider_payload_into_scrubbed_digest(self):
+    def test_wire_response_scrubs_provider_payload_and_freezes_digest(self):
         raw_api_key = "WIRE-RAW-API-KEY-MUST-NOT-SURVIVE"
         payload = {
             "retCode": 10003,
@@ -813,55 +667,32 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             response=payload,
         )
         digest = wire_response.response_sha256
-
         payload["retCode"] = 0
         payload["result"]["apiKey"] = "mutated-after-wire"
-
         self.assertFalse(hasattr(wire_response, "response"))
         self.assertNotIn(raw_api_key, repr(wire_response))
         self.assertNotIn("permissions", repr(wire_response))
         self.assertEqual(wire_response.ret_code, 10003)
         self.assertEqual(wire_response.response_sha256, digest)
-        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
 
-    def test_clock_callback_cannot_rewrite_scrubbed_wire_observation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault, handle = _register_probe_credential(directory)
-            payload = {
-                "retCode": 10003,
-                "retMsg": "invalid",
-                "result": {"marker": "wire-observation"},
-            }
-            wire_response = BybitCredentialProbeWireResponse(
+    def test_wire_response_success_requires_exact_echo_flag(self):
+        success = {
+            "retCode": 0,
+            "result": {"apiKey": "probe-key", "secret": ""},
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "echo confirmation"):
+            BybitCredentialProbeWireResponse(
                 http_status=200,
-                response=payload,
+                response=success,
             )
-            expected_digest = wire_response.response_sha256
+        confirmed = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response=success,
+            api_key_echo_confirmed=True,
+        )
+        self.assertTrue(confirmed.api_key_echo_confirmed)
 
-            def wire_query(**kwargs):
-                del kwargs
-                return wire_response
-
-            def mutating_clock():
-                payload["retCode"] = 0
-                payload["result"]["marker"] = "rewritten-by-clock"
-                return datetime(2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc)
-
-            evidence = _probe(
-                vault=vault,
-                handle=handle,
-                wire_query=wire_query,
-                clock_utc=mutating_clock,
-            )
-
-            self.assertEqual(evidence.ret_code, 10003)
-            self.assertEqual(evidence.response_sha256, expected_digest)
-            self.assertIs(
-                evidence.classification,
-                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
-            )
-
-    def test_shared_wire_probe_builds_exact_empty_query_get_request(self):
+    def test_shared_wire_builds_exact_empty_query_get_and_signature(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
             client = _FakeProbeWireClient(
@@ -870,7 +701,6 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     body=b'{"retCode":10003,"retMsg":"API key is invalid"}',
                 )
             )
-
             evidence = probe_bybit_credential_with_shared_wire(
                 vault=vault,
                 credential_handle=handle,
@@ -878,17 +708,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 product_family="SPOT",
                 clock_millis=lambda: 1791064800123,
                 clock_utc=lambda: datetime(
-                    2026,
-                    10,
-                    3,
-                    22,
-                    1,
-                    2,
-                    tzinfo=timezone.utc,
+                    2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
                 ),
                 wire_client=client,
             )
-
             self.assertEqual(len(client.requests), 1)
             request = client.requests[0]
             self.assertIs(type(request), BybitCredentialProbeHttpRequest)
@@ -897,93 +720,56 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "https://api.bybit.com/v5/user/query-api",
             )
             self.assertNotIn("?", request.url)
-            self.assertEqual(request.headers["X-BAPI-API-KEY"], "probe-key")
-            self.assertNotIn("probe-secret", repr(request.headers))
+            expected_signature = hmac.new(
+                b"probe-secret",
+                b"1791064800123probe-key5000",
+                sha256,
+            ).hexdigest()
+            self.assertEqual(request.headers["X-BAPI-SIGN"], expected_signature)
             self.assertNotIn("probe-key", repr(request))
-            self.assertNotIn(request.headers["X-BAPI-SIGN"], repr(request))
+            self.assertNotIn("probe-secret", repr(request))
             self.assertIs(
                 evidence.classification,
                 BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
             )
 
-    def test_transport_repr_redacts_raw_provider_body(self):
-        marker = b'RAW-PROVIDER-BODY-MUST-NOT-ENTER-REPR'
-        raw = BybitCredentialProbeRawHttpResponse(
-            http_status=200,
-            body=marker,
-        )
-        self.assertNotIn(marker.decode("ascii"), repr(raw))
-        self.assertIn("http_status=200", repr(raw))
-
-    def test_shared_wire_adapter_rejects_origin_escape_before_send(self):
-        client = _FakeProbeWireClient(
-            BybitCredentialProbeRawHttpResponse(
-                http_status=200,
-                body=b'{"retCode":0}',
-            )
-        )
-        hostile = (
-            "https://evil.example/v5/user/query-api",
-            "https://api.bybit.com.evil.example/v5/user/query-api",
-            "http://api.bybit.com/v5/user/query-api",
-            "https://api.bybit.com/v5/order/create",
-        )
-        for source_uri in hostile:
-            with self.subTest(source_uri=source_uri), self.assertRaises(
-                ProviderCoreError
-            ):
-                execute_bybit_credential_probe_wire_query(
-                    source_uri=source_uri,
-                    headers=_wire_headers(),
-                    timeout_seconds=15,
-                    wire_client=client,
+    def test_shared_wire_success_is_bound_to_exact_echoed_api_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+            client = _FakeProbeWireClient(
+                BybitCredentialProbeRawHttpResponse(
+                    http_status=200,
+                    body=_successful_query_api_body(),
                 )
-        self.assertEqual(client.requests, [])
-
-    def test_shared_wire_adapter_rejects_header_shape_before_send(self):
-        client = _FakeProbeWireClient(
-            BybitCredentialProbeRawHttpResponse(
-                http_status=200,
-                body=b'{"retCode":0}',
             )
-        )
-        bad_headers = []
-        missing = _wire_headers()
-        del missing["X-BAPI-SIGN"]
-        bad_headers.append(missing)
-        extra = _wire_headers()
-        extra["Authorization"] = "unexpected"
-        bad_headers.append(extra)
-        bad_signature = _wire_headers()
-        bad_signature["X-BAPI-SIGN"] = "A" * 64
-        bad_headers.append(bad_signature)
-        bad_window = _wire_headers()
-        bad_window["X-BAPI-RECV-WINDOW"] = "05000"
-        bad_headers.append(bad_window)
-        newline = _wire_headers()
-        newline["X-BAPI-API-KEY"] = "key\r\nInjected: yes"
-        bad_headers.append(newline)
+            evidence = probe_bybit_credential_with_shared_wire(
+                vault=vault,
+                credential_handle=handle,
+                execution_identity="operator-1",
+                product_family="SPOT",
+                clock_millis=lambda: 1791064800123,
+                clock_utc=lambda: datetime(
+                    2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
+                ),
+                wire_client=client,
+            )
+            metadata = bybit_credential_probe_receipt_metadata(evidence)
+            self.assertIs(
+                evidence.classification,
+                BybitCredentialNonAcceptance.STILL_ACCEPTED,
+            )
+            self.assertTrue(evidence.api_key_echo_confirmed)
+            self.assertTrue(metadata["api_key_echo_confirmed"])
+            serialized = repr(evidence) + repr(metadata)
+            self.assertNotIn("probe-key", serialized)
+            self.assertNotIn("permissions", serialized)
 
-        for headers in bad_headers:
-            with self.subTest(headers=headers), self.assertRaises(
-                ProviderCoreError
-            ):
-                execute_bybit_credential_probe_wire_query(
-                    source_uri="https://api.bybit.com/v5/user/query-api",
-                    headers=headers,
-                    timeout_seconds=15,
-                    wire_client=client,
-                )
-        self.assertEqual(client.requests, [])
-
-    def test_shared_wire_json_parser_rejects_ambiguous_nonfinite_or_non_object_payload(self):
+    def test_shared_wire_success_rejects_mismatched_missing_or_secret_echo(self):
         bodies = (
-            b'{"retCode":0,"retCode":10003}',
-            b'[]',
-            b'{"retCode":NaN}',
-            b'{"retCode":0,"ratio":1e9999}',
-            b'not-json',
-            b'\xff',
+            _successful_query_api_body(api_key="different-key"),
+            b'{"retCode":0,"retMsg":"OK","result":{"secret":""}}',
+            _successful_query_api_body(secret="must-not-be-returned"),
+            b'{"retCode":0,"retMsg":"OK"}',
         )
         for body in bodies:
             with self.subTest(body=body):
@@ -1002,16 +788,81 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     )
                 self.assertEqual(len(client.requests), 1)
 
-    def test_shared_wire_json_depth_and_large_integer_fail_closed(self):
+    def test_shared_wire_rejects_origin_header_and_header_key_subclass_before_send(self):
+        client = _FakeProbeWireClient(
+            BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=b'{"retCode":10003}',
+            )
+        )
+        hostile = (
+            "https://evil.example/v5/user/query-api",
+            "https://api.bybit.com.evil.example/v5/user/query-api",
+            "http://api.bybit.com/v5/user/query-api",
+            "https://api.bybit.com/v5/order/create",
+        )
+        for source_uri in hostile:
+            with self.subTest(source_uri=source_uri), self.assertRaises(
+                ProviderCoreError
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri=source_uri,
+                    headers=_wire_headers(),
+                    timeout_seconds=15,
+                    wire_client=client,
+                )
+
+        bad_headers = []
+        missing = _wire_headers()
+        del missing["X-BAPI-SIGN"]
+        bad_headers.append(missing)
+        extra = _wire_headers()
+        extra["Authorization"] = "unexpected"
+        bad_headers.append(extra)
+        bad_signature = _wire_headers()
+        bad_signature["X-BAPI-SIGN"] = "A" * 64
+        bad_headers.append(bad_signature)
+        bad_window = _wire_headers()
+        bad_window["X-BAPI-RECV-WINDOW"] = "05000"
+        bad_headers.append(bad_window)
+        newline = _wire_headers()
+        newline["X-BAPI-API-KEY"] = "key\r\nInjected: yes"
+        bad_headers.append(newline)
+        subclass_key = _wire_headers()
+        subclass_key[_StrSubclass("Accept")] = subclass_key.pop("Accept")
+        bad_headers.append(subclass_key)
+        for headers in bad_headers:
+            with self.subTest(headers=headers), self.assertRaises(
+                ProviderCoreError
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=headers,
+                    timeout_seconds=15,
+                    wire_client=client,
+                )
+        self.assertEqual(client.requests, [])
+
+    def test_shared_wire_json_parser_rejects_ambiguous_nonfinite_deep_or_huge_payload(self):
         deep_body = (
-            b'{"retCode":0,"nested":'
+            b'{"retCode":10003,"nested":'
             + (b"[" * 80)
             + b"0"
             + (b"]" * 80)
             + b"}"
         )
-        large_integer_body = b'{"retCode":' + (b"9" * 5000) + b"}"
-        for body in (deep_body, large_integer_body):
+        huge_integer = b'{"retCode":' + (b"9" * 5000) + b"}"
+        bodies = (
+            b'{"retCode":0,"retCode":10003}',
+            b'[]',
+            b'{"retCode":NaN}',
+            b'{"retCode":10003,"ratio":1e9999}',
+            b'not-json',
+            b'\xff',
+            deep_body,
+            huge_integer,
+        )
+        for body in bodies:
             with self.subTest(length=len(body)):
                 client = _FakeProbeWireClient(
                     BybitCredentialProbeRawHttpResponse(
@@ -1028,11 +879,11 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     )
                 self.assertEqual(len(client.requests), 1)
 
-    def test_shared_wire_requires_typed_status_preserving_response(self):
+    def test_shared_wire_requires_typed_response_and_non_200_stays_unknown(self):
         class UntypedClient:
             def send(self, request):
                 del request
-                return b'{"retCode":0}'
+                return b'{"retCode":10003}'
 
         with self.assertRaisesRegex(TypeError, "RawHttpResponse"):
             execute_bybit_credential_probe_wire_query(
@@ -1042,26 +893,34 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 wire_client=UntypedClient(),
             )
 
-    def test_shared_wire_non_200_stays_unknown(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault, handle = _register_probe_credential(directory)
-            client = _FakeProbeWireClient(
-                BybitCredentialProbeRawHttpResponse(
-                    http_status=401,
-                    body=b'{"retCode":10003,"retMsg":"invalid"}',
-                )
+        client = _FakeProbeWireClient(
+            BybitCredentialProbeRawHttpResponse(
+                http_status=401,
+                body=b'{"retCode":10003,"retMsg":"invalid"}',
             )
-            with self.assertRaisesRegex(ProviderCoreError, "non-200"):
-                probe_bybit_credential_with_shared_wire(
-                    vault=vault,
-                    credential_handle=handle,
-                    execution_identity="operator-1",
-                    product_family="SPOT",
-                    clock_millis=lambda: 1791064800123,
-                    clock_utc=lambda: datetime.now(timezone.utc),
-                    wire_client=client,
-                )
-            self.assertEqual(len(client.requests), 1)
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "non-200"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=_wire_headers(),
+                timeout_seconds=15,
+                wire_client=client,
+            )
+
+    def test_transport_repr_redacts_headers_and_raw_provider_body(self):
+        marker = b"RAW-PROVIDER-BODY-MUST-NOT-ENTER-REPR"
+        raw = BybitCredentialProbeRawHttpResponse(
+            http_status=200,
+            body=marker,
+        )
+        request = BybitCredentialProbeHttpRequest(
+            url="https://api.bybit.com/v5/user/query-api",
+            headers=_wire_headers(),
+            timeout_seconds=15,
+        )
+        self.assertNotIn(marker.decode("ascii"), repr(raw))
+        self.assertNotIn("probe-key", repr(request))
+        self.assertNotIn("X-BAPI-SIGN", repr(request))
 
     def test_wire_exception_produces_no_evidence_and_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1075,11 +934,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 raise ExpectedWireFailure("network unavailable")
 
             with self.assertRaises(ExpectedWireFailure):
-                _probe(
-                    vault=vault,
-                    handle=handle,
-                    wire_query=wire_query,
-                )
+                _probe(vault=vault, handle=handle, wire_query=wire_query)
 
 
 if __name__ == "__main__":

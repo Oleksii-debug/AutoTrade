@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import NAMESPACE_URL, uuid5
 
+import mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification as bound
+import mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification as plan_bound
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -57,79 +59,130 @@ def _receipt() -> SignedQualificationAttestation:
 
 
 class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
+    @staticmethod
+    def _call(verifier, **extra):
+        return verifier(
+            _receipt(),
+            evidence_store=object(),
+            evidence_root="evidence-root",
+            journal_store=object(),
+            plan_id="plan-1",
+            spec=object(),
+            expected_release_artifact_id=RELEASE_ID,
+            expected_release_artifact_sha256=RELEASE_SHA,
+            campaign_plan=object(),
+            campaign_cut=object(),
+            measurement=object(),
+            **extra,
+        )
+
     def test_canonical_signed_receipt_cannot_use_legacy_chronology_free_terminal_path(self):
         with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "accepted RELEASE_RUNTIME chronology authority",
         ):
-            verify_declared_plan_runtime_target_host_qualification(
-                _receipt(),
-                evidence_store=object(),
-                evidence_root="unused",
-                journal_store=object(),
-                plan_id="plan-1",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
-            )
+            self._call(verify_declared_plan_runtime_target_host_qualification)
 
     def test_partial_chronology_authority_fails_before_any_terminal_dispatch(self):
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification."
-            "verify_chronology_bound_runtime_target_host_qualification"
-        ) as terminal, self.assertRaisesRegex(
+        forged_terminal = Mock(return_value=object())
+        with patch.object(
+            bound,
+            "verify_chronology_bound_runtime_target_host_qualification",
+            forged_terminal,
+        ), self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "complete RELEASE_RUNTIME chronology authority",
         ):
-            verify_declared_plan_runtime_target_host_qualification(
-                _receipt(),
-                evidence_store=object(),
-                evidence_root="unused",
-                journal_store=object(),
-                plan_id="plan-1",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
+            self._call(
+                verify_declared_plan_runtime_target_host_qualification,
                 recovery=object(),
             )
-        terminal.assert_not_called()
+        forged_terminal.assert_not_called()
 
-    def test_complete_chronology_authority_is_the_only_canonical_terminal_dispatch(self):
+    def test_factory_dispatches_complete_chronology_only_to_captured_terminal(self):
         accepted = object()
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification."
-            "verify_chronology_bound_runtime_target_host_qualification",
-            return_value=accepted,
-        ) as terminal:
-            result = verify_declared_plan_runtime_target_host_qualification(
-                _receipt(),
-                evidence_store=object(),
-                evidence_root="evidence-root",
-                journal_store=object(),
-                plan_id="plan-1",
-                spec=object(),
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-                campaign_plan=object(),
-                campaign_cut=object(),
-                measurement=object(),
+        captured_terminal = Mock(return_value=accepted)
+        lower = Mock(side_effect=AssertionError("chronology-free verifier ran"))
+        verifier = bound._build_product_dispatcher(
+            terminal_verifier=captured_terminal,
+            lower_verifier=lower,
+        )
+
+        result = self._call(
+            verifier,
+            recovery=object(),
+            runtime=object(),
+            chronology_cut=object(),
+        )
+
+        self.assertIs(result, accepted)
+        captured_terminal.assert_called_once()
+        lower.assert_not_called()
+        kwargs = captured_terminal.call_args.kwargs
+        self.assertEqual(kwargs["plan_id"], "plan-1")
+        self.assertEqual(kwargs["expected_release_artifact_id"], RELEASE_ID)
+        self.assertEqual(kwargs["expected_release_artifact_sha256"], RELEASE_SHA)
+
+    def test_factory_captures_terminal_and_type_authority_before_rebinding(self):
+        accepted = object()
+        captured_terminal = Mock(return_value=accepted)
+        lower = Mock(side_effect=AssertionError("chronology-free verifier ran"))
+        verifier = bound._build_product_dispatcher(
+            terminal_verifier=captured_terminal,
+            lower_verifier=lower,
+        )
+
+        class ForgedReceipt:
+            pass
+
+        class ForgedCompositionError(Exception):
+            pass
+
+        forged_public_terminal = Mock(
+            side_effect=AssertionError("rebound public terminal verifier ran")
+        )
+        with (
+            patch.object(plan_bound, "SignedQualificationAttestation", ForgedReceipt),
+            patch.object(
+                plan_bound,
+                "RuntimeTargetHostCompositionError",
+                ForgedCompositionError,
+            ),
+            patch.object(
+                bound,
+                "verify_chronology_bound_runtime_target_host_qualification",
+                forged_public_terminal,
+            ),
+        ):
+            result = self._call(
+                verifier,
                 recovery=object(),
                 runtime=object(),
                 chronology_cut=object(),
             )
 
         self.assertIs(result, accepted)
-        terminal.assert_called_once()
-        kwargs = terminal.call_args.kwargs
-        self.assertEqual(kwargs["plan_id"], "plan-1")
-        self.assertEqual(kwargs["expected_release_artifact_id"], RELEASE_ID)
-        self.assertEqual(kwargs["expected_release_artifact_sha256"], RELEASE_SHA)
+        captured_terminal.assert_called_once()
+        lower.assert_not_called()
+        forged_public_terminal.assert_not_called()
+
+    def test_production_dispatch_ignores_rebound_public_terminal_symbol(self):
+        forged_terminal = Mock(
+            side_effect=AssertionError("rebound public terminal verifier ran")
+        )
+        with patch.object(
+            bound,
+            "verify_chronology_bound_runtime_target_host_qualification",
+            forged_terminal,
+        ):
+            with self.assertRaises((TypeError, AttributeError, PermissionError, ValueError)):
+                self._call(
+                    verify_declared_plan_runtime_target_host_qualification,
+                    recovery=object(),
+                    runtime=object(),
+                    chronology_cut=object(),
+                )
+        forged_terminal.assert_not_called()
 
 
 if __name__ == "__main__":

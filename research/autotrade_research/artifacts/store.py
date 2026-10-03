@@ -96,6 +96,22 @@ class ArtifactStore:
         for path in (self.objects, self.manifests, self.staging):
             path.mkdir(parents=True, exist_ok=True)
 
+    def _assert_no_instance_method_shadows(self) -> None:
+        state = object.__getattribute__(self, "__dict__")
+        shadowed = tuple(
+            sorted(
+                name
+                for name in state
+                if name in ArtifactStore.__dict__
+                and callable(getattr(ArtifactStore, name, None))
+            )
+        )
+        if shadowed:
+            raise ArtifactIntegrityError(
+                "artifact store instance shadows canonical methods: "
+                + ", ".join(shadowed)
+            )
+
     @staticmethod
     def _artifact_id(value: str) -> str:
         try:
@@ -870,9 +886,10 @@ class ArtifactStore:
         self,
         artifact_id: str,
     ) -> tuple[dict[str, Any], bytes]:
+        ArtifactStore._assert_no_instance_method_shadows(self)
         normalized_id = ArtifactStore._artifact_id(artifact_id)
         manifest_path = ArtifactStore._manifest_path(self, normalized_id)
-        descriptor, opened = ArtifactStore._open_manifest_descriptor(self, manifest_path)
+        descriptor, opened = ArtifactStore._open_manifest_descriptor(\n            self, manifest_path\n        )
         try:
             raw_bytes = ArtifactStore._read_manifest_descriptor(self, 
                 manifest_path,
@@ -889,11 +906,13 @@ class ArtifactStore:
                 )
             _verify_manifest_integrity(manifest, required=True)
             data = ArtifactStore._read_verified_object_bytes(self, manifest)
-            ArtifactStore._revalidate_manifest_descriptor(self, 
+            ArtifactStore._revalidate_manifest_descriptor(
+                self,
                 manifest_path,
                 descriptor,
                 opened,
             )
+            ArtifactStore._assert_no_instance_method_shadows(self)
             return manifest, data
         finally:
             os.close(descriptor)

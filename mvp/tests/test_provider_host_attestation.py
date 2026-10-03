@@ -384,7 +384,7 @@ def _fence_fixture():
 
 class ProviderHostAttestationTests(unittest.TestCase):
     def test_self_describing_session_cannot_replace_independent_pin(self):
-        prepared, _observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         with self.assertRaisesRegex(
             HostProviderAttestationError,
             "independently pinned",
@@ -398,7 +398,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             )
 
     def test_attempt_binding_tamper_fails_before_platform_crypto(self):
-        prepared, _observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["attempt"]["subject"]["account_id"] = "attacker-account"
         with self.assertRaisesRegex(
@@ -414,7 +414,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             )
 
     def test_noncanonical_or_extra_fields_are_rejected(self):
-        prepared, _observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["attempt"]["caller_authorized"] = True
         with self.assertRaisesRegex(
@@ -430,7 +430,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
             )
 
     def test_serialized_query_cannot_replace_independently_pinned_query(self):
-        prepared, _observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["query"]["symbol"] = "ETHUSDT"
         with self.assertRaisesRegex(
@@ -498,7 +498,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
 
     @unittest.skipIf(sys.platform == "win32", "non-Windows fail-closed contract")
     def test_non_windows_never_grants_host_signature_authority(self):
-        prepared, _observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         with self.assertRaisesRegex(
             HostProviderAttestationUnavailable,
             "Windows CNG",

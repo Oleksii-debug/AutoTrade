@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.credential_transition_journal import (
     require_current_trade_credential_transition_anchor,
 )
 from mvp.autotrade_mvp.credential_transition_receipt import (
+    CredentialTransitionReceiptError,
     rotate_trade_credential_with_receipt,
     verify_trade_credential_transition_receipt,
 )
@@ -145,6 +146,15 @@ class CredentialTransitionJournalTests(unittest.TestCase):
                 rolled_back,
                 receipt_one,
             )
+        with self.assertRaisesRegex(
+            CredentialTransitionAnchorError,
+            "not the next durable receipt sequence",
+        ):
+            record_current_trade_credential_transition_anchor(
+                self.store,
+                rolled_back,
+                receipt_one,
+            )
 
     def test_missing_intermediate_anchor_fails_closed(self) -> None:
         second, receipt_one = self._rotate(self.first, "secret-v2")
@@ -181,7 +191,7 @@ class CredentialTransitionJournalTests(unittest.TestCase):
             receipt_two,
         )
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(CredentialTransitionReceiptError):
             require_current_trade_credential_transition_anchor(
                 self.store,
                 self.vault,

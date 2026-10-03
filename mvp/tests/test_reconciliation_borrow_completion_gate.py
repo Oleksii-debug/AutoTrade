@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.reconciliation import (
@@ -86,6 +86,42 @@ class ReconciliationBorrowCompletionGateTests(unittest.TestCase):
         self.assertIn(resource, result.blocking_resources)
         self.assertTrue(result.blocks_new_risk)
         self.assertFalse(result.complete)
+
+    def test_borrow_difference_is_independent_of_decimal_context(self):
+        resource = self._borrow_evidence().resource_key
+        expected = Decimal("1.23456544")
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        _, result = self._base(
+                            local_borrowed_resources={
+                                resource: Decimal("8.64197777")
+                            },
+                            provider_borrowed_resources={
+                                resource: Decimal("9.87654321")
+                            },
+                        )
+                    self.assertEqual(
+                        result.borrow_differences[resource],
+                        expected,
+                    )
+                    self.assertIn(resource, result.blocking_resources)
+                    self.assertFalse(result.complete)
+
+    def test_matching_borrow_without_recall_remains_complete(self):
+        resource = self._borrow_evidence().resource_key
+        _, result = self._base(
+            local_borrowed_resources={resource: Decimal("2")},
+            provider_borrowed_resources={resource: Decimal("2")},
+        )
+
+        self.assertEqual(dict(result.borrow_differences), {})
+        self.assertNotIn(resource, result.blocking_resources)
+        self.assertFalse(result.blocks_new_risk)
+        self.assertTrue(result.complete)
 
     def test_active_borrow_recall_makes_reconciliation_incomplete(self):
         resource = self._borrow_evidence().resource_key

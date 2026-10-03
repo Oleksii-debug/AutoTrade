@@ -243,6 +243,40 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("Reserved EUR: 10.00", text)
         self.assertIn("Economic edge: unproven", text)
 
+    def test_hostile_status_equality_cannot_execute_at_accessible_boundaries(self):
+        class HostileEquality:
+            def __eq__(self, other):
+                raise AssertionError("malformed scalar must not execute __eq__")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": HostileEquality(),
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+            },
+            {
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": False,
+                "valuation_status": HostileEquality(),
+            },
+        )
+
+        self.assertIn("System state: Running", text)
+        self.assertIn("Final equity: 1000", text)
+        self.assertNotIn("Journal sequence:", text)
+        self.assertNotIn(
+            "Portfolio valuation and profit or loss: unavailable",
+            text,
+        )
+        self.assertIn("Economic edge: unproven", text)
+
+
     def test_hostile_nested_status_containers_fail_closed_without_execution(self):
         class HostileDict(dict):
             def __len__(self):

@@ -204,6 +204,76 @@ def _exact_git_blob(
     return raw, object_id
 
 
+def release_evidence_snapshot(
+    path: Path,
+    *,
+    label: str,
+    expected_source_sha: str | None = None,
+) -> tuple[bool, str | None, dict[str, object] | None]:
+    """Validate one held evidence-byte snapshot and return that exact parsed value."""
+    del label
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return False, "missing", None
+    except OSError:
+        return False, "invalid_json", None
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False, "invalid_json", None
+    if type(value) is not dict:
+        return False, "not_object", None
+    if value.get("qualified") is not True:
+        return False, "not_qualified", None
+    schema_version = value.get("schema_version")
+    if type(schema_version) is not str or not schema_version.strip():
+        return False, "missing_schema_version", None
+    source_sha = value.get("source_sha")
+    if type(source_sha) is not str or GIT_SHA.fullmatch(source_sha) is None:
+        return False, "invalid_source_sha", None
+    if expected_source_sha is not None:
+        if GIT_SHA.fullmatch(expected_source_sha) is None:
+            raise ValueError("expected_source_sha must be a canonical 40-hex commit SHA")
+        if source_sha != expected_source_sha:
+            return False, "source_sha_mismatch", None
+    refs = value.get("evidence_refs")
+    if type(refs) is not list or not refs:
+        return False, "missing_evidence_refs", None
+
+    seen_artifact_ids: set[str] = set()
+    for item in refs:
+        if type(item) is not dict:
+            return False, "invalid_evidence_refs", None
+        artifact_id = item.get("artifact_id")
+        digest = item.get("sha256")
+        observed_at = item.get("observed_at")
+        if (
+            type(artifact_id) is not str
+            or not artifact_id.strip()
+            or type(digest) is not str
+            or SHA256_ID.fullmatch(digest) is None
+            or type(observed_at) is not str
+            or UTC_EVIDENCE_TIME.fullmatch(observed_at) is None
+        ):
+            return False, "invalid_evidence_refs", None
+        try:
+            instant = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False, "invalid_evidence_refs", None
+        if (
+            instant.tzinfo is None
+            or instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            != observed_at
+        ):
+            return False, "invalid_evidence_refs", None
+        canonical_artifact_id = artifact_id.strip()
+        if canonical_artifact_id in seen_artifact_ids:
+            return False, "invalid_evidence_refs", None
+        seen_artifact_ids.add(canonical_artifact_id)
+    return True, None, value
+
+
 def release_evidence_document(
     path: Path,
     *,
@@ -211,57 +281,12 @@ def release_evidence_document(
     expected_source_sha: str | None = None,
 ) -> tuple[bool, str | None]:
     """Require explicit evidence before a release gate can be treated as satisfied."""
-    if not path.exists():
-        return False, "missing"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False, "invalid_json"
-    if not isinstance(value, dict):
-        return False, "not_object"
-    if value.get("qualified") is not True:
-        return False, "not_qualified"
-    if not isinstance(value.get("schema_version"), str) or not value["schema_version"].strip():
-        return False, "missing_schema_version"
-    source_sha = value.get("source_sha")
-    if not isinstance(source_sha, str) or GIT_SHA.fullmatch(source_sha) is None:
-        return False, "invalid_source_sha"
-    if expected_source_sha is not None:
-        if GIT_SHA.fullmatch(expected_source_sha) is None:
-            raise ValueError("expected_source_sha must be a canonical 40-hex commit SHA")
-        if source_sha != expected_source_sha:
-            return False, "source_sha_mismatch"
-    refs = value.get("evidence_refs")
-    if not isinstance(refs, list) or not refs:
-        return False, "missing_evidence_refs"
-
-    seen_artifact_ids: set[str] = set()
-    for item in refs:
-        if not isinstance(item, dict):
-            return False, "invalid_evidence_refs"
-        artifact_id = item.get("artifact_id")
-        digest = item.get("sha256")
-        observed_at = item.get("observed_at")
-        if (
-            not isinstance(artifact_id, str)
-            or not artifact_id.strip()
-            or not isinstance(digest, str)
-            or SHA256_ID.fullmatch(digest) is None
-            or not isinstance(observed_at, str)
-            or UTC_EVIDENCE_TIME.fullmatch(observed_at) is None
-        ):
-            return False, "invalid_evidence_refs"
-        try:
-            instant = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-        except ValueError:
-            return False, "invalid_evidence_refs"
-        if instant.tzinfo is None or instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") != observed_at:
-            return False, "invalid_evidence_refs"
-        canonical_artifact_id = artifact_id.strip()
-        if canonical_artifact_id in seen_artifact_ids:
-            return False, "invalid_evidence_refs"
-        seen_artifact_ids.add(canonical_artifact_id)
-    return True, None
+    qualified, reason, _ = release_evidence_snapshot(
+        path,
+        label=label,
+        expected_source_sha=expected_source_sha,
+    )
+    return qualified, reason
 
 
 def qualification_trust_policy_digest_from_bytes(
@@ -449,17 +474,13 @@ def dependency_advisory_evidence_document(
     expected_source_sha: str | None = None,
 ) -> tuple[bool, str | None]:
     """Require advisory evidence for the exact dependency graph under review."""
-    qualified, reason = release_evidence_document(
+    qualified, reason, value = release_evidence_snapshot(
         path,
         label="dependency advisory qualification",
         expected_source_sha=expected_source_sha,
     )
-    if not qualified:
+    if not qualified or value is None:
         return False, reason
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False, "invalid_json"
     if value.get("dependency_graph") != expected_dependency_graph:
         return False, "dependency_graph_mismatch"
     return True, None
@@ -708,17 +729,18 @@ def build_manifest() -> dict[str, object]:
 
     blockers: list[dict[str, object]] = []
     composition = ROOT / "provenance" / "release-composition.json"
-    composition_ok, composition_reason = release_evidence_document(
-        composition,
-        label="release composition",
+    composition_ok, composition_reason, composition_document = (
+        release_evidence_snapshot(
+            composition,
+            label="release composition",
+        )
     )
     release_source_sha: str | None = None
     release_policy_digest: str | None = None
     release_policy_pin_blob_sha: str | None = None
     if composition_ok:
-        composition_document = json.loads(
-            composition.read_text(encoding="utf-8")
-        )
+        if composition_document is None:
+            raise RuntimeError("qualified release composition lacks held snapshot")
         release_source_sha = composition_document["source_sha"]
 
         try:

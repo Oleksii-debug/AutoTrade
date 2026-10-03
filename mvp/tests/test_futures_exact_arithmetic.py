@@ -152,7 +152,7 @@ class FuturesExactArithmeticTests(unittest.TestCase):
 
     def test_high_significance_linear_pnl_is_one_exact_value_in_all_contexts(self):
         expected = Decimal(
-            "1524157875323883675019051998.750190521"
+            "1524157875323883675.019051998750190521"
         )
         actual = []
         for precision, rounding in (
@@ -215,6 +215,9 @@ class FuturesExactArithmeticTests(unittest.TestCase):
         amount = Decimal(
             "1234567890123456789012345678.000000000000000000000000001"
         )
+        exact_opposite = Decimal(
+            "-1234567890123456789012345678.000000000000000000000000001"
+        )
         for precision, rounding in (
             (6, ROUND_FLOOR),
             (10, ROUND_CEILING),
@@ -229,11 +232,9 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                     amount=amount,
                 )
                 self.assertEqual(transaction.postings[0].amount, amount)
-                self.assertEqual(transaction.postings[1].amount, -amount)
                 self.assertEqual(
-                    transaction.postings[0].amount
-                    + transaction.postings[1].amount,
-                    Decimal("0"),
+                    transaction.postings[1].amount,
+                    exact_opposite,
                 )
 
     def test_settlement_quantum_final_multiplication_is_context_independent(self):

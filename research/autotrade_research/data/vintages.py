@@ -74,7 +74,7 @@ def _text(value: Any, name: str) -> str:
 
 
 def _sequence(value: Any, name: str) -> int:
-    if isinstance(value, bool):
+    if type(value) not in (int, str):
         raise HistoricalDataError(f"{name} must be a positive integer")
     try:
         parsed = int(value)
@@ -88,7 +88,7 @@ def _sequence(value: Any, name: str) -> int:
 def _optional_non_negative_sequence(value: Any, name: str) -> int | None:
     if value is None:
         return None
-    if isinstance(value, bool):
+    if type(value) not in (int, str):
         raise HistoricalDataError(
             f"{name} must be a canonical non-negative integer"
         )
@@ -115,11 +115,13 @@ def _non_negative_sequence(value: Any, name: str) -> int:
 
 
 def _utc(value: Any, name: str) -> datetime:
-    if isinstance(value, datetime):
+    if type(value) is datetime:
         if value.tzinfo is None:
             raise HistoricalDataError(f"{name} must be timezone-aware")
         return value.astimezone(timezone.utc)
-    text = _text(value, name)
+    if type(value) is not str or value != value.strip():
+        raise HistoricalDataError(f"{name} must be canonical UTC text")
+    text = value
     if not text.endswith("Z"):
         raise HistoricalDataError(f"{name} must be UTC and end in Z")
     try:
@@ -134,7 +136,9 @@ def _utc_text(value: datetime) -> str:
 
 
 def _digest(value: Any, name: str = "digest") -> str:
-    text = _text(value, name)
+    if type(value) is not str or value != value.strip():
+        raise HistoricalDataError(f"{name} must be canonical digest text")
+    text = value
     if not text.startswith("sha256:") or len(text) != 71:
         raise HistoricalDataError(f"{name} must be a canonical SHA-256 digest")
     if any(ch not in "0123456789abcdef" for ch in text[7:]):
@@ -143,7 +147,9 @@ def _digest(value: Any, name: str = "digest") -> str:
 
 
 def _uuid(value: Any, name: str) -> str:
-    text = _text(value, name)
+    if type(value) is not str or value != value.strip():
+        raise HistoricalDataError(f"{name} must be canonical UUID text")
+    text = value
     try:
         return str(UUID(text))
     except (ValueError, TypeError, AttributeError) as error:
@@ -330,8 +336,8 @@ def causal_market_event_history(
             )
         event_id = _uuid(event.get("event_id"), "event_id")
         instrument_version = _text(event.get("instrument_version"), "instrument_version")
-        event_kind = _text(event.get("kind"), "kind")
-        if event_kind not in _MARKET_EVENT_KINDS:
+        event_kind = event.get("kind")
+        if type(event_kind) is not str or event_kind not in _MARKET_EVENT_KINDS:
             raise HistoricalDataError("market event kind is not canonical")
         if type(event.get("payload")) is not dict:
             raise HistoricalDataError("market event payload must be an object")

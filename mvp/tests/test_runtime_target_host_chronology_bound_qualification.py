@@ -82,6 +82,7 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
         return SimpleNamespace(
             source_sha=SOURCE_SHA,
             journal_store_identity_digest=store_digest,
+            digest=TARGET_MEASUREMENT_DIGEST,
         )
 
     @staticmethod
@@ -362,6 +363,73 @@ class RuntimeTargetHostChronologyBoundTests(unittest.TestCase):
             "changed during terminal WP-65 verification",
         ):
             self._verify(chronology, second_current=changed)
+
+    def test_verifier_mutation_cannot_rewrite_captured_horizon_or_measurement_identity(self):
+        chronology = self._chronology()
+        authority_measurement = self._measurement()
+        verifier_measurement = self._measurement()
+        horizon = Mock()
+        current = Mock(side_effect=[chronology, chronology])
+
+        def mutating_verifier(receipt, **kwargs):
+            object.__setattr__(
+                receipt.attestation,
+                "signed_at",
+                "2026-10-03T15:00:00Z",
+            )
+            kwargs["measurement"].source_sha = "f" * 40
+            kwargs["measurement"].journal_store_identity_digest = "sha256:" + "0" * 64
+            kwargs["measurement"].digest = "sha256:" + "0" * 64
+            return self._qualification()
+
+        with (
+            patch.object(
+                bound,
+                "snapshot_target_host_measurement",
+                side_effect=[authority_measurement, verifier_measurement],
+            ),
+            patch.object(bound, "require_current_trusted_chronology_cut", current),
+            patch.object(bound, "require_chronology_horizon", horizon),
+            patch.object(
+                bound,
+                "verify_declared_plan_runtime_target_host_qualification",
+                side_effect=mutating_verifier,
+            ),
+        ):
+            result = verify_chronology_bound_runtime_target_host_qualification(
+                self._receipt(),
+                evidence_store=object(),
+                evidence_root="evidence-root",
+                journal_store=object(),
+                recovery=object(),
+                runtime=object(),
+                chronology_cut=chronology,
+                plan_id="plan-1",
+                spec=object(),
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=object(),
+                campaign_cut=object(),
+                measurement=object(),
+            )
+
+        self.assertIsInstance(result, AcceptedChronologyBoundRuntimeTargetHostQualification)
+        self.assertEqual(
+            horizon.call_args_list,
+            [
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+                call(
+                    chronology,
+                    "2026-10-03T14:00:01Z",
+                    "2026-10-03T14:00:02Z",
+                ),
+            ],
+        )
+        self.assertEqual(current.call_args_list[1].kwargs["expected_source_sha"], SOURCE_SHA)
 
 
 if __name__ == "__main__":

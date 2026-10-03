@@ -119,6 +119,23 @@ def verify_declared_plan_runtime_target_host_qualification(
             raise RuntimeTargetHostCompositionError(
                 "terminal WP-65 qualification requires composed target-host measurement authority"
             )
+        # The durable pre-run declaration remains the workload identity authority.
+        # Exact typed terminal inputs may not substitute a parallel campaign or
+        # measurement workload hash before the composed durable binder runs.
+        if (
+            type(campaign_plan) is RuntimeCampaignPlan
+            and campaign_plan.workload_profile_hash != plan.digest
+        ):
+            raise RuntimeTargetHostCompositionError(
+                "campaign workload identity does not match durable pre-run plan"
+            )
+        if (
+            type(measurement) is TargetHostMeasurementArtifact
+            and measurement.workload_profile_hash != plan.digest
+        ):
+            raise RuntimeTargetHostCompositionError(
+                "measurement workload identity does not match durable pre-run plan"
+            )
         # ``RuntimeCampaignCut`` is a frozen issued object but Python callers can
         # still abuse ``object.__setattr__``. Detach its inert scalar state before
         # the composed verifier reaches measurement/campaign-window prechecks.

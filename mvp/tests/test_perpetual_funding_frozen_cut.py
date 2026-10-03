@@ -203,6 +203,70 @@ class FundingFrozenCutTests(unittest.TestCase):
                     [],
                 )
 
+    def test_shadowed_journal_method_invalidates_funding_store_authority(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [source])
+            before = store.current_journal_sequence(), book.audit_digest()
+            store.load_events = lambda *args, **kwargs: self.fail(
+                "shadowed JournalStore read must not execute"
+            )
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "store identity is no longer valid",
+            ):
+                authority.apply(source.evidence_ref)
+            del store.load_events
+            self.assertEqual(
+                (store.current_journal_sequence(), book.audit_digest()),
+                before,
+            )
+
+    def test_shadowed_economic_prepare_method_cannot_replace_canonical_plan(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [source])
+            book.prepare_batch_mutation = lambda *args, **kwargs: self.fail(
+                "instance economic mutation callback must not execute"
+            )
+            result = authority.apply(source.evidence_ref)
+            self.assertTrue(result.inserted)
+            self.assertEqual(result.cashflow, Decimal("-0.2"))
+
+    def test_evidence_callback_cannot_rebind_financial_store_mid_apply(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            primary_store = JournalStore(f"{directory}/primary.sqlite3")
+            authority, book = self.authority(primary_store, [source])
+            foreign_store = JournalStore(f"{directory}/foreign.sqlite3")
+            before = primary_store.current_journal_sequence(), book.audit_digest()
+
+            def hostile_resolver(reference):
+                self.assertEqual(reference, source.evidence_ref)
+                authority.store = foreign_store
+                return source
+
+            authority.evidence_resolver = hostile_resolver
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "durable store binding changed after construction",
+            ):
+                authority.apply(source.evidence_ref)
+
+            self.assertEqual(
+                (primary_store.current_journal_sequence(), book.audit_digest()),
+                before,
+            )
+            self.assertEqual(
+                foreign_store.load_events(
+                    "perpetual_funding",
+                    authority.aggregate_id,
+                ),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

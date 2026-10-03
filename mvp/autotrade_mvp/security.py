@@ -16,6 +16,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -536,24 +537,62 @@ class SecurityBoundary:
 
     @staticmethod
     def redact(value: object) -> object:
-        if isinstance(value, Mapping):
-            return {
-                key: "[REDACTED]"
-                if _REDACT_RE.search(str(key))
-                else SecurityBoundary.redact(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [SecurityBoundary.redact(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(SecurityBoundary.redact(item) for item in value)
-        if isinstance(value, set):
-            return {SecurityBoundary.redact(item) for item in value}
-        if isinstance(value, frozenset):
-            return frozenset(SecurityBoundary.redact(item) for item in value)
-        if isinstance(value, str) and _REDACT_RE.search(value):
-            return "[REDACTED]"
-        return value
+        """Return a diagnostic-safe tree without executing hostile object hooks."""
+
+        active_containers: set[int] = set()
+
+        def scrub(item: object) -> object:
+            item_type = type(item)
+            if item_type is dict or item_type is MappingProxyType:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    result: dict[object, object] = {}
+                    unsupported_key = 0
+                    for key, child in item.items():
+                        if type(key) is not str:
+                            unsupported_key += 1
+                            result[f"[UNSUPPORTED_KEY_{unsupported_key}]"] = "[REDACTED]"
+                        elif _REDACT_RE.search(key):
+                            result[key] = "[REDACTED]"
+                        else:
+                            result[key] = scrub(child)
+                    return result
+                finally:
+                    active_containers.remove(identity)
+            if item_type is list:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    return [scrub(child) for child in item]
+                finally:
+                    active_containers.remove(identity)
+            if item_type is tuple:
+                identity = id(item)
+                if identity in active_containers:
+                    return "[REDACTED:CYCLE]"
+                active_containers.add(identity)
+                try:
+                    return tuple(scrub(child) for child in item)
+                finally:
+                    active_containers.remove(identity)
+            if item_type is set:
+                return {scrub(child) for child in item}
+            if item_type is frozenset:
+                return frozenset(scrub(child) for child in item)
+            if item_type is str:
+                return "[REDACTED]" if _REDACT_RE.search(item) else item
+            if item is None or item_type in {bool, int, float}:
+                return item
+            if item_type in {bytes, bytearray, memoryview}:
+                return "[REDACTED:BINARY]"
+            return "[REDACTED:UNSUPPORTED]"
+
+        return scrub(value)
 
     @staticmethod
     def redact_for_diagnostics(
@@ -570,28 +609,35 @@ class SecurityBoundary:
         keyed = SecurityBoundary.redact(value)
         known: list[str] = []
         for candidate in sensitive_values:
-            if not isinstance(candidate, str) or not candidate:
+            if type(candidate) is not str or not candidate:
                 raise ValueError("sensitive_values must contain non-empty strings")
             known.append(candidate)
         known.sort(key=len, reverse=True)
 
+        def scrub_text(item: str) -> str:
+            result = item
+            for secret_value in known:
+                if secret_value in result:
+                    result = result.replace(secret_value, "[REDACTED]")
+            return result
+
         def scrub(item: object) -> object:
-            if isinstance(item, Mapping):
-                return {key: scrub(child) for key, child in item.items()}
-            if isinstance(item, list):
+            item_type = type(item)
+            if item_type is dict:
+                return {
+                    scrub_text(key) if type(key) is str else "[UNSUPPORTED_KEY]": scrub(child)
+                    for key, child in item.items()
+                }
+            if item_type is list:
                 return [scrub(child) for child in item]
-            if isinstance(item, tuple):
+            if item_type is tuple:
                 return tuple(scrub(child) for child in item)
-            if isinstance(item, set):
+            if item_type is set:
                 return {scrub(child) for child in item}
-            if isinstance(item, frozenset):
+            if item_type is frozenset:
                 return frozenset(scrub(child) for child in item)
-            if isinstance(item, str):
-                result = item
-                for secret_value in known:
-                    if secret_value in result:
-                        result = result.replace(secret_value, "[REDACTED]")
-                return result
+            if item_type is str:
+                return scrub_text(item)
             return item
 
         return scrub(keyed)

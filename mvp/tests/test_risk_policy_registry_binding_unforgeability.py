@@ -12,6 +12,23 @@ from mvp.autotrade_mvp.risk_policy_authority import (
 
 
 class RiskPolicyRegistryBindingUnforgeabilityTests(unittest.TestCase):
+    def test_reinitialization_cannot_retarget_original_policy_history(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            replacement = JournalStore(root / "replacement.sqlite3")
+            registry = DurableRiskPolicyRegistry(selected)
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "already initialized|already established",
+            ):
+                registry.__init__(replacement)
+
+            bound_store, _bound_identity = registry._journal_store_authority()
+            self.assertIs(bound_store, selected)
+            self.assertIs(registry.store, selected)
+
     def test_imported_registry_binding_map_cannot_retarget_policy_history(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -13,6 +13,9 @@ from mvp.autotrade_mvp.runtime_load_plan import (
     declare_runtime_event_plan,
 )
 from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as plan_bound_module
+from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
+    RuntimeTargetHostCompositionError,
+)
 from mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification import (
     verify_declared_plan_runtime_target_host_qualification,
 )
@@ -53,7 +56,7 @@ def _expected_event() -> ExpectedJournalEvent:
 
 
 class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
-    def test_terminal_expected_identities_are_derived_from_durable_plan(self) -> None:
+    def test_terminal_delegates_to_composed_authority_with_durable_plan_id(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             spec = _spec()
@@ -65,10 +68,13 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             )
             receipt = object()
             evidence_store = object()
+            campaign_plan = object()
+            campaign_cut = object()
+            measurement = object()
             accepted = object()
-            with patch(
-                "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
-                "verify_runtime_target_host_qualification",
+            with patch.object(
+                plan_bound_module,
+                "verify_composed_runtime_target_host_qualification",
                 return_value=accepted,
             ) as terminal:
                 result = verify_declared_plan_runtime_target_host_qualification(
@@ -80,6 +86,9 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     spec=spec,
                     expected_release_artifact_id=RELEASE_ID,
                     expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=campaign_plan,
+                    campaign_cut=campaign_cut,
+                    measurement=measurement,
                 )
 
             self.assertIs(result, accepted)
@@ -87,22 +96,13 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             self.assertEqual(args.args, (receipt,))
             self.assertIs(args.kwargs["evidence_store"], evidence_store)
             self.assertEqual(args.kwargs["evidence_root"], directory)
-            self.assertEqual(args.kwargs["expected_source_sha"], SOURCE_SHA)
-            self.assertEqual(
-                args.kwargs["expected_scenario_id"],
-                "plan-bound-target-host",
-            )
-            self.assertEqual(args.kwargs["expected_spec_digest"], spec.digest)
-            self.assertEqual(args.kwargs["expected_configuration_hash"], CONFIG)
-            self.assertEqual(args.kwargs["expected_host_fingerprint"], HOST)
-            self.assertEqual(
-                args.kwargs["expected_workload_profile_hash"],
-                plan.digest,
-            )
-            self.assertEqual(
-                args.kwargs["expected_journal_store_identity_digest"],
-                plan.store_identity_digest,
-            )
+            self.assertIs(args.kwargs["journal_store"], store)
+            self.assertIsNot(args.kwargs["spec"], spec)
+            self.assertEqual(args.kwargs["spec"].digest, spec.digest)
+            self.assertIs(args.kwargs["campaign_plan"], campaign_plan)
+            self.assertIs(args.kwargs["campaign_cut"], campaign_cut)
+            self.assertEqual(args.kwargs["declared_plan_id"], plan.plan_id)
+            self.assertIs(args.kwargs["measurement"], measurement)
             self.assertEqual(
                 args.kwargs["expected_release_artifact_id"],
                 RELEASE_ID,
@@ -124,6 +124,9 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             )
             original_loader = plan_bound_module.load_declared_runtime_event_plan
             accepted = object()
+            campaign_plan = object()
+            campaign_cut = object()
+            measurement = object()
 
             def mutating_loader(current_store, *, plan_id, spec):
                 self.assertIsNot(spec, caller_spec)
@@ -145,7 +148,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 side_effect=mutating_loader,
             ), patch.object(
                 plan_bound_module,
-                "verify_runtime_target_host_qualification",
+                "verify_composed_runtime_target_host_qualification",
                 return_value=accepted,
             ) as terminal:
                 result = verify_declared_plan_runtime_target_host_qualification(
@@ -157,15 +160,18 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     spec=caller_spec,
                     expected_release_artifact_id=RELEASE_ID,
                     expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=campaign_plan,
+                    campaign_cut=campaign_cut,
+                    measurement=measurement,
                 )
 
             self.assertIs(result, accepted)
             self.assertEqual(
-                terminal.call_args.kwargs["expected_configuration_hash"],
+                terminal.call_args.kwargs["spec"].configuration_hash,
                 CONFIG,
             )
             self.assertEqual(
-                terminal.call_args.kwargs["expected_source_sha"],
+                terminal.call_args.kwargs["spec"].release_sha,
                 SOURCE_SHA,
             )
             self.assertNotEqual(caller_spec.configuration_hash, CONFIG)
@@ -183,9 +189,9 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             changed_spec = _spec(
                 configuration_hash="sha256:" + ("e" * 64),
             )
-            with patch(
-                "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
-                "verify_runtime_target_host_qualification",
+            with patch.object(
+                plan_bound_module,
+                "verify_composed_runtime_target_host_qualification",
             ) as terminal:
                 with self.assertRaisesRegex(
                     RuntimeLoadPlanError,
@@ -239,15 +245,13 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 store._store_identity = alternate.store_identity
                 return original_get_event(store, event_id)
 
-            accepted = object()
             with patch.object(
                 JournalStore,
                 "get_event",
                 new=rebound_get_event,
             ), patch.object(
                 plan_bound_module,
-                "verify_runtime_target_host_qualification",
-                return_value=accepted,
+                "verify_composed_runtime_target_host_qualification",
             ) as terminal:
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -265,6 +269,36 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     )
 
             terminal.assert_not_called()
+
+    def test_legacy_signed_pass_cannot_bypass_missing_composed_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="terminal-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_qualification."
+                "verify_runtime_target_host_qualification",
+                return_value=object(),
+            ) as legacy, self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "requires composed target-host measurement authority",
+            ):
+                verify_declared_plan_runtime_target_host_qualification(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=store,
+                    plan_id=plan.plan_id,
+                    spec=spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                )
+            legacy.assert_not_called()
 
     def test_adapter_requires_exact_journal_store_and_budget_spec_types(self) -> None:
         with self.assertRaisesRegex(TypeError, "journal_store must be exact JournalStore"):

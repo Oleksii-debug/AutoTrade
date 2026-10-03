@@ -8,9 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from typing import Iterable
+from zoneinfo import ZoneInfo
+
+from .exact_decimal import (
+    exact_add, exact_subtract, exact_sum, parse_bounded_exact_decimal,
+)
 
 
 class RoutingMode(StrEnum):
@@ -28,13 +33,13 @@ class RouteStatus(StrEnum):
 
 
 def _identifier(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{field} must be non-empty text")
     return value.strip()
 
 
 def _identifier_tuple(values: tuple[str, ...], field: str) -> tuple[str, ...]:
-    if not isinstance(values, tuple):
+    if type(values) is not tuple:
         raise TypeError(f"{field} must be a tuple")
     normalized = tuple(_identifier(value, field) for value in values)
     if len(normalized) != len(set(normalized)):
@@ -43,15 +48,10 @@ def _identifier_tuple(values: tuple[str, ...], field: str) -> tuple[str, ...]:
 
 
 def _exact_decimal(value: Decimal | str | int, field: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ValueError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{field} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{field} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} must use finite exact decimal input") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +155,7 @@ class ModelRequest:
             raise TypeError("privacy_remote_allowed must be boolean")
         if type(self.cancelled) is not bool:
             raise TypeError("cancelled must be boolean")
-        if not isinstance(self.deadline_utc, datetime) or self.deadline_utc.tzinfo is None:
+        if type(self.deadline_utc) is not datetime or type(self.deadline_utc.tzinfo) not in (timezone, ZoneInfo):
             raise ValueError("deadline must be timezone-aware")
         object.__setattr__(
             self,
@@ -183,6 +183,8 @@ def _now_utc() -> datetime:
 def _dedupe_descriptors(descriptors: Iterable[ModelDescriptor]) -> dict[str, ModelDescriptor]:
     result: dict[str, ModelDescriptor] = {}
     for descriptor in descriptors:
+        if type(descriptor) is not ModelDescriptor:
+            raise TypeError("descriptor must be exact ModelDescriptor")
         if descriptor.model_id in result:
             raise ValueError(f"duplicate model descriptor: {descriptor.model_id}")
         result[descriptor.model_id] = descriptor
@@ -198,6 +200,8 @@ def route_model(
 ) -> RouteDecision:
     """Return one deterministic admission decision without performing inference."""
 
+    if type(policy) is not RoutingPolicy or type(request) is not ModelRequest:
+        raise TypeError("routing requires exact RoutingPolicy and ModelRequest")
     now = now_utc or _now_utc()
     if now.tzinfo is None:
         raise ValueError("now_utc must be timezone-aware")
@@ -251,7 +255,7 @@ def route_model(
         chosen = sorted(
             candidates,
             key=lambda item: (
-                -item.quality_score,
+                exact_subtract(Decimal("0"), item.quality_score),
                 item.estimated_cost,
                 item.latency_ms,
                 item.model_id,
@@ -277,8 +281,8 @@ class BudgetSnapshot:
 
     @property
     def available(self) -> Decimal:
-        used = self.reserved + self.incurred + self.estimated_unbilled
-        remaining = self.ceiling - used
+        used = exact_sum((self.reserved, self.incurred, self.estimated_unbilled))
+        remaining = exact_subtract(self.ceiling, used)
         return remaining if remaining > 0 else Decimal("0")
 
 
@@ -302,12 +306,9 @@ class BudgetLedger:
     def snapshot(self) -> BudgetSnapshot:
         return BudgetSnapshot(
             ceiling=self._ceiling,
-            reserved=sum(self._reserved.values(), Decimal("0")),
+            reserved=exact_sum(self._reserved.values()),
             incurred=self._incurred,
-            estimated_unbilled=sum(
-                self._estimated_unbilled_by_request.values(),
-                Decimal("0"),
-            ),
+            estimated_unbilled=exact_sum(self._estimated_unbilled_by_request.values()),
         )
 
     def reserve(self, request_id: str, amount: Decimal) -> None:
@@ -322,6 +323,9 @@ class BudgetLedger:
             return
         if amount > self.snapshot().available:
             raise ValueError("budget exhausted")
+        candidate_reserved = exact_sum((*self._reserved.values(), amount))
+        BudgetSnapshot(self._ceiling, candidate_reserved, self._incurred,
+                       exact_sum(self._estimated_unbilled_by_request.values())).available
         self._reserved[request_id] = amount
 
     def release(self, request_id: str) -> Decimal:
@@ -345,13 +349,18 @@ class BudgetLedger:
         )
         if incurred < 0 or estimated_unbilled < 0:
             raise ValueError("costs cannot be negative")
-        reserved = self._reserved.pop(request_id, None)
+        reserved = self._reserved.get(request_id)
         if reserved is None:
             raise ValueError("unknown reservation")
-        if incurred + estimated_unbilled > reserved:
-            self._reserved[request_id] = reserved
+        if exact_add(incurred, estimated_unbilled) > reserved:
             raise ValueError("settlement exceeds reserved ceiling")
-        self._incurred += incurred
+        new_incurred = exact_add(self._incurred, incurred)
+        # Complete all bounded exact arithmetic before changing any projection.
+        new_unbilled = exact_sum((*self._estimated_unbilled_by_request.values(), estimated_unbilled))
+        new_reserved = exact_sum(value for key, value in self._reserved.items() if key != request_id)
+        BudgetSnapshot(self._ceiling, new_reserved, new_incurred, new_unbilled).available
+        del self._reserved[request_id]
+        self._incurred = new_incurred
         self._estimated_unbilled_by_request[request_id] = estimated_unbilled
         self._settled_requests.add(request_id)
 
@@ -379,7 +388,13 @@ class BudgetLedger:
         # merely because the actual charge exceeded our prior estimate. Reduce
         # only this request's remaining estimate, then record the full bill.
         estimate = self._estimated_unbilled_by_request.get(request, Decimal("0"))
-        remaining_estimate = estimate - min(estimate, billed)
+        remaining_estimate = exact_subtract(estimate, min(estimate, billed))
+        new_incurred = exact_add(self._incurred, billed)
+        new_unbilled = exact_sum(
+            value for key, value in self._estimated_unbilled_by_request.items() if key != request
+        )
+        new_unbilled = exact_add(new_unbilled, remaining_estimate)
+        BudgetSnapshot(self._ceiling, exact_sum(self._reserved.values()), new_incurred, new_unbilled).available
         self._estimated_unbilled_by_request[request] = remaining_estimate
-        self._incurred += billed
+        self._incurred = new_incurred
         self._reconciled_bills[identifier] = (request, billed)

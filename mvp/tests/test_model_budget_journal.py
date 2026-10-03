@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext, ROUND_DOWN, Inexact, Rounded
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -870,3 +871,99 @@ class DurableModelBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExactDurableModelBudgetTests(unittest.TestCase):
+    def test_restart_rebuilds_exact_costs_with_hostile_decimal_context(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1.11")
+            with localcontext() as ctx:
+                ctx.prec = 1
+                ctx.rounding = ROUND_DOWN
+                ctx.traps[Inexact] = True
+                ctx.traps[Rounded] = True
+                budget.reserve("a", "1")
+                budget.reserve("b", "0.11")
+                before_events = len(journal.load_events("model_budget", "policy-1"))
+                with self.assertRaisesRegex(ValueError, "budget exhausted"):
+                    budget.reserve("over", "0.01")
+                self.assertEqual(len(journal.load_events("model_budget", "policy-1")), before_events)
+                budget.settle("a", incurred="0.8", estimated_unbilled="0.1")
+                budget.reconcile_unbilled(billing_id="bill", request_id="a", billed="0.06")
+                expected = budget.snapshot()
+                restarted_journal, restarted = open_budget(directory, ceiling="1.11")
+                self.assertEqual(restarted.snapshot(), expected)
+                self.assertEqual(expected.available, Decimal("0.1"))
+                self.assertFalse(restarted.reconcile_unbilled(billing_id="bill", request_id="a", billed="0.06"))
+
+    def test_unrepresentable_settlement_never_commits_or_consumes_reservation(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1.001")
+            budget.reserve("a", "1.001")
+            count = len(journal.load_events("model_budget", "policy-1"))
+            with localcontext() as ctx:
+                ctx.prec = 3
+                ctx.rounding = ROUND_DOWN
+                with self.assertRaisesRegex(ValueError, "exceeds reserved"):
+                    budget.settle("a", incurred="1.001", estimated_unbilled="0.00009")
+            self.assertEqual(len(journal.load_events("model_budget", "policy-1")), count)
+            self.assertEqual(budget.active_reservation("a"), Decimal("1.001"))
+            self.assertTrue(budget.release("a"))
+
+
+class ModelBudgetAdmissionRaceTests(unittest.TestCase):
+    def test_commit_version_cannot_come_from_a_newer_cut_than_budget_validation(self):
+        with TemporaryDirectory() as directory:
+            journal, stale = open_budget(directory, ceiling="1")
+            _, winner = open_budget(directory, ceiling="1")
+            original_events = stale._events
+            raced = False
+            def read_then_concurrent_commit():
+                nonlocal raced
+                frozen = original_events()
+                if not raced:
+                    raced = True
+                    winner.reserve("winner", "0.6")
+                return frozen
+            with patch.object(stale, "_events", side_effect=read_then_concurrent_commit):
+                with self.assertRaisesRegex(ValueError, "budget exhausted"):
+                    stale.reserve("stale", "0.6")
+            self.assertEqual(stale.snapshot().reserved, Decimal("0.6"))
+            self.assertIsNone(stale.active_reservation("stale"))
+            self.assertEqual(len(journal.load_events("model_budget", "policy-1")), 2)
+
+
+    def test_two_real_threads_cannot_overbook_from_the_same_frozen_cut(self):
+        with TemporaryDirectory() as directory:
+            _, first = open_budget(directory, ceiling="1")
+            _, second = open_budget(directory, ceiling="1")
+            barrier = threading.Barrier(2)
+            results, failures = [], []
+            def worker(budget, identity):
+                original_events = budget._events
+                first_read = True
+                def synchronized_cut():
+                    nonlocal first_read
+                    frozen = original_events()
+                    if first_read:
+                        first_read = False
+                        barrier.wait(timeout=5)
+                    return frozen
+                try:
+                    with patch.object(budget, "_events", side_effect=synchronized_cut):
+                        results.append(budget.reserve(identity, "0.6"))
+                except ValueError as error:
+                    failures.append(str(error))
+                except BaseException as error:
+                    failures.append(type(error).__name__)
+            threads = [threading.Thread(target=worker, args=(first, "a")),
+                       threading.Thread(target=worker, args=(second, "b"))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "budget concurrency test deadlocked")
+            self.assertEqual(results, [True])
+            self.assertEqual(failures, ["budget exhausted"])
+            self.assertEqual(first.snapshot().reserved, Decimal("0.6"))
+            self.assertEqual(first.snapshot().available, Decimal("0.4"))

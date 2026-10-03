@@ -8,7 +8,7 @@ provider instance, so restart leaves it UNKNOWN instead of sending again.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -16,6 +16,10 @@ from .accounting import book_equity_fill, book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import GuardedDispatcher, stable_client_order_id
 from .durable_reservations import DurableReservationBook
+from .exact_decimal import (
+    canonical_decimal_text, exact_add, exact_multiply,
+    parse_bounded_exact_decimal,
+)
 from .persistence import JournalStore, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
@@ -67,13 +71,10 @@ def _prices(values: list[str]) -> list[Decimal]:
         raise ValueError("at least one simulated price is required")
     parsed = []
     for raw in values:
-        if not isinstance(raw, str):
+        if type(raw) is not str:
             raise TypeError("prices must be decimal strings")
-        try:
-            value = Decimal(raw)
-        except InvalidOperation as error:
-            raise ValueError("prices must be finite positive decimals") from error
-        if not value.is_finite() or value <= 0:
+        value = parse_bounded_exact_decimal(raw.strip())
+        if value <= 0:
             raise ValueError("prices must be finite positive decimals")
         parsed.append(value)
     return parsed
@@ -126,7 +127,7 @@ def _risk_policy() -> RiskPolicy:
 def _risk_context(price: Decimal) -> RiskContext:
     return RiskContext.create(
         state_version=1, equity=str(INITIAL_CASH), positions={},
-        marks={INSTRUMENT: str(price)}, reserved_position_delta={},
+        marks={INSTRUMENT: canonical_decimal_text(price)}, reserved_position_delta={},
         daily_pnl="0", drawdown_fraction="0", market_data_age_seconds="1",
         fx_age_seconds={"USD": "1"}, margin_headroom="1",
         capability_allowed=True, borrow_available=True,
@@ -192,6 +193,11 @@ def run_canonical_simulation(
     decision = MovingAverageStrategy().decide(values, Decimal("1"))
     if decision.side == "SELL":
         raise ValueError("this long-only simulation session supports BUY/HOLD prices")
+    buy_requirements = None
+    if decision.side == "BUY":
+        amount = exact_multiply(decision.quantity, decision.price)
+        required = exact_add(amount, exact_multiply(amount, FEE_RATE))
+        buy_requirements = (amount, required)
     input_payload = {"episode_id": episode_id, "prices": [str(v) for v in values]}
     input_hash = payload_digest(input_payload)
     root = Path(state_dir)
@@ -200,11 +206,13 @@ def run_canonical_simulation(
         return _run_locked(
             root, episode_id=episode_id, input_hash=input_hash,
             decision=decision, now=now, fault_after_send=fault_after_send,
+            buy_requirements=buy_requirements,
         )
 
 
 def _run_locked(root: Path, *, episode_id: str, input_hash: str,
-                decision, now: str | None, fault_after_send: bool) -> dict[str, object]:
+                decision, now: str | None, fault_after_send: bool,
+                buy_requirements: tuple[Decimal, Decimal] | None) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
     prior = store.load_events("canonical_simulation_session", _AGGREGATE)
     if prior:
@@ -320,12 +328,15 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         resolution_artifact_store=ArtifactStore(root / "artifacts"),
         resolution_artifact_root=root / "artifacts",
     )
-    amount = decision.quantity * decision.price
-    required = amount + amount * FEE_RATE
+    amount, required = buy_requirements
+    quantity_text = canonical_decimal_text(decision.quantity)
+    price_text = canonical_decimal_text(decision.price)
+    amount_text = canonical_decimal_text(amount)
+    required_text = canonical_decimal_text(required)
     intent_id = _uuid("intent", episode_id)
     intent_hash = payload_digest({
-        "episode_id": episode_id, "side": "BUY", "quantity": str(decision.quantity),
-        "price": str(decision.price), "instrument": INSTRUMENT,
+        "episode_id": episode_id, "side": "BUY", "quantity": quantity_text,
+        "price": price_text, "instrument": INSTRUMENT,
     })
     admission_id = _uuid("admission", episode_id)
     admission = authority.admit(
@@ -334,16 +345,16 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         admission_id=admission_id, policy_id=policy_id,
         intent_id=intent_id, intent_hash=intent_hash, account_id=ACCOUNT,
         environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
-        instrument_version=1, action="ORDER.SUBMIT", notional=str(amount),
+        instrument_version=1, action="ORDER.SUBMIT", notional=amount_text,
         capability_snapshot_id="simulated-capability-v1",
         risk_intent=RiskIntent.create(
-            symbol=INSTRUMENT, side="BUY", quantity=str(decision.quantity),
-            price=str(decision.price), expected_state_version=1,
+            symbol=INSTRUMENT, side="BUY", quantity=quantity_text,
+            price=price_text, expected_state_version=1,
         ),
         risk_context=context, risk_policy=policy, risk_valid_until=future,
         reservation_book=reservations,
         reservation_id=_uuid("reservation", episode_id),
-        reservation_requirements={"CASH:USD": str(required)},
+        reservation_requirements={"CASH:USD": required_text},
         reservation_available={"CASH:USD": snapshot["balances"][0]["available"]},
         reservation_checkpoint_event_id=availability["event_id"],
         reservation_provider_id=PROVIDER, reservation_max_age_seconds="60",
@@ -377,8 +388,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         attempt_id=attempt_id, intent_id=intent_id, intent_hash=intent_hash,
         provider="simulated", request={
             "attempt_id": attempt_id, "instrument_version": INSTRUMENT,
-            "side": "BUY", "quantity": str(decision.quantity),
-            "price": str(decision.price), "now": timestamp,
+            "side": "BUY", "quantity": quantity_text,
+            "price": price_text, "now": timestamp,
         },
         now=timestamp, authority_check=final_check,
         transport_send=provider.transport_send,
@@ -403,7 +414,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
         reservation_id=_uuid("reservation", episode_id),
-        usage={"CASH:USD": str(required)},
+        usage={"CASH:USD": required_text},
         transactions=(book_equity_fill(
             transaction_id=_uuid("fill-transaction", episode_id),
             cause_event_id=fill["provider_execution_id"],

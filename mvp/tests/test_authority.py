@@ -4,8 +4,11 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 
+from mvp.autotrade_mvp import authority as authority_module
 from mvp.autotrade_mvp.authority import (
+    AdmissionRecord,
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
     AuthorityPolicy,
@@ -154,12 +157,12 @@ def public_risk_policy(**overrides):
     return RiskPolicy.create(**values)
 
 
-def public_financial_kwargs(store, **overrides):
+def public_financial_kwargs(store, *, environment="SIMULATION", **overrides):
     provider_id = "TEST_PROVIDER"
     result = reconcile_account(
         provider_id=provider_id,
         account_id="paper-1",
-        environment="PAPER",
+        environment=environment,
         local_cash={"USD": "1000"},
         provider_cash={"USD": "1000"},
         local_positions={},
@@ -169,7 +172,7 @@ def public_financial_kwargs(store, **overrides):
         snapshot_consistency=SnapshotConsistencyEvidence(
             provider_id=provider_id,
             account_id="paper-1",
-            environment="PAPER",
+            environment=environment,
             mode="ATOMIC",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -182,7 +185,7 @@ def public_financial_kwargs(store, **overrides):
         resource_availability=ResourceAvailabilityEvidence(
             provider_id=provider_id,
             account_id="paper-1",
-            environment="PAPER",
+            environment=environment,
             snapshot_id="authority-account-snapshot",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -222,6 +225,29 @@ def public_financial_kwargs(store, **overrides):
     )
     values.update(overrides)
     return values
+
+
+def public_risk_authority_request(
+    *, risk_intent: RiskIntent | None = None
+) -> RiskAuthorityRequest:
+    return RiskAuthorityRequest(
+        risk_intent=public_risk_intent() if risk_intent is None else risk_intent,
+        account_id="paper-1",
+        environment="SIMULATION",
+        provider_id="BYBIT",
+        instrument_version=InstrumentVersionIdentity(
+            instrument_id=INSTRUMENT_ID,
+            version=1,
+        ),
+        capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+        reconciliation_checkpoint_event_id="reconciliation-fixture",
+        journal_sequence_cut=0,
+        reservation_version=0,
+        reservation_state_digest="sha256:" + "b" * 64,
+        authority_policy_id="p1",
+        authority_policy_version=1,
+        evaluated_at="2026-09-24T18:01:00Z",
+    )
 
 
 def public_authoritative_risk_snapshot(
@@ -1431,6 +1457,129 @@ class AuthorityTests(unittest.TestCase):
             (False, "financial_evidence_missing"),
         )
 
+    def test_injected_risk_resolver_cannot_mint_paper_or_live_authority(self):
+        calls = []
+
+        def resolver(request):
+            calls.append(request.environment)
+            return public_authoritative_risk_snapshot(request)
+
+        authority = AuthorityService(risk_authority_resolver=resolver)
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment):
+                request = RiskAuthorityRequest(
+                    risk_intent=public_risk_intent(),
+                    account_id="paper-1",
+                    environment=environment,
+                    provider_id="TEST_PROVIDER",
+                    instrument_version=InstrumentVersionIdentity(
+                        INSTRUMENT_ID,
+                        1,
+                    ),
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                    reconciliation_checkpoint_event_id="checkpoint:test",
+                    journal_sequence_cut=0,
+                    reservation_version=0,
+                    reservation_state_digest="sha256:" + "1" * 64,
+                    authority_policy_id="p1",
+                    authority_policy_version=1,
+                    evaluated_at="2026-09-24T18:01:00Z",
+                )
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "product-owned authoritative risk resolver",
+                ):
+                    authority._resolve_authoritative_risk_snapshot(request)
+        self.assertEqual(calls, [])
+
+    def test_new_paper_financial_admission_rejects_injected_resolver_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            calls = []
+
+            def resolver(request):
+                calls.append(request.environment)
+                return public_authoritative_risk_snapshot(request)
+
+            authority = authority_service(store, resolver=resolver)
+            item = policy(autonomous=True, environments={"PAPER"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="production-resolver-block",
+                idempotency_key="production-resolver-block",
+                admission_id="production-resolver-block",
+                policy_id=item.policy_id,
+                intent_id="production-resolver-block",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="production-resolver-block",
+                **public_financial_kwargs(store, environment="PAPER"),
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "product-owned authoritative risk resolver",
+            ):
+                authority.admit(**kwargs)
+            self.assertEqual(calls, [])
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.load_events("risk_decision", "canonical"), [])
+
+    def test_legacy_paper_financial_record_cannot_become_send_authority(self):
+        service = AuthorityService()
+        service.register_policy(
+            policy(autonomous=True, environments={"PAPER"})
+        )
+        legacy = AdmissionRecord(
+            admission_id="legacy-paper-financial",
+            policy_id="p1",
+            intent_hash="sha256:" + "a" * 64,
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=InstrumentVersionIdentity(INSTRUMENT_ID, 1),
+            action="ORDER.SUBMIT",
+            notional=Decimal("100"),
+            risk_reducing=False,
+            state_version=1,
+            authority_epoch=service.epoch,
+            outcome="ADMITTED",
+            admitted_at="2026-09-24T18:00:00Z",
+            confirmation_id=None,
+            reason="legacy fixture",
+            request_fingerprint="a" * 64,
+            intent_id="legacy-intent",
+            risk_decision_id="legacy-risk-decision",
+            reservation_id="legacy-reservation",
+            capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+            risk_valid_until="2026-09-24T18:30:00Z",
+            policy_version=1,
+            financial_command_id="legacy-command",
+        )
+        service._admissions[legacy.admission_id] = legacy
+        self.assertEqual(
+            service.dispatch_allowed(
+                legacy.admission_id,
+                intent_hash=legacy.intent_hash,
+                account_id=legacy.account_id,
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2026-09-24T18:01:00Z",
+                capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+            ),
+            (False, "production_risk_authority_unavailable"),
+        )
+
     def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
         class FailingFinancialJournalStore(JournalStore):
             def __init__(self, path):
@@ -1448,7 +1597,7 @@ class AuthorityTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             store = FailingFinancialJournalStore(path)
             authority = authority_service(store)
-            item = policy()
+            item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
             confirmation_id = "confirm-transaction-a-fault"
             authority.add_confirmation(
@@ -1456,7 +1605,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_hash=PUBLIC_INTENT_HASH,
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1465,7 +1614,7 @@ class AuthorityTests(unittest.TestCase):
             )
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             kwargs = dict(
@@ -1475,7 +1624,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-public-fault",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1514,7 +1663,7 @@ class AuthorityTests(unittest.TestCase):
                     "admission-public-fault",
                     intent_hash=PUBLIC_INTENT_HASH,
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1547,7 +1696,7 @@ class AuthorityTests(unittest.TestCase):
             restarted_authority = authority_service(restarted_store)
             restarted_reservations = DurableReservationBook(
                 restarted_store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             self.assertEqual(restarted_reservations.version, 0)
@@ -1600,11 +1749,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
@@ -1618,7 +1767,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-no-risk-resolver",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1635,11 +1784,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             tampered = replace(
@@ -1658,7 +1807,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-risk-context-tamper",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1677,11 +1826,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
@@ -1695,7 +1844,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-risk-policy-tamper",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1712,6 +1861,207 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(reservations.version, 0)
             self.assertEqual(store.pending_outbox(), [])
 
+    def test_risk_authority_request_detaches_caller_intent(self):
+        caller = public_risk_intent()
+        request = public_risk_authority_request(risk_intent=caller)
+        object.__setattr__(caller, "quantity", Decimal("999"))
+        self.assertEqual(caller.quantity, Decimal("999"))
+        self.assertNotEqual(request.risk_intent.quantity, Decimal("999"))
+
+    def test_risk_authority_request_rejects_intent_subclass_before_callbacks(self):
+        class HostileRiskIntent(RiskIntent):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name == "quantity":
+                    type(self).callbacks += 1
+                    raise AssertionError("RiskIntent subclass callback executed")
+                return super().__getattribute__(name)
+
+        hostile = HostileRiskIntent(**vars(public_risk_intent()))
+        with self.assertRaisesRegex(TypeError, "exact RiskIntent"):
+            public_risk_authority_request(risk_intent=hostile)
+        self.assertEqual(HostileRiskIntent.callbacks, 0)
+
+    def test_risk_context_fingerprint_preserves_legacy_canonical_bytes(self):
+        exact = public_risk_context()
+        legacy = RiskContext.create(**vars(exact))
+        self.assertEqual(
+            authority_module._risk_context_fingerprint(exact),
+            authority_module._risk_object_fingerprint(legacy),
+        )
+
+    def test_authoritative_risk_snapshot_detaches_caller_context_graph(self):
+        caller = public_risk_context()
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request(),
+            risk_context=caller,
+        )
+        caller.positions["ABC"] = Decimal("999")
+        self.assertNotEqual(caller.positions, snapshot.context.positions)
+        self.assertNotEqual(
+            snapshot.context.positions.get("ABC"),
+            Decimal("999"),
+        )
+
+    def test_authoritative_risk_snapshot_rejects_context_subclass_before_callbacks(self):
+        class HostileRiskContext(RiskContext):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name == "state_version":
+                    type(self).callbacks += 1
+                    raise AssertionError("RiskContext subclass callback executed")
+                return super().__getattribute__(name)
+
+        hostile = HostileRiskContext(**vars(public_risk_context()))
+        with self.assertRaisesRegex(TypeError, "exact RiskContext"):
+            public_authoritative_risk_snapshot(
+                public_risk_authority_request(),
+                risk_context=hostile,
+            )
+        self.assertEqual(HostileRiskContext.callbacks, 0)
+
+    def test_authoritative_risk_snapshot_rejects_nested_mapping_subclass_before_callbacks(self):
+        class HostilePositions(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("nested mapping callback executed")
+
+        hostile_positions = HostilePositions(public_risk_context().positions)
+        caller = public_risk_context()
+        object.__setattr__(caller, "positions", hostile_positions)
+        with self.assertRaisesRegex(TypeError, "non-canonical HostilePositions"):
+            public_authoritative_risk_snapshot(
+                public_risk_authority_request(),
+                risk_context=caller,
+            )
+        self.assertEqual(HostilePositions.callbacks, 0)
+
+    def test_authoritative_risk_snapshot_rejects_hostile_evidence_mapping_before_callbacks(self):
+        class HostileEvidence(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("evidence mapping callback executed")
+
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request()
+        )
+        hostile = HostileEvidence(dict(snapshot.evidence_refs))
+        with self.assertRaisesRegex(TypeError, "exact dict or canonical evidence refs"):
+            replace(snapshot, evidence_refs=hostile)
+        self.assertEqual(HostileEvidence.callbacks, 0)
+
+    def test_authoritative_risk_snapshot_rejects_mappingproxy_over_hostile_evidence(self):
+        class HostileEvidence(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("proxied evidence callback executed")
+
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request()
+        )
+        hostile = HostileEvidence(dict(snapshot.evidence_refs))
+        proxied = MappingProxyType(hostile)
+        with self.assertRaisesRegex(TypeError, "exact dict or canonical evidence refs"):
+            replace(snapshot, evidence_refs=proxied)
+        self.assertEqual(HostileEvidence.callbacks, 0)
+
+    def test_authoritative_risk_snapshot_canonical_evidence_survives_replace(self):
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request()
+        )
+        rebuilt = replace(snapshot)
+        self.assertIs(type(rebuilt.evidence_refs), type(snapshot.evidence_refs))
+        self.assertEqual(
+            dict(rebuilt.evidence_refs),
+            dict(snapshot.evidence_refs),
+        )
+        with self.assertRaisesRegex(AttributeError, "immutable"):
+            rebuilt.evidence_refs._items = ()
+
+    def test_authoritative_risk_snapshot_detaches_exact_evidence_dict(self):
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request()
+        )
+        caller_refs = dict(snapshot.evidence_refs)
+        rebuilt = replace(snapshot, evidence_refs=caller_refs)
+        caller_refs["PORTFOLIO"] = "sha256:" + "0" * 64
+        self.assertNotEqual(
+            rebuilt.evidence_refs["PORTFOLIO"],
+            caller_refs["PORTFOLIO"],
+        )
+
+    def test_risk_policy_fingerprint_preserves_legacy_canonical_bytes(self):
+        exact = public_risk_policy()
+        self.assertEqual(
+            authority_module._risk_policy_fingerprint(exact),
+            authority_module._risk_object_fingerprint(exact),
+        )
+
+    def test_authoritative_risk_snapshot_detaches_caller_policy(self):
+        caller = public_risk_policy(max_single_notional="1000")
+        snapshot = public_authoritative_risk_snapshot(
+            public_risk_authority_request(),
+            risk_policy=caller,
+        )
+        object.__setattr__(
+            caller,
+            "max_single_notional",
+            Decimal("999999"),
+        )
+        self.assertEqual(caller.max_single_notional, Decimal("999999"))
+        self.assertEqual(snapshot.risk_policy.max_single_notional, Decimal("1000"))
+
+    def test_authoritative_risk_snapshot_rejects_policy_subclass_before_callbacks(self):
+        class HostileRiskPolicy(RiskPolicy):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name in {"max_abs_position", "max_single_notional"}:
+                    type(self).callbacks += 1
+                    raise AssertionError("RiskPolicy subclass callback executed")
+                return super().__getattribute__(name)
+
+        hostile = HostileRiskPolicy(**vars(public_risk_policy()))
+        with self.assertRaisesRegex(TypeError, "exact RiskPolicy"):
+            public_authoritative_risk_snapshot(
+                public_risk_authority_request(),
+                risk_policy=hostile,
+            )
+        self.assertEqual(HostileRiskPolicy.callbacks, 0)
+
+    def test_risk_resolver_rejects_snapshot_subclass_before_attribute_dispatch(self):
+        class HostileSnapshot(AuthoritativeRiskSnapshot):
+            callbacks = 0
+            armed = False
+
+            def __getattribute__(self, name):
+                if type(self).armed and name == "account_id":
+                    type(self).callbacks += 1
+                    raise AssertionError("snapshot subclass callback executed")
+                return super().__getattribute__(name)
+
+        request = public_risk_authority_request()
+        canonical = public_authoritative_risk_snapshot(request)
+        hostile = HostileSnapshot(**vars(canonical))
+        HostileSnapshot.armed = True
+        service = AuthorityService(
+            risk_authority_resolver=lambda _request: hostile
+        )
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "exact AuthoritativeRiskSnapshot",
+        ):
+            service._resolve_authoritative_risk_snapshot(request)
+        self.assertEqual(HostileSnapshot.callbacks, 0)
+
     def test_public_financial_admission_rejects_caller_risk_validity_extension(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -1724,11 +2074,11 @@ class AuthorityTests(unittest.TestCase):
                 )
 
             authority = authority_service(store, resolver=resolver)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
@@ -1742,7 +2092,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-risk-validity-tamper",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1770,11 +2120,11 @@ class AuthorityTests(unittest.TestCase):
                 )
 
             authority = authority_service(store, resolver=changing_resolver)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
@@ -1788,7 +2138,7 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-risk-snapshot-race",
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -1805,11 +2155,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             kwargs = dict(
@@ -1819,7 +2169,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-risk-snapshot-proof",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1867,7 +2217,7 @@ class AuthorityTests(unittest.TestCase):
             replayed = restarted.admit(
                 reservation_book=DurableReservationBook(
                     store,
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="paper-1",
                 ),
                 **kwargs,
@@ -1895,7 +2245,7 @@ class AuthorityTests(unittest.TestCase):
         request = RiskAuthorityRequest(
             risk_intent=risk_intent,
             account_id="paper-1",
-            environment="PAPER",
+            environment="SIMULATION",
             provider_id="TEST_PROVIDER",
             instrument_version=InstrumentVersionIdentity(
                 INSTRUMENT_ID, 1
@@ -1963,7 +2313,7 @@ class AuthorityTests(unittest.TestCase):
                 store,
                 risk_context=derivative_context,
             )
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             kwargs = dict(
                 command_id="cmd-derivative-snapshot",
@@ -1972,7 +2322,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-derivative-snapshot",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -1987,7 +2337,7 @@ class AuthorityTests(unittest.TestCase):
             admitted = authority.admit(
                 reservation_book=DurableReservationBook(
                     store,
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="paper-1",
                 ),
                 **kwargs,
@@ -2028,7 +2378,7 @@ class AuthorityTests(unittest.TestCase):
             replayed = restarted.admit(
                 reservation_book=DurableReservationBook(
                     reopened_store,
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="paper-1",
                 ),
                 **kwargs,
@@ -2051,7 +2401,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-derivative-after-restart",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2070,13 +2420,13 @@ class AuthorityTests(unittest.TestCase):
             )
             before_version = DurableReservationBook(
                 reopened_store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             ).version
             rejected = post_restart.admit(
                 reservation_book=DurableReservationBook(
                     reopened_store,
-                    environment="PAPER",
+                    environment="SIMULATION",
                     account_id="paper-1",
                 ),
                 **fresh_kwargs,
@@ -2087,7 +2437,7 @@ class AuthorityTests(unittest.TestCase):
             )
             after_version = DurableReservationBook(
                 reopened_store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             ).version
             self.assertEqual(after_version, before_version)
@@ -2112,7 +2462,7 @@ class AuthorityTests(unittest.TestCase):
                 instrument_types={},
             )
             authority = authority_service(store, risk_context=exposed)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             kwargs = dict(
                 command_id="cmd-family-reject",
@@ -2121,7 +2471,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-family-reject",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2137,7 +2487,7 @@ class AuthorityTests(unittest.TestCase):
                 ),
             )
             reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                store, environment="SIMULATION", account_id="paper-1"
             )
             first = authority.admit(reservation_book=reservations, **kwargs)
             self.assertEqual(
@@ -2162,7 +2512,7 @@ class AuthorityTests(unittest.TestCase):
             )
             replayed_reservations = DurableReservationBook(
                 reopened_store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             replayed = restarted.admit(
@@ -2185,11 +2535,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             kwargs = dict(
@@ -2199,7 +2549,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-public",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2220,12 +2570,12 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(len(store.pending_outbox()), 1)
 
-            # Lost-response replay re-evaluates the typed risk inputs against
-            # immutable original evidence; it never reserves or publishes twice.
+            # Lost-response replay validates the original durable request and
+            # evidence identity; it never re-runs risk, reserves, or publishes twice.
             restarted_authority = authority_service(store)
             restarted_reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             replayed = restarted_authority.admit(
@@ -2265,11 +2615,11 @@ class AuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             rejected_policy = public_risk_policy(max_single_notional="50")
             authority = authority_service(store, risk_policy=rejected_policy)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             rejected = authority.admit(
@@ -2279,7 +2629,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-risk-reject",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2307,10 +2657,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                store, environment="SIMULATION", account_id="paper-1"
             )
             rejected = authority.admit(
                 command_id="cmd-stale-state",
@@ -2319,7 +2669,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-stale-state",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2338,15 +2688,258 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(store.pending_outbox(), [])
 
 
+    def test_public_financial_retry_is_historical_and_skips_risk_evaluator(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-historical-retry",
+                idempotency_key="idem-historical-retry",
+                admission_id="admission-historical-retry",
+                policy_id=item.policy_id,
+                intent_id="intent-historical-retry",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-historical-retry",
+                **public_financial_kwargs(store),
+            )
+            first = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            risk_event = store.load_events(
+                "risk_decision",
+                first.risk_decision_id,
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["risk_intent"],
+                {
+                    "symbol": "ABC",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "price": "100",
+                    "expected_state_version": 7,
+                    "reduce_only": False,
+                    "action": "TRADE",
+                    "instrument_type": "GENERIC",
+                },
+            )
+            self.assertEqual(
+                risk_event["payload"]["financial_idempotency_key"],
+                authority_module._authority_event_id(
+                    "FinancialAdmissionIdempotency",
+                    "SIMULATION:paper-1:idem-historical-retry",
+                ),
+            )
+
+            restarted = authority_service(store)
+            restarted_book = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+
+            original_evaluator = authority_module.evaluate_bound_risk
+            original_resolver = restarted.risk_authority_resolver
+            original_availability_loader = (
+                authority_module.load_account_resource_availability_evidence
+            )
+
+            def forbidden_evaluator(*_args, **_kwargs):
+                raise AssertionError("exact retry must not re-run risk")
+
+            def forbidden_resolver(*_args, **_kwargs):
+                raise AssertionError(
+                    "exact retry must not resolve a fresh risk snapshot"
+                )
+
+            def forbidden_availability_loader(*_args, **_kwargs):
+                raise AssertionError(
+                    "exact retry must not re-evaluate current availability"
+                )
+
+            authority_module.evaluate_bound_risk = forbidden_evaluator
+            restarted.risk_authority_resolver = forbidden_resolver
+            authority_module.load_account_resource_availability_evidence = (
+                forbidden_availability_loader
+            )
+            try:
+                replayed = restarted.admit(
+                    reservation_book=restarted_book,
+                    **{
+                        **kwargs,
+                        "now": "2026-09-25T18:01:00Z",
+                        "reservation_available": {
+                            "CASH:USD": "0",
+                        },
+                    },
+                )
+            finally:
+                authority_module.evaluate_bound_risk = original_evaluator
+                restarted.risk_authority_resolver = original_resolver
+                authority_module.load_account_resource_availability_evidence = (
+                    original_availability_loader
+                )
+
+            self.assertEqual(replayed, first)
+            self.assertEqual(restarted_book.version, 1)
+            self.assertEqual(
+                restarted_book.total_reserved("CASH:USD"),
+                Decimal("100"),
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision",
+                        first.risk_decision_id,
+                    )
+                ),
+                1,
+            )
+
+    def test_public_financial_retry_rejects_changed_risk_intent_before_evaluation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-retry-intent",
+                idempotency_key="idem-retry-intent",
+                admission_id="admission-retry-intent",
+                policy_id=item.policy_id,
+                intent_id="intent-retry-intent",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-retry-intent",
+                **public_financial_kwargs(store),
+            )
+            authority.admit(reservation_book=reservations, **kwargs)
+            restarted = authority_service(store)
+            restarted_book = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+
+            original_evaluator = authority_module.evaluate_bound_risk
+
+            def forbidden_evaluator(*_args, **_kwargs):
+                raise AssertionError("changed retry must fail before risk")
+
+            authority_module.evaluate_bound_risk = forbidden_evaluator
+            try:
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "risk_intent changed",
+                ):
+                    restarted.admit(
+                        reservation_book=restarted_book,
+                        **{
+                            **kwargs,
+                            "risk_intent": RiskIntent.create(
+                                symbol="ABC",
+                                side="BUY",
+                                quantity="2",
+                                price="100",
+                                expected_state_version=7,
+                            ),
+                        },
+                    )
+            finally:
+                authority_module.evaluate_bound_risk = original_evaluator
+
+            self.assertEqual(restarted_book.version, 1)
+            self.assertEqual(len(store.pending_outbox()), 1)
+
+    def test_public_financial_retry_rejects_changed_idempotency_key_before_evaluation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-retry-idempotency",
+                idempotency_key="idem-retry-idempotency",
+                admission_id="admission-retry-idempotency",
+                policy_id=item.policy_id,
+                intent_id="intent-retry-idempotency",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-retry-idempotency",
+                **public_financial_kwargs(store),
+            )
+            authority.admit(reservation_book=reservations, **kwargs)
+            restarted = authority_service(store)
+            restarted_book = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+
+            original_evaluator = authority_module.evaluate_bound_risk
+
+            def forbidden_evaluator(*_args, **_kwargs):
+                raise AssertionError("changed retry must fail before risk")
+
+            authority_module.evaluate_bound_risk = forbidden_evaluator
+            try:
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "idempotency_key changed",
+                ):
+                    restarted.admit(
+                        reservation_book=restarted_book,
+                        **{
+                            **kwargs,
+                            "idempotency_key": "different-retry-key",
+                        },
+                    )
+            finally:
+                authority_module.evaluate_bound_risk = original_evaluator
+
+            self.assertEqual(restarted_book.version, 1)
+            self.assertEqual(len(store.pending_outbox()), 1)
+
     def test_public_financial_admission_replay_rejects_changed_reservation_delta(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             kwargs = dict(
@@ -2356,7 +2949,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-retry-delta",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2371,12 +2964,12 @@ class AuthorityTests(unittest.TestCase):
             restarted = authority_service(store)
             restarted_book = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "another financial command",
+                "reservation requirements changed for an existing financial command",
             ):
                 restarted.admit(
                     reservation_book=restarted_book,
@@ -2401,11 +2994,11 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             kwargs = dict(
@@ -2415,7 +3008,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="intent-replay-scope",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2427,7 +3020,7 @@ class AuthorityTests(unittest.TestCase):
             restarted = authority_service(store)
             restarted_book = DurableReservationBook(
                 store,
-                environment="PAPER",
+                environment="SIMULATION",
                 account_id="paper-1",
             )
             with self.assertRaisesRegex(
@@ -2449,10 +3042,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                store, environment="SIMULATION", account_id="paper-1"
             )
             stale = bound_risk_decision(
                 policy_version=item.version,
@@ -2476,8 +3069,9 @@ class AuthorityTests(unittest.TestCase):
                     policy_id=item.policy_id,
                     intent_id="intent-stale",
                     intent_hash=stale.intent_hash,
+                    risk_intent=public_risk_intent(),
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",
@@ -2498,10 +3092,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                store, environment="SIMULATION", account_id="paper-1"
             )
             admitted = authority.admit(
                 command_id="dispatch-command",
@@ -2510,7 +3104,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="dispatch-intent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2522,7 +3116,7 @@ class AuthorityTests(unittest.TestCase):
             common = dict(
                 intent_hash=PUBLIC_INTENT_HASH,
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2567,10 +3161,10 @@ class AuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = authority_service(store)
-            item = policy(autonomous=True)
+            item = policy(autonomous=True, environments={"SIMULATION"})
             authority.register_policy(item)
             reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                store, environment="SIMULATION", account_id="paper-1"
             )
             admitted = authority.admit(
                 command_id="first-command",
@@ -2579,7 +3173,7 @@ class AuthorityTests(unittest.TestCase):
                 policy_id=item.policy_id,
                 intent_id="first-intent",
                 account_id="paper-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
                 action="ORDER.SUBMIT",
@@ -2601,7 +3195,7 @@ class AuthorityTests(unittest.TestCase):
                     admitted.admission_id,
                     intent_hash=PUBLIC_INTENT_HASH,
                     account_id="paper-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
                     action="ORDER.SUBMIT",

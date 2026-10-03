@@ -12,8 +12,45 @@ class PayloadSnapshotError(ValueError):
     """Raised when raw payload state cannot be safely detached from its caller."""
 
 
-def _snapshot(value: Any, *, path: str, active: set[int]) -> Any:
+_MAX_PAYLOAD_CONTAINER_ITEMS = 20_000
+_MAX_PAYLOAD_NODES = 100_000
+_MAX_PAYLOAD_DEPTH = 64
+
+
+class _SnapshotBudget:
+    """Bound detached authority growth independently of caller graph size."""
+
+    __slots__ = ("remaining_nodes",)
+
+    def __init__(self) -> None:
+        self.remaining_nodes = _MAX_PAYLOAD_NODES
+
+    def consume(self, *, path: str) -> None:
+        if self.remaining_nodes <= 0:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload node resource envelope"
+            )
+        self.remaining_nodes -= 1
+
+
+def _snapshot(
+    value: Any,
+    *,
+    path: str,
+    active: set[int],
+    budget: _SnapshotBudget,
+    depth: int,
+) -> Any:
+    if depth > _MAX_PAYLOAD_DEPTH:
+        raise PayloadSnapshotError(
+            f"{path} exceeds the market payload nesting resource envelope"
+        )
+    budget.consume(path=path)
     if isinstance(value, Mapping):
+        if len(value) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
         identity = id(value)
         if identity in active:
             raise PayloadSnapshotError(f"{path} contains a reference cycle")
@@ -29,19 +66,31 @@ def _snapshot(value: Any, *, path: str, active: set[int]) -> Any:
                     item,
                     path=f"{path}.{key}",
                     active=active,
+                    budget=budget,
+                    depth=depth + 1,
                 )
             return MappingProxyType(frozen)
         finally:
             active.remove(identity)
 
     if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_PAYLOAD_CONTAINER_ITEMS:
+            raise PayloadSnapshotError(
+                f"{path} exceeds the market payload container resource envelope"
+            )
         identity = id(value)
         if identity in active:
             raise PayloadSnapshotError(f"{path} contains a reference cycle")
         active.add(identity)
         try:
             return tuple(
-                _snapshot(item, path=f"{path}[{index}]", active=active)
+                _snapshot(
+                    item,
+                    path=f"{path}[{index}]",
+                    active=active,
+                    budget=budget,
+                    depth=depth + 1,
+                )
                 for index, item in enumerate(value)
             )
         finally:
@@ -80,7 +129,13 @@ def snapshot_market_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
     if not isinstance(value, Mapping):
         raise PayloadSnapshotError("payload must be an object")
-    frozen = _snapshot(value, path="payload", active=set())
+    frozen = _snapshot(
+        value,
+        path="payload",
+        active=set(),
+        budget=_SnapshotBudget(),
+        depth=0,
+    )
     assert isinstance(frozen, Mapping)
     return frozen
 

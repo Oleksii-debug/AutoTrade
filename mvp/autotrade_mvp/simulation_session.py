@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
+import sys
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import book_equity_fill, book_external_cash_flow
@@ -48,9 +50,125 @@ INITIAL_CASH = Decimal("1000")
 FEE_RATE = Decimal("0.001")
 _AGGREGATE = "single-episode"
 
+_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@2"
+_STRATEGY_ID = "moving-average"
+_STRATEGY_VERSION = "1"
+_STRATEGY_FAST = 2
+_STRATEGY_SLOW = 3
+_STRATEGY_QUANTITY = Decimal("1")
+_RISK_POLICY_SPEC = (
+    ("max_abs_position", "10"),
+    ("max_single_notional", "1000"),
+    ("max_gross_leverage", "2"),
+    ("max_net_leverage", "2"),
+    ("max_daily_loss", "500"),
+    ("max_drawdown_fraction", "0.20"),
+    ("max_data_age_seconds", "5"),
+    ("max_fx_age_seconds", "60"),
+    ("min_margin_headroom", "0.20"),
+    ("max_stress_loss", "500"),
+)
+_RESERVATION_PROTOCOL = "durable-reservations@1"
+_ADMISSION_PROTOCOL = "authority-admission@1"
+_ECONOMIC_PROTOCOL = "provider-economic-book@1"
+_RECONCILIATION_PROTOCOL = "account-reconciliation@1"
+_PROVIDER_PROTOCOL = "simulated-provider@1"
+
 
 def _uuid(kind: str, episode_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"autotrade-canonical-simulation:{kind}:{episode_id}"))
+
+
+def _python_source_tree_digest(root: Path) -> str:
+    """Content identity for the exact Python source tree used by the simulator."""
+
+    files = tuple(sorted(path for path in root.rglob("*.py") if path.is_file()))
+    if not files:
+        raise RuntimeError("canonical simulation source tree is unavailable")
+    digest = sha256()
+    for path in files:
+        try:
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            content = path.read_bytes()
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                "canonical simulation source identity cannot be established"
+            ) from error
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
+
+
+def _module_source_root(component) -> Path:
+    module = sys.modules.get(component.__module__)
+    raw_path = getattr(module, "__file__", None)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RuntimeError("canonical simulation dependency source is unavailable")
+    path = Path(raw_path).resolve()
+    if path.suffix in {".pyc", ".pyo"}:
+        source = path.with_suffix(".py")
+        if source.is_file():
+            path = source
+    return path.parent
+
+
+def _simulation_build_identity() -> str:
+    """Bind restart to the exact executable source packages, not only inputs."""
+
+    document = {
+        "mvp_source_tree": _python_source_tree_digest(Path(__file__).resolve().parent),
+        "research_artifact_source_tree": _python_source_tree_digest(
+            _module_source_root(ArtifactStore)
+        ),
+    }
+    return payload_digest(document)
+
+
+def _canonical_risk_policy_document() -> dict[str, str]:
+    return {
+        name: canonical_decimal_text(parse_bounded_exact_decimal(value))
+        for name, value in _RISK_POLICY_SPEC
+    }
+
+
+def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object]:
+    """Frozen behavior identity required before a durable session may be reused."""
+
+    return {
+        "protocol_version": _SIMULATION_PROTOCOL_VERSION,
+        "source_build_identity": _simulation_build_identity(),
+        "strategy": {
+            "id": _STRATEGY_ID,
+            "version": _STRATEGY_VERSION,
+            "fast": _STRATEGY_FAST,
+            "slow": _STRATEGY_SLOW,
+            "quantity": canonical_decimal_text(_STRATEGY_QUANTITY),
+        },
+        "financial_scope": {
+            "account_id": ACCOUNT,
+            "provider_id": PROVIDER,
+            "environment": ENVIRONMENT,
+            "instrument_version": INSTRUMENT,
+            "instrument_id": INSTRUMENT_ID,
+        },
+        "economics": {
+            "initial_cash": canonical_decimal_text(INITIAL_CASH),
+            "fee_rate": canonical_decimal_text(FEE_RATE),
+            "provider_protocol": _PROVIDER_PROTOCOL,
+            "economic_protocol": _ECONOMIC_PROTOCOL,
+        },
+        "risk_policy": _canonical_risk_policy_document(),
+        "authority_protocols": {
+            "admission": _ADMISSION_PROTOCOL,
+            "reservation": _RESERVATION_PROTOCOL,
+            "reconciliation": _RECONCILIATION_PROTOCOL,
+        },
+        "fault_injection_mode": (
+            "AFTER_ACCEPT_RESPONSE_LOST" if fault_after_send else "NONE"
+        ),
+    }
 
 
 def _now(value: str | None) -> str:
@@ -115,18 +233,12 @@ def _deliver_event(store: JournalStore, event_id: str) -> None:
 
 
 def _risk_policy() -> RiskPolicy:
-    return RiskPolicy.create(
-        max_abs_position="10", max_single_notional="1000",
-        max_gross_leverage="2", max_net_leverage="2",
-        max_daily_loss="500", max_drawdown_fraction="0.20",
-        max_data_age_seconds="5", max_fx_age_seconds="60",
-        min_margin_headroom="0.20", max_stress_loss="500",
-    )
+    return RiskPolicy.create(**dict(_RISK_POLICY_SPEC))
 
 
 def _risk_context(price: Decimal) -> RiskContext:
     return RiskContext.create(
-        state_version=1, equity=str(INITIAL_CASH), positions={},
+        state_version=1, equity=canonical_decimal_text(INITIAL_CASH), positions={},
         marks={INSTRUMENT: canonical_decimal_text(price)}, reserved_position_delta={},
         daily_pnl="0", drawdown_fraction="0", market_data_age_seconds="1",
         fx_age_seconds={"USD": "1"}, margin_headroom="1",
@@ -190,7 +302,9 @@ def run_canonical_simulation(
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
     values = _prices(prices)
-    decision = MovingAverageStrategy().decide(values, Decimal("1"))
+    decision = MovingAverageStrategy(
+        fast=_STRATEGY_FAST, slow=_STRATEGY_SLOW
+    ).decide(values, _STRATEGY_QUANTITY)
     if decision.side == "SELL":
         raise ValueError("this long-only simulation session supports BUY/HOLD prices")
     buy_requirements = None
@@ -198,30 +312,55 @@ def run_canonical_simulation(
         amount = exact_multiply(decision.quantity, decision.price)
         required = exact_add(amount, exact_multiply(amount, FEE_RATE))
         buy_requirements = (amount, required)
-    input_payload = {"episode_id": episode_id, "prices": [str(v) for v in values]}
+    protocol_document = _simulation_protocol_document(
+        fault_after_send=fault_after_send
+    )
+    protocol_identity = payload_digest(protocol_document)
+    source_build_identity = protocol_document["source_build_identity"]
+    input_payload = {
+        "episode_id": episode_id,
+        "prices": [canonical_decimal_text(value) for value in values],
+        "protocol_identity": protocol_identity,
+    }
     input_hash = payload_digest(input_payload)
     root = Path(state_dir)
     root.mkdir(parents=True, exist_ok=True)
     with ResourceLock(root / ".canonical-simulation.lock"):
         return _run_locked(
             root, episode_id=episode_id, input_hash=input_hash,
+            protocol_identity=protocol_identity,
+            source_build_identity=source_build_identity,
             decision=decision, now=now, fault_after_send=fault_after_send,
             buy_requirements=buy_requirements,
         )
 
 
 def _run_locked(root: Path, *, episode_id: str, input_hash: str,
+                protocol_identity: str, source_build_identity: str,
                 decision, now: str | None, fault_after_send: bool,
                 buy_requirements: tuple[Decimal, Decimal] | None) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
     prior = store.load_events("canonical_simulation_session", _AGGREGATE)
     if prior:
         started = prior[0]
-        if (started["event_type"] != "SimulationSessionStarted"
-                or started["payload"].get("input_hash") != input_hash):
+        if started["event_type"] != "SimulationSessionStarted":
+            raise ValueError("simulation session journal has an invalid first event")
+        if started["payload"].get("protocol_identity") != protocol_identity:
+            raise ValueError(
+                "state directory belongs to incompatible simulation protocol/configuration"
+            )
+        if started["payload"].get("input_hash") != input_hash:
             raise ValueError("state directory belongs to another simulation input")
         if len(prior) == 2 and prior[1]["event_type"] == "SimulationSessionCompleted":
-            result = dict(prior[1]["payload"])
+            completed = prior[1]
+            if (
+                completed["payload"].get("protocol_identity") != protocol_identity
+                or completed["payload"].get("input_hash") != input_hash
+            ):
+                raise ValueError(
+                    "completed simulation protocol/input identity does not match session"
+                )
+            result = dict(completed["payload"])
             economic = DurableProviderEconomicBook(
                 store, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT,
@@ -235,6 +374,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         return {
             "status": "UNKNOWN", "environment": ENVIRONMENT,
             "episode_id": episode_id, "reason": "incomplete_send_requires_reconciliation",
+            "protocol_identity": protocol_identity, "input_hash": input_hash,
+            "source_build_identity": source_build_identity,
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
 
@@ -242,7 +383,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     future = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
               + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     provider = SimulatedProvider(
-        account_id=ACCOUNT, initial_cash=str(INITIAL_CASH), fee_rate=str(FEE_RATE),
+        account_id=ACCOUNT, initial_cash=canonical_decimal_text(INITIAL_CASH),
+        fee_rate=canonical_decimal_text(FEE_RATE),
         transport_faults=({stable_client_order_id(
             "simulated", _uuid("intent", episode_id),
             environment=ENVIRONMENT, account_id=ACCOUNT,
@@ -258,12 +400,14 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         return {
             "status": "UNKNOWN", "environment": ENVIRONMENT,
             "episode_id": episode_id, "reason": "orphaned_durable_state_requires_reconciliation",
+            "protocol_identity": protocol_identity, "input_hash": input_hash,
+            "source_build_identity": source_build_identity,
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
     economic.append(book_external_cash_flow(
         transaction_id=_uuid("seed-transaction", episode_id),
         cause_event_id=_uuid("seed-cause", episode_id),
-        currency="USD", amount=str(INITIAL_CASH),
+        currency="USD", amount=canonical_decimal_text(INITIAL_CASH),
     ))
     bootstrap = store.load_events("economic_book", economic.book_id)
     _deliver_event(store, bootstrap[-1]["event_id"])
@@ -277,14 +421,21 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     )
     _deliver_event(store, availability["event_id"])
     _event(store, "SimulationSessionStarted", episode_id, {
-        "input_hash": input_hash, "decision": decision.side,
-        "episode_id": episode_id, "environment": ENVIRONMENT,
+        "input_hash": input_hash,
+        "protocol_identity": protocol_identity,
+        "protocol_version": _SIMULATION_PROTOCOL_VERSION,
+        "source_build_identity": source_build_identity,
+        "decision": decision.side,
+        "episode_id": episode_id,
+        "environment": ENVIRONMENT,
     }, timestamp)
     if decision.side == "HOLD":
         result = {
             "status": "HOLD", "decision": "HOLD", "environment": ENVIRONMENT,
             "episode_id": episode_id, "cash": str(economic.cash("USD")),
-            "position": str(economic.position(INSTRUMENT)), "reconciled": True,
+            "position": str(economic.position(INSTRUMENT)),
+            "protocol_identity": protocol_identity, "input_hash": input_hash,
+            "source_build_identity": source_build_identity, "reconciled": True,
             "order_id": None, "fill_id": None,
             "reconciliation_event_id": availability["event_id"],
             "new_outbound_requests": 0,
@@ -364,7 +515,9 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         result = {
             "status": "RISK_REJECTED", "decision": "BUY", "environment": ENVIRONMENT,
             "episode_id": episode_id, "cash": str(economic.cash("USD")),
-            "position": str(economic.position(INSTRUMENT)), "reconciled": True,
+            "position": str(economic.position(INSTRUMENT)),
+            "protocol_identity": protocol_identity, "input_hash": input_hash,
+            "source_build_identity": source_build_identity, "reconciled": True,
             "order_id": None, "fill_id": None,
             "reconciliation_event_id": availability["event_id"],
             "new_outbound_requests": 0,
@@ -399,6 +552,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "status": "UNKNOWN" if dispatch.status == "UNKNOWN" else "BLOCKED",
             "decision": "BUY", "environment": ENVIRONMENT,
             "episode_id": episode_id, "reason": dispatch.reason,
+            "protocol_identity": protocol_identity, "input_hash": input_hash,
+            "source_build_identity": source_build_identity,
             "reconciled": False, "resumed": False,
             "new_outbound_requests": provider.outbound_request_count,
         }
@@ -439,6 +594,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "environment": ENVIRONMENT, "episode_id": episode_id,
         "cash": str(economic.cash("USD")),
         "position": str(economic.position(INSTRUMENT)),
+        "protocol_identity": protocol_identity, "input_hash": input_hash,
+        "source_build_identity": source_build_identity,
         "reconciled": True, "order_id": dispatch.client_order_id,
         "fill_id": fill["provider_execution_id"],
         "reconciliation_event_id": checkpoint["event_id"],

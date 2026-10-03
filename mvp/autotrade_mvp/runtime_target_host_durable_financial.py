@@ -413,6 +413,10 @@ def bind_durable_financial_latency_to_target_host_measurement(
             raise RuntimeTargetHostDurableFinancialError(
                 "durable runtime event plan was declared after target-host campaign start"
             )
+        if measurement.workload_profile_hash != declared_plan.digest:
+            raise RuntimeTargetHostDurableFinancialError(
+                "target-host workload profile does not bind durable declared plan"
+            )
         durable_samples = load_declared_financial_latency_samples(
             store,
             spec,

@@ -57,7 +57,8 @@ _OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
 _OWNER_AGGREGATE_ID = "canonical"
 _BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
 
-_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@2"
+_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@3"
+_SIMULATION_EPOCH = "2026-09-30T12:00:00Z"
 _STRATEGY_ID = "moving-average"
 _STRATEGY_VERSION = "1"
 _STRATEGY_FAST = 2
@@ -178,6 +179,7 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
             "reservation": _RESERVATION_PROTOCOL,
             "reconciliation": _RECONCILIATION_PROTOCOL,
         },
+        "clock": {"kind": "DETERMINISTIC_UTC", "default_epoch": _SIMULATION_EPOCH},
         "fault_injection_mode": (
             "AFTER_ACCEPT_RESPONSE_LOST" if fault_after_send else "NONE"
         ),
@@ -186,14 +188,15 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
 
 def _now(value: str | None) -> str:
     if value is None:
-        point = datetime.now(timezone.utc)
-    else:
-        try:
-            point = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (AttributeError, ValueError) as error:
-            raise ValueError("now must be an ISO timestamp with timezone") from error
-        if point.tzinfo is None:
-            raise ValueError("now must include timezone")
+        value = _SIMULATION_EPOCH
+    if type(value) is not str:
+        raise TypeError("now must be exact timestamp text")
+    try:
+        point = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("now must be an ISO timestamp with timezone") from error
+    if point.tzinfo is None:
+        raise ValueError("now must include timezone")
     return point.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -904,6 +907,8 @@ def run_canonical_simulation(
         raise ValueError("episode_id is required")
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
+    if now is not None:
+        now = _now(now)
     values = _prices(prices)
     decision = MovingAverageStrategy(
         fast=_STRATEGY_FAST, slow=_STRATEGY_SLOW
@@ -1111,7 +1116,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         episode_id=episode_id,
                         decision=decision,
                         prepared_request_time=timestamp,
-                        recovery_now=_now(now),
+                        recovery_now=timestamp if now is None else _now(now),
                     )
                     if recovery.status == "IN_PROGRESS":
                         # Dispatcher lease activity is an internal recovery

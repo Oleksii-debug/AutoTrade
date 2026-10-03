@@ -1,6 +1,7 @@
 """Product entrypoint checks for the canonical network-free simulation session."""
 
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+from datetime import datetime
 import json
 import subprocess
 import sys
@@ -39,6 +40,37 @@ class HostileDecimal(Decimal):
 
 
 class CanonicalSimulationSessionTests(unittest.TestCase):
+    def test_default_clock_produces_identical_events_without_reading_wall_time(self):
+        streams = []
+        for _ in range(2):
+            with TemporaryDirectory() as directory:
+                with patch.object(simulation_module, "datetime", wraps=datetime) as clock:
+                    clock.now.side_effect = AssertionError("simulation read wall clock")
+                    result = run_canonical_simulation(BUY, directory, episode_id="default-clock")
+                self.assertEqual(result["status"], "FILL_RECONCILED_ORDER_UNCONFIRMED")
+                store = JournalStore(Path(directory) / "journal.sqlite3")
+                streams.append({
+                    kind: store.load_events_by_aggregate_type(kind)
+                    for kind in (
+                        "canonical_simulation_store_owner", "canonical_simulation_session",
+                        "authority_state", "economic_book", "reservation_book",
+                        "submission_attempt", "account_reconciliation",
+                    )
+                })
+                owner = store.load_events("canonical_simulation_store_owner", "canonical")[0]["payload"]
+                self.assertEqual(owner["evidence_time"], NOW)
+        self.assertEqual(streams[0], streams[1])
+
+    def test_clock_subclass_rejected_before_virtual_reads_or_directory_mutation(self):
+        class HostileTime(str):
+            def replace(self, *args, **kwargs):
+                raise AssertionError("virtual timestamp input")
+        with TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            with self.assertRaises(TypeError):
+                run_canonical_simulation(BUY, state, episode_id="clock-subclass", now=HostileTime(NOW))
+            self.assertFalse(state.exists())
+
     def test_strategy_keeps_valid_wide_intermediate_sums_rational(self):
         low = Decimal("9" * 255 + "7")
         middle = Decimal("9" * 255 + "8")
@@ -252,7 +284,7 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 self.assertEqual(result[key], completed["payload"][key])
             self.assertEqual(
                 started["payload"]["protocol_version"],
-                "canonical-simulation@2",
+                "canonical-simulation@3",
             )
 
     def test_changed_fee_configuration_cannot_reinterpret_completed_state(self):

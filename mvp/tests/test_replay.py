@@ -192,7 +192,7 @@ class CausalReplayTests(unittest.TestCase):
             expected = hmac.new(secret, material, hashlib.sha256).hexdigest()
             return hmac.compare_digest(expected, signature)
 
-        return RuntimeStateVerifier(
+        return RuntimeStateVerifier.select_product_trust(
             authority_id=authority_id,
             verifier_id=verifier_id,
             verify_signature=verify,

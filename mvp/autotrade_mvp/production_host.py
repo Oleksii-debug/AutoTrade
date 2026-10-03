@@ -297,10 +297,12 @@ class ProductionHostRuntimeOccurrence:
                 raise TypeError(f"{field} must be a positive exact int")
 
 
-def _runtime_occurrence_from_event(
+def _runtime_occurrence_from_scoped_event(
     event: object,
     *,
-    config: ProductionHostConfig,
+    host_id: str,
+    account_id: str,
+    environment: str,
     expected_version: int,
 ) -> ProductionHostRuntimeOccurrence:
     if type(event) is not dict:
@@ -309,7 +311,7 @@ def _runtime_occurrence_from_event(
         raise RuntimeError("production host runtime occurrence event type is invalid")
     if event.get("aggregate_type") != _RUNTIME_OCCURRENCE_AGGREGATE_TYPE:
         raise RuntimeError("production host runtime occurrence aggregate type is invalid")
-    if event.get("aggregate_id") != config.host_id:
+    if event.get("aggregate_id") != host_id:
         raise RuntimeError("production host runtime occurrence host identity is invalid")
     if event.get("aggregate_version") != expected_version:
         raise RuntimeError("production host runtime occurrence version chain is invalid")
@@ -322,9 +324,9 @@ def _runtime_occurrence_from_event(
     if payload.get("schema_version") != _RUNTIME_OCCURRENCE_SCHEMA_VERSION:
         raise RuntimeError("production host runtime occurrence schema version is invalid")
     for field, expected in (
-        ("host_id", config.host_id),
-        ("account_id", config.account_id),
-        ("environment", config.environment),
+        ("host_id", host_id),
+        ("account_id", account_id),
+        ("environment", environment),
     ):
         value = payload.get(field)
         if type(value) is not str or value != expected:
@@ -339,15 +341,29 @@ def _runtime_occurrence_from_event(
     try:
         return ProductionHostRuntimeOccurrence(
             runtime_occurrence_id=occurrence_id,
-            host_id=config.host_id,
-            account_id=config.account_id,
-            environment=config.environment,
+            host_id=host_id,
+            account_id=account_id,
+            environment=environment,
             aggregate_version=expected_version,
             journal_sequence=journal_sequence,
         )
     except (TypeError, ValueError) as error:
         raise RuntimeError("production host runtime occurrence payload is invalid") from error
 
+
+def _runtime_occurrence_from_event(
+    event: object,
+    *,
+    config: ProductionHostConfig,
+    expected_version: int,
+) -> ProductionHostRuntimeOccurrence:
+    return _runtime_occurrence_from_scoped_event(
+        event,
+        host_id=config.host_id,
+        account_id=config.account_id,
+        environment=config.environment,
+        expected_version=expected_version,
+    )
 
 def _load_production_host_runtime_occurrences(
     journal: JournalStore,
@@ -384,6 +400,70 @@ def _load_production_host_runtime_occurrences(
         occurrences.append(occurrence)
     return tuple(occurrences)
 
+
+
+def require_current_production_host_runtime_occurrence(
+    *,
+    journal: JournalStore,
+    occurrence: ProductionHostRuntimeOccurrence,
+) -> ProductionHostRuntimeOccurrence:
+    """Return a detached exact snapshot only if occurrence is current in journal.
+
+    This proves durable runtime-occurrence identity and ordering only. It does not
+    prove UTC chronology, release authenticity, readiness, or trading authority.
+    """
+
+    if type(occurrence) is not ProductionHostRuntimeOccurrence:
+        raise TypeError(
+            "occurrence must be exact ProductionHostRuntimeOccurrence"
+        )
+    snapshot = ProductionHostRuntimeOccurrence(
+        runtime_occurrence_id=occurrence.runtime_occurrence_id,
+        host_id=occurrence.host_id,
+        account_id=occurrence.account_id,
+        environment=occurrence.environment,
+        aggregate_version=occurrence.aggregate_version,
+        journal_sequence=occurrence.journal_sequence,
+    )
+    identity = require_exact_journal_store_authority(
+        journal,
+        subject="production host runtime occurrence JournalStore",
+    )
+    with journal_store_authority_scope(journal, identity):
+        events = JournalStore.load_events(
+            journal,
+            _RUNTIME_OCCURRENCE_AGGREGATE_TYPE,
+            snapshot.host_id,
+        )
+
+    if not events:
+        raise PermissionError("production host runtime occurrence is not durable")
+    seen: set[str] = set()
+    previous_sequence = 0
+    current: ProductionHostRuntimeOccurrence | None = None
+    for expected_version, event in enumerate(events, start=1):
+        item = _runtime_occurrence_from_scoped_event(
+            event,
+            host_id=snapshot.host_id,
+            account_id=snapshot.account_id,
+            environment=snapshot.environment,
+            expected_version=expected_version,
+        )
+        if item.runtime_occurrence_id in seen:
+            raise RuntimeError("production host runtime occurrence id is duplicated")
+        if item.journal_sequence <= previous_sequence:
+            raise RuntimeError(
+                "production host runtime occurrence journal order is invalid"
+            )
+        seen.add(item.runtime_occurrence_id)
+        previous_sequence = item.journal_sequence
+        current = item
+
+    if current != snapshot:
+        raise PermissionError(
+            "production host runtime occurrence is no longer current"
+        )
+    return snapshot
 
 def _issue_production_host_runtime_occurrence(
     journal: JournalStore,

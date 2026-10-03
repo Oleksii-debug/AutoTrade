@@ -10,7 +10,11 @@ from mvp.autotrade_mvp.journal_taxonomy import (
     QUALIFICATION_NON_FINANCIAL,
     require_journal_aggregate_descriptor,
 )
-from mvp.autotrade_mvp.production_host import ProductionHostConfig, build_production_host
+from mvp.autotrade_mvp.production_host import (
+    ProductionHostConfig,
+    build_production_host,
+    require_current_production_host_runtime_occurrence,
+)
 
 
 class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
@@ -94,6 +98,14 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                 )
                 first_occurrence = first_event["payload"]["runtime_occurrence_id"]
                 self.assertEqual(str(UUID(first_occurrence)), first_occurrence)
+                first_occurrence_value = first.runtime_occurrence
+                self.assertEqual(
+                    require_current_production_host_runtime_occurrence(
+                        journal=first.journal,
+                        occurrence=first_occurrence_value,
+                    ),
+                    first_occurrence_value,
+                )
             finally:
                 first.close()
 
@@ -115,6 +127,18 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                 second_occurrence = events[1]["payload"]["runtime_occurrence_id"]
                 self.assertEqual(str(UUID(second_occurrence)), second_occurrence)
                 self.assertNotEqual(first_occurrence, second_occurrence)
+                with self.assertRaisesRegex(PermissionError, "no longer current"):
+                    require_current_production_host_runtime_occurrence(
+                        journal=successor.journal,
+                        occurrence=first_occurrence_value,
+                    )
+                self.assertEqual(
+                    require_current_production_host_runtime_occurrence(
+                        journal=successor.journal,
+                        occurrence=successor.runtime_occurrence,
+                    ),
+                    successor.runtime_occurrence,
+                )
             finally:
                 successor.close()
 

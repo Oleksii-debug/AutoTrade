@@ -94,7 +94,12 @@ class SecurityBoundary:
         if not isinstance(credential_vault, ProtectedCredentialVault):
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
         self._state_lock = threading.RLock()
-        self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
+        self._paired_origins = {
+            _authenticated_origin(value) for value in allowed_origins
+        }
+        self._origin_generations = {
+            origin: 1 for origin in self._paired_origins
+        }
         self._credential_vault = credential_vault
         if session_authorizer is not None and not callable(session_authorizer):
             raise TypeError("session_authorizer must be callable or None")
@@ -184,6 +189,7 @@ class SecurityBoundary:
         with self._state_lock:
             if normalized_origin not in self._paired_origins:
                 raise PermissionError("Origin is not paired")
+            origin_generation = self._origin_generations[normalized_origin]
         ttl = self._session_lifetime(ttl_seconds, name="Session lifetime")
         idle_timeout = (
             min(300, ttl)
@@ -202,6 +208,8 @@ class SecurityBoundary:
         with self._state_lock:
             if normalized_origin not in self._paired_origins:
                 raise PermissionError("Origin is no longer paired")
+            if self._origin_generations.get(normalized_origin) != origin_generation:
+                raise PermissionError("Origin pairing changed during authentication")
             return self._issue_session(
                 subject=normalized_subject,
                 role=normalized_role,
@@ -364,7 +372,9 @@ class SecurityBoundary:
         normalized = _authenticated_origin(new_origin)
         with self._state_lock:
             self.validate_session(token, required_roles={"OWNER"}, origin=origin)
-            self._paired_origins.add(normalized)
+            if normalized not in self._paired_origins:
+                self._origin_generations.setdefault(normalized, 1)
+                self._paired_origins.add(normalized)
             return normalized
 
     def unpair_origin(
@@ -386,6 +396,9 @@ class SecurityBoundary:
             if normalized == owner.origin and len(self._paired_origins) == 1:
                 raise PermissionError("Cannot remove the final authenticated origin")
             self._paired_origins.remove(normalized)
+            self._origin_generations[normalized] = (
+                self._origin_generations.get(normalized, 0) + 1
+            )
             for session_token, session in list(self._sessions.items()):
                 if session.origin == normalized:
                     self._sessions.pop(session_token, None)

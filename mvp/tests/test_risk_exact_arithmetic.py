@@ -113,6 +113,68 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 borrow_available=True,
             )
 
+    def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            finite_reads = 0
+
+            def is_finite(self):
+                type(self).finite_reads += 1
+                raise AssertionError("hostile Decimal method was dispatched")
+
+        hostile = HostileDecimal("1")
+        with self.assertRaisesRegex(
+            TypeError,
+            "quantity must use Decimal",
+        ):
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity=hostile,
+                price="1",
+                expected_state_version=7,
+            )
+        self.assertEqual(HostileDecimal.finite_reads, 0)
+
+    def test_intermediate_notional_overflow_fails_closed(self):
+        large = "1" + "0" * 64
+        wide_limit = "9" * 128
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity=large,
+            price=large,
+            expected_state_version=7,
+        )
+        configured = policy(
+            max_abs_position=wide_limit,
+            max_single_notional=wide_limit,
+            max_daily_loss=wide_limit,
+            max_stress_loss=wide_limit,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "risk product exceeds the exact arithmetic resource envelope",
+        ):
+            evaluate_risk(
+                intent,
+                RiskContext.create(
+                    state_version=7,
+                    equity=wide_limit,
+                    positions={},
+                    marks={"ABC": large},
+                    reserved_position_delta={},
+                    daily_pnl="0",
+                    drawdown_fraction="0",
+                    market_data_age_seconds="0",
+                    fx_age_seconds={},
+                    margin_headroom="1",
+                    capability_allowed=True,
+                    borrow_available=True,
+                    stress_scenarios=({"ABC": "0"},),
+                ),
+                configured,
+            )
+
     def test_nonterminating_leverage_verdict_uses_exact_ratio(self):
         intent = RiskIntent.create(
             symbol="ABC",

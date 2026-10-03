@@ -21,6 +21,7 @@ from hashlib import sha256
 import sys
 import threading
 import time
+from types import FunctionType
 from typing import Callable, Mapping
 
 from .performance_qualification import (
@@ -164,14 +165,14 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
 
 
 def _build_callback_authority_guard() -> Callable[[], None]:
-    """Freeze clock/resource bindings that caller callbacks must not retarget.
+    """Freeze executable measurement authority across caller callbacks.
 
-    Campaign callbacks are workload, not measurement authority. The runner uses
-    system monotonic/process clocks, JournalStore class methods and the latency
-    module's retained ``perf_counter_ns`` binding after caller code executes.
-    Capture those exact bindings before the first callback and recheck them
-    immediately after every caller-controlled operation, before any post-callback
-    measurement/readback can consume a replacement.
+    Campaign callbacks are workload, not measurement authority. Capture exact
+    clock/resource/JournalStore bindings plus the reachable Python-function graph
+    used by ``measure_declared_financial_operation`` before the first callback,
+    then recheck it immediately after every caller-controlled operation. This
+    prevents both rebinding and same-object ``__code__``/defaults/closure mutation
+    from becoming post-callback qualification evidence.
     """
 
     runner_namespace = globals()
@@ -180,6 +181,22 @@ def _build_callback_authority_guard() -> Callable[[], None]:
     journal_type = JournalStore
     measurement_function = measure_declared_financial_operation
     error_type = RuntimeTargetHostRunnerError
+    missing = object()
+
+    def capture_function_state(function: object, label: str):
+        if type(function) is not FunctionType:
+            return None
+        return (
+            label,
+            function,
+            function.__code__,
+            function.__defaults__,
+            None if function.__kwdefaults__ is None else dict(function.__kwdefaults__),
+            tuple(
+                (cell, cell.cell_contents)
+                for cell in (function.__closure__ or ())
+            ),
+        )
 
     expected_runner_bindings = (
         ("time", time_module, "runner time module"),
@@ -189,6 +206,21 @@ def _build_callback_authority_guard() -> Callable[[], None]:
             "measure_declared_financial_operation",
             measurement_function,
             "durable financial measurement function",
+        ),
+        (
+            "_capture_resource_metrics",
+            _capture_resource_metrics,
+            "runner resource collector",
+        ),
+        (
+            "collect_runtime_campaign_evidence_from_measurement_artifact",
+            collect_runtime_campaign_evidence_from_measurement_artifact,
+            "runtime campaign evidence collector",
+        ),
+        (
+            "evaluate_runtime_budget",
+            evaluate_runtime_budget,
+            "runtime budget evaluator",
         ),
     )
     expected_time_bindings = (
@@ -205,21 +237,132 @@ def _build_callback_authority_guard() -> Callable[[], None]:
             "pending_outbox_count",
         )
     )
+    expected_class_bindings = (
+        (
+            "FinancialTargetHostSample.__init__",
+            FinancialTargetHostSample,
+            "__init__",
+            FinancialTargetHostSample.__dict__.get("__init__"),
+        ),
+        (
+            "ResearchInterferenceSample.__init__",
+            ResearchInterferenceSample,
+            "__init__",
+            ResearchInterferenceSample.__dict__.get("__init__"),
+        ),
+        (
+            "ResourceTargetHostSample.__init__",
+            ResourceTargetHostSample,
+            "__init__",
+            ResourceTargetHostSample.__dict__.get("__init__"),
+        ),
+        (
+            "TargetHostMeasurementArtifact.__init__",
+            TargetHostMeasurementArtifact,
+            "__init__",
+            TargetHostMeasurementArtifact.__dict__.get("__init__"),
+        ),
+        (
+            "RuntimeLoadCampaignEvidence.__init__",
+            RuntimeLoadCampaignEvidence,
+            "__init__",
+            RuntimeLoadCampaignEvidence.__dict__.get("__init__"),
+        ),
+        (
+            "RuntimeCampaignEvidence.to_observation",
+            RuntimeCampaignEvidence,
+            "to_observation",
+            RuntimeCampaignEvidence.__dict__.get("to_observation"),
+        ),
+        (
+            "ParsedRuntimeTargetHostCampaign.__init__",
+            ParsedRuntimeTargetHostCampaign,
+            "__init__",
+            ParsedRuntimeTargetHostCampaign.__dict__.get("__init__"),
+        ),
+        (
+            "ParsedRuntimeTargetHostCampaign.parse",
+            ParsedRuntimeTargetHostCampaign,
+            "parse",
+            ParsedRuntimeTargetHostCampaign.__dict__.get("parse"),
+        ),
+    )
+
     measurement_namespace = measurement_function.__globals__
-    expected_perf_counter = measurement_namespace.get("perf_counter_ns")
+    measurement_module = measurement_function.__module__
+    measurement_bindings: list[tuple[dict[str, object], str, object, str]] = []
+    function_states: list[tuple[object, ...]] = []
+    seen_functions: set[int] = set()
+    seen_bindings: set[tuple[int, str]] = set()
+
+    def capture_function_graph(function: object, label: str, *, recurse: bool) -> None:
+        state = capture_function_state(function, label)
+        if state is None:
+            return
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        function_states.append(state)
+        if not recurse:
+            return
+        namespace = function.__globals__
+        for name in function.__code__.co_names:
+            if name not in namespace:
+                continue
+            expected = namespace[name]
+            binding_key = (id(namespace), name)
+            if binding_key not in seen_bindings:
+                seen_bindings.add(binding_key)
+                measurement_bindings.append(
+                    (namespace, name, expected, function.__module__ + "." + name)
+                )
+            if type(expected) is FunctionType:
+                capture_function_graph(
+                    expected,
+                    function.__module__ + "." + name,
+                    recurse=expected.__module__ == measurement_module,
+                )
+
+    capture_function_graph(
+        measurement_function,
+        "runtime_load_measurement.measure_declared_financial_operation",
+        recurse=True,
+    )
+    for name, expected, label in expected_runner_bindings:
+        capture_function_graph(expected, label, recurse=False)
+    for name, expected in expected_time_bindings:
+        capture_function_graph(expected, "time." + name, recurse=False)
+    capture_function_graph(
+        expected_threading_binding,
+        "threading.active_count",
+        recurse=False,
+    )
+    for name, expected in expected_journal_bindings:
+        capture_function_graph(
+            expected,
+            "JournalStore." + name,
+            recurse=False,
+        )
+    for label, _owner, _name, expected in expected_class_bindings:
+        executable = expected
+        if isinstance(expected, (classmethod, staticmethod)):
+            executable = expected.__func__
+        capture_function_graph(executable, label, recurse=False)
 
     if any(value is None for _name, value in expected_time_bindings):
-        raise RuntimeTargetHostRunnerError(
-            "target-host clock authority is unavailable"
-        )
-    if expected_threading_binding is None or expected_perf_counter is None:
-        raise RuntimeTargetHostRunnerError(
-            "target-host measurement authority is unavailable"
-        )
+        raise error_type("target-host clock authority is unavailable")
+    if expected_threading_binding is None:
+        raise error_type("target-host measurement authority is unavailable")
     if any(value is None for _name, value in expected_journal_bindings):
-        raise RuntimeTargetHostRunnerError(
+        raise error_type(
             "target-host JournalStore measurement authority is unavailable"
         )
+    if any(expected is None for _label, _owner, _name, expected in expected_class_bindings):
+        raise error_type("target-host evidence authority is unavailable")
+
+    frozen_measurement_bindings = tuple(measurement_bindings)
+    frozen_function_states = tuple(function_states)
 
     def require_callback_authority() -> None:
         for name, expected, label in expected_runner_bindings:
@@ -245,11 +388,67 @@ def _build_callback_authority_guard() -> Callable[[], None]:
                     + "JournalStore."
                     + name
                 )
-        if measurement_namespace.get("perf_counter_ns") is not expected_perf_counter:
-            raise error_type(
-                "callback changed target-host measurement authority: "
-                "runtime_load_measurement.perf_counter_ns"
-            )
+        for label, owner, name, expected in expected_class_bindings:
+            if owner.__dict__.get(name) is not expected:
+                raise error_type(
+                    "callback changed target-host measurement authority: " + label
+                )
+        for namespace, name, expected, label in frozen_measurement_bindings:
+            if namespace.get(name, missing) is not expected:
+                raise error_type(
+                    "callback changed target-host measurement authority: " + label
+                )
+        for (
+            label,
+            function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_closure,
+        ) in frozen_function_states:
+            if function.__code__ is not expected_code:
+                raise error_type(
+                    "callback changed target-host executable authority: "
+                    + str(label)
+                )
+            if function.__defaults__ is not expected_defaults:
+                raise error_type(
+                    "callback changed target-host executable defaults: "
+                    + str(label)
+                )
+            current_kwdefaults = function.__kwdefaults__
+            if expected_kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise error_type(
+                        "callback changed target-host executable defaults: "
+                        + str(label)
+                    )
+            elif (
+                type(current_kwdefaults) is not dict
+                or current_kwdefaults != expected_kwdefaults
+            ):
+                raise error_type(
+                    "callback changed target-host executable defaults: "
+                    + str(label)
+                )
+            current_closure = function.__closure__ or ()
+            if len(current_closure) != len(expected_closure):
+                raise error_type(
+                    "callback changed target-host executable closure: "
+                    + str(label)
+                )
+            for current_cell, (expected_cell, expected_value) in zip(
+                current_closure,
+                expected_closure,
+            ):
+                if (
+                    current_cell is not expected_cell
+                    or current_cell.cell_contents is not expected_value
+                ):
+                    raise error_type(
+                        "callback changed target-host executable closure: "
+                        + str(label)
+                    )
 
     return require_callback_authority
 

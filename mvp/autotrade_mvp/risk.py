@@ -27,8 +27,8 @@ from .exact_decimal import (
 )
 
 
-RISK_ARITHMETIC_POLICY_ID = "risk-exact-v1:q=1e-36:half-even"
-_RISK_RATIO_REPORT_QUANTUM = Decimal("1e-36")
+RISK_ARITHMETIC_POLICY_ID = "RISK_EXACT_FRACTION_V1_REPORT_1E-18_CEILING"
+_RISK_RATIO_REPORT_QUANTUM = Decimal("0.000000000000000001")
 
 
 def _risk_arithmetic_error(operation: str, error: Exception) -> ValueError:
@@ -99,7 +99,7 @@ def _risk_fraction_report(value: Fraction, *, operation: str) -> Decimal:
         return round_fraction_to_quantum(
             bounded_fraction(value),
             _RISK_RATIO_REPORT_QUANTUM,
-            mode="HALF_EVEN",
+            mode="CEILING",
         )
     except (ExactDecimalError, TypeError) as error:
         raise _risk_arithmetic_error(f"{operation} reporting", error) from error
@@ -1232,6 +1232,7 @@ class RiskDecision:
     worst_stress_loss: Decimal
     input_fingerprint: str
     rules: tuple[RiskRuleResult, ...]
+    arithmetic_policy_id: str | None = None
     decision_id: str | None = None
     intent_hash: str | None = None
     state_version: int | None = None
@@ -1271,7 +1272,6 @@ def _risk_input_fingerprint(
     policy: RiskPolicy,
 ) -> str:
     payload = {
-        "arithmetic_policy": RISK_ARITHMETIC_POLICY_ID,
         "intent": _fingerprint_value(vars(intent)),
         "context": _fingerprint_value(vars(context)),
         "policy": _fingerprint_value(vars(policy)),
@@ -1289,7 +1289,6 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     if not isinstance(decision, RiskDecision):
         raise TypeError("decision must be a RiskDecision")
     payload = {
-        "arithmetic_policy": RISK_ARITHMETIC_POLICY_ID,
         "admitted": decision.admitted,
         "resulting_position": _canonical_decimal_text(decision.resulting_position),
         "gross_leverage": _canonical_decimal_text(decision.gross_leverage),
@@ -1307,6 +1306,13 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             for item in decision.rules
         ],
     }
+    if decision.arithmetic_policy_id is not None:
+        if (
+            type(decision.arithmetic_policy_id) is not str
+            or decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID
+        ):
+            raise ValueError("unsupported risk arithmetic policy")
+        payload["arithmetic_policy_id"] = decision.arithmetic_policy_id
     binding_values = (
         decision.intent_hash,
         decision.state_version,
@@ -1387,6 +1393,10 @@ def bind_risk_decision(
 
     if not isinstance(decision, RiskDecision):
         raise TypeError("decision must be a RiskDecision")
+    if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
+        raise ValueError(
+            "risk decision must use the current exact arithmetic policy"
+        )
     ihash = _risk_binding_text(intent_hash, name="intent_hash")
     capability = _risk_binding_text(
         capability_snapshot_id, name="capability_snapshot_id"
@@ -1449,6 +1459,8 @@ def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
         raise TypeError("risk_decision must be a RiskDecision")
     if decision.decision_id is None:
         raise ValueError("risk_decision must be bound before admission")
+    if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
+        raise ValueError("risk_decision arithmetic policy is not current")
     expected = "risk:sha256:" + risk_decision_fingerprint(decision)
     if decision.decision_id != expected:
         raise ValueError("risk_decision_id does not match bound evidence")
@@ -2509,4 +2521,5 @@ def evaluate_risk(
         worst_stress_loss=worst_stress_loss,
         input_fingerprint=_risk_input_fingerprint(intent, context, policy),
         rules=tuple(rules),
+        arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
     )

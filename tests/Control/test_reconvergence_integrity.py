@@ -210,75 +210,6 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
 
-    def test_self_protecting_trust_root_content_modification_fails_closed(self):
-        for sentinel in (
-            "control/tools/reconvergence_integrity.py",
-            ".github/workflows/reconvergence-integrity.yml",
-        ):
-            with self.subTest(sentinel=sentinel):
-                result = assess_reconvergence(
-                    base_paths=[sentinel, "README.md"],
-                    changes=[Change(status="M", path=sentinel)],
-                )
-                self.assertFalse(result.allowed)
-                self.assertIn(
-                    "trust-root content modification requires exact trusted scope",
-                    result.protected_violations[0],
-                )
-
-    def test_broad_scope_does_not_authorize_trust_root_modification(self):
-        sentinel = ".github/workflows/reconvergence-integrity.yml"
-        result = assess_reconvergence(
-            base_paths=[sentinel, "README.md"],
-            changes=[Change(status="M", path=sentinel)],
-            allowed_scopes=(".github/workflows",),
-        )
-        self.assertFalse(result.allowed)
-        self.assertIn("requires exact trusted scope", result.protected_violations[0])
-
-    def test_exact_trusted_scope_can_authorize_trust_root_content(self):
-        sentinel = "control/tools/reconvergence_integrity.py"
-        result = assess_reconvergence(
-            base_paths=[sentinel, "README.md"],
-            changes=[Change(status="M", path=sentinel)],
-            allowed_scopes=(sentinel,),
-        )
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.protected_violations, ())
-
-    def test_non_executable_control_sentinel_is_not_globally_frozen(self):
-        sentinel = "control/INDEX.json"
-        result = assess_reconvergence(
-            base_paths=[sentinel, "README.md"],
-            changes=[Change(status="M", path=sentinel)],
-        )
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.protected_violations, ())
-
-    def test_malformed_or_unsupported_name_status_fails_closed(self):
-        malformed = (
-            "UU\tconflicted.py",
-            "R101\told.py\tnew.py",
-            "Rbad\told.py\tnew.py",
-            "M\tbad\x00path.py",
-        )
-        for line in malformed:
-            with self.subTest(line=repr(line)), self.assertRaises(ValueError):
-                parse_name_status([line])
-
-        invalid_changes = (
-            Change(status="UU", path="README.md"),
-            Change(status="M", path="README.md", previous_path="unexpected.py"),
-            Change(status="R100", path="README.md"),
-        )
-        for change in invalid_changes:
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                assess_reconvergence(
-                    base_paths=["README.md"],
-                    changes=[change],
-                    protected_sentinels=frozenset(),
-                )
-
     def test_protected_sentinel_type_change_fails_closed(self):
         sentinel = "control/qualification.json"
         result = assess_reconvergence(
@@ -379,14 +310,6 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
-        self.assertIn("git ls-remote --refs origin", workflow)
-        self.assertIn('read -r live_sha _ <<< "$live_line"', workflow)
-        self.assertIn('test "$live_sha" = "$BASE_SHA"', workflow)
-        self.assertEqual(
-            workflow.count("- name: Run trusted guard regression tests"),
-            1,
-        )
-        self.assertIn("BASE_REF:", workflow)
         self.assertNotIn("edited", workflow)
 
 

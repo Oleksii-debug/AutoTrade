@@ -77,7 +77,8 @@ class VerifySurfaceTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("actions/setup-node@v4", workflow)
-        self.assertIn('node-version: "22"', workflow)
+        self.assertIn('node-version: "22.23.3"', workflow)
+        self.assertNotIn('node-version: "22"\n', workflow)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,25 @@ def _event_ids(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def _validated_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
+    """Reconstruct the exact budget so post-construction mutation cannot persist."""
+
+    if type(value) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    return RuntimeBudgetSpec(
+        scenario_id=value.scenario_id,
+        release_sha=value.release_sha,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        strategy_horizon_us=value.strategy_horizon_us,
+        max_p95_financial_latency_us=value.max_p95_financial_latency_us,
+        max_financial_staleness_us=value.max_financial_staleness_us,
+        max_research_interference_us=value.max_research_interference_us,
+        min_financial_samples=value.min_financial_samples,
+        min_research_samples=value.min_research_samples,
+    )
+
+
 def _store_identity_digest(identity: JournalStoreIdentity) -> str:
     return payload_digest(
         {
@@ -140,8 +159,7 @@ def _read_plan(
     spec: RuntimeBudgetSpec,
     plan_id: str,
 ) -> DeclaredRuntimeEventPlan:
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    spec = _validated_spec(spec)
     pid = _text(plan_id, name="plan_id")
     identity = require_exact_journal_store_authority(
         store,
@@ -240,8 +258,7 @@ def declare_runtime_event_plan(
     plan identity with different event/spec/store semantics fails closed.
     """
 
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    spec = _validated_spec(spec)
     pid = _text(plan_id, name="plan_id")
     ids = _event_ids(expected_event_ids)
     limit = _positive_int(max_journal_events, name="max_journal_events")
@@ -335,6 +352,7 @@ def evaluate_declared_runtime_budget(
     campaign events, eliminating post-outcome caller selection of those facts.
     """
 
+    spec = _validated_spec(spec)
     plan = _read_plan(store, spec=spec, plan_id=plan_id)
     decision, evidence = evaluate_journal_backed_runtime_budget(
         spec,

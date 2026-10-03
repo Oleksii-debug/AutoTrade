@@ -233,10 +233,15 @@ def _require_provider_fill_financial_binding(
     projected = request.get("projected_fill")
     provider_fill = request.get("provider_fill")
     if (
-        type(financial_admission) is not dict
+        payload.get("schema_version") != "1.0.0"
+        or request.get("schema_version") != "1.2.0"
+        or type(financial_admission) is not dict
         or type(projected) is not dict
         or type(provider_fill) is not dict
+        or financial_admission.get("schema_version") != "1.0.0"
         or request.get("financial_admission_digest") != payload_digest(financial_admission)
+        or request.get("projected_fill_digest") != payload_digest(projected)
+        or request.get("provider_fill_digest") != payload_digest(provider_fill)
         or financial_admission.get("admission_id") != admission["payload"].get("admission_id")
         or financial_admission.get("intent_id") != admission["payload"].get("intent_id")
         or financial_admission.get("reservation_id") != admission["payload"].get("reservation_id")

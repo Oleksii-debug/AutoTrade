@@ -21,6 +21,8 @@ def _instant(value: str, *, field: str) -> datetime:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
         raise ReplayError(f"{field} must be an ISO-8601 timestamp") from error
+    if "T" not in value or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReplayError(f"{field} must be an explicit UTC date-time")
     return parsed.astimezone(timezone.utc)
 
 

@@ -1,7 +1,7 @@
 """Adversarial event/cursor ingress at the existing causal replay authority."""
 from dataclasses import replace
 import unittest
-from mvp.autotrade_mvp.replay import CausalReplay, ReplayEvent, ReplayCheckpoint
+from mvp.autotrade_mvp.replay import CausalReplay, ReplayEvent, ReplayCheckpoint, ReplayError
 
 START = "2026-10-03T00:00:00Z"
 AT = "2026-10-03T00:01:00Z"
@@ -10,6 +10,15 @@ def event():
     return ReplayEvent(1, AT, "frozen-source@1", {"price": "100", "nested": {"value": 1}})
 
 class ReplayEventSnapshotTests(unittest.TestCase):
+    def test_date_only_or_space_separated_time_cannot_select_a_local_timezone_cut(self):
+        for value in ("2026-09-01Z", "2026-09-01 00:00:00Z"):
+            with self.subTest(value=value), self.assertRaises(ReplayError):
+                ReplayEvent(sequence=0, available_at=value, source_version="v1", payload={})
+            with self.subTest(start=value), self.assertRaises(ReplayError):
+                CausalReplay([event()], start_at=value)
+            with self.subTest(checkpoint=value), self.assertRaises(ReplayError):
+                ReplayCheckpoint(dataset_digest="a" * 64, cursor=0, clock=value)
+
     def test_caller_mutation_after_enrollment_cannot_change_dataset_or_visibility(self):
         original = event()
         replay = CausalReplay([original], start_at=START)

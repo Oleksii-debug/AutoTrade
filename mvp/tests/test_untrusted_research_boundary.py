@@ -311,6 +311,49 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact ResearchToolRequest"):
             self.boundary().admit(forged)
 
+    def test_metadata_subclasses_are_rejected_before_callbacks(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("untrusted string callback must not execute")
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("untrusted tuple callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "request_id is required"):
+            ResearchToolRequest(
+                request_id=HostileText("request"),
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact collection"):
+            ResearchToolRequest(
+                request_id="hostile-capabilities",
+                tool_name="statistics",
+                requested_capabilities=HostileTuple(("COMPUTE_STATISTICS",)),
+                arguments={},
+            )
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact collection"):
+            ResearchModelResult(
+                result_id="hostile-evidence-refs",
+                proposal={"safe": True},
+                evidence_refs=HostileTuple(("evidence:1",)),
+            )
+
+    def test_string_key_subclass_is_rejected_before_encode_callback(self):
+        class HostileKey(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError("untrusted key callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact strings"):
+            ResearchToolRequest(
+                request_id="hostile-key",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={HostileKey("safe"): 1},
+            )
+
     def test_aggregate_text_budget_blocks_many_individually_valid_strings(self):
         chunk = "x" * 1_048_576
         with self.assertRaisesRegex(

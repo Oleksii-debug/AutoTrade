@@ -858,6 +858,97 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+    def test_quote_reseal_uses_one_held_object_state_cut(self):
+        quote = eurusd(bid="1.1000", ask="1.1002")
+        original_snapshot = fx_valuation._exact_state_snapshot
+
+        def snapshot_then_mutate(value, fields, *, name):
+            snapshot = original_snapshot(value, fields, name=name)
+            if name == "quote":
+                object.__setattr__(value, "bid", Decimal("9"))
+                object.__setattr__(value, "ask", Decimal("9"))
+                object.__setattr__(value, "source_id", "provider:mutated")
+            return snapshot
+
+        with patch(
+            "mvp.autotrade_mvp.fx_valuation._exact_state_snapshot",
+            side_effect=snapshot_then_mutate,
+        ):
+            result = value_amount(
+                "100",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(quote.bid, Decimal("9"))
+        self.assertEqual(result.rate_used, Decimal("1.1000"))
+        self.assertEqual(result.source_id, "provider:fx")
+        self.assertEqual(result.converted_amount, Decimal("110.0000"))
+
+    def test_rounding_policy_reseal_uses_one_held_object_state_cut(self):
+        policy = FxRoundingPolicy(
+            reporting_currency="USD",
+            quantum="0.01",
+            version="held",
+        )
+        original_snapshot = fx_valuation._exact_state_snapshot
+
+        def snapshot_then_mutate(value, fields, *, name):
+            snapshot = original_snapshot(value, fields, name=name)
+            if name == "rounding_policy":
+                object.__setattr__(value, "reporting_currency", "EUR")
+                object.__setattr__(value, "quantum", Decimal("100"))
+                object.__setattr__(value, "version", "mutated")
+            return snapshot
+
+        with patch(
+            "mvp.autotrade_mvp.fx_valuation._exact_state_snapshot",
+            side_effect=snapshot_then_mutate,
+        ):
+            result = value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(bid="1.105", ask="1.105"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=policy,
+            )
+
+        self.assertEqual(policy.reporting_currency, "EUR")
+        self.assertEqual(result.converted_amount, Decimal("1.10"))
+        self.assertEqual(result.rounding_quantum, Decimal("0.01"))
+        self.assertIsNotNone(result.rounding_policy_id)
+
+    def test_exact_domain_objects_with_injected_fields_fail_closed(self):
+        quote = eurusd()
+        object.__setattr__(quote, "unexpected", "forged")
+        with self.assertRaisesRegex(FxValuationError, "unexpected fields"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        policy = FxRoundingPolicy(reporting_currency="USD", quantum="0.01")
+        object.__setattr__(policy, "unexpected", "forged")
+        with self.assertRaisesRegex(FxValuationError, "unexpected fields"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=policy,
+            )
+
     def test_forged_exact_domain_objects_missing_fields_fail_closed(self):
         empty_quote = object.__new__(FxQuote)
         empty_policy = object.__new__(FxRoundingPolicy)

@@ -10,6 +10,7 @@ replay evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
@@ -145,8 +146,8 @@ def validate_execution_qualification(
         raise TypeError("model must be ExecutionModel")
     if not isinstance(qualification, ExecutionModelQualification):
         raise TypeError("qualification must be ExecutionModelQualification")
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be the canonical ArtifactStore")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be the exact canonical ArtifactStore")
 
     normalized_asset = _text(asset_class, name="asset_class").upper()
     if normalized_asset not in _ASSET_CLASSES:
@@ -165,14 +166,14 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest = artifact_store.load_manifest(
-            normalized_evidence_artifact_id
+        evidence_manifest, evidence_bytes = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            normalized_evidence_artifact_id,
         )
         if evidence_manifest.get("manifest_hash") is None:
             raise ExecutionQualificationError(
                 "execution evidence manifest lacks integrity binding"
             )
-        artifact_store.read_bytes(normalized_evidence_artifact_id)
     except ExecutionQualificationError:
         raise
     except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
@@ -184,6 +185,10 @@ def validate_execution_qualification(
         evidence_manifest.get("sha256"),
         name="resolved evidence sha256",
     )
+    if sha256(evidence_bytes).hexdigest() != resolved_evidence:
+        raise ExecutionQualificationError(
+            "execution evidence bytes do not match immutable artifact digest"
+        )
 
     failures: list[str] = []
     if qualification.asset_class != normalized_asset:

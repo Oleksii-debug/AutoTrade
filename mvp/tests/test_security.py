@@ -334,6 +334,62 @@ class SecurityBoundaryTests(unittest.TestCase):
                 origin=session.origin,
             )
 
+    def test_failed_refresh_does_not_roll_back_newer_concurrent_idle_state(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = [0]
+
+        def authorize(subject, role, origin):
+            calls[0] += 1
+            if calls[0] == 2:
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+                return False
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        session = boundary.create_session(
+            subject="operator-refresh-cas",
+            role="OPERATOR",
+            origin=self.owner.origin,
+            ttl_seconds=60,
+            idle_timeout_seconds=20,
+        )
+        self.clock[0] = 1005.0
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh = executor.submit(
+                boundary.refresh_session,
+                session.token,
+                origin=session.origin,
+                ttl_seconds=60,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            self.clock[0] = 1010.0
+            touched = boundary.validate_session(
+                session.token,
+                required_roles={"OPERATOR"},
+                origin=session.origin,
+            )
+            self.assertEqual(touched.idle_expires_at, 1030.0)
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "not authenticated"):
+                refresh.result(timeout=2)
+
+        self.clock[0] = 1026.0
+        still_valid = boundary.validate_session(
+            session.token,
+            required_roles={"OPERATOR"},
+            origin=session.origin,
+        )
+        self.assertEqual(still_valid.subject, session.subject)
+
     def test_refresh_cannot_revive_a_concurrently_revoked_session(self):
         entered = threading.Event()
         release = threading.Event()

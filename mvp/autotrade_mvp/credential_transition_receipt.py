@@ -317,11 +317,44 @@ def _seal_entropy(receipt: CredentialTransitionReceipt) -> bytes:
     ).digest()
 
 
-def _next_sequence(section: dict[str, object], *, handle_id: str) -> int:
+def _next_sequence(
+    vault: ProtectedCredentialVault,
+    section: dict[str, object],
+    *,
+    handle_id: str,
+) -> int:
     previous = section["latest_by_handle"].get(handle_id)
     if previous is None:
         return 1
+
     parsed = _parse_receipt(previous["receipt"])
+    expected_id = _receipt_id_from_subject(_receipt_subject(parsed))
+    if parsed.receipt_id != expected_id:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt content identity is invalid"
+        )
+    expected_authority = _vault_authority_digest(
+        vault,
+        instance_id=section["instance_id"],
+    )
+    if parsed.vault_authority_sha256 != expected_authority:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt vault authority is invalid"
+        )
+    try:
+        sealed = b64decode(previous["seal_b64"], validate=True)
+        unsealed = vault._protector.unprotect(
+            sealed,
+            entropy=_seal_entropy(parsed),
+        )
+    except Exception as error:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt issuer seal is invalid"
+        ) from error
+    if unsealed != parsed.receipt_id.encode("utf-8"):
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt issuer seal payload mismatch"
+        )
     return parsed.transition_sequence + 1
 
 
@@ -348,7 +381,11 @@ def _issue_locked(
         vault,
         instance_id=section["instance_id"],
     )
-    sequence = _next_sequence(section, handle_id=current_handle.handle_id)
+    sequence = _next_sequence(
+        vault,
+        section,
+        handle_id=current_handle.handle_id,
+    )
     subject = {
         "schema_version": _SCHEMA_VERSION,
         "operation": operation,

@@ -179,6 +179,77 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
         return path
 
+    def test_executable_bundle_scalars_fail_before_filesystem_or_provenance_reads(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip callback executed")
+
+            def lower(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile lower callback executed")
+
+            def __hash__(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile hash callback executed")
+
+        cases = (
+            ("version", HostileText("1.0.0"), "version is required"),
+            ("source_sha", HostileText(SOURCE_SHA), "source_sha is required"),
+            ("mode", HostileText("diagnostics"), "mode must be diagnostics or release"),
+        )
+        for field, hostile, expected in cases:
+            with self.subTest(field=field):
+                HostileText.callbacks = 0
+                arguments = {
+                    "staging": self.root / "must-not-be-read",
+                    "output": self.root / f"{field}.zip",
+                    "version": "1.0.0",
+                    "source_sha": SOURCE_SHA,
+                    "mode": "diagnostics",
+                    "provenance_path": self.root / "must-not-be-read.json",
+                }
+                arguments[field] = hostile
+                with self.assertRaisesRegex(BundleError, expected):
+                    build_bundle(**arguments)
+                self.assertEqual(HostileText.callbacks, 0)
+                self.assertFalse(arguments["output"].exists())
+
+    def test_bundle_source_sha_is_exact_lowercase_identity(self):
+        with self.assertRaisesRegex(
+            BundleError,
+            "exact 40-character lowercase Git SHA",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-source.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA.upper(),
+                mode="diagnostics",
+                provenance_path=self.root / "must-not-be-read.json",
+            )
+        self.assertFalse((self.root / "uppercase-source.zip").exists())
+
+    def test_release_provenance_source_sha_must_be_canonical_lowercase(self):
+        with self.assertRaisesRegex(
+            BundleError,
+            "release provenance must bind an exact 40-character lowercase source_sha",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-provenance.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(
+                    eligible=True,
+                    source_sha=SOURCE_SHA.upper(),
+                ),
+            )
+        self.assertFalse((self.root / "uppercase-provenance.zip").exists())
+
     def test_diagnostics_bundle_is_byte_reproducible(self):
         provenance = self.provenance(eligible=False)
         first = self.root / "first.zip"

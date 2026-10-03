@@ -10,6 +10,7 @@ be used by a terminal consumer.
 from __future__ import annotations
 
 import sys
+from types import FunctionType
 
 from . import _trusted_chronology_cut_impl as _impl
 from .recovery import OwnerFence, RecoveryController
@@ -19,6 +20,10 @@ _original_require_current_trusted_chronology_cut = (
     _impl.require_current_trusted_chronology_cut
 )
 _original_require_chronology_horizon = _impl.require_chronology_horizon
+_original_verify_canonical_qualification_attestation = (
+    _impl.verify_canonical_qualification_attestation
+)
+_original_trusted_authenticated_reader = _impl.trusted_authenticated_reader
 
 
 # The compatibility facade intentionally publishes a small number of replacements
@@ -29,6 +34,7 @@ _original_require_chronology_horizon = _impl.require_chronology_horizon
 # a function object whose ``__globals__`` still points at the mutable impl module.
 _IMPL_SEAL_EXCLUDED_NAMES = frozenset(
     {
+        "_build_callback_authority_wrappers",
         "_build_post_verification_currentness",
         "_build_current_cut_with_horizon",
         "_build_impl_namespace_guard",
@@ -109,7 +115,7 @@ def _build_impl_namespace_guard(
     *,
     excluded_names: frozenset[str] = _IMPL_SEAL_EXCLUDED_NAMES,
 ):
-    """Reject module rebinding and shallow mutation of captured authority types."""
+    """Reject rebinding or executable mutation of captured implementation authority."""
 
     if type(namespace) is not dict:
         raise TypeError("implementation namespace must be exact dict")
@@ -127,6 +133,21 @@ def _build_impl_namespace_guard(
         for name, value in captured
         if isinstance(value, type)
     )
+    captured_functions = tuple(
+        (
+            name,
+            value,
+            value.__code__,
+            value.__defaults__,
+            None if value.__kwdefaults__ is None else dict(value.__kwdefaults__),
+            tuple(
+                (cell, cell.cell_contents)
+                for cell in (value.__closure__ or ())
+            ),
+        )
+        for name, value in captured
+        if type(value) is FunctionType
+    )
 
     def require_impl_namespace_sealed() -> None:
         for name, expected in captured:
@@ -141,10 +162,117 @@ def _build_impl_namespace_guard(
                 expected_names,
                 expected_members,
             )
+        for (
+            name,
+            expected_function,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_closure,
+        ) in captured_functions:
+            if expected_function.__code__ is not expected_code:
+                raise RuntimeError(
+                    "trusted chronology implementation executable changed: " + name
+                )
+            if expected_function.__defaults__ is not expected_defaults:
+                raise RuntimeError(
+                    "trusted chronology implementation defaults changed: " + name
+                )
+            current_kwdefaults = expected_function.__kwdefaults__
+            if expected_kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise RuntimeError(
+                        "trusted chronology implementation defaults changed: " + name
+                    )
+            elif (
+                type(current_kwdefaults) is not dict
+                or current_kwdefaults != expected_kwdefaults
+            ):
+                raise RuntimeError(
+                    "trusted chronology implementation defaults changed: " + name
+                )
+            current_closure = expected_function.__closure__ or ()
+            if len(current_closure) != len(expected_closure):
+                raise RuntimeError(
+                    "trusted chronology implementation closure changed: " + name
+                )
+            for current_cell, (expected_cell, expected_value) in zip(
+                current_closure,
+                expected_closure,
+            ):
+                if current_cell is not expected_cell or current_cell.cell_contents is not expected_value:
+                    raise RuntimeError(
+                        "trusted chronology implementation closure changed: " + name
+                    )
 
     return require_impl_namespace_sealed
 
 
+def _build_callback_authority_wrappers(
+    *,
+    canonical_verifier,
+    authenticated_reader_factory,
+    require_callback_authority,
+):
+    """Guard every callback return before chronology code consumes mutable globals."""
+
+    if not callable(canonical_verifier):
+        raise TypeError("canonical_verifier must be callable")
+    if not callable(authenticated_reader_factory):
+        raise TypeError("authenticated_reader_factory must be callable")
+    if not callable(require_callback_authority):
+        raise TypeError("require_callback_authority must be callable")
+
+    def guarded_canonical_verifier(*args, **kwargs):
+        result = canonical_verifier(*args, **kwargs)
+        require_callback_authority()
+        return result
+
+    def guarded_authenticated_reader_factory(*args, **kwargs):
+        reader = authenticated_reader_factory(*args, **kwargs)
+        require_callback_authority()
+        if not callable(reader):
+            raise TypeError("trusted authenticated reader factory returned non-callable")
+
+        def guarded_reader(*reader_args, **reader_kwargs):
+            result = reader(*reader_args, **reader_kwargs)
+            require_callback_authority()
+            return result
+
+        return guarded_reader
+
+    return guarded_canonical_verifier, guarded_authenticated_reader_factory
+
+
+# The canonical verifier and authenticated reader are the two callback-capable
+# operations inside the durable chronology re-verification path. Seal every other
+# implementation binding first, then install wrappers that recheck that frozen
+# authority immediately when either callback returns. This closes the active-frame
+# interval before `_reverify_durable_acceptance()` can consume module-global hash,
+# parser, or dynamic-requirement authority changed by the callback.
+_callback_guard_exclusions = _IMPL_SEAL_EXCLUDED_NAMES | frozenset(
+    {"verify_canonical_qualification_attestation", "trusted_authenticated_reader"}
+)
+_require_callback_authority_sealed = _build_impl_namespace_guard(
+    _impl.__dict__,
+    excluded_names=_callback_guard_exclusions,
+)
+(
+    _guarded_verify_canonical_qualification_attestation,
+    _guarded_trusted_authenticated_reader,
+) = _build_callback_authority_wrappers(
+    canonical_verifier=_original_verify_canonical_qualification_attestation,
+    authenticated_reader_factory=_original_trusted_authenticated_reader,
+    require_callback_authority=_require_callback_authority_sealed,
+)
+_impl.verify_canonical_qualification_attestation = (
+    _guarded_verify_canonical_qualification_attestation
+)
+_impl.trusted_authenticated_reader = _guarded_trusted_authenticated_reader
+
+# Capture the complete implementation namespace only after the two guarded
+# callback seams are installed. The complete seal therefore also freezes the
+# wrappers themselves, including their executable code/defaults/closure cells.
 _require_impl_namespace_sealed = _build_impl_namespace_guard(_impl.__dict__)
 _require_recovery_owner_globals_sealed = _build_named_namespace_guard(
     RecoveryController.durable_owner_chain.__globals__,
@@ -363,6 +491,7 @@ def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> 
     )
 
 
+_impl._build_callback_authority_wrappers = _build_callback_authority_wrappers
 _impl._build_post_verification_currentness = _build_post_verification_currentness
 _impl._build_current_cut_with_horizon = _build_current_cut_with_horizon
 _impl._build_impl_namespace_guard = _build_impl_namespace_guard

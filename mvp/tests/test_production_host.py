@@ -45,6 +45,74 @@ class InstanceFenceTests(unittest.TestCase):
         lock.release.assert_called_once_with()
 
 
+class ProductionHostConfigNestedAuthorityTests(unittest.TestCase):
+    class ExecutableText(str):
+        executed = False
+
+        def __bool__(self):
+            self.executed = True
+            return len(self) != 0
+
+        def strip(self, *args, **kwargs):
+            self.executed = True
+            return str.strip(self, *args, **kwargs)
+
+    class ExecutableInt(int):
+        executed = False
+
+        def __le__(self, other):
+            self.executed = True
+            return int(self) <= other
+
+        def __gt__(self, other):
+            self.executed = True
+            return int(self) > other
+
+    @staticmethod
+    def _config(directory: str) -> ProductionHostConfig:
+        return ProductionHostConfig(
+            journal_path=Path(directory).resolve() / "journal.sqlite3",
+            account_id="paper-account",
+            environment="PAPER",
+            host_id="host-a",
+            bind_host="127.0.0.1",
+            bind_port=8765,
+            public_origin="http://127.0.0.1:8765",
+        )
+
+    def test_post_construction_executable_host_id_is_rejected_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            hostile = self.ExecutableText("host-a")
+            object.__setattr__(config, "host_id", hostile)
+            with patch.object(production_host._InstanceFence, "acquire") as acquire:
+                with self.assertRaisesRegex(TypeError, "host_id must remain exact str"):
+                    production_host.build_production_host(
+                        config,
+                        security_boundary=object(),
+                        principal_resolver=lambda *args, **kwargs: None,
+                        snapshot_provider=lambda *args, **kwargs: None,
+                    )
+            self.assertFalse(hostile.executed)
+            acquire.assert_not_called()
+
+    def test_post_construction_executable_bind_port_is_rejected_before_comparison(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            hostile = self.ExecutableInt(8765)
+            object.__setattr__(config, "bind_port", hostile)
+            with patch.object(production_host._InstanceFence, "acquire") as acquire:
+                with self.assertRaisesRegex(TypeError, "bind_port must remain exact int"):
+                    production_host.build_production_host(
+                        config,
+                        security_boundary=object(),
+                        principal_resolver=lambda *args, **kwargs: None,
+                        snapshot_provider=lambda *args, **kwargs: None,
+                    )
+            self.assertFalse(hostile.executed)
+            acquire.assert_not_called()
+
+
 class ProductionHostCompositionTests(unittest.TestCase):
     class DummySecurityBoundary:
         pass
@@ -87,6 +155,14 @@ class ProductionHostCompositionTests(unittest.TestCase):
             journal = Mock()
             journal.path = config.journal_path
             journal.store_identity = identity
+            occurrence = production_host.ProductionHostRuntimeOccurrence(
+                runtime_occurrence_id="11111111-1111-4111-8111-111111111111",
+                host_id=config.host_id,
+                account_id=config.account_id,
+                environment=config.environment,
+                aggregate_version=1,
+                journal_sequence=1,
+            )
             application = Mock()
             server = Mock()
             fence = Mock()
@@ -98,6 +174,11 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     "JournalStore",
                     return_value=journal,
                 ) as journal_factory,
+                patch.object(
+                    production_host,
+                    "_issue_production_host_runtime_occurrence",
+                    return_value=occurrence,
+                ),
                 patch.object(
                     production_host,
                     "AuthenticatedHostApplication",

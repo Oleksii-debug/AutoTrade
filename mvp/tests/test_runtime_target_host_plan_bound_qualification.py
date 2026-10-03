@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -72,24 +72,23 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             campaign_cut = object()
             measurement = object()
             accepted = object()
-            with patch.object(
-                plan_bound_module,
-                "verify_composed_runtime_target_host_qualification",
-                return_value=accepted,
-            ) as terminal:
-                result = verify_declared_plan_runtime_target_host_qualification(
-                    receipt,
-                    evidence_store=evidence_store,
-                    evidence_root=directory,
-                    journal_store=store,
-                    plan_id=plan.plan_id,
-                    spec=spec,
-                    expected_release_artifact_id=RELEASE_ID,
-                    expected_release_artifact_sha256=RELEASE_SHA,
-                    campaign_plan=campaign_plan,
-                    campaign_cut=campaign_cut,
-                    measurement=measurement,
-                )
+            terminal = Mock(return_value=accepted)
+            verifier = plan_bound_module._build_chronology_free_verifier(
+                verify_composed=terminal,
+            )
+            result = verifier(
+                receipt,
+                evidence_store=evidence_store,
+                evidence_root=directory,
+                journal_store=store,
+                plan_id=plan.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=campaign_plan,
+                campaign_cut=campaign_cut,
+                measurement=measurement,
+            )
 
             self.assertIs(result, accepted)
             args = terminal.call_args
@@ -142,28 +141,24 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 )
 
             caller_spec = spec
-            with patch.object(
-                plan_bound_module,
-                "load_declared_runtime_event_plan",
-                side_effect=mutating_loader,
-            ), patch.object(
-                plan_bound_module,
-                "verify_composed_runtime_target_host_qualification",
-                return_value=accepted,
-            ) as terminal:
-                result = verify_declared_plan_runtime_target_host_qualification(
-                    object(),
-                    evidence_store=object(),
-                    evidence_root=directory,
-                    journal_store=store,
-                    plan_id=plan.plan_id,
-                    spec=caller_spec,
-                    expected_release_artifact_id=RELEASE_ID,
-                    expected_release_artifact_sha256=RELEASE_SHA,
-                    campaign_plan=campaign_plan,
-                    campaign_cut=campaign_cut,
-                    measurement=measurement,
-                )
+            terminal = Mock(return_value=accepted)
+            verifier = plan_bound_module._build_chronology_free_verifier(
+                load_declared_plan=mutating_loader,
+                verify_composed=terminal,
+            )
+            result = verifier(
+                object(),
+                evidence_store=object(),
+                evidence_root=directory,
+                journal_store=store,
+                plan_id=plan.plan_id,
+                spec=caller_spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=campaign_plan,
+                campaign_cut=campaign_cut,
+                measurement=measurement,
+            )
 
             self.assertIs(result, accepted)
             self.assertEqual(
@@ -288,15 +283,15 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 selected._store_identity = alternate.store_identity
                 return accepted
 
-            with patch.object(
-                plan_bound_module,
-                "verify_composed_runtime_target_host_qualification",
-                side_effect=rebound_after_verification,
-            ) as terminal, self.assertRaisesRegex(
+            terminal = Mock(side_effect=rebound_after_verification)
+            verifier = plan_bound_module._build_chronology_free_verifier(
+                verify_composed=terminal,
+            )
+            with self.assertRaisesRegex(
                 RuntimeError,
                 "journal operation authority changed",
             ):
-                verify_declared_plan_runtime_target_host_qualification(
+                verifier(
                     object(),
                     evidence_store=object(),
                     evidence_root=directory,
@@ -311,6 +306,71 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 )
 
             terminal.assert_called_once()
+
+    def test_production_delegate_ignores_rebound_authority_globals(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="terminal-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            forged_loader = Mock(
+                side_effect=AssertionError("rebound durable-plan loader ran")
+            )
+            forged_authority = Mock(
+                side_effect=AssertionError("rebound JournalStore authority ran")
+            )
+            forged_scope = Mock(
+                side_effect=AssertionError("rebound JournalStore scope ran")
+            )
+            forged_composed = Mock(
+                side_effect=AssertionError("rebound composed verifier ran")
+            )
+
+            with (
+                patch.object(
+                    plan_bound_module,
+                    "load_declared_runtime_event_plan",
+                    forged_loader,
+                ),
+                patch.object(
+                    plan_bound_module,
+                    "require_exact_journal_store_authority",
+                    forged_authority,
+                ),
+                patch.object(
+                    plan_bound_module,
+                    "journal_store_authority_scope",
+                    forged_scope,
+                ),
+                patch.object(
+                    plan_bound_module,
+                    "verify_composed_runtime_target_host_qualification",
+                    forged_composed,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostCompositionError,
+                    "requires composed target-host measurement authority",
+                ),
+            ):
+                plan_bound_module._verify_declared_plan_runtime_target_host_qualification_without_chronology(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=store,
+                    plan_id=plan.plan_id,
+                    spec=spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                )
+
+            forged_loader.assert_not_called()
+            forged_authority.assert_not_called()
+            forged_scope.assert_not_called()
+            forged_composed.assert_not_called()
 
     def test_legacy_signed_pass_cannot_bypass_missing_composed_authority(self) -> None:
         with TemporaryDirectory() as directory:

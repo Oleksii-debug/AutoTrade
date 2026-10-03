@@ -25,6 +25,11 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
+from .recovery_clock_incident import (
+    append_clock_trust_transition,
+    clock_incident_generation as durable_clock_incident_generation,
+    clock_trusted_after_replay,
+)
 from .sender_gate import journal_sender_gate
 from .store_identity import (
     JournalStoreIdentity,
@@ -187,7 +192,14 @@ class RecoveryController:
             tuple[str, str, str, str, str, str, str],
         ] = {}
         self.storage_writable = True
-        self.clock_trusted = True
+        self.clock_trusted = (
+            True
+            if owner_store is None
+            else clock_trusted_after_replay(
+                owner_store,
+                owner_scope=self._owner_scope,
+            )
+        )
         self.provider_reconciled = False
 
     @staticmethod
@@ -252,6 +264,30 @@ class RecoveryController:
             return None
         self._journal_store_authority()
         return Path(self._selected_journal_identity().canonical_path)
+
+    @property
+    def durable_owner_store_identity(self) -> JournalStoreIdentity | None:
+        """Return the pinned physical JournalStore identity, if durable."""
+
+        if self._owner_store is None:
+            return None
+        self._journal_store_authority()
+        return self._selected_journal_identity()
+
+    @property
+    def clock_incident_generation(self) -> int:
+        """Return the validated durable clock-invalidation generation.
+
+        This generation is an invalidation fence only. It is not trusted UTC
+        evidence and cannot make a chronology cut current by itself.
+        """
+
+        if self._owner_store is None:
+            return 0
+        return durable_clock_incident_generation(
+            self._journal_store_authority(),
+            owner_scope=self._owner_scope,
+        )
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.
@@ -1294,9 +1330,42 @@ class RecoveryController:
             self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
-    def set_clock_trusted(self, trusted: bool) -> None:
+    def set_clock_trusted(
+        self,
+        trusted: bool,
+        *,
+        reason_code: str | None = None,
+        evidence_ref: str | None = None,
+    ) -> None:
         if type(trusted) is not bool:
             raise TypeError("trusted must be a boolean")
+        if self._owner_store is not None and trusted != self.clock_trusted:
+            # A journal-backed controller must never create an ownerless local
+            # clock transition. Otherwise a pre-owner loss can disappear before
+            # chronology captures its generation, or a restarted controller can
+            # locally restore health while the durable incident remains open.
+            if self.owner is None:
+                raise PermissionError(
+                    "Durable clock trust transition requires an active recovery owner"
+                )
+            append_clock_trust_transition(
+                self._journal_store_authority(),
+                owner_scope=self._owner_scope,
+                owner_id=self.owner.owner_id,
+                owner_epoch=self.owner.epoch,
+                trusted=trusted,
+                reason_code=(
+                    reason_code
+                    if reason_code is not None
+                    else (
+                        "clock-trust-restored"
+                        if trusted
+                        else "clock-untrusted"
+                    )
+                ),
+                evidence_ref=evidence_ref,
+                committed_at=self._now(),
+            )
         self.clock_trusted = trusted
         if trusted:
             self.reason_codes.discard("clock_untrusted")

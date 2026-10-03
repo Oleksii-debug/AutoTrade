@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
 from typing import Mapping, Sequence
+from threading import RLock
+import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -30,7 +32,8 @@ from .order_projection import (
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (JournalStore, canonical_json, payload_digest,
+    require_exact_journal_store_authority, journal_store_authority_scope)
 
 
 _AGGREGATE_TYPE = "order_projection_book"
@@ -223,8 +226,75 @@ class PreparedOrderMutation:
     already_committed: bool = False
 
 
+_ORDER_STATE_FIELDS = frozenset({
+    "store", "provider_id", "account_id", "environment", "host_id", "owner_epoch",
+    "evidence_artifact_store", "aggregate_id", "_book", "_idempotency",
+})
+_ORDER_SCOPE_FIELDS = ("provider_id", "account_id", "environment", "host_id", "owner_epoch", "aggregate_id")
+
+
+def _order_projection_binding_operations():
+    bindings = {}
+    lock = RLock()
+
+    def registered(value):
+        with lock:
+            entry = bindings.get(id(value))
+            return entry is not None and entry[0]() is value
+
+    def bind(value):
+        with lock:
+            if registered(value):
+                raise OrderProjectionConflict("durable OMS composition is already initialized")
+            for key in [key for key, entry in bindings.items() if entry[0]() is None]:
+                bindings.pop(key)
+            state = object.__getattribute__(value, "__dict__")
+            store = state["store"]
+            identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
+            scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
+            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+
+    def require(value):
+        if type(value) is not DurableOrderBookProjection:
+            raise TypeError("OMS must be exact DurableOrderBookProjection")
+        with lock:
+            entry = bindings.get(id(value))
+            if entry is None or entry[0]() is not value:
+                raise OrderProjectionConflict("durable OMS selection authority is unavailable")
+            _, store, identity, scope, evidence = entry
+            state = object.__getattribute__(value, "__dict__")
+            if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
+                raise OrderProjectionConflict("durable OMS instance state is shadowed")
+            if any(type(state[name]) is not str or state[name] != selected
+                   for name, selected in zip(_ORDER_SCOPE_FIELDS, scope)):
+                raise OrderProjectionConflict("durable OMS scope changed")
+            if state["store"] is not store or state["evidence_artifact_store"] is not evidence:
+                raise OrderProjectionConflict("durable OMS selected store changed")
+            if require_exact_journal_store_authority(store, subject="durable OMS JournalStore") != identity:
+                raise OrderProjectionConflict("durable OMS JournalStore generation changed")
+            return store, identity
+
+    return registered, bind, require
+
+
+_order_projection_is_registered, _bind_order_projection, require_exact_order_projection_authority = _order_projection_binding_operations()
+
+
 class DurableOrderBookProjection:
     """Crash-recoverable adapter over the single canonical OrderBookProjection."""
+
+    def __getattribute__(self, name):
+        if not name.startswith("__") and _order_projection_is_registered(self):
+            require_exact_order_projection_authority(self)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        if _order_projection_is_registered(self) and (
+            name in _ORDER_STATE_FIELDS - {"_book", "_idempotency"}
+            or any(name in base.__dict__ for base in DurableOrderBookProjection.__mro__)
+        ):
+            raise OrderProjectionConflict("durable OMS authority state is immutable")
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -237,8 +307,11 @@ class DurableOrderBookProjection:
         owner_epoch: str,
         evidence_artifact_store: ArtifactStore | None = None,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        if type(self) is not DurableOrderBookProjection:
+            raise TypeError("OMS must be exact DurableOrderBookProjection")
+        if _order_projection_is_registered(self):
+            raise OrderProjectionConflict("durable OMS composition is already initialized")
+        require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -260,6 +333,7 @@ class DurableOrderBookProjection:
             str,
             tuple[str, OrderSnapshot, str],
         ] = {}
+        _bind_order_projection(self)
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -270,7 +344,9 @@ class DurableOrderBookProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        store, identity = require_exact_order_projection_authority(self)
+        with journal_store_authority_scope(store, identity):
+            return JournalStore.load_events(store, _AGGREGATE_TYPE, self.aggregate_id)
 
     @staticmethod
     def _requires_provider_evidence(
@@ -702,18 +778,23 @@ class DurableOrderBookProjection:
 
     @property
     def snapshots(self) -> tuple[OrderSnapshot, ...]:
+        self._reload()
         return self._book.snapshots()
 
     def order(self, client_order_id: str):
+        self._reload()
         return self._book.order(client_order_id)
 
     def effective_fills(self):
+        self._reload()
         return self._book.effective_fills()
 
     def oco_breaches(self):
+        self._reload()
         return self._book.oco_breaches()
 
     def active_oco_breaches(self):
+        self._reload()
         return self._book.active_oco_breaches()
 
     def create_order(

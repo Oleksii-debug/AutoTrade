@@ -32,6 +32,7 @@ from .accounting import (
 from .durable_order_projection import (
     DurableOrderBookProjection,
     PreparedOrderMutation,
+    require_exact_order_projection_authority,
     _OUTBOX_TOPIC as _ORDER_PROJECTION_OUTBOX_TOPIC,
 )
 from .durable_reservations import (
@@ -2203,6 +2204,7 @@ def commit_economic_batch_with_reservation_consumption(
             "order_projection and order_fill must be supplied together"
         )
     if order_projection is not None:
+        require_exact_order_projection_authority(order_projection)
         _require_same_financial_journal_generation(
             economic_book,
             order_projection,
@@ -2241,6 +2243,11 @@ def commit_economic_batch_with_reservation_consumption(
         if committed_at is None
         else _instant_text(committed_at, name="committed_at")
     )
+    financial_cut = None
+    if order_projection is not None:
+        authority = _require_durable_provider_economic_book_authority(economic_book)
+        with journal_store_authority_scope(authority.store, authority.store_identity):
+            financial_cut = JournalStore.current_journal_sequence(authority.store)
     reservation_component_key = _scoped_identity(
         "atomic-fill-reservation",
         economic_book.provider_id,
@@ -2454,6 +2461,7 @@ def commit_economic_batch_with_reservation_consumption(
             idempotency_key=journal_idempotency_key,
             request=request,
             result=result,
+            expected_journal_sequence=financial_cut,
             state_version=max(
                 reservation_plan.aggregate_version,
                 economic_plan.aggregate_version,

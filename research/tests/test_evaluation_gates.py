@@ -986,3 +986,21 @@ class FrozenScientificQualificationTests(unittest.TestCase):
         for cutoff in (True, "2026-10-03T00:00:00", "nonsense", " 2026-10-03T00:00:00Z"):
             with self.subTest(cutoff=cutoff), self.assertRaises(ValueError):
                 evaluate_gates(profile(), evidence(), qualification_at=cutoff)
+
+
+class NestedFrozenReviewEvidenceTests(unittest.TestCase):
+    def test_backdated_review_cannot_qualify_later_published_nested_evidence(self):
+        from mvp.tests.test_qualification_attestation import root, attestation, sign, publish
+        from mvp.autotrade_mvp.qualification_attestation import SignedQualificationAttestation
+        a = attestation(root())
+        receipt = SignedQualificationAttestation(attestation=a, signature_b64=sign(a))
+        payload = json.dumps({"attestation": a.canonical_payload(), "signature_b64": receipt.signature_b64}).encode()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with patch.object(gate_module, "verify_canonical_qualification_attestation", side_effect=AssertionError("future nested evidence reached trust")):
+                accepted, provenance = gate_module._verify_independent_review(payload, artifact_store=store,
+                    evidence_root=directory, expected_source_sha=SOURCE_SHA, evidence_bundle_id=BUNDLE_ID,
+                    requirement_id="test-frozen-nested-cut", qualification_at="2026-09-30T00:00:00Z")
+        self.assertFalse(accepted)
+        self.assertEqual(dict(provenance), {})

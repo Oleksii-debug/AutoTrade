@@ -675,7 +675,14 @@ def _verify_independent_review(
                 attestation.started_at, attestation.completed_at, attestation.signed_at,
             )):
                 return False, MappingProxyType({})
-    except (UnicodeError, ValueError, TypeError, QualificationTrustError):
+            # Review evidence is a nested graph: a backdated signature cannot
+            # turn an artifact first published after the frozen cut into past truth.
+            reader = trusted_authenticated_reader(evidence_root, publication_store=artifact_store)
+            for ref in attestation.evidence_refs:
+                manifest, _ = reader(ref.artifact_id)
+                if _qualification_time(manifest.get("created_at"), name="review evidence created_at") > cutoff:
+                    return False, MappingProxyType({})
+    except (UnicodeError, ValueError, TypeError, QualificationTrustError, ArtifactIntegrityError, OSError):
         return False, MappingProxyType({})
 
     try:

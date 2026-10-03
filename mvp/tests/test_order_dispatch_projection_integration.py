@@ -196,7 +196,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             )
             original_load_events = store.load_events
 
-            def corrupt_exact_source(aggregate_type, selected_id, *args, **kwargs):
+            def corrupt_exact_source(_store, aggregate_type, selected_id, *args, **kwargs):
                 events = original_load_events(
                     aggregate_type, selected_id, *args, **kwargs
                 )
@@ -211,7 +211,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                 return corrupted
 
             with patch.object(
-                store, "load_events", side_effect=corrupt_exact_source
+                JournalStore, "load_events", autospec=True, side_effect=corrupt_exact_source
             ):
                 with self.assertRaisesRegex(
                     OrderProjectionConflict,
@@ -230,7 +230,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             # A structurally inadmissible but internally SHA-consistent
             # replacement response must not turn durable Sending into ACK.
             invalid_nested = b"[" * 65 + b"0" + b"]" * 65
-            def structural_invalid_source(aggregate_type, selected_id, *args, **kwargs):
+            def structural_invalid_source(_store, aggregate_type, selected_id, *args, **kwargs):
                 events = original_load_events(
                     aggregate_type, selected_id, *args, **kwargs
                 )
@@ -248,7 +248,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                 return forged
 
             with patch.object(
-                store, "load_events", side_effect=structural_invalid_source
+                JournalStore, "load_events", autospec=True, side_effect=structural_invalid_source
             ):
                 with self.assertRaisesRegex(
                     OrderProjectionConflict,
@@ -672,7 +672,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                         "response": response,
                     }
 
-                def partial_exact_source(aggregate_type, selected_id, *args, **kwargs):
+                def partial_exact_source(_store, aggregate_type, selected_id, *args, **kwargs):
                     events = original_load_events(
                         aggregate_type, selected_id, *args, **kwargs
                     )
@@ -685,7 +685,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                     return altered
 
                 with patch.object(
-                    store, "load_events", side_effect=partial_exact_source
+                    JournalStore, "load_events", autospec=True, side_effect=partial_exact_source
                 ):
                     with self.assertRaisesRegex(
                         OrderProjectionConflict,

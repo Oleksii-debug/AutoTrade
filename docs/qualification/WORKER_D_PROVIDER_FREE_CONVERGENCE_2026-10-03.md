@@ -1,7 +1,9 @@
 # Worker D: provider-free financial and autonomous convergence
 
 Status: integration candidate, sections 13/14/15/16/19 ADVANCED; none CLOSED.
-Base refreshed from live main `cc3599daa3d7d42a4f55cca3103cc89d52689a8b`.
+Base initially refreshed from main `cc3599daa3d7d42a4f55cca3103cc89d52689a8b`;
+refreshed again and integrated main `6477da4baea07f700d8742b4d2bf1cfc0f34fd3f`
+including the canonical merged #1299 accounting and #1320 FIFO authorities.
 Exact source head and terminal verification results belong in the associated PR;
 this record makes no claim from queued CI or from tests on an earlier source.
 
@@ -25,6 +27,7 @@ The candidate carries path-scoped semantic results from existing owners:
 | #1350 | b75fd106052357d6e04aeaedf8e12bef4df8be5f | prepared OMS event composed into existing atomic financial barrier |
 | #1348 | ae4c12b0ce253c666dc469771831b53a99f3438d | racing-fill-safe replace rejection, policy-content freeze, sendmsg/sendfile denial |
 | #1341 | 535656516ae69023ec32577bb0146def8d2cae5d | exact source-package build-identity helpers only |
+| #1359 | 8edbb0a97f4566a7755838e629a1549be32c5d76 | three-path forecast/holding-cost horizon composition only |
 
 No stale ancestry or old ablation files are replayed. Main's merged #1279 exact
 ablation authority is retained. #1134 remains a separate research strategy
@@ -56,7 +59,14 @@ freezes canonical RiskPolicy content before both protocol and registration.
 Autonomous protocol v3 consumes #1341's exact executable-package build identity,
 account/provider/environment and explicit strategy parameters. Changed build,
 policy, fees or chronology rejects completed/UNKNOWN resume before mutation;
-operator reads cannot relabel earlier builds. Historical v1/v2 journals are not
+operator reads cannot relabel earlier builds. OMS authority is now bound to its
+original exact JournalStore instance/generation and scope in closure-owned,
+callback-free state. Re-entry, scope/store retargeting and raw executable shadows
+fail before preparation. Public OMS reads reconstruct the durable projection so
+an in-memory cache cannot hide open obligations. The atomic OMS financial path
+captures one global financial cut before plan derivation and carries it into the
+canonical JournalStore CAS commit; an unrelated intervening writer rejects the
+whole batch without partial economics, reservation or fill mutation. Historical v1/v2 journals are not
 silently migrated.
 
 The simulator's restart image is carried in the canonical JournalStore, never
@@ -131,7 +141,9 @@ candidate to issue earlier frozen scientific PASS. A normalized `qualification_a
 cut is now part of the signed graph/review requirement identity. Artifacts created
 after that cut and reviews started/completed/signed after it are rejected; changing
 the cut cannot reuse the earlier review. Missing frozen time remains INCONCLUSIVE.
-Gate inputs are detached and revalidated at use time, rejecting raw mutation,
+The same cutoff is enforced on nested review-attestation evidence artifacts;
+a backdated review cannot borrow evidence first published later. Gate inputs are
+detached and revalidated at use time, rejecting raw mutation,
 subclasses and hidden extra authority state. The 48 scientific tests include
 future publication, later signed review and frozen-cut replay adversaries.
 
@@ -142,6 +154,13 @@ production authority. Borrow mismatch/recall checkpoints remain incomplete and
 cannot admit cash-only trades through that conflicted financial cut. The existing
 atomic cash-replay facade now consumes the canonical exact store-generation scope
 and detached activity validator rather than bypassing its retained implementation.
+The existing evidence-bound allocator now consumes #1359's forecast and
+holding-cost horizon binding. Forecast horizons must be future at decision time,
+and financing/funding/borrow holding-cost evidence must cover exactly that horizon.
+Only the three allocator/test paths are consumed: #1359's full tree would restore
+stale accounting/FIFO despite its displayed base; current main finance is retained.
+No second allocator and no mismatched-horizon economic value claim are introduced.
+
 A targeted 221-test integration packet passed after these repairs. A further
 108-test cash replay, qualification and scientific packet passed. Verification
 uses an isolated temporary parent outside any source checkout so competing
@@ -150,7 +169,12 @@ Exact remote predecessor `83195a2fe6c836638880807e9cfa8262a18650f4` passed all
 4,385 repository/research/MVP Python tests (51 skipped); `tools/verify.py` then
 stopped because `dotnet` is unavailable. This predecessor result does not qualify
 the later composed head. The 95-test composed OMS/atomic/build packet passed.
-The final exact-head run and remote CI status remain recorded in the PR.
+Composed predecessor `cac05d72e9b2b3e5272a8e8545970463c3139e42` subsequently
+passed all 4,395 Python tests (51 skipped), again stopping only on missing dotnet.
+Later hardening packets passed: 94 OMS/financial tests, 7 OMS-store adversaries,
+138 accounting/FIFO/composition tests after main refresh, 159 allocator/authority
+and OMS tests, and 49 scientific tests. These are targeted results; the final
+exact-head run and remote CI status remain recorded in the PR.
 
 Remaining provider-free blockers preventing section closure:
 

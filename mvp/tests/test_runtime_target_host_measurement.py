@@ -25,6 +25,7 @@ CONFIG = "sha256:" + "b" * 64
 HOST = "sha256:" + "c" * 64
 WORKLOAD = "sha256:" + "d" * 64
 RELEASE_ARTIFACT_ID = "40000000-0000-4000-8000-000000000001"
+ALT_RELEASE_ARTIFACT_ID = "40000000-0000-4000-8000-000000000002"
 RELEASE_ARTIFACT_SHA = "sha256:" + "e" * 64
 ALT_RELEASE_ARTIFACT_SHA = "sha256:" + "f" * 64
 FINANCIAL_AGGREGATE = "risk_decision"
@@ -90,9 +91,19 @@ def measurement(
     event_ids=("fin-1", "fin-2"),
     sequences=(1, 2),
     end_sequence=2,
+    release_artifact_id=RELEASE_ARTIFACT_ID,
     release_artifact_sha256=RELEASE_ARTIFACT_SHA,
+    financial_samples=None,
     resource_samples=None,
 ):
+    if financial_samples is None:
+        financial_samples = tuple(
+            financial_sample(event_id, sequence, index)
+            for index, (event_id, sequence) in enumerate(
+                zip(event_ids, sequences, strict=True),
+                start=1,
+            )
+        )
     if resource_samples is None:
         resource_samples = (
             ResourceTargetHostSample(
@@ -120,7 +131,7 @@ def measurement(
         )
     return TargetHostMeasurementArtifact(
         source_sha=SOURCE_SHA,
-        release_artifact_id=RELEASE_ARTIFACT_ID,
+        release_artifact_id=release_artifact_id,
         release_artifact_sha256=release_artifact_sha256,
         scenario_id=current_plan.scenario_id,
         spec_digest=current_plan.spec_digest,
@@ -135,13 +146,7 @@ def measurement(
         monotonic_clock_id="python-time.monotonic_ns",
         staleness_basis="host-monotonic-financial-state-age",
         research_interference_basis="host-monotonic-contention-delay",
-        financial_samples=tuple(
-            financial_sample(event_id, sequence, index)
-            for index, (event_id, sequence) in enumerate(
-                zip(event_ids, sequences, strict=True),
-                start=1,
-            )
-        ),
+        financial_samples=tuple(financial_samples),
         research_samples=(
             ResearchInterferenceSample(
                 sample_id="research-1",
@@ -297,6 +302,7 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
                     plan=current_plan,
                     cut=cut,
                     measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
             self.assertEqual(evidence.financial_latency_us, (100, 100))
@@ -338,6 +344,7 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
                     plan=current_plan,
                     cut=cut,
                     measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
     def test_measurement_cannot_reuse_another_delivered_artifact(self):
@@ -361,6 +368,67 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
                     plan=current_plan,
                     cut=cut,
                     measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+                )
+
+    def test_low_level_minting_rejects_self_asserted_release_uuid(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = campaign_plan(spec, "fin-1", "fin-2")
+            cut = self._cut(journal, spec, current_plan)
+            value = measurement(
+                current_plan=current_plan,
+                cut=cut,
+                release_artifact_id=ALT_RELEASE_ARTIFACT_ID,
+            )
+            with self.assertRaisesRegex(
+                RuntimeTargetHostMeasurementError,
+                "another delivered release artifact",
+            ):
+                collect_runtime_campaign_evidence_from_measurement_artifact(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+                )
+
+    def test_low_level_minting_rejects_pre_campaign_staleness_observation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = campaign_plan(spec, "fin-1")
+            cut = self._cut(journal, spec, current_plan)
+            sample = FinancialTargetHostSample(
+                sample_id="financial-pre-start",
+                event_id="fin-1",
+                journal_sequence=1,
+                latency_start_monotonic_ns=1_100_000_000,
+                latency_end_monotonic_ns=1_100_100_000,
+                staleness_source_monotonic_ns=900_000_000,
+                staleness_observed_monotonic_ns=999_999_999,
+            )
+            value = measurement(
+                current_plan=current_plan,
+                cut=cut,
+                event_ids=("fin-1",),
+                sequences=(1,),
+                end_sequence=1,
+                financial_samples=(sample,),
+            )
+            with self.assertRaisesRegex(
+                RuntimeTargetHostMeasurementError,
+                "staleness observation occurs before campaign monotonic cut",
+            ):
+                collect_runtime_campaign_evidence_from_measurement_artifact(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
     def test_frozen_measurement_end_cut_cannot_ignore_later_durable_activity(self):
@@ -391,6 +459,7 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
                     plan=current_plan,
                     cut=cut,
                     measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
     def test_sample_outside_campaign_monotonic_window_is_rejected(self):
@@ -433,6 +502,7 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
                     plan=current_plan,
                     cut=cut,
                     measurement=value,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
                 )
 
 

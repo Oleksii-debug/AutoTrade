@@ -34,6 +34,7 @@ from .store_identity import JournalStoreIdentity
 _PLAN_EVENT_TYPE = "RuntimeQualificationPlanDeclared"
 _PLAN_AGGREGATE_TYPE = "runtime_qualification_plan"
 _PLAN_SCHEMA_VERSION = "1.1.0"
+_MAX_JOURNAL_EVENTS = 100_000
 
 
 class RuntimeLoadPlanError(ValueError):
@@ -46,9 +47,11 @@ def _text(value: object, *, name: str) -> str:
     return value
 
 
-def _positive_int(value: object, *, name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise RuntimeLoadPlanError(f"{name} must be a positive integer")
+def _journal_event_limit(value: object) -> int:
+    if type(value) is not int or value < 1 or value > _MAX_JOURNAL_EVENTS:
+        raise RuntimeLoadPlanError(
+            f"max_journal_events must be between 1 and {_MAX_JOURNAL_EVENTS}"
+        )
     return value
 
 
@@ -220,10 +223,7 @@ def _read_plan(
         raise RuntimeLoadPlanError(
             "runtime qualification plan event bindings are non-canonical"
         )
-    max_events = _positive_int(
-        payload.get("max_journal_events"),
-        name="max_journal_events",
-    )
+    max_events = _journal_event_limit(payload.get("max_journal_events"))
     actual_store_digest = _store_identity_digest(identity)
     if payload.get("store_identity_digest") != actual_store_digest:
         raise RuntimeLoadPlanError("runtime qualification plan belongs to another journal")
@@ -265,7 +265,7 @@ def declare_runtime_event_plan(
     spec = _validated_spec(spec)
     pid = _text(plan_id, name="plan_id")
     events = snapshot_expected_journal_events(expected_events)
-    limit = _positive_int(max_journal_events, name="max_journal_events")
+    limit = _journal_event_limit(max_journal_events)
     identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",

@@ -105,6 +105,73 @@ class ReconciliationAuthoritySnapshotAndExactnessTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "provider_order_id must be exact str"):
             self.base(provider_working_orders=(order,))
 
+    def test_singleton_and_coverage_authority_reject_hidden_or_polymorphic_state(self):
+        availability = ResourceAvailabilityEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            snapshot_id="snapshot-hidden",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+            valid_until="2026-09-24T19:05:00Z",
+            available_resources={"CASH:USD": Decimal("850")},
+            evidence_refs=("provider:snapshot-hidden",),
+        )
+        object.__setattr__(
+            availability,
+            "unreviewed_state",
+            "must-not-enter-authority",
+        )
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            self.base(resource_availability=availability)
+
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        )
+        object.__setattr__(
+            snapshot,
+            "unreviewed_state",
+            "must-not-enter-authority",
+        )
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            self.base(snapshot_consistency=snapshot)
+
+        coverage = CoverageSurfaceEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            surface="ACTIVITIES",
+            coverage_start="2026-09-24T16:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+            provider_semantics_exclude_execution=True,
+        )
+
+        class CoverageSubclass(CoverageSurfaceEvidence):
+            pass
+
+        subclass = CoverageSubclass(
+            provider_id=coverage.provider_id,
+            account_id=coverage.account_id,
+            environment=coverage.environment,
+            surface=coverage.surface,
+            coverage_start=coverage.coverage_start,
+            coverage_end=coverage.coverage_end,
+            pagination_complete=coverage.pagination_complete,
+            consistency_horizon_satisfied=coverage.consistency_horizon_satisfied,
+            provider_semantics_exclude_execution=(
+                coverage.provider_semantics_exclude_execution
+            ),
+        )
+        with self.assertRaisesRegex(TypeError, "exact CoverageSurfaceEvidence"):
+            self.base(activity_coverage=subclass)
+
     def test_singleton_authority_is_frozen_before_sequence_callbacks(self):
         snapshot = SnapshotConsistencyEvidence(
             provider_id="TEST_PROVIDER",

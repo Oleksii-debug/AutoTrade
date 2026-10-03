@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
@@ -60,6 +60,53 @@ from .runtime_target_host_qualification import (
 )
 
 
+def _build_exact_class_authority_guard(
+    *,
+    owner_type,
+    function_guard_builder,
+    error_type,
+    label: str,
+):
+    """Seal one captured class namespace plus executable member dependency graphs."""
+
+    expected_namespace = dict(owner_type.__dict__)
+    executable_guards: list[object] = []
+
+    def add_function_guard(member_name: str, function) -> None:
+        if type(function) is FunctionType:
+            executable_guards.append(
+                function_guard_builder(
+                    root=function,
+                    error_type=error_type,
+                    label=f"{label}.{member_name}",
+                )
+            )
+
+    for name, member in expected_namespace.items():
+        if type(member) is FunctionType:
+            add_function_guard(name, member)
+        elif type(member) in {classmethod, staticmethod}:
+            add_function_guard(name, member.__func__)
+        elif type(member) is property:
+            add_function_guard(f"{name}.fget", member.fget)
+            add_function_guard(f"{name}.fset", member.fset)
+            add_function_guard(f"{name}.fdel", member.fdel)
+
+    expected_keys = frozenset(expected_namespace)
+
+    def guard() -> None:
+        current = dict(owner_type.__dict__)
+        if frozenset(current) != expected_keys:
+            raise error_type(f"{label} sealed class namespace key set changed")
+        for name, expected in expected_namespace.items():
+            if current.get(name) is not expected:
+                raise error_type(f"{label} sealed class member changed: {name}")
+        for executable_guard in executable_guards:
+            executable_guard()
+
+    return guard
+
+
 def _build_durable_plan_matcher(
     *,
     durable_binding_type,
@@ -93,6 +140,8 @@ def _build_signed_campaign_matcher(
     composition_error_type,
     campaign_evidence_kind,
     sha256_factory,
+    parser_dependency_guard=None,
+    budget_dependency_guard=None,
 ):
     """Capture signed campaign re-read, parse, hash, and budget policy authority."""
 
@@ -140,12 +189,16 @@ def _build_signed_campaign_matcher(
                 f"signed {campaign_evidence_kind} raw payload changed after canonical verification"
             )
 
+        if parser_dependency_guard is not None:
+            parser_dependency_guard()
         try:
             parsed = parsed_campaign_type.parse(raw)
         except campaign_error_type as error:
             raise composition_error_type(
                 "signed campaign raw payload is not canonical target-host campaign evidence"
             ) from error
+        if parser_dependency_guard is not None:
+            parser_dependency_guard()
 
         observation = parsed.evidence.observation
         expected_ids = tuple(sample.event_id for sample in measurement.financial_samples)
@@ -192,12 +245,18 @@ def _build_signed_campaign_matcher(
             return None
         if type(spec) is not budget_spec_type:
             raise TypeError("spec must be exact RuntimeBudgetSpec")
+        if budget_dependency_guard is not None:
+            budget_dependency_guard()
         try:
             decision = budget_evaluator(spec, observation)
         except budget_error_type as error:
             raise composition_error_type(
                 "signed campaign cannot be evaluated by canonical runtime budget policy"
             ) from error
+        if budget_dependency_guard is not None:
+            budget_dependency_guard()
+        if parser_dependency_guard is not None:
+            parser_dependency_guard()
         if decision.status != "PASS" or decision.reasons:
             reasons = ",".join(decision.reasons) if decision.reasons else "none"
             raise composition_error_type(
@@ -378,9 +437,6 @@ def _build_composed_production_verifier(
             expected_release_artifact_id=expected_release_artifact_id,
             expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
-        # The signed verifier crosses canonical trust and authenticated-evidence
-        # callbacks. Recheck its same-module executable graph immediately after it
-        # returns, before any accepted value can become composed product authority.
         if signed_dependency_guard is not None:
             signed_dependency_guard()
         if type(accepted) is not accepted_type:
@@ -405,9 +461,6 @@ def _build_composed_production_verifier(
                     f"signed {kind} raw payload does not bind canonical target-host measurement"
                 )
 
-        # Signed-campaign re-read/parsing/budget evaluation also crosses callback-
-        # capable trust boundaries. No mutation of the signed verifier's executable
-        # graph may survive that phase into the composed return boundary either.
         if signed_dependency_guard is not None:
             signed_dependency_guard()
         return composed_type(
@@ -424,6 +477,17 @@ _PRODUCTION_DURABLE_PLAN_MATCHER = _build_durable_plan_matcher(
     durable_binding_type=DurableTargetHostFinancialBinding,
     composition_error_type=RuntimeTargetHostCompositionError,
 )
+_PRODUCTION_CAMPAIGN_PARSER_GUARD = _build_exact_class_authority_guard(
+    owner_type=ParsedRuntimeTargetHostCampaign,
+    function_guard_builder=_build_module_authority_guard,
+    error_type=RuntimeTargetHostCompositionError,
+    label="signed campaign parser",
+)
+_PRODUCTION_BUDGET_EVALUATOR_GUARD = _build_module_authority_guard(
+    root=evaluate_runtime_budget,
+    error_type=RuntimeTargetHostCompositionError,
+    label="runtime budget evaluator",
+)
 _PRODUCTION_SIGNED_CAMPAIGN_MATCHER = _build_signed_campaign_matcher(
     authenticated_reader_factory=trusted_authenticated_reader,
     artifact_integrity_error_type=ArtifactIntegrityError,
@@ -435,6 +499,8 @@ _PRODUCTION_SIGNED_CAMPAIGN_MATCHER = _build_signed_campaign_matcher(
     composition_error_type=RuntimeTargetHostCompositionError,
     campaign_evidence_kind=CAMPAIGN_EVIDENCE_KIND,
     sha256_factory=sha256,
+    parser_dependency_guard=_PRODUCTION_CAMPAIGN_PARSER_GUARD,
+    budget_dependency_guard=_PRODUCTION_BUDGET_EVALUATOR_GUARD,
 )
 _PRODUCTION_PROJECTION_DIGEST_BUILDER = _build_projection_digest_builder(
     projection_schema_version=PROJECTION_SCHEMA_VERSION,

@@ -8,24 +8,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
 from typing import Iterable
 from uuid import UUID
 
+from autotrade_numeric import ExactDecimalError, parse_bounded_exact_decimal
+
 
 def _decimal(value, *, name: str) -> Decimal:
     if type(value) not in (Decimal, str, int):
         raise TypeError(f"{name} must use exact built-in Decimal, string or integer input")
     try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _time(value: datetime, *, name: str) -> datetime:

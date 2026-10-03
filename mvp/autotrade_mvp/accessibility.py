@@ -143,6 +143,9 @@ def format_accessible_status(
                     reservation_lines.append(
                         "Reservation state: unavailable; malformed value"
                     )
+                    # Once reservation state is not canonical, remaining-resource
+                    # values are not exposure truth and must not be announced.
+                    continue
                 if type(remaining) is not dict:
                     malformed_reservations = True
                     reservation_lines.append(

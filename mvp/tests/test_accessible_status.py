@@ -165,6 +165,31 @@ class AccessibleStatusTests(unittest.TestCase):
             2,
         )
 
+    def test_invalid_reservation_state_suppresses_untrusted_remaining_amounts(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {
+                        "state": "FILLED",
+                        "remaining": {
+                            "CASH:USD": "999999999",
+                            "POSITION:ABC": "777",
+                        },
+                    }
+                ],
+            }
+        )
+        self.assertIn("Reservation state: unavailable; malformed value", text)
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertNotIn("999999999", text)
+        self.assertNotIn("Reserved CASH:USD", text)
+        self.assertNotIn("Reserved POSITION:ABC", text)
+
     def test_dict_subclass_reservation_does_not_execute_overridden_get(self):
         class HostileDict(dict):
             def get(self, *args, **kwargs):
@@ -214,8 +239,8 @@ class AccessibleStatusTests(unittest.TestCase):
         )
         self.assertIn("Structurally readable reservation entries: 0", text)
         self.assertIn("Reservation state: unavailable; malformed value", text)
-        self.assertIn("Reservation resource detail: unavailable; malformed value", text)
-        self.assertIn("Reserved EUR: 10.00; state: Unavailable", text)
+        self.assertNotIn("25.00", text)
+        self.assertNotIn("Reserved EUR: 10.00", text)
         self.assertIn("Economic edge: unproven", text)
 
     def test_hostile_nested_status_containers_fail_closed_without_execution(self):

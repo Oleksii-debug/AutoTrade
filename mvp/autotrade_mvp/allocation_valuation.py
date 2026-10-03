@@ -70,24 +70,31 @@ def _positive_int(value, *, name: str) -> int:
 
 
 def _text(value, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise AllocationValuationError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise AllocationValuationError(f"{name} is required")
+    return normalized
 
 
 def _currency(value, *, name: str) -> str:
-    return _text(value, name=name).upper()
+    return str.upper(_text(value, name=name))
 
 
 def _instant(value, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str.replace(text, "Z", "+00:00"))
     except ValueError as error:
         raise AllocationValuationError(f"{name} must be an ISO timestamp") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    if type(parsed) is not datetime or type(parsed.tzinfo) is not timezone:
+        raise AllocationValuationError(
+            f"{name} must resolve to an exact fixed-offset timestamp"
+        )
+    if datetime.utcoffset(parsed) is None:
         raise AllocationValuationError(f"{name} must include timezone")
-    return parsed.astimezone(timezone.utc)
+    return datetime.astimezone(parsed, timezone.utc)
 
 
 def _sha256(value, *, name: str) -> str:
@@ -315,14 +322,18 @@ def normalize_allocation_valuation(
 
     if _text(valuation.get("symbol"), name=f"{symbol_text} valuation symbol") != symbol_text:
         raise AllocationValuationError(f"{symbol_text} valuation symbol mismatch")
-    asset_class = _text(
-        valuation["asset_class"],
-        name=f"{symbol_text} valuation asset_class",
-    ).upper()
-    payoff = _text(
-        valuation["payoff"],
-        name=f"{symbol_text} valuation payoff",
-    ).upper()
+    asset_class = str.upper(
+        _text(
+            valuation["asset_class"],
+            name=f"{symbol_text} valuation asset_class",
+        )
+    )
+    payoff = str.upper(
+        _text(
+            valuation["payoff"],
+            name=f"{symbol_text} valuation payoff",
+        )
+    )
     quantity_unit = _text(
         valuation["quantity_unit"],
         name=f"{symbol_text} valuation quantity_unit",
@@ -445,11 +456,7 @@ def normalize_allocation_valuation(
             name=f"{symbol_text} valuation fx_quote",
         )
         max_age_seconds = quote_payload.get("max_age_seconds")
-        if (
-            not isinstance(max_age_seconds, int)
-            or isinstance(max_age_seconds, bool)
-            or max_age_seconds <= 0
-        ):
+        if type(max_age_seconds) is not int or max_age_seconds <= 0:
             raise AllocationValuationError(
                 f"{symbol_text} fx max_age_seconds must be a positive integer"
             )

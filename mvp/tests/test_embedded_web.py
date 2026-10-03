@@ -451,6 +451,7 @@ class EmbeddedWebTests(unittest.TestCase):
             "frame-ancestors 'none'",
             "connect-src 'self'",
             "script-src 'self'",
+            "worker-src 'none'",
             "style-src 'self'",
         ):
             self.assertIn(directive, csp)

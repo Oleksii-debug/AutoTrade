@@ -211,6 +211,15 @@ def load_immutable_web_bundle(
         raise TypeError("web bundle bodies must be an exact dict")
     if len(asset_bodies) > _MAX_ASSETS:
         raise ValueError("web bundle body set has too many assets")
+    # Detach the caller-owned body-key/value graph before any dict membership
+    # lookup. A str subclass key can otherwise execute __eq__ during an exact
+    # manifest-path lookup even though the manifest path itself is canonical.
+    for body_path, body_bytes in asset_bodies.items():
+        if type(body_path) is not str:
+            raise TypeError("web bundle body paths must be exact strings")
+        _canonical_asset_path(body_path)
+        if type(body_bytes) is not bytes:
+            raise TypeError("web bundle asset body must be immutable bytes")
 
     def reject_duplicate_keys(
         pairs: list[tuple[str, object]],
@@ -336,6 +345,11 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
         headers: Mapping[str, str],
         body: bytes = b"",
     ) -> TransportResponse:
+        # The concrete HTTP handler supplies an exact built-in request target.
+        # Reject executable string subclasses before urllib can dispatch methods
+        # such as lstrip() while parsing the target.
+        if type(target) is not str:
+            return _static_error(400, "INVALID_REQUEST_TARGET")
         parsed = urlsplit(target)
         if parsed.scheme or parsed.netloc or parsed.fragment:
             return super().dispatch(
@@ -347,6 +361,12 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
             return super().dispatch(
                 method=method, target=target, headers=headers, body=body
             )
+
+        # The wire adapter materializes request headers into an exact dict.
+        # Refuse arbitrary Mapping implementations on the static boundary before
+        # calling .items(), so caller-defined mapping callbacks cannot execute.
+        if type(headers) is not dict:
+            return _static_error(400, "INVALID_STATIC_REQUEST")
 
         try:
             if type(method) is not str or method != "GET":

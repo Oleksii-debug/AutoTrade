@@ -33,7 +33,7 @@ from .performance_qualification import (
     RuntimeLoadObservation,
     evaluate_runtime_budget,
 )
-from .persistence import JournalStore
+from .persistence import JournalStore, require_exact_journal_store_authority
 
 
 _CUT_TOKEN = object()
@@ -510,8 +510,10 @@ def begin_runtime_campaign(
     plan: RuntimeCampaignPlan,
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> RuntimeCampaignCut:
-    if not isinstance(journal, JournalStore):
-        raise TypeError("journal must be JournalStore")
+    require_exact_journal_store_authority(
+        journal,
+        subject="runtime qualification JournalStore",
+    )
     if not isinstance(spec, RuntimeBudgetSpec):
         raise TypeError("spec must be RuntimeBudgetSpec")
     if not isinstance(plan, RuntimeCampaignPlan):
@@ -529,13 +531,13 @@ def begin_runtime_campaign(
     # Bracket the start-clock sample with one stable durable journal sequence.
     # Any event racing across that sample makes the cut ambiguous: counting it can
     # overstate timed throughput, while hiding it can break event conservation.
-    start_journal_sequence = journal.current_journal_sequence()
+    start_journal_sequence = JournalStore.current_journal_sequence(journal)
     started_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="started_monotonic_ns",
         allow_zero=True,
     )
-    if journal.current_journal_sequence() != start_journal_sequence:
+    if JournalStore.current_journal_sequence(journal) != start_journal_sequence:
         raise RuntimeBudgetError(
             "campaign journal changed while sampling the start clock"
         )
@@ -562,8 +564,10 @@ def collect_runtime_campaign_evidence(
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
     max_events: int = 100000,
 ) -> RuntimeCampaignEvidence:
-    if not isinstance(journal, JournalStore):
-        raise TypeError("journal must be JournalStore")
+    require_exact_journal_store_authority(
+        journal,
+        subject="runtime qualification JournalStore",
+    )
     if not isinstance(spec, RuntimeBudgetSpec):
         raise TypeError("spec must be RuntimeBudgetSpec")
     if not isinstance(plan, RuntimeCampaignPlan):
@@ -579,7 +583,7 @@ def collect_runtime_campaign_evidence(
     # This is intentionally conservative: the measured duration may include time
     # after the last admitted journal event, but an event committed after the
     # terminal clock can never be credited to an already-ended duration.
-    end_sequence = journal.current_journal_sequence()
+    end_sequence = JournalStore.current_journal_sequence(journal)
     if end_sequence < cut.start_journal_sequence:
         raise RuntimeBudgetError("campaign journal end cut precedes its start cut")
 
@@ -587,7 +591,7 @@ def collect_runtime_campaign_evidence(
     # terminal clock so an acknowledgement that races after campaign end cannot
     # erase reconnect pressure from the already-ended interval. A later drain is
     # intentionally conservative for this evidence cut.
-    backlog_remaining = journal.pending_outbox_count()
+    backlog_remaining = JournalStore.pending_outbox_count(journal)
     if type(backlog_remaining) is not int or backlog_remaining < 0:
         raise RuntimeBudgetError("campaign reconnect backlog is invalid")
 
@@ -604,7 +608,8 @@ def collect_runtime_campaign_evidence(
     observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
     declared_duration_us = plan.declared_duration_ms * 1000
 
-    events = journal.load_events_after_journal_sequence(
+    events = JournalStore.load_events_after_journal_sequence(
+        journal,
         cut.start_journal_sequence,
         limit=max_events,
     )

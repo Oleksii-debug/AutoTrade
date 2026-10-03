@@ -518,6 +518,47 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_replace_terminal_journal_readback_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            owner = next(
+                candidate
+                for candidate in JournalStore.__mro__
+                if "load_events_after_journal_sequence" in vars(candidate)
+            )
+            original = vars(owner)["load_events_after_journal_sequence"]
+
+            def forged_load_events(*_args, **_kwargs):
+                return []
+
+            def poison_journal_readback() -> None:
+                setattr(
+                    owner,
+                    "load_events_after_journal_sequence",
+                    forged_load_events,
+                )
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "JournalStore.load_events_after_journal_sequence "
+                    "class member changed during campaign callback",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-journal-readback", poison_journal_readback),),
+                    )
+            finally:
+                setattr(owner, "load_events_after_journal_sequence", original)
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_research_callback_cannot_disable_callback_guard_helper(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

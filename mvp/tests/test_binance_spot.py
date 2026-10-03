@@ -35,7 +35,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
-from mvp.autotrade_mvp.accounting import ScopedEconomicBook
+from mvp.autotrade_mvp.accounting import AccountingConflict, ScopedEconomicBook
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     build_provider_fill_financial_plan,
@@ -1988,7 +1988,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 },
             )
 
-    def test_spot_fill_remains_compatible_with_cash_equity_financial_plan(self):
+    def test_spot_fill_without_client_order_identity_cannot_enter_financial_plan(self):
         row = {
             "symbol": "BTCUSDT",
             "id": 9,
@@ -2022,16 +2022,19 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             consumed={"CASH:USDT": Decimal("0")},
             state="WORKING",
         )
-        plan = build_provider_fill_financial_plan(
-            book=ScopedEconomicBook(environment="PAPER", account_id="paper-1"),
-            provider_id="BINANCE",
-            projected_fill=projected,
-            provider_fill=provider_fill,
-            expected_instrument="BTCUSDT:v1",
-            settlement_currency="USDT",
-            reservation_snapshot=reservation,
-        )
-        self.assertEqual(plan.usage["CASH:USDT"], Decimal("10.125"))
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "exact client order identity",
+        ):
+            build_provider_fill_financial_plan(
+                book=ScopedEconomicBook(environment="PAPER", account_id="paper-1"),
+                provider_id="BINANCE",
+                projected_fill=projected,
+                provider_fill=provider_fill,
+                expected_instrument="BTCUSDT:v1",
+                settlement_currency="USDT",
+                reservation_snapshot=reservation,
+            )
 
     def test_execution_parser_rejects_wrong_authenticated_read_surface(self):
         row = {

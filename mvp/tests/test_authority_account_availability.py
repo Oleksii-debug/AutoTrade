@@ -286,6 +286,31 @@ def _settlement_authorities(store: JournalStore):
     return artifact_store, economic, settlements
 
 
+def _append_economic_at(
+    economic: DurableProviderEconomicBook,
+    transaction,
+    *,
+    committed_at: str,
+) -> bool:
+    plan = economic.prepare_batch_mutation((transaction,), committed_at=committed_at)
+    if plan.already_committed:
+        economic.refresh()
+        return False
+    assert plan.envelope is not None
+    _, inserted, _ = economic.store.commit_command(
+        command_id=f"test-economic:{plan.batch_digest}",
+        actor="provider-economic-accounting",
+        environment=economic.environment,
+        idempotency_key=f"test-economic:{economic.book_id}:{plan.batch_digest}",
+        request=plan.request,
+        result=plan.result,
+        state_version=plan.aggregate_version,
+        events=[(plan.envelope, "autotrade.economic.events")],
+    )
+    economic.refresh()
+    return inserted
+
+
 def _book_cash_trade(
     store: JournalStore,
     economic: DurableProviderEconomicBook,
@@ -308,7 +333,11 @@ def _book_cash_trade(
         economic_order_key=f"provider:{PROVIDER_ID}:execution:{suffix}",
         observed_at="2026-09-24T17:55:01Z",
     )
-    economic.append(transaction)
+    _append_economic_at(
+        economic,
+        transaction,
+        committed_at="2026-09-24T17:55:01Z",
+    )
     obligation = equity_cash_obligation_from_transaction(
         transaction,
         obligation_id=f"availability-settlement-{suffix}",
@@ -388,15 +417,18 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifact_store, economic, settlements = _settlement_authorities(store)
-            economic.append(
+            _append_economic_at(
+                economic,
                 book_external_cash_flow(
                     transaction_id="unbound-opening-cash",
                     cause_event_id="unbound-opening-cash-evidence",
                     currency="USD",
                     amount="1000",
-                )
+                ),
+                committed_at="2026-09-24T17:54:00Z",
             )
-            economic.append(
+            _append_economic_at(
+                economic,
                 book_equity_fill(
                     transaction_id="unbound-sale",
                     cause_event_id="unbound-sale-execution",
@@ -408,7 +440,8 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     economic_effective_at="2026-09-24T17:55:00Z",
                     economic_order_key="provider:TEST_PROVIDER:execution:unbound-sale",
                     observed_at="2026-09-24T17:55:01Z",
-                )
+                ),
+                committed_at="2026-09-24T17:55:01Z",
             )
             self.assertEqual(economic.cash("USD"), Decimal("1100"))
             self.assertEqual(settlements.obligations, ())
@@ -449,13 +482,15 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifact_store, economic, settlements = _settlement_authorities(store)
-            economic.append(
+            _append_economic_at(
+                economic,
                 book_external_cash_flow(
                     transaction_id="availability-opening-cash",
                     cause_event_id="opening-cash-evidence",
                     currency="USD",
                     amount="1000",
-                )
+                ),
+                committed_at="2026-09-24T17:54:00Z",
             )
             _book_cash_trade(
                 store,
@@ -544,13 +579,15 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifact_store, economic, settlements = _settlement_authorities(store)
-            economic.append(
+            _append_economic_at(
+                economic,
                 book_external_cash_flow(
                     transaction_id="dispatch-opening-cash",
                     cause_event_id="dispatch-opening-cash-evidence",
                     currency="USD",
                     amount="1000",
-                )
+                ),
+                committed_at="2026-09-24T17:54:00Z",
             )
             _book_cash_trade(
                 store,

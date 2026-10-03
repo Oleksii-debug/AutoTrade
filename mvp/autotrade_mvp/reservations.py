@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Protocol
+
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_add,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 
 
 class CapitalAvailabilityEvidence(Protocol):
@@ -33,12 +41,11 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be an exact finite decimal within the resource envelope"
+        ) from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -79,23 +86,42 @@ class ReservationBook:
     def __init__(self) -> None:
         self._records: dict[str, ReservationSnapshot] = {}
 
-    def get(self, reservation_id: str) -> ReservationSnapshot:
+    @staticmethod
+    def _detached_snapshot(record: ReservationSnapshot) -> ReservationSnapshot:
+        if type(record) is not ReservationSnapshot:
+            raise TypeError("reservation record must be exact ReservationSnapshot")
+        return ReservationSnapshot(
+            reservation_id=record.reservation_id,
+            intent_id=record.intent_id,
+            original=MappingProxyType(dict(record.original)),
+            remaining=MappingProxyType(dict(record.remaining)),
+            consumed=MappingProxyType(dict(record.consumed)),
+            state=record.state,
+            resolution_evidence=record.resolution_evidence,
+        )
+
+    def _get_record(self, reservation_id: str) -> ReservationSnapshot:
         key = _text(reservation_id, name="reservation_id")
         try:
             return self._records[key]
         except KeyError as error:
             raise KeyError(f"Unknown reservation: {key}") from error
 
+    def get(self, reservation_id: str) -> ReservationSnapshot:
+        return self._detached_snapshot(self._get_record(reservation_id))
+
     def total_reserved(self, resource: str) -> Decimal:
         key = _text(resource, name="resource")
-        return sum(
-            (
+        try:
+            return exact_sum(
                 record.remaining.get(key, Decimal("0"))
                 for record in self._records.values()
                 if record.state in ACTIVE_STATES
-            ),
-            Decimal("0"),
-        )
+            )
+        except ExactDecimalError as error:
+            raise ReservationConflict(
+                "reserved total exceeds exact decimal authority"
+            ) from error
 
     def reserve(
         self,
@@ -116,7 +142,7 @@ class ReservationBook:
                 raise ReservationConflict(
                     "reservation_id was already committed with different content"
                 )
-            return existing
+            return self._detached_snapshot(existing)
 
         if any(record.intent_id == iid for record in self._records.values()):
             raise ReservationConflict(
@@ -127,7 +153,13 @@ class ReservationBook:
             if resource not in availability:
                 raise InsufficientAvailable(f"No availability evidence for {resource}")
             already_reserved = self.total_reserved(resource)
-            if already_reserved + amount > availability[resource]:
+            try:
+                projected_reserved = exact_add(already_reserved, amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation admission exceeds exact decimal authority"
+                ) from error
+            if projected_reserved > availability[resource]:
                 raise InsufficientAvailable(
                     f"Insufficient {resource}: available={availability[resource]}, "
                     f"reserved={already_reserved}, requested={amount}"
@@ -144,7 +176,7 @@ class ReservationBook:
             state="WORKING",
         )
         self._records[rid] = snapshot
-        return snapshot
+        return self._detached_snapshot(snapshot)
 
     def reserve_from_capital(
         self,
@@ -181,7 +213,7 @@ class ReservationBook:
         reservation_id: str,
         usage: Mapping[str, Decimal | str | int],
     ) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         if current.state not in ACTIVE_STATES:
             raise ReservationConflict("Cannot consume a terminal reservation")
         amounts = _amounts(usage)
@@ -194,8 +226,15 @@ class ReservationBook:
                 raise ReservationConflict(
                     f"Consumption exceeds remaining reservation for {resource}"
                 )
-            remaining[resource] -= amount
-            consumed[resource] += amount
+            try:
+                next_remaining = exact_subtract(remaining[resource], amount)
+                next_consumed = exact_add(consumed[resource], amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation consumption exceeds exact decimal authority"
+                ) from error
+            remaining[resource] = next_remaining
+            consumed[resource] = next_consumed
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
@@ -206,14 +245,14 @@ class ReservationBook:
             resolution_evidence=current.resolution_evidence,
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def mark_unknown(self, reservation_id: str) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         if current.state in TERMINAL_STATES:
             raise ReservationConflict("A terminal reservation cannot become UNKNOWN")
         if current.state == "UNKNOWN":
-            return current
+            return self._detached_snapshot(current)
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
@@ -223,7 +262,7 @@ class ReservationBook:
             state="UNKNOWN",
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def mark_terminal(
         self,
@@ -232,7 +271,7 @@ class ReservationBook:
         outcome: str,
         resolution_evidence: str,
     ) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         normalized = _text(outcome, name="outcome").upper()
         if normalized not in TERMINAL_STATES:
             raise ValueError(f"Unsupported terminal outcome: {normalized}")
@@ -247,7 +286,7 @@ class ReservationBook:
                 raise ReservationConflict(
                     "Terminal reservation cannot be resolved differently"
                 )
-            return current
+            return self._detached_snapshot(current)
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
@@ -260,11 +299,11 @@ class ReservationBook:
             resolution_evidence=evidence,
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def active(self) -> tuple[ReservationSnapshot, ...]:
         return tuple(
-            record
+            self._detached_snapshot(record)
             for record in self._records.values()
             if record.state in ACTIVE_STATES
         )

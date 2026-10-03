@@ -100,6 +100,14 @@ class CredentialTransitionJournalTests(unittest.TestCase):
             events[0]["journal_sequence"],
             first_witness.journal_sequence,
         )
+        self.assertGreaterEqual(
+            first_witness.verified_journal_cut,
+            first_witness.journal_sequence,
+        )
+        self.assertEqual(
+            required.verified_journal_cut,
+            self.store.current_journal_sequence(),
+        )
 
     def test_vault_only_rollback_cannot_roll_back_newer_journal_anchor(self) -> None:
         second, receipt_one = self._rotate(self.first, "secret-v2")

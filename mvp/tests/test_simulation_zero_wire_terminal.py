@@ -8,6 +8,7 @@ from unittest.mock import patch
 from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reservations import ReservationConflict
 from mvp.autotrade_mvp import simulation_session
 from mvp.autotrade_mvp.simulation_session import (
     ACCOUNT,
@@ -245,6 +246,82 @@ class SimulationZeroWireTerminalTests(unittest.TestCase):
                     directory,
                     episode_id=episode_id,
                 )
+
+    def test_zero_wire_release_rejects_mismatch_and_consumed_exposure(self):
+        episode_id = "blocked-negative-proof"
+        terminal_command = simulation_session._uuid(
+            "blocked-terminal-command",
+            episode_id,
+        )
+        real_commit = JournalStore.commit_command
+
+        def crash_terminal(store, **kwargs):
+            if kwargs.get("command_id") == terminal_command:
+                raise RuntimeError("crash-before-zero-wire-terminal")
+            return real_commit(store, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            with self._block_dispatch(), patch.object(
+                JournalStore,
+                "commit_command",
+                new=crash_terminal,
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_canonical_simulation(
+                        BUY,
+                        directory,
+                        episode_id=episode_id,
+                        now=NOW,
+                    )
+
+            reservations = self._reservations(directory)
+            reservation_id = simulation_session._uuid(
+                "reservation",
+                episode_id,
+            )
+            attempt_id = simulation_session._uuid("attempt", episode_id)
+            correct_client_order_id = simulation_session.stable_client_order_id(
+                "simulated",
+                simulation_session._uuid("intent", episode_id),
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT,
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "does not match reservation scope",
+            ):
+                reservations.prepare_zero_wire_blocked_terminal_mutation(
+                    event_key="mismatch-event",
+                    idempotency_key="mismatch-idem",
+                    reservation_id=reservation_id,
+                    provider="SIMULATED",
+                    attempt_id=attempt_id,
+                    client_order_id="wrong-client-order-id",
+                    committed_at=NOW,
+                )
+            self.assertEqual(len(reservations.active()), 1)
+
+            reservations.consume(
+                command_id="adversarial-consume",
+                idempotency_key="adversarial-consume",
+                reservation_id=reservation_id,
+                usage={"CASH:USD": "1"},
+            )
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "cannot erase consumed exposure",
+            ):
+                reservations.prepare_zero_wire_blocked_terminal_mutation(
+                    event_key="consumed-event",
+                    idempotency_key="consumed-idem",
+                    reservation_id=reservation_id,
+                    provider="SIMULATED",
+                    attempt_id=attempt_id,
+                    client_order_id=correct_client_order_id,
+                    committed_at=NOW,
+                )
+            self.assertEqual(len(reservations.active()), 1)
+            self.assertEqual(reservations.active()[0].state, "WORKING")
 
 
 if __name__ == "__main__":

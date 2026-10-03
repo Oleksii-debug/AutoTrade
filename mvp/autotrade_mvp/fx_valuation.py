@@ -119,11 +119,28 @@ def _age_limit(value: timedelta) -> timedelta:
     return value
 
 
-def _exact_field(value, field: str, *, name: str):
+def _exact_state_snapshot(
+    value,
+    fields: tuple[str, ...],
+    *,
+    name: str,
+) -> dict[str, object]:
+    """Hold one exact CPython dataclass state cut before validation/reseal."""
+
     try:
-        return object.__getattribute__(value, field)
+        state = object.__getattribute__(value, "__dict__")
     except AttributeError as error:
-        raise FxValuationError(f"{name} is missing required field {field}") from error
+        raise FxValuationError(f"{name} has no readable exact state") from error
+    if type(state) is not dict:
+        raise FxValuationError(f"{name} exact state must be a built-in dict")
+    snapshot = dict.copy(state)
+    for field in fields:
+        if field not in snapshot:
+            raise FxValuationError(f"{name} is missing required field {field}")
+    extras = set(snapshot) - set(fields)
+    if extras:
+        raise FxValuationError(f"{name} contains unexpected fields")
+    return snapshot
 
 
 def _has_terminating_decimal(value: Fraction) -> bool:
@@ -195,12 +212,15 @@ def _validated_rounding_policy(
         raise FxValuationError(
             "rounding_policy must be exact FxRoundingPolicy or None"
         )
+    snapshot = _exact_state_snapshot(
+        value,
+        ("reporting_currency", "quantum", "version"),
+        name="rounding_policy",
+    )
     policy = FxRoundingPolicy(
-        reporting_currency=_exact_field(
-            value, "reporting_currency", name="rounding_policy"
-        ),
-        quantum=_exact_field(value, "quantum", name="rounding_policy"),
-        version=_exact_field(value, "version", name="rounding_policy"),
+        reporting_currency=snapshot["reporting_currency"],
+        quantum=snapshot["quantum"],
+        version=snapshot["version"],
     )
     if policy.reporting_currency != reporting_currency:
         raise FxValuationError("FX rounding policy reporting currency mismatch")
@@ -404,14 +424,27 @@ def value_amount(
         )
     if type(quote) is not FxQuote:
         raise FxValuationError("quote must be exact FxQuote or None")
+    quote_snapshot = _exact_state_snapshot(
+        quote,
+        (
+            "base_currency",
+            "quote_currency",
+            "bid",
+            "ask",
+            "available_at",
+            "source_id",
+            "evidence_sha256",
+        ),
+        name="quote",
+    )
     quote = FxQuote.create(
-        base_currency=_exact_field(quote, "base_currency", name="quote"),
-        quote_currency=_exact_field(quote, "quote_currency", name="quote"),
-        bid=_exact_field(quote, "bid", name="quote"),
-        ask=_exact_field(quote, "ask", name="quote"),
-        available_at=_exact_field(quote, "available_at", name="quote"),
-        source_id=_exact_field(quote, "source_id", name="quote"),
-        evidence_sha256=_exact_field(quote, "evidence_sha256", name="quote"),
+        base_currency=quote_snapshot["base_currency"],
+        quote_currency=quote_snapshot["quote_currency"],
+        bid=quote_snapshot["bid"],
+        ask=quote_snapshot["ask"],
+        available_at=quote_snapshot["available_at"],
+        source_id=quote_snapshot["source_id"],
+        evidence_sha256=quote_snapshot["evidence_sha256"],
     )
 
     if quote.available_at > point:

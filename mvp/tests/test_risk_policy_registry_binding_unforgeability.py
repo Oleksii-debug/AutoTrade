@@ -53,6 +53,18 @@ class RiskPolicyRegistryBindingUnforgeabilityTests(unittest.TestCase):
             with self.assertRaises(RiskPolicyAuthorityError):
                 registry._journal_store_authority()
 
+            # Restoring only the caller-visible diagnostics must recover the
+            # original selected store even while the imported global map remains
+            # forged; the authoritative composition lives in closure-owned state.
+            selected_identity = authority._canonical_journal_authority_snapshot(
+                selected
+            )
+            registry.store = selected
+            registry._journal_store_identity = selected_identity
+            bound_store, bound_identity = registry._journal_store_authority()
+            self.assertIs(bound_store, selected)
+            self.assertEqual(bound_identity, selected_identity)
+
 
 if __name__ == "__main__":
     unittest.main()

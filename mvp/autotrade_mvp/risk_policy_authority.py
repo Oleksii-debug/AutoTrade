@@ -700,16 +700,82 @@ class _ReplayState:
     activation_requests: dict[str, tuple[RiskPolicyIdentity, str | None, str, int]]
 
 
-# Callback-free weak references are deliberate. WeakKeyDictionary installs a
-# caller-discoverable removal callback on its key weakref; invoking that callback
-# manually can erase a live composition binding. Key by id instead, retain weak
-# refs with no callbacks, and prove referent identity at every use. Dead-id
-# entries are replaced lazily only when Python actually reuses that object id.
+# Compatibility/diagnostic surface only. Financial composition authority is
+# deliberately NOT stored here: callers can import and mutate module globals.
 _RISK_POLICY_REGISTRY_BINDINGS: dict[
     int,
     tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
 ] = {}
-_RISK_POLICY_REGISTRY_BINDINGS_LOCK = threading.RLock()
+
+
+def _risk_policy_registry_binding_operations():
+    """Return closure-owned one-shot registry composition operations.
+
+    Callback-free weak references are deliberate. WeakKeyDictionary installs a
+    caller-discoverable removal callback on its key weakref; invoking that
+    callback manually can erase a live composition binding. Key by id instead,
+    retain weak refs with no callbacks, and prove referent identity at every use.
+    """
+
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
+    ] = {}
+    lock = threading.RLock()
+
+    def bind(
+        registry: "DurableRiskPolicyRegistry",
+        store: JournalStore,
+    ) -> JournalStoreIdentity:
+        registry_id = id(registry)
+        with lock:
+            existing = bindings.get(registry_id)
+            if existing is not None:
+                existing_registry = existing[0]()
+                if existing_registry is registry:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry composition is already initialized"
+                    )
+                if existing_registry is not None:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry binding identity collision"
+                    )
+                # Python reused the id of a genuinely dead registry.
+                bindings.pop(registry_id, None)
+
+            selected_identity = _canonical_journal_authority_snapshot(store)
+            visible_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="selected risk policy journal identity",
+            )
+            module_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="module-owned risk policy journal identity",
+            )
+            bindings[registry_id] = (
+                weakref.ref(registry),
+                weakref.ref(store),
+                module_identity,
+            )
+            return visible_identity
+
+    def resolve(
+        registry: "DurableRiskPolicyRegistry",
+    ) -> tuple[
+        weakref.ReferenceType,
+        weakref.ReferenceType,
+        JournalStoreIdentity,
+    ] | None:
+        with lock:
+            return bindings.get(id(registry))
+
+    return bind, resolve
+
+
+(
+    _bind_risk_policy_registry,
+    _resolve_risk_policy_registry_binding,
+) = _risk_policy_registry_binding_operations()
 
 
 class DurableRiskPolicyRegistry:
@@ -724,50 +790,16 @@ class DurableRiskPolicyRegistry:
         if type(self) is not DurableRiskPolicyRegistry:
             raise TypeError("registry must be exact DurableRiskPolicyRegistry")
         # Python permits explicit re-entry into __init__ on an existing object.
-        # Composition selection is one-shot financial authority: never inspect a
-        # replacement store, let alone overwrite the module-owned binding.
-        registry_id = id(self)
-        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
-            existing = _RISK_POLICY_REGISTRY_BINDINGS.get(registry_id)
-            if existing is not None:
-                existing_registry = existing[0]()
-                if existing_registry is self:
-                    raise RiskPolicyAuthorityError(
-                        "risk policy registry composition is already initialized"
-                    )
-                if existing_registry is not None:
-                    raise RiskPolicyAuthorityError(
-                        "risk policy registry binding identity collision"
-                    )
-                # The prior registry is genuinely dead. Reuse of its Python id is
-                # the only supported transition; no weakref callback can erase a
-                # live binding.
-                _RISK_POLICY_REGISTRY_BINDINGS.pop(registry_id, None)
-            selected_identity = _canonical_journal_authority_snapshot(store)
-            # Keep the caller-visible diagnostic snapshot and the module-owned
-            # selected identity as detached values.  Mutating one cannot rewrite
-            # the other through a frozen-dataclass __dict__ alias.
-            visible_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="selected risk policy journal identity",
-            )
-            module_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="module-owned risk policy journal identity",
-            )
-            self._journal_store_identity = visible_identity
-            self.store = store
-            _RISK_POLICY_REGISTRY_BINDINGS[registry_id] = (
-                weakref.ref(self),
-                weakref.ref(store),
-                module_identity,
-            )
+        # The closure-owned binding rejects re-entry before inspecting a replacement
+        # store, and caller-visible fields below remain diagnostics only.
+        visible_identity = _bind_risk_policy_registry(self, store)
+        self._journal_store_identity = visible_identity
+        self.store = store
 
     def _journal_store_authority(self) -> tuple[JournalStore, JournalStoreIdentity]:
         if type(self) is not DurableRiskPolicyRegistry:
             raise TypeError("registry must be exact DurableRiskPolicyRegistry")
-        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
-            binding = _RISK_POLICY_REGISTRY_BINDINGS.get(id(self))
+        binding = _resolve_risk_policy_registry_binding(self)
         if binding is None:
             raise RiskPolicyAuthorityError(
                 "risk policy registry lacks original journal composition"

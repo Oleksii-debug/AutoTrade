@@ -111,6 +111,25 @@ def _require_shared_monotonic_clock() -> None:
         )
 
 
+def _snapshot_runtime_budget_spec(spec: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
+    """Detach caller-owned budget state before any JournalStore authority read."""
+
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    return RuntimeBudgetSpec(
+        scenario_id=spec.scenario_id,
+        release_sha=spec.release_sha,
+        configuration_hash=spec.configuration_hash,
+        host_fingerprint=spec.host_fingerprint,
+        strategy_horizon_us=spec.strategy_horizon_us,
+        max_p95_financial_latency_us=spec.max_p95_financial_latency_us,
+        max_financial_staleness_us=spec.max_financial_staleness_us,
+        max_research_interference_us=spec.max_research_interference_us,
+        min_financial_samples=spec.min_financial_samples,
+        min_research_samples=spec.min_research_samples,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DurableFinancialIdentityBinding:
     """One exact JournalStore financial event plus its durable latency record."""
@@ -309,8 +328,8 @@ def bind_durable_financial_latency_to_target_host_measurement(
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement does not declare the shared monotonic/perf clock"
         )
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    spec = _snapshot_runtime_budget_spec(spec)
+    declared_plan_id = _text(declared_plan_id, name="declared_plan_id")
     if measurement.source_sha != spec.release_sha:
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement source SHA conflicts with runtime budget"

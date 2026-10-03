@@ -184,6 +184,29 @@ class FxRoundingPolicy:
         return "fx-rounding:sha256:" + sha256(payload).hexdigest()
 
 
+def _validated_rounding_policy(
+    value: FxRoundingPolicy | None,
+    *,
+    reporting_currency: str,
+) -> FxRoundingPolicy | None:
+    if value is None:
+        return None
+    if type(value) is not FxRoundingPolicy:
+        raise FxValuationError(
+            "rounding_policy must be exact FxRoundingPolicy or None"
+        )
+    policy = FxRoundingPolicy(
+        reporting_currency=_exact_field(
+            value, "reporting_currency", name="rounding_policy"
+        ),
+        quantum=_exact_field(value, "quantum", name="rounding_policy"),
+        version=_exact_field(value, "version", name="rounding_policy"),
+    )
+    if policy.reporting_currency != reporting_currency:
+        raise FxValuationError("FX rounding policy reporting currency mismatch")
+    return policy
+
+
 @dataclass(frozen=True)
 class FxQuote:
     base_currency: str
@@ -327,20 +350,10 @@ def value_amount(
     haircut_value = _decimal(haircut, "haircut")
     if haircut_value < 0 or haircut_value >= 1:
         raise FxValuationError("haircut must be in [0, 1)")
-    if rounding_policy is not None:
-        if type(rounding_policy) is not FxRoundingPolicy:
-            raise FxValuationError(
-                "rounding_policy must be exact FxRoundingPolicy or None"
-            )
-        rounding_policy = FxRoundingPolicy(
-            reporting_currency=_exact_field(
-                rounding_policy, "reporting_currency", name="rounding_policy"
-            ),
-            quantum=_exact_field(rounding_policy, "quantum", name="rounding_policy"),
-            version=_exact_field(rounding_policy, "version", name="rounding_policy"),
-        )
-        if rounding_policy.reporting_currency != reporting:
-            raise FxValuationError("FX rounding policy reporting currency mismatch")
+    rounding_policy = _validated_rounding_policy(
+        rounding_policy,
+        reporting_currency=reporting,
+    )
 
     if source == reporting:
         return FxValuation(
@@ -557,6 +570,15 @@ def value_cash_balances(
         if type(raw_currency) is not str:
             raise FxValuationError("quote currency keys must be exact strings")
     reporting = _currency(reporting_currency, "reporting_currency")
+    point = _instant(as_of, "as_of")
+    age_limit = _age_limit(max_age)
+    haircut_value = _decimal(haircut, "haircut")
+    if haircut_value < 0 or haircut_value >= 1:
+        raise FxValuationError("haircut must be in [0, 1)")
+    validated_rounding_policy = _validated_rounding_policy(
+        rounding_policy,
+        reporting_currency=reporting,
+    )
 
     components: list[FxValuation] = []
     seen_currencies: set[str] = set()
@@ -574,10 +596,10 @@ def value_cash_balances(
             source_currency=currency,
             reporting_currency=reporting,
             quote=quote,
-            as_of=as_of,
-            max_age=max_age,
-            haircut=haircut,
-            rounding_policy=rounding_policy,
+            as_of=point,
+            max_age=age_limit,
+            haircut=haircut_value,
+            rounding_policy=validated_rounding_policy,
         )
         components.append(component)
 

@@ -572,6 +572,93 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_empty_portfolio_cannot_skip_shared_valuation_authority(self):
+        valid = value_cash_balances(
+            {},
+            reporting_currency="USD",
+            quotes={},
+            as_of=NOW,
+            max_age=timedelta(minutes=1),
+        )
+        self.assertEqual(valid.status, "CERTAIN")
+        self.assertEqual(valid.total, Decimal("0"))
+        self.assertTrue(valid.allocatable)
+
+        with self.assertRaisesRegex(FxValuationError, "exact datetime"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=object(),
+                max_age=timedelta(minutes=1),
+            )
+        with self.assertRaisesRegex(FxValuationError, "non-negative exact timedelta"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=-timedelta(microseconds=1),
+            )
+        with self.assertRaisesRegex(FxValuationError, "haircut must be in"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                haircut="1",
+            )
+        with self.assertRaisesRegex(FxValuationError, "reporting currency mismatch"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=FxRoundingPolicy(
+                    reporting_currency="EUR",
+                    quantum="0.01",
+                ),
+            )
+
+    def test_empty_portfolio_rejects_polymorphic_context_without_callbacks(self):
+        touched = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                touched.append("utcoffset")
+                raise AssertionError("hostile datetime callback")
+
+        class HostilePolicy(FxRoundingPolicy):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(name)
+                    raise AssertionError("hostile policy callback")
+                return super().__getattribute__(name)
+
+        with self.assertRaisesRegex(FxValuationError, "exact datetime"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=HostileDateTime(
+                    2026, 9, 24, 18, 0, tzinfo=timezone.utc
+                ),
+                max_age=timedelta(minutes=1),
+            )
+        with self.assertRaisesRegex(FxValuationError, "exact FxRoundingPolicy"):
+            value_cash_balances(
+                {},
+                reporting_currency="USD",
+                quotes={},
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=object.__new__(HostilePolicy),
+            )
+
+        self.assertEqual(touched, [])
+
     def test_mapping_subclasses_are_rejected_before_mapping_callbacks(self):
         touched = []
 

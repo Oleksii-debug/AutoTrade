@@ -31,7 +31,12 @@ from .financing import (
     FinancingUpdate,
     book_financing_delta,
 )
-from .exact_decimal import exact_subtract
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+)
 from .instruments import (
     InstrumentRegistry,
     InstrumentRegistryError,
@@ -411,20 +416,25 @@ def authenticated_financing_event(
 
 
 def _milliseconds_instant(value: object, *, name: str) -> datetime:
-    if isinstance(value, bool):
-        raise FinancingError(f"{name} must be epoch milliseconds")
-    if isinstance(value, int):
-        milliseconds = value
-    elif isinstance(value, str) and value.isdigit():
-        milliseconds = int(value)
+    if type(value) is int:
+        token = str(value)
+    elif type(value) is str:
+        token = value
     else:
         raise FinancingError(f"{name} must be epoch milliseconds")
+    try:
+        milliseconds = parse_bounded_json_integer_token(token)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FinancingError(f"{name} must be bounded epoch milliseconds") from error
     if milliseconds < 0:
         raise FinancingError(f"{name} must be non-negative")
     seconds, remainder = divmod(milliseconds, 1000)
-    return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
-        microsecond=remainder * 1000
-    )
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
+            microsecond=remainder * 1000
+        )
+    except (OverflowError, OSError, ValueError) as error:
+        raise FinancingError(f"{name} is outside supported UTC range") from error
 
 
 def _bybit_funding_event_from_exact_response(
@@ -474,10 +484,12 @@ def _bybit_funding_event_from_exact_response(
     if not isinstance(raw_funding, str) or raw_funding != raw_funding.strip():
         raise FinancingError("Bybit funding must be an exact decimal string")
     try:
-        funding = Decimal(raw_funding)
-    except InvalidOperation as error:
-        raise FinancingError("Bybit funding must be an exact decimal string") from error
-    if not funding.is_finite() or funding >= 0:
+        funding = parse_bounded_exact_decimal(raw_funding, allow_exponent=False)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FinancingError(
+            "Bybit funding must be a bounded exact decimal string"
+        ) from error
+    if funding >= 0:
         raise FinancingError(
             "Bybit funding authority currently supports paid funding charges only"
         )
@@ -510,6 +522,43 @@ def _bybit_funding_event_from_exact_response(
         row.get("transactionTime"),
         name="transactionTime",
     )
+    start_at = (
+        None
+        if observation.query_binding.query.get("startTime") is None
+        else _milliseconds_instant(
+            observation.query_binding.query.get("startTime"),
+            name="startTime",
+        )
+    )
+    end_at = (
+        None
+        if observation.query_binding.query.get("endTime") is None
+        else _milliseconds_instant(
+            observation.query_binding.query.get("endTime"),
+            name="endTime",
+        )
+    )
+    if start_at is not None and end_at is not None and start_at > end_at:
+        raise FinancingError("Bybit funding query time bounds are contradictory")
+    if start_at is not None and effective_at < start_at:
+        raise FinancingError("Bybit funding transactionTime precedes authenticated query")
+    if end_at is not None and effective_at > end_at:
+        raise FinancingError("Bybit funding transactionTime exceeds authenticated query")
+    raw_cash_flow = row.get("cashFlow")
+    if raw_cash_flow is not None:
+        try:
+            companion_cash_flow = parse_bounded_exact_decimal(
+                raw_cash_flow,
+                allow_exponent=False,
+            )
+        except (ExactDecimalError, TypeError, ValueError) as error:
+            raise FinancingError(
+                "Bybit settlement cashFlow must be a bounded exact decimal string"
+            ) from error
+        if companion_cash_flow != 0:
+            raise FinancingError(
+                "Bybit SETTLEMENT with companion cashFlow requires settlement authority"
+            )
     try:
         version = instrument_registry.exact(requested_instrument_version)
     except InstrumentRegistryError as error:
@@ -563,7 +612,7 @@ def _bybit_funding_event_from_exact_response(
         effective_at=effective_at,
         available_at=available_at,
         unit=currency,
-        amount=-funding,
+        amount=exact_subtract(Decimal("0"), funding),
         source_account=f"CASH:{currency}",
         evidence_ref=evidence_ref,
     )

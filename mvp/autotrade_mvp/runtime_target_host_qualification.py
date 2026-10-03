@@ -164,6 +164,7 @@ class RuntimeTargetHostProvenance:
     release_artifact_sha256: str
     collector_id: str
     collector_version: str
+    payload_artifact_id: str
     payload_sha256: str
     schema_version: str = PROVENANCE_SCHEMA_VERSION
 
@@ -185,6 +186,11 @@ class RuntimeTargetHostProvenance:
             self,
             "release_artifact_id",
             _uuid(self.release_artifact_id, name="release_artifact_id"),
+        )
+        object.__setattr__(
+            self,
+            "payload_artifact_id",
+            _uuid(self.payload_artifact_id, name="payload_artifact_id"),
         )
         for field in ("scenario_id", "collector_id", "collector_version"):
             object.__setattr__(
@@ -211,6 +217,7 @@ class RuntimeTargetHostProvenance:
             "evidence_kind": self.evidence_kind,
             "host_fingerprint": self.host_fingerprint,
             "journal_store_identity_digest": self.journal_store_identity_digest,
+            "payload_artifact_id": self.payload_artifact_id,
             "payload_sha256": self.payload_sha256,
             "release_artifact_id": self.release_artifact_id,
             "release_artifact_sha256": self.release_artifact_sha256,
@@ -234,6 +241,7 @@ class RuntimeTargetHostProvenance:
             "evidence_kind",
             "host_fingerprint",
             "journal_store_identity_digest",
+            "payload_artifact_id",
             "payload_sha256",
             "release_artifact_id",
             "release_artifact_sha256",
@@ -382,19 +390,22 @@ class AcceptedRuntimeTargetHostQualification:
     binding_artifact_id: str
     binding_sha256: str
     evidence_sha256_by_kind: Mapping[str, str]
+    payload_artifact_id_by_kind: Mapping[str, str]
+    payload_sha256_by_kind: Mapping[str, str]
     collector_by_kind: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
+        for field in (
             "evidence_sha256_by_kind",
-            MappingProxyType(dict(self.evidence_sha256_by_kind)),
-        )
-        object.__setattr__(
-            self,
+            "payload_artifact_id_by_kind",
+            "payload_sha256_by_kind",
             "collector_by_kind",
-            MappingProxyType(dict(self.collector_by_kind)),
-        )
+        ):
+            object.__setattr__(
+                self,
+                field,
+                MappingProxyType(dict(getattr(self, field))),
+            )
 
 
 def _snapshot_ref(value: EvidenceArtifactRef) -> EvidenceArtifactRef:
@@ -460,6 +471,27 @@ def _read_artifact_bytes(
     if "sha256:" + sha256(raw).hexdigest() != ref.sha256:
         raise RuntimeTargetHostQualificationError(
             "target-host artifact bytes do not match accepted evidence digest"
+        )
+    return raw
+
+
+def _read_bound_payload(
+    reader: Callable[[str], tuple[dict[str, object], bytes]],
+    provenance: RuntimeTargetHostProvenance,
+) -> bytes:
+    try:
+        _manifest, raw = reader(provenance.payload_artifact_id)
+    except (ArtifactIntegrityError, FileNotFoundError, OSError) as error:
+        raise RuntimeTargetHostQualificationError(
+            f"retained raw payload is unavailable for {provenance.evidence_kind}"
+        ) from error
+    if type(raw) is not bytes or not raw:
+        raise RuntimeTargetHostQualificationError(
+            f"retained raw payload is empty or non-bytes for {provenance.evidence_kind}"
+        )
+    if "sha256:" + sha256(raw).hexdigest() != provenance.payload_sha256:
+        raise RuntimeTargetHostQualificationError(
+            f"retained raw payload digest mismatch for {provenance.evidence_kind}"
         )
     return raw
 
@@ -631,6 +663,10 @@ def verify_runtime_target_host_qualification(
         RESOURCE_EVIDENCE_KIND: binding.resource_evidence_sha256,
         HOST_INVENTORY_EVIDENCE_KIND: binding.host_inventory_evidence_sha256,
     }
+    top_level_artifact_ids = {ref.artifact_id for ref in refs.values()}
+    payload_artifact_ids: set[str] = set()
+    payload_id_by_kind: dict[str, str] = {}
+    payload_digest_by_kind: dict[str, str] = {}
     collectors: dict[str, str] = {}
     for kind in sorted(_PROVENANCE_KINDS):
         ref = refs[kind]
@@ -649,6 +685,18 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance identity conflicts for {kind}"
             )
+        if provenance.payload_artifact_id in top_level_artifact_ids:
+            raise RuntimeTargetHostQualificationError(
+                f"raw payload artifact aliases signed envelope for {kind}"
+            )
+        if provenance.payload_artifact_id in payload_artifact_ids:
+            raise RuntimeTargetHostQualificationError(
+                f"raw payload artifact is reused across evidence families: {kind}"
+            )
+        _read_bound_payload(reader, provenance)
+        payload_artifact_ids.add(provenance.payload_artifact_id)
+        payload_id_by_kind[kind] = provenance.payload_artifact_id
+        payload_digest_by_kind[kind] = provenance.payload_sha256
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
     return AcceptedRuntimeTargetHostQualification(
@@ -668,5 +716,7 @@ def verify_runtime_target_host_qualification(
         evidence_sha256_by_kind={
             kind: ref.sha256 for kind, ref in sorted(refs.items())
         },
+        payload_artifact_id_by_kind=payload_id_by_kind,
+        payload_sha256_by_kind=payload_digest_by_kind,
         collector_by_kind=collectors,
     )

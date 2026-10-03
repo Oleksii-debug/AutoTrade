@@ -141,6 +141,33 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(structured["safe"], "ok")
             self.assertTrue(store.verify())
 
+    def test_camel_case_sensitive_aliases_do_not_escape_accessible_export(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-camel-sensitive-aliases")
+            item["attributes"].update(
+                {
+                    "accessToken": "ACCESS-EXPORT-SECRET",
+                    "clientSecret": "CLIENT-EXPORT-SECRET",
+                    "sessionId": "SESSION-EXPORT-SECRET",
+                    "proxyAuthorization": "PROXY-EXPORT-SECRET",
+                    "XApiKey": "API-EXPORT-SECRET",
+                }
+            )
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export("decision-camel-sensitive-aliases")
+            for leaked in (
+                "ACCESS-EXPORT-SECRET",
+                "CLIENT-EXPORT-SECRET",
+                "SESSION-EXPORT-SECRET",
+                "PROXY-EXPORT-SECRET",
+                "API-EXPORT-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+
     def test_benign_counter_aliases_only_bypass_redaction_for_exact_counts(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

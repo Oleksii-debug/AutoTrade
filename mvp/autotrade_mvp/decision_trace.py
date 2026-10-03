@@ -57,11 +57,18 @@ _SENSITIVE_KEYS = {
 
 
 def _normalized_key(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("diagnostic keys must be exact strings")
+    # Preserve acronym boundaries as well as ordinary camelCase so aliases such
+    # as XApiKey, accessToken and proxyAuthorization canonicalize to the same
+    # security vocabulary as x_api_key, access_token and proxy_authorization.
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value.strip())
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
     return "_".join(
         part
         for part in "".join(
             character.lower() if character.isalnum() else "_"
-            for character in str(value).strip()
+            for character in separated
         ).split("_")
         if part
     )

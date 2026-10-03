@@ -419,6 +419,42 @@ class DecisionTraceStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
                 store.append(bad_digest)
 
+    def test_camel_and_acronym_secret_aliases_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-camel-secret-aliases")
+            item["attributes"] = {
+                "accessToken": "ACCESS-CAMEL-SECRET",
+                "clientSecret": "CLIENT-CAMEL-SECRET",
+                "sessionId": "SESSION-CAMEL-SECRET",
+                "proxyAuthorization": "PROXY-CAMEL-SECRET",
+                "XApiKey": "API-ACRONYM-SECRET",
+                "safeValue": "visible",
+            }
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)["attributes"]
+
+            for leaked in (
+                "ACCESS-CAMEL-SECRET",
+                "CLIENT-CAMEL-SECRET",
+                "SESSION-CAMEL-SECRET",
+                "PROXY-CAMEL-SECRET",
+                "API-ACRONYM-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+            for key in (
+                "accessToken",
+                "clientSecret",
+                "sessionId",
+                "proxyAuthorization",
+                "XApiKey",
+            ):
+                self.assertEqual(persisted[key], "[REDACTED]")
+            self.assertEqual(persisted["safeValue"], "visible")
+
     def test_benign_security_counter_names_cannot_hide_secret_values(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

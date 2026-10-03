@@ -150,6 +150,71 @@ class ScientificTrialOwnerTests(unittest.TestCase):
             self.assertTrue(owner.authoritative)
             self.assertTrue(owner.digest.startswith("sha256:"))
 
+    def test_registry_connect_instance_shadow_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry.register_protocol(bound_protocol(gate_profile))
+            state = {"called": False}
+
+            def hostile_connect(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("caller-owned registry connection override executed")
+
+            registry._connect = hostile_connect
+            with self.assertRaisesRegex(
+                TypeError,
+                "authority methods must not be instance-shadowed",
+            ):
+                resolve_gate_profile_protocol_binding(
+                    registry=registry,
+                    profile=gate_profile,
+                )
+            self.assertFalse(state["called"])
+
+    def test_registry_trial_evidence_instance_shadow_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(
+                bound_protocol(gate_profile, trial_budget=1)
+            )
+            fill_trials(registry, registered.protocol_id, 1)
+            state = {"called": False}
+
+            def hostile_trial_evidence(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("caller-owned trial evidence override executed")
+
+            registry.trial_completeness_evidence = hostile_trial_evidence
+            with self.assertRaisesRegex(
+                TypeError,
+                "authority methods must not be instance-shadowed",
+            ):
+                resolve_scientific_trial_owner(
+                    registry=registry,
+                    profile=gate_profile,
+                    evidence=evidence(trials_attempted=1, trial_log_complete=True),
+                )
+            self.assertFalse(state["called"])
+
+    def test_wrapper_rejects_registry_shadow_before_base_gate_evaluation(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry._connect = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("hostile connect executed")
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "authority methods must not be instance-shadowed",
+            ):
+                evaluate_gates_with_scientific_trial_owner(
+                    gate_profile,
+                    evidence(),
+                    scientific_registry=registry,
+                )
+
     def test_wrapper_reports_missing_registry_owner_as_inconclusive(self):
         gate_profile = profile()
         with TemporaryDirectory() as directory:

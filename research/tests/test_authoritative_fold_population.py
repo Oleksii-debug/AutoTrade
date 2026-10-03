@@ -543,7 +543,6 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             dataset_id=legitimate.dataset_id,
             dataset_version=legitimate.dataset_version,
             manifest_digest=legitimate.manifest_digest,
-            artifact_store=self.artifacts,
             training_population_fingerprint=legitimate.training_population_fingerprint,
             feature_spec_fingerprint=legitimate.feature_spec_fingerprint,
             replay_common_cut_fingerprint=None,

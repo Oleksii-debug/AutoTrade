@@ -1,5 +1,7 @@
+from inspect import signature
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.performance_qualification import (
     RuntimeBudgetError,
@@ -78,6 +80,13 @@ class _ForgedJournalStore(JournalStore):
 
 
 class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
+    def test_campaign_api_has_no_caller_selected_clock_seam(self):
+        self.assertNotIn("monotonic_ns", signature(begin_runtime_campaign).parameters)
+        self.assertNotIn(
+            "monotonic_ns",
+            signature(collect_runtime_campaign_evidence).parameters,
+        )
+
     def test_campaign_rejects_journal_store_subclass_authority(self):
         with TemporaryDirectory() as directory:
             journal = _ForgedJournalStore(f"{directory}/journal.sqlite3")
@@ -90,12 +99,14 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                 clock_called = True
                 return 1_000_000_000
 
-            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                side_effect=clock,
+            ), self.assertRaisesRegex(TypeError, "exact JournalStore"):
                 begin_runtime_campaign(
                     journal=journal,
                     spec=spec,
                     plan=current_plan,
-                    monotonic_ns=clock,
                 )
             self.assertFalse(clock_called)
 
@@ -110,7 +121,10 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                 _rebind_store(journal, other)
                 return 1_000_000_000
 
-            with self.assertRaisesRegex(
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                side_effect=starting_clock,
+            ), self.assertRaisesRegex(
                 RuntimeError,
                 "journal operation authority changed before connection",
             ):
@@ -118,7 +132,6 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                     journal=journal,
                     spec=spec,
                     plan=current_plan,
-                    monotonic_ns=starting_clock,
                 )
 
     def test_collect_rejects_cut_from_another_journal_generation(self):
@@ -127,16 +140,22 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
             other = JournalStore(f"{directory}/journal-b.sqlite3")
             spec = _spec()
             current_plan = _plan(spec)
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             other.append_event(_envelope("fin-expected"))
             _rebind_store(journal, other)
 
-            with self.assertRaisesRegex(
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_001_000,
+            ), self.assertRaisesRegex(
                 RuntimeBudgetError,
                 "campaign cut belongs to another journal generation",
             ):
@@ -150,7 +169,6 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                     research_interference_us=(100,),
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 1},
-                    monotonic_ns=lambda: 1_000_001_000,
                 )
 
     def test_terminal_clock_shadow_cannot_hide_undeclared_financial_event(self):
@@ -158,12 +176,15 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
             journal = JournalStore(f"{directory}/journal.sqlite3")
             spec = _spec()
             current_plan = _plan(spec)
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             journal.append_event(_envelope("fin-expected"))
             journal.append_event(_envelope("fin-extra"))
 
@@ -175,7 +196,10 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                 )
                 return 1_000_001_000
 
-            with self.assertRaisesRegex(
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                side_effect=ending_clock,
+            ), self.assertRaisesRegex(
                 RuntimeBudgetError,
                 "undeclared financial event identities.*fin-extra",
             ):
@@ -189,7 +213,6 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                     research_interference_us=(100,),
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 1},
-                    monotonic_ns=ending_clock,
                 )
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from hashlib import sha256
 from types import MappingProxyType
-from typing import Callable, Mapping, Sequence
+from typing import Mapping, Sequence
 import json
 import re
 import time
@@ -552,7 +552,6 @@ def begin_runtime_campaign(
     journal: JournalStore,
     spec: RuntimeBudgetSpec,
     plan: RuntimeCampaignPlan,
-    monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> RuntimeCampaignCut:
     journal_identity = require_exact_journal_store_authority(
         journal,
@@ -579,7 +578,7 @@ def begin_runtime_campaign(
     with journal_store_authority_scope(journal, journal_identity):
         start_journal_sequence = JournalStore.current_journal_sequence(journal)
         started_monotonic_ns = _positive_int(
-            monotonic_ns(),
+            time.monotonic_ns(),
             name="started_monotonic_ns",
             allow_zero=True,
         )
@@ -608,7 +607,6 @@ def collect_runtime_campaign_evidence(
     research_interference_us: Sequence[int],
     resource_evidence_hash: str,
     resource_metrics: Mapping[str, int],
-    monotonic_ns: Callable[[], int] = time.monotonic_ns,
     max_events: int = 100000,
 ) -> RuntimeCampaignEvidence:
     journal_identity = require_exact_journal_store_authority(
@@ -645,7 +643,7 @@ def collect_runtime_campaign_evidence(
             raise RuntimeBudgetError("campaign reconnect backlog is invalid")
 
         ended_monotonic_ns = _positive_int(
-            monotonic_ns(),
+            time.monotonic_ns(),
             name="ended_monotonic_ns",
             allow_zero=True,
         )

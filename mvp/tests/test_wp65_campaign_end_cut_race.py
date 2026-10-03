@@ -71,12 +71,15 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                 expected_financial_event_ids=("fin-race",),
                 financial_aggregate_types=("risk_decision",),
             )
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=plan,
+                )
 
             original_current = JournalStore.current_journal_sequence
             original_load = JournalStore.load_events_after_journal_sequence
@@ -115,18 +118,21 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                     "load_events_after_journal_sequence",
                     new=load_with_race,
                 ):
-                    evidence = collect_runtime_campaign_evidence(
-                        journal=journal,
-                        spec=spec,
-                        plan=plan,
-                        cut=cut,
-                        financial_latency_us=(100,),
-                        financial_staleness_us=(100,),
-                        research_interference_us=(100,),
-                        resource_evidence_hash=RESOURCE,
-                        resource_metrics={"cpu_peak_millis": 1},
-                        monotonic_ns=ending_clock,
-                    )
+                    with patch(
+                        "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                        side_effect=ending_clock,
+                    ):
+                        evidence = collect_runtime_campaign_evidence(
+                            journal=journal,
+                            spec=spec,
+                            plan=plan,
+                            cut=cut,
+                            financial_latency_us=(100,),
+                            financial_staleness_us=(100,),
+                            research_interference_us=(100,),
+                            resource_evidence_hash=RESOURCE,
+                            resource_metrics={"cpu_peak_millis": 1},
+                        )
             except RuntimeBudgetError:
                 # Fail-closed cut rejection is a valid repair outcome.
                 return
@@ -152,12 +158,15 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                 expected_financial_event_ids=("fin-backlog",),
                 financial_aggregate_types=("risk_decision",),
             )
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=plan,
+                )
             journal.append_event(
                 _envelope("fin-backlog"),
                 outbox_topic="runtime-qualification",
@@ -172,18 +181,21 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                 )
                 return 1_000_001_000
 
-            evidence = collect_runtime_campaign_evidence(
-                journal=journal,
-                spec=spec,
-                plan=plan,
-                cut=cut,
-                financial_latency_us=(100,),
-                financial_staleness_us=(100,),
-                research_interference_us=(100,),
-                resource_evidence_hash=RESOURCE,
-                resource_metrics={"cpu_peak_millis": 1},
-                monotonic_ns=ending_clock,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                side_effect=ending_clock,
+            ):
+                evidence = collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(100,),
+                    research_interference_us=(100,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 1},
+                )
 
             # The outbox did drain after the terminal-state snapshot. That later
             # success must not retroactively rewrite the already-ended campaign.
@@ -211,7 +223,10 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                 journal.append_event(_envelope("fin-hidden"))
                 return 1_000_000_000
 
-            with self.assertRaisesRegex(
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                side_effect=starting_clock,
+            ), self.assertRaisesRegex(
                 RuntimeBudgetError,
                 "journal changed while sampling the start clock",
             ):
@@ -219,7 +234,6 @@ class RuntimeCampaignEndCutRaceTests(unittest.TestCase):
                     journal=journal,
                     spec=spec,
                     plan=plan,
-                    monotonic_ns=starting_clock,
                 )
 
 

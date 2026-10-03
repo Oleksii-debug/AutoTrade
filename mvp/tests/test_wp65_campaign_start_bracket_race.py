@@ -1,5 +1,6 @@
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -63,24 +64,30 @@ class RuntimeCampaignStartBracketTests(unittest.TestCase):
                 return 1_000_000_000
 
             try:
-                cut = begin_runtime_campaign(
-                    journal=journal,
-                    spec=spec,
-                    plan=plan,
-                    monotonic_ns=starting_clock,
-                )
-                evidence = collect_runtime_campaign_evidence(
-                    journal=journal,
-                    spec=spec,
-                    plan=plan,
-                    cut=cut,
-                    financial_latency_us=(100,),
-                    financial_staleness_us=(100,),
-                    research_interference_us=(100,),
-                    resource_evidence_hash=RESOURCE,
-                    resource_metrics={"cpu_peak_millis": 1},
-                    monotonic_ns=lambda: 1_000_001_000,
-                )
+                with patch(
+                    "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                    side_effect=starting_clock,
+                ):
+                    cut = begin_runtime_campaign(
+                        journal=journal,
+                        spec=spec,
+                        plan=plan,
+                    )
+                with patch(
+                    "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                    return_value=1_000_001_000,
+                ):
+                    evidence = collect_runtime_campaign_evidence(
+                        journal=journal,
+                        spec=spec,
+                        plan=plan,
+                        cut=cut,
+                        financial_latency_us=(100,),
+                        financial_staleness_us=(100,),
+                        research_interference_us=(100,),
+                        resource_evidence_hash=RESOURCE,
+                        resource_metrics={"cpu_peak_millis": 1},
+                    )
             except RuntimeBudgetError:
                 # A repaired begin cut may fail closed if the journal changes
                 # while the start clock is sampled.

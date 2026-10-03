@@ -1,5 +1,6 @@
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.journal_taxonomy import taxonomy_digest
 from mvp.autotrade_mvp.performance_qualification import (
@@ -81,12 +82,15 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
 
             spec = runtime_spec()
             current_plan = plan(spec, "fin-1", "fin-2")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 1_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
 
             journal.append_event(envelope("fin-1"))
             journal.append_event(
@@ -107,9 +111,12 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     "memory_peak_bytes": 1024,
                     "disk_fsync_p95_us": 200,
                 },
-                "monotonic_ns": lambda: 1_900_000_000,
             }
-            first = collect_runtime_campaign_evidence(journal=journal, **kwargs)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_900_000_000,
+            ):
+                first = collect_runtime_campaign_evidence(journal=journal, **kwargs)
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
@@ -117,7 +124,11 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
 
             reopened = JournalStore(path)
-            second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_900_000_000,
+            ):
+                second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
             self.assertEqual(second.digest, first.digest)
             self.assertEqual(
                 second.recovered_financial_event_bindings,
@@ -129,26 +140,32 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             journal = JournalStore(f"{directory}/journal.sqlite3")
             spec = runtime_spec(samples=1)
             current_plan = plan(spec, "fin-1")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 10_000_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=10_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             journal.append_event(envelope("fin-1"))
 
-            evidence = collect_runtime_campaign_evidence(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                cut=cut,
-                financial_latency_us=(100,),
-                financial_staleness_us=(80,),
-                research_interference_us=(50,),
-                resource_evidence_hash=RESOURCE,
-                resource_metrics={"cpu_peak_millis": 500},
-                monotonic_ns=lambda: 11_100_000_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=11_100_000_000,
+            ):
+                evidence = collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(100,),
+                    financial_staleness_us=(80,),
+                    research_interference_us=(50,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 500},
+                )
             self.assertEqual(evidence.declared_duration_us, 1_000_000)
             self.assertEqual(evidence.observed_duration_us, 1_100_000)
             decision = evaluate_runtime_campaign(spec, evidence)
@@ -160,14 +177,20 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             journal = JournalStore(f"{directory}/journal.sqlite3")
             spec = runtime_spec(samples=1)
             current_plan = plan(spec, "fin-1")
-            cut = begin_runtime_campaign(
-                journal=journal,
-                spec=spec,
-                plan=current_plan,
-                monotonic_ns=lambda: 2_000,
-            )
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=2_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
             journal.append_event(envelope("fin-1"))
-            with self.assertRaisesRegex(RuntimeBudgetError, "moved backwards"):
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_999,
+            ), self.assertRaisesRegex(RuntimeBudgetError, "moved backwards"):
                 collect_runtime_campaign_evidence(
                     journal=journal,
                     spec=spec,
@@ -178,7 +201,6 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     research_interference_us=(50,),
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 500},
-                    monotonic_ns=lambda: 1_999,
                 )
 
     def test_missing_expected_financial_event_is_a_budget_failure_not_a_caller_count(self):

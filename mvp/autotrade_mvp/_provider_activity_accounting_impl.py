@@ -29,6 +29,11 @@ from .accounting import (
     book_external_cash_flow,
     canonical_transaction,
 )
+from .durable_order_projection import (
+    DurableOrderBookProjection,
+    PreparedOrderMutation,
+    _OUTBOX_TOPIC as _ORDER_PROJECTION_OUTBOX_TOPIC,
+)
 from .durable_reservations import (
     DurableReservationBook,
     reservation_snapshot_digest,
@@ -2114,6 +2119,8 @@ def commit_economic_batch_with_reservation_consumption(
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
     provider_fill_binding: PreparedProviderFillBinding | None = None,
+    order_projection: DurableOrderBookProjection | None = None,
+    order_fill: Mapping[str, object] | None = None,
 ) -> bool:
     """Atomically commit canonical economics and reservation consumption.
 
@@ -2191,6 +2198,44 @@ def commit_economic_batch_with_reservation_consumption(
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
     rid = _text(reservation_id, name="reservation_id")
+    if (order_projection is None) != (order_fill is None):
+        raise ValueError(
+            "order_projection and order_fill must be supplied together"
+        )
+    if order_projection is not None:
+        _require_same_financial_journal_generation(
+            economic_book,
+            order_projection,
+            expected_type=DurableOrderBookProjection,
+            subject="order projection",
+        )
+        if (
+            order_projection.provider_id != economic_book.provider_id
+            or order_projection.account_id != economic_book.account_id
+            or order_projection.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "order projection must share provider/account/environment scope"
+            )
+        if type(order_fill) is not dict:
+            raise TypeError("order_fill must be an exact dict when supplied")
+        required_order_fields = {
+            "event_key",
+            "client_order_id",
+            "fill_id",
+            "provider_execution_id",
+            "quantity",
+            "price",
+        }
+        allowed_order_fields = required_order_fields | {
+            "provider_revision",
+            "evidence_refs",
+        }
+        if not required_order_fields.issubset(order_fill) or (
+            set(order_fill) - allowed_order_fields
+        ):
+            raise ValueError("order_fill has invalid RECORD_FILL fields")
+
     when = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if committed_at is None
@@ -2221,6 +2266,29 @@ def commit_economic_batch_with_reservation_consumption(
         transactions,
         committed_at=when,
     )
+
+    order_plan: PreparedOrderMutation | None = None
+    if order_projection is not None:
+        assert order_fill is not None
+        order_plan = order_projection.prepare_record_fill_mutation(
+            event_key=order_fill["event_key"],
+            client_order_id=order_fill["client_order_id"],
+            fill_id=order_fill["fill_id"],
+            provider_execution_id=order_fill["provider_execution_id"],
+            quantity=order_fill["quantity"],
+            price=order_fill["price"],
+            provider_revision=order_fill.get("provider_revision"),
+            committed_at=when,
+            evidence_refs=order_fill.get("evidence_refs"),
+        )
+        provider_execution_id = order_plan.request["provider_execution_id"]
+        if not any(
+            item.cause_event_id == provider_execution_id
+            for item in economic_plan.transactions
+        ):
+            raise AccountingConflict(
+                "OMS fill provider execution is absent from the atomic economic batch"
+            )
 
     settlement_plan = None
     if settlement_book is not None:
@@ -2272,9 +2340,13 @@ def commit_economic_batch_with_reservation_consumption(
         commit_states.append(settlement_plan.already_committed)
     if provider_fill_binding is not None:
         commit_states.append(provider_fill_binding.already_committed)
+    if order_plan is not None:
+        commit_states.append(order_plan.already_committed)
     if any(commit_states) and not all(commit_states):
         reservation_book.refresh()
         economic_book.refresh()
+        if order_projection is not None:
+            order_projection.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
         raise AccountingConflict(
@@ -2283,6 +2355,8 @@ def commit_economic_batch_with_reservation_consumption(
     if all(commit_states):
         reservation_book.refresh()
         economic_book.refresh()
+        if order_projection is not None:
+            order_projection.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
         return False
@@ -2300,6 +2374,10 @@ def commit_economic_batch_with_reservation_consumption(
         raise AccountingConflict(
             "fresh provider fill financial binding is missing durable event"
         )
+    if order_plan is not None and order_plan.envelope is None:
+        raise AccountingConflict(
+            "fresh OMS fill plan is missing its durable event"
+        )
 
     request = {
         "schema_version": "1.0.0",
@@ -2316,6 +2394,16 @@ def commit_economic_batch_with_reservation_consumption(
             if provider_fill_binding is None
             else provider_fill_binding.request
         ),
+        "order_projection": (
+            None
+            if order_plan is None
+            else {
+                "event_key": order_plan.event_key,
+                "operation": order_plan.operation,
+                "request": order_plan.request,
+                "mutation_hash": order_plan.mutation_hash,
+            }
+        ),
     }
     result = {
         "reservation": reservation_plan.snapshot_payload,
@@ -2327,6 +2415,15 @@ def commit_economic_batch_with_reservation_consumption(
             None
             if provider_fill_binding is None
             else provider_fill_binding.result
+        ),
+        "order_projection": (
+            None
+            if order_plan is None
+            else {
+                "event_id": order_plan.event_id,
+                "snapshot": order_plan.snapshot_payload,
+                "mutation_hash": order_plan.mutation_hash,
+            }
         ),
     }
     command_identity = str(
@@ -2366,6 +2463,9 @@ def commit_economic_batch_with_reservation_consumption(
                 0
                 if provider_fill_binding is None
                 else provider_fill_binding.aggregate_version,
+                0
+                if order_plan is None
+                else order_plan.aggregate_version,
             ),
             events=(
                 [
@@ -2382,17 +2482,31 @@ def commit_economic_batch_with_reservation_consumption(
                     if provider_fill_binding is None
                     else [(provider_fill_binding.envelope, None)]
                 )
+                + (
+                    []
+                    if order_plan is None
+                    else [
+                        (
+                            order_plan.envelope,
+                            _ORDER_PROJECTION_OUTBOX_TOPIC,
+                        )
+                    ]
+                )
             ),
         )
     except Exception:
         reservation_book.refresh()
         economic_book.refresh()
+        if order_projection is not None:
+            order_projection.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
         raise
 
     reservation_book.refresh()
     economic_book.refresh()
+    if order_projection is not None:
+        order_projection.refresh()
     if settlement_book is not None:
         settlement_book.refresh()
     return inserted

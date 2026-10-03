@@ -471,78 +471,6 @@ def _resolved_policy_authority_digest(value: ResolvedRiskPolicy) -> str:
     )
 
 
-_RESOLVED_POLICY_ISSUANCE_BINDINGS: dict[
-    int,
-    tuple[weakref.ReferenceType, str],
-] = {}
-_RESOLVED_POLICY_ISSUANCE_BINDINGS_LOCK = threading.RLock()
-
-
-def _record_resolved_policy_issuance(
-    value: ResolvedRiskPolicy,
-) -> ResolvedRiskPolicy:
-    """Retain issuance truth outside the caller-held result object."""
-
-    if type(value) is not ResolvedRiskPolicy:
-        raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
-    issued_digest = _resolved_policy_authority_digest(value)
-    if value._authority_digest != issued_digest:
-        raise RiskPolicyAuthorityError(
-            "resolved RiskPolicy authority changed before registry issuance"
-        )
-    key = id(value)
-    with _RESOLVED_POLICY_ISSUANCE_BINDINGS_LOCK:
-        existing = _RESOLVED_POLICY_ISSUANCE_BINDINGS.get(key)
-        if existing is not None:
-            referent = existing[0]()
-            if referent is value:
-                if existing[1] != issued_digest:
-                    raise RiskPolicyAuthorityError(
-                        "resolved RiskPolicy issuance binding changed"
-                    )
-                return value
-            if referent is not None:
-                raise RiskPolicyAuthorityError(
-                    "resolved RiskPolicy issuance identity collision"
-                )
-            _RESOLVED_POLICY_ISSUANCE_BINDINGS.pop(key, None)
-        # Deliberately use a callback-free weakref.  Caller code cannot invoke a
-        # weakref removal callback to erase live issuance authority.
-        _RESOLVED_POLICY_ISSUANCE_BINDINGS[key] = (
-            weakref.ref(value),
-            issued_digest,
-        )
-    return value
-
-
-def require_registry_issued_resolved_policy(
-    value: object,
-) -> ResolvedRiskPolicy:
-    """Require the exact object and content durably issued by the registry."""
-
-    if type(value) is not ResolvedRiskPolicy:
-        raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
-    key = id(value)
-    with _RESOLVED_POLICY_ISSUANCE_BINDINGS_LOCK:
-        binding = _RESOLVED_POLICY_ISSUANCE_BINDINGS.get(key)
-    if binding is None or binding[0]() is not value:
-        raise RiskPolicyAuthorityError(
-            "resolved RiskPolicy was not issued by DurableRiskPolicyRegistry"
-        )
-    issued_digest = binding[1]
-    try:
-        current_digest = _resolved_policy_authority_digest(value)
-    except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
-        raise RiskPolicyAuthorityError(
-            "resolved RiskPolicy authority changed after registry issuance"
-        ) from error
-    if value._authority_digest != issued_digest or current_digest != issued_digest:
-        raise RiskPolicyAuthorityError(
-            "resolved RiskPolicy authority changed after registry issuance"
-        )
-    return value
-
-
 def _decimal_text(value: object, *, name: str) -> str | None:
     if value is None:
         return None
@@ -1369,4 +1297,91 @@ class DurableRiskPolicyRegistry:
             ),
             _authority_token=_RESOLVED_POLICY_AUTHORITY_TOKEN,
         )
-        return _record_resolved_policy_issuance(resolved)
+        return resolved
+
+def _install_resolved_policy_issuance_authority():
+    """Install a closure-owned issuance capability on the registry resolver.
+
+    The mutable binding table and the registrar are deliberately not module
+    globals. Importing the constructor token or recomputing the caller-visible
+    diagnostic digest therefore cannot register a caller-constructed result.
+    """
+
+    lock = threading.RLock()
+    bindings: dict[int, tuple[weakref.ReferenceType, str]] = {}
+    original_resolve = DurableRiskPolicyRegistry.resolve_current
+
+    def bind_issued(value: ResolvedRiskPolicy) -> ResolvedRiskPolicy:
+        if type(value) is not ResolvedRiskPolicy:
+            raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
+        issued_digest = _resolved_policy_authority_digest(value)
+        if value._authority_digest != issued_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed before registry issuance"
+            )
+        key = id(value)
+        with lock:
+            existing = bindings.get(key)
+            if existing is not None:
+                referent = existing[0]()
+                if referent is value:
+                    if existing[1] != issued_digest:
+                        raise RiskPolicyAuthorityError(
+                            "resolved RiskPolicy issuance binding changed"
+                        )
+                    return value
+                if referent is not None:
+                    raise RiskPolicyAuthorityError(
+                        "resolved RiskPolicy issuance identity collision"
+                    )
+                bindings.pop(key, None)
+            # Callback-free weakrefs prevent caller-invoked removal callbacks
+            # from erasing issuance truth for a live result.
+            bindings[key] = (weakref.ref(value), issued_digest)
+        return value
+
+    def sealed_resolve_current(
+        self,
+        scope: RiskPolicyScope,
+        *,
+        journal_sequence_cut: int | None = None,
+    ) -> ResolvedRiskPolicy:
+        resolved = original_resolve(
+            self,
+            scope,
+            journal_sequence_cut=journal_sequence_cut,
+        )
+        return bind_issued(resolved)
+
+    def require_issued(value: object) -> ResolvedRiskPolicy:
+        if type(value) is not ResolvedRiskPolicy:
+            raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
+        key = id(value)
+        with lock:
+            binding = bindings.get(key)
+        if binding is None or binding[0]() is not value:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy was not issued by DurableRiskPolicyRegistry"
+            )
+        issued_digest = binding[1]
+        try:
+            current_digest = _resolved_policy_authority_digest(value)
+        except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed after registry issuance"
+            ) from error
+        if value._authority_digest != issued_digest or current_digest != issued_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed after registry issuance"
+            )
+        return value
+
+    DurableRiskPolicyRegistry.resolve_current = sealed_resolve_current
+    return require_issued
+
+
+require_registry_issued_resolved_policy = (
+    _install_resolved_policy_issuance_authority()
+)
+del _install_resolved_policy_issuance_authority
+

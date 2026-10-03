@@ -687,6 +687,9 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
+        # Revalidate captured scope immediately after caller code, before
+        # interpreting the response using any retargeted financial owner.
+        self._require_canonical_authorities()
         if not isinstance(source, ProviderResponseObservation):
             raise OptionLifecycleError(
                 "provider lifecycle evidence must be a sealed ProviderResponseObservation"

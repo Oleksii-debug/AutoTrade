@@ -690,12 +690,12 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             account_id="paper-1",
             environment="PAPER",
         )
-        original_prepare = self.book.prepare_batch_mutation
+        original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
         raced = False
 
-        def racing_prepare(transactions, **kwargs):
+        def racing_prepare(book, transactions, **kwargs):
             nonlocal raced
-            if not raced:
+            if book is self.book and not raced:
                 raced = True
                 competing_book.append(
                     book_equity_fill(
@@ -708,12 +708,12 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                         price=Decimal("1"),
                     )
                 )
-            return original_prepare(transactions, **kwargs)
+            return original_prepare(book, transactions, **kwargs)
 
         with patch.object(
-            self.book,
+            DurableProviderEconomicBook,
             "prepare_batch_mutation",
-            side_effect=racing_prepare,
+            new=racing_prepare,
         ):
             with self.assertRaisesRegex(
                 OptionLifecycleConflict,

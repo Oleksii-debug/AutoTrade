@@ -7,9 +7,10 @@ It is a development fallback surface, not NVDA release qualification.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any
+
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 
 
 STATE_TEXT = {
@@ -45,10 +46,10 @@ def _reservation_amount_text(value: Any) -> str:
     if type(value) is not str or not value or value != value.strip():
         return ""
     try:
-        amount = Decimal(value)
-    except (InvalidOperation, ValueError):
+        amount = parse_bounded_exact_decimal(value)
+    except ExactDecimalError:
         return ""
-    if not amount.is_finite() or amount < 0:
+    if amount < 0:
         return ""
     return value
 

@@ -127,6 +127,10 @@ class ImmutableWebAssetBundle:
             or _CONTRACT_VERSION_RE.fullmatch(self.host_api_contract_version) is None
         ):
             raise ValueError("web bundle Host API contract version is not canonical")
+        if self.host_api_contract_version != HOST_API_CONTRACT_VERSION:
+            raise ValueError(
+                "web bundle Host API contract version does not match runtime authority"
+            )
         if type(self.assets) is not tuple or not self.assets:
             raise TypeError("web bundle assets must be a non-empty exact tuple")
         if len(self.assets) > _MAX_ASSETS:

@@ -57,7 +57,8 @@ _OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
 _OWNER_AGGREGATE_ID = "canonical"
 _BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
 
-_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@2"
+_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@3"
+_SIMULATION_EPOCH = "2026-09-30T12:00:00Z"
 _STRATEGY_ID = "moving-average"
 _STRATEGY_VERSION = "1"
 _STRATEGY_FAST = 2
@@ -178,6 +179,7 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
             "reservation": _RESERVATION_PROTOCOL,
             "reconciliation": _RECONCILIATION_PROTOCOL,
         },
+        "clock": {"kind": "DETERMINISTIC_UTC", "default_epoch": _SIMULATION_EPOCH},
         "fault_injection_mode": (
             "AFTER_ACCEPT_RESPONSE_LOST" if fault_after_send else "NONE"
         ),
@@ -186,14 +188,15 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
 
 def _now(value: str | None) -> str:
     if value is None:
-        point = datetime.now(timezone.utc)
-    else:
-        try:
-            point = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (AttributeError, ValueError) as error:
-            raise ValueError("now must be an ISO timestamp with timezone") from error
-        if point.tzinfo is None:
-            raise ValueError("now must include timezone")
+        value = _SIMULATION_EPOCH
+    if type(value) is not str:
+        raise TypeError("now must be exact timestamp text")
+    try:
+        point = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("now must be an ISO timestamp with timezone") from error
+    if point.tzinfo is None:
+        raise ValueError("now must include timezone")
     return point.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -776,6 +779,65 @@ def _finalize_zero_wire_blocked(
     return {**result, "resumed": resumed}
 
 
+def _recover_existing_buy_attempt(
+    store: JournalStore,
+    *,
+    episode_id: str,
+    decision,
+    prepared_request_time: str,
+    recovery_now: str,
+):
+    """Advance only the durable recovery automaton for an existing BUY attempt.
+
+    Re-entering GuardedDispatcher with the exact original attempt/request is safe:
+    its existing-attempt path validates immutable submission identity and returns
+    before authority_check or transport_send. This advances Prepared/Sending
+    crash states without opening a second outbound-send path.
+    """
+
+    if decision.side != "BUY":
+        raise ValueError("submission recovery requires BUY decision")
+    quantity_text = canonical_decimal_text(decision.quantity)
+    price_text = canonical_decimal_text(decision.price)
+    intent_id = _uuid("intent", episode_id)
+    intent_hash = payload_digest({
+        "episode_id": episode_id,
+        "side": "BUY",
+        "quantity": quantity_text,
+        "price": price_text,
+        "instrument": INSTRUMENT,
+    })
+    attempt_id = _uuid("attempt", episode_id)
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError(
+            "existing submission recovery attempted fresh authority or wire I/O"
+        )
+
+    return GuardedDispatcher(
+        store,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        owner_token="canonical-simulation-owner",
+    ).dispatch(
+        attempt_id=attempt_id,
+        intent_id=intent_id,
+        intent_hash=intent_hash,
+        provider="simulated",
+        request={
+            "attempt_id": attempt_id,
+            "instrument_version": INSTRUMENT,
+            "side": "BUY",
+            "quantity": quantity_text,
+            "price": price_text,
+            "now": prepared_request_time,
+        },
+        now=recovery_now,
+        authority_check=_must_not_be_called,
+        transport_send=_must_not_be_called,
+    )
+
+
 def _risk_policy() -> RiskPolicy:
     return RiskPolicy.create(**dict(_RISK_POLICY_SPEC))
 
@@ -845,6 +907,8 @@ def run_canonical_simulation(
         raise ValueError("episode_id is required")
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
+    if now is not None:
+        now = _now(now)
     values = _prices(prices)
     decision = MovingAverageStrategy(
         fast=_STRATEGY_FAST, slow=_STRATEGY_SLOW
@@ -1039,6 +1103,52 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     timestamp=timestamp,
                     resumed=True,
                 )
+            if attempt_events:
+                attempt_types = [
+                    event.get("event_type") for event in attempt_events
+                ]
+                if attempt_types in (
+                    ["SubmissionPrepared"],
+                    ["SubmissionPrepared", "SubmissionSending"],
+                ):
+                    recovery = _recover_existing_buy_attempt(
+                        store,
+                        episode_id=episode_id,
+                        decision=decision,
+                        prepared_request_time=timestamp,
+                        recovery_now=timestamp if now is None else _now(now),
+                    )
+                    if recovery.status == "IN_PROGRESS":
+                        # Dispatcher lease activity is an internal recovery
+                        # phase, not a new product-level simulation status.
+                        return {
+                            "status": "UNKNOWN",
+                            "environment": ENVIRONMENT,
+                            "episode_id": episode_id,
+                            "reason": recovery.reason,
+                            "protocol_identity": protocol_identity,
+                            "input_hash": input_hash,
+                            "source_build_identity": source_build_identity,
+                            "reconciled": False,
+                            "resumed": True,
+                            "new_outbound_requests": 0,
+                        }
+                    if recovery.status != "UNKNOWN":
+                        raise ValueError(
+                            "incomplete submission recovery produced invalid status"
+                        )
+                    return {
+                        "status": "UNKNOWN",
+                        "environment": ENVIRONMENT,
+                        "episode_id": episode_id,
+                        "reason": recovery.reason,
+                        "protocol_identity": protocol_identity,
+                        "input_hash": input_hash,
+                        "source_build_identity": source_build_identity,
+                        "reconciled": False,
+                        "resumed": True,
+                        "new_outbound_requests": 0,
+                    }
         return {
             "status": "UNKNOWN", "environment": ENVIRONMENT,
             "episode_id": episode_id, "reason": "incomplete_send_requires_reconciliation",

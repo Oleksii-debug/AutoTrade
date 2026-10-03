@@ -39,6 +39,12 @@ from .fill_accounting import (
     build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_subtract,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
@@ -76,8 +82,12 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "financial decimal exceeds exact decimal authority"
+        ) from error
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -563,9 +573,50 @@ def _positive_usage_map(value: object, *, name: str) -> dict[str, Decimal]:
 
 
 def _usage_payload(usage: Mapping[str, Decimal]) -> dict[str, str]:
+    try:
+        return {
+            key: canonical_decimal_text(value)
+            for key, value in sorted(usage.items())
+        }
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "financial usage exceeds exact decimal authority"
+        ) from error
+
+
+def _exact_usage_increase(amount: Decimal, previous: Decimal) -> Decimal:
+    try:
+        return exact_subtract(amount, previous)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "financial usage delta exceeds exact decimal authority"
+        ) from error
+
+
+def _cash_leg_totals(
+    transactions: Iterable[JournalTransaction],
+) -> dict[tuple[str, str], Decimal]:
+    totals: dict[tuple[str, str], Decimal] = {}
+    try:
+        for transaction in transactions:
+            if not isinstance(transaction, JournalTransaction):
+                raise TypeError("transactions must contain JournalTransaction")
+            for posting in transaction.postings:
+                if posting.ledger_account != f"CASH:{posting.asset_or_currency}":
+                    continue
+                key = (transaction.transaction_id, posting.asset_or_currency)
+                totals[key] = exact_add(
+                    totals.get(key, Decimal("0")),
+                    posting.signed_amount,
+                )
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "cash-leg aggregation exceeds exact decimal authority"
+        ) from error
     return {
-        key: _decimal_text(value)
-        for key, value in sorted(usage.items())
+        key: amount
+        for key, amount in totals.items()
+        if amount != 0
     }
 
 
@@ -583,9 +634,15 @@ def _cash_outflow_usage(transaction: JournalTransaction) -> dict[str, Decimal]:
         expected_account = f"CASH:{posting.asset_or_currency}"
         if posting.ledger_account != expected_account or posting.signed_amount >= 0:
             continue
-        usage[expected_account] = (
-            usage.get(expected_account, Decimal("0")) - posting.signed_amount
-        )
+        try:
+            usage[expected_account] = exact_subtract(
+                usage.get(expected_account, Decimal("0")),
+                posting.signed_amount,
+            )
+        except ExactDecimalError as error:
+            raise AccountingConflict(
+                "provider fill correction cash usage exceeds exact decimal authority"
+            ) from error
     if not usage:
         raise AccountingConflict(
             "provider fill correction has no conservative cash outflow usage"
@@ -712,6 +769,26 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict(
             "initial provider fill binding is not qualified cash-equity BUY evidence"
         )
+    initial_projected = initial_request.get("projected_fill")
+    if not isinstance(initial_projected, Mapping):
+        raise AccountingConflict(
+            "initial provider fill projected evidence is invalid"
+        )
+    active_projected_digest = _text(
+        initial_request.get("projected_fill_digest"),
+        name="initial projected_fill_digest",
+    )
+    active_provider_digest = _text(
+        initial_request.get("provider_fill_digest"),
+        name="initial provider_fill_digest",
+    )
+    if (
+        active_projected_digest != payload_digest(initial_projected)
+        or active_provider_digest != payload_digest(initial_provider)
+    ):
+        raise AccountingConflict(
+            "initial provider fill binding evidence digests are invalid"
+        )
 
     snapshot = reservation_book.get(rid)
     if snapshot.intent_id != corrected_projected_fill.intent_id:
@@ -785,6 +862,15 @@ def _prepare_provider_fill_correction_binding(
             raise AccountingConflict(
                 "provider fill correction binding chain is invalid"
             )
+        if (
+            request.get("original_projected_fill_digest")
+            != active_projected_digest
+            or request.get("original_provider_fill_digest")
+            != active_provider_digest
+        ):
+            raise AccountingConflict(
+                "provider fill correction evidence lineage is invalid"
+            )
         previous_usage = _positive_usage_map(
             request.get("previous_conservative_usage"),
             name="previous conservative correction usage",
@@ -805,7 +891,10 @@ def _prepare_provider_fill_correction_binding(
             for resource in set(conservative_usage) | set(corrected_usage)
         }
         expected_additional = {
-            resource: amount - conservative_usage.get(resource, Decimal("0"))
+            resource: _exact_usage_increase(
+                amount,
+                conservative_usage.get(resource, Decimal("0")),
+            )
             for resource, amount in expected_resulting.items()
             if amount > conservative_usage.get(resource, Decimal("0"))
         }
@@ -826,8 +915,31 @@ def _prepare_provider_fill_correction_binding(
             raise AccountingConflict(
                 "provider fill correction reuses an existing fill identity"
             )
+        corrected_projected_digest = _text(
+            request.get("corrected_projected_fill_digest"),
+            name="corrected_projected_fill_digest",
+        )
+        corrected_provider_digest = _text(
+            request.get("corrected_provider_fill_digest"),
+            name="corrected_provider_fill_digest",
+        )
+        corrected_projected_payload = request.get("corrected_projected_fill")
+        corrected_provider_payload = request.get("corrected_provider_fill")
+        if (
+            not isinstance(corrected_projected_payload, Mapping)
+            or not isinstance(corrected_provider_payload, Mapping)
+            or corrected_projected_digest
+            != payload_digest(corrected_projected_payload)
+            or corrected_provider_digest
+            != payload_digest(corrected_provider_payload)
+        ):
+            raise AccountingConflict(
+                "provider fill correction corrected evidence digests are invalid"
+            )
         seen_fill_ids.add(corrected_fill_id)
         active_fill_id = corrected_fill_id
+        active_projected_digest = corrected_projected_digest
+        active_provider_digest = corrected_provider_digest
         conservative_usage = expected_resulting
         last_event = event
         last_request = request
@@ -893,6 +1005,15 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict(
             "provider fill correction does not extend the active correction lineage"
         )
+    if (
+        stable_request["original_projected_fill_digest"]
+        != active_projected_digest
+        or stable_request["original_provider_fill_digest"]
+        != active_provider_digest
+    ):
+        raise AccountingConflict(
+            "provider fill correction original evidence does not match active lineage"
+        )
 
     corrected_usage = _cash_outflow_usage(replacement)
     for resource, amount in corrected_usage.items():
@@ -913,7 +1034,10 @@ def _prepare_provider_fill_correction_binding(
         for resource in set(conservative_usage) | set(corrected_usage)
     }
     additional_usage = {
-        resource: amount - conservative_usage.get(resource, Decimal("0"))
+        resource: _exact_usage_increase(
+            amount,
+            conservative_usage.get(resource, Decimal("0")),
+        )
         for resource, amount in resulting_usage.items()
         if amount > conservative_usage.get(resource, Decimal("0"))
     }
@@ -1398,26 +1522,7 @@ def commit_economic_batch_with_reservation_consumption(
         batch_transaction_ids = {
             item.transaction_id for item in economic_plan.transactions
         }
-        expected_cash_legs: dict[tuple[str, str], Decimal] = {}
-        for transaction in economic_plan.transactions:
-            for posting in transaction.postings:
-                if (
-                    posting.ledger_account
-                    == f"CASH:{posting.asset_or_currency}"
-                ):
-                    key = (
-                        transaction.transaction_id,
-                        posting.asset_or_currency,
-                    )
-                    expected_cash_legs[key] = (
-                        expected_cash_legs.get(key, Decimal("0"))
-                        + posting.signed_amount
-                    )
-        expected_cash_legs = {
-            key: value
-            for key, value in expected_cash_legs.items()
-            if value != 0
-        }
+        expected_cash_legs = _cash_leg_totals(economic_plan.transactions)
 
         bound_cash_legs: dict[tuple[str, str], Decimal] = {}
         for obligation in settlement_items:
@@ -1719,22 +1824,7 @@ def commit_economic_correction_with_settlement_replacement(
             "canonical correction batch lost reversal/replacement lineage"
         )
 
-    expected_cash_legs: dict[tuple[str, str], Decimal] = {}
-    for posting in canonical_replacement.postings:
-        if posting.ledger_account == f"CASH:{posting.asset_or_currency}":
-            key = (
-                canonical_replacement.transaction_id,
-                posting.asset_or_currency,
-            )
-            expected_cash_legs[key] = (
-                expected_cash_legs.get(key, Decimal("0"))
-                + posting.signed_amount
-            )
-    expected_cash_legs = {
-        key: amount
-        for key, amount in expected_cash_legs.items()
-        if amount != 0
-    }
+    expected_cash_legs = _cash_leg_totals((canonical_replacement,))
     if not expected_cash_legs:
         raise AccountingConflict(
             "settlement-aware correction replacement has no active cash leg"

@@ -179,6 +179,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 opening,
                 settlement,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertTrue(inserted)
             self.assertEqual(delta, Decimal("100"))
@@ -195,6 +196,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 reopened,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(rebuilt, state)
 
@@ -204,6 +206,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     settlement,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             )
             self.assertFalse(retry_inserted)
@@ -236,6 +239,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     correction,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             )
             self.assertTrue(correction_inserted)
@@ -251,6 +255,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     final_store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 corrected,
             )
@@ -258,6 +263,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 final_store,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(rebuilt_book.cash("USD"), Decimal("120"))
             self.assertEqual(
@@ -300,6 +306,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 opening,
                 first,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             aggregate_id = variation_margin_aggregate_id(opening)
             with self.assertRaisesRegex(FuturesError, "conflicts"):
@@ -308,6 +315,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     conflicting,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             self.assertEqual(
                 len(store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id)),
@@ -318,6 +326,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ).last_settlement_price,
                 Decimal("105"),
             )
@@ -343,6 +352,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     first,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -355,6 +365,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     JournalStore(path),
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 state,
             )
@@ -365,6 +376,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     first,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -390,6 +402,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     correction,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -419,6 +432,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     final_store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 corrected,
             )
@@ -426,6 +440,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 final_store,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(
                 rebuilt_book.cash("BTC"),
@@ -468,6 +483,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     altered,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
 
             self.assertEqual(
@@ -522,6 +538,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     settlement,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
 
             aggregate_id = variation_margin_aggregate_id(opening)

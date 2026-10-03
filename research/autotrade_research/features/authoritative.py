@@ -336,7 +336,8 @@ def resolve_authoritative_feature_points(
         raise TypeError("registry must be HistoricalVintageRegistry")
     if type(artifact_store) is not ArtifactStore:
         raise TypeError("artifact_store must be exact ArtifactStore")
-    population = registry.resolve_market_population(
+    population = HistoricalVintageRegistry.resolve_market_population(
+        registry,
         dataset_id,
         dataset_version,
         manifest_digest=manifest_digest,
@@ -461,7 +462,8 @@ class AuthoritativeFoldNormalizer:
         if _replay_common_cut(replay_common_cut_fingerprint) != self.replay_common_cut_fingerprint:
             raise ValueError("replay common-cut identity differs from fitted authority")
 
-        training_population = registry.resolve_market_population(
+        training_population = HistoricalVintageRegistry.resolve_market_population(
+            registry,
             self.dataset_id,
             self.dataset_version,
             manifest_digest=self.manifest_digest,
@@ -481,7 +483,8 @@ class AuthoritativeFoldNormalizer:
         if recomputed != self.fold_normalizer:
             raise ValueError("stored fold normalizer differs from authoritative recomputation")
 
-        validation_population = registry.resolve_market_population(
+        validation_population = HistoricalVintageRegistry.resolve_market_population(
+            registry,
             self.dataset_id,
             self.dataset_version,
             manifest_digest=self.manifest_digest,
@@ -548,7 +551,8 @@ def fit_authoritative_fold_normalizer(
         raise TypeError("fold must be CausalFold")
     if type(spec) is not HistoricalFeatureInputSpec:
         raise TypeError("spec must be HistoricalFeatureInputSpec")
-    population = registry.resolve_market_population(
+    population = HistoricalVintageRegistry.resolve_market_population(
+        registry,
         dataset_id,
         dataset_version,
         manifest_digest=manifest_digest,

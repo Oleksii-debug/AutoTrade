@@ -72,6 +72,40 @@ class AccessibleStatusTests(unittest.TestCase):
         ):
             self.assertIn(expected, text)
 
+    def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": {"unexpected": "mapping"},
+            }
+        )
+        self.assertIn("Active reservations: unavailable; malformed state", text)
+        self.assertIn("inspect or restore reservation state", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_malformed_reservation_items_do_not_hide_status_surface(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    None,
+                    {"state": "HELD", "remaining": "not-a-mapping"},
+                    {"state": "HELD", "remaining": {"USD": "25.00"}},
+                ],
+            }
+        )
+        self.assertIn("Reservation detail: unavailable; malformed state", text)
+        self.assertIn("malformed remaining resources", text)
+        self.assertIn("Reserved USD: 25.00; state: HELD", text)
+
     def test_cli_accessible_status_after_simulation(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

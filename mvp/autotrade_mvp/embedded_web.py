@@ -31,6 +31,10 @@ _ALLOWED_CONTENT_TYPES = MappingProxyType(
         ".js": "text/javascript; charset=utf-8",
     }
 )
+_MAX_MANIFEST_BYTES = 256 * 1024
+_MAX_ASSETS = 256
+_MAX_ASSET_BYTES = 32 * 1024 * 1024
+_MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 _CSP = (
     "default-src 'self'; "
     "base-uri 'none'; "
@@ -47,6 +51,8 @@ _CSP = (
 def _canonical_asset_path(value: str) -> str:
     if type(value) is not str or not value:
         raise TypeError("web asset path must be a non-empty exact str")
+    if len(value) > 255:
+        raise ValueError("web asset path is too long")
     if (
         value.startswith("/")
         or "\\" in value
@@ -86,6 +92,8 @@ class ImmutableWebAsset:
         path = _canonical_asset_path(self.path)
         if type(self.body) is not bytes:
             raise TypeError("web asset body must be immutable bytes")
+        if len(self.body) > _MAX_ASSET_BYTES:
+            raise ValueError("web asset body exceeds the release envelope")
         if type(self.sha256_hex) is not str or _SHA256_RE.fullmatch(
             self.sha256_hex
         ) is None:
@@ -104,6 +112,7 @@ class ImmutableWebAssetBundle:
     host_api_contract_version: str
     assets: tuple[ImmutableWebAsset, ...]
     bundle_sha256: str = field(init=False)
+    manifest_bytes: bytes = field(init=False, repr=False)
     _routes: Mapping[str, ImmutableWebAsset] = field(
         init=False, repr=False, compare=False
     )
@@ -120,12 +129,16 @@ class ImmutableWebAssetBundle:
             raise ValueError("web bundle Host API contract version is not canonical")
         if type(self.assets) is not tuple or not self.assets:
             raise TypeError("web bundle assets must be a non-empty exact tuple")
+        if len(self.assets) > _MAX_ASSETS:
+            raise ValueError("web bundle has too many assets")
         if any(type(asset) is not ImmutableWebAsset for asset in self.assets):
             raise TypeError("web bundle accepts only exact ImmutableWebAsset values")
 
         ordered = tuple(sorted(self.assets, key=lambda asset: asset.path))
         if len({asset.path for asset in ordered}) != len(ordered):
             raise ValueError("web bundle asset paths must be unique")
+        if sum(len(asset.body) for asset in ordered) > _MAX_BUNDLE_BYTES:
+            raise ValueError("web bundle exceeds the release size envelope")
         by_path = {asset.path: asset for asset in ordered}
         if "index.html" not in by_path:
             raise ValueError("web bundle requires index.html")
@@ -156,6 +169,7 @@ class ImmutableWebAssetBundle:
         }
         routes["/"] = by_path["index.html"]
         object.__setattr__(self, "assets", ordered)
+        object.__setattr__(self, "manifest_bytes", encoded)
         object.__setattr__(self, "bundle_sha256", sha256(encoded).hexdigest())
         object.__setattr__(self, "_routes", MappingProxyType(routes))
 
@@ -163,6 +177,98 @@ class ImmutableWebAssetBundle:
         if type(path) is not str:
             return None
         return self._routes.get(path)
+
+
+def load_immutable_web_bundle(
+    manifest_bytes: bytes,
+    asset_bodies: dict[str, bytes],
+) -> ImmutableWebAssetBundle:
+    """Rehydrate one canonical release manifest plus its exact immutable bytes."""
+
+    if type(manifest_bytes) is not bytes:
+        raise TypeError("web bundle manifest must be immutable bytes")
+    if not manifest_bytes or len(manifest_bytes) > _MAX_MANIFEST_BYTES:
+        raise ValueError("web bundle manifest size is invalid")
+    if type(asset_bodies) is not dict:
+        raise TypeError("web bundle bodies must be an exact dict")
+    if len(asset_bodies) > _MAX_ASSETS:
+        raise ValueError("web bundle body set has too many assets")
+
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("web bundle manifest contains a duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_non_finite(constant: str) -> object:
+        raise ValueError("web bundle manifest contains a non-finite value: " + constant)
+
+    try:
+        decoded = json.loads(
+            manifest_bytes.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("web bundle manifest is not strict JSON") from error
+    if type(decoded) is not dict or set(decoded) != {
+        "schema_version",
+        "source_revision",
+        "host_api_contract_version",
+        "assets",
+    }:
+        raise ValueError("web bundle manifest fields are not canonical")
+    if decoded["schema_version"] != "1":
+        raise ValueError("web bundle manifest schema version is unsupported")
+    records = decoded["assets"]
+    if type(records) is not list or not records or len(records) > _MAX_ASSETS:
+        raise ValueError("web bundle manifest assets are invalid")
+
+    admitted: list[ImmutableWebAsset] = []
+    declared_paths: set[str] = set()
+    for record in records:
+        if type(record) is not dict or set(record) != {
+            "path",
+            "sha256",
+            "content_type",
+            "size",
+        }:
+            raise ValueError("web bundle manifest asset fields are not canonical")
+        path = _canonical_asset_path(record["path"])
+        if path in declared_paths:
+            raise ValueError("web bundle manifest asset paths must be unique")
+        declared_paths.add(path)
+        if path not in asset_bodies:
+            raise ValueError("web bundle asset body is missing")
+        body = asset_bodies[path]
+        if type(body) is not bytes:
+            raise TypeError("web bundle asset body must be immutable bytes")
+        size = record["size"]
+        if type(size) is not int or size < 0 or size != len(body):
+            raise ValueError("web bundle manifest asset size does not match bytes")
+        admitted.append(
+            ImmutableWebAsset(
+                path=path,
+                body=body,
+                sha256_hex=record["sha256"],
+                content_type=record["content_type"],
+            )
+        )
+
+    if set(asset_bodies) != declared_paths:
+        raise ValueError("web bundle contains undeclared asset bodies")
+    result = ImmutableWebAssetBundle(
+        source_revision=decoded["source_revision"],
+        host_api_contract_version=decoded["host_api_contract_version"],
+        assets=tuple(admitted),
+    )
+    if result.manifest_bytes != manifest_bytes:
+        raise ValueError("web bundle manifest is not canonical JSON encoding")
+    return result
 
 
 def _static_error(status: int, code: str) -> TransportResponse:

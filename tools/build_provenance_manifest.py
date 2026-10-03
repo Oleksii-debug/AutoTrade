@@ -602,28 +602,20 @@ def git_blob_sha(path: Path) -> str:
         ) from exc
 
     try:
-        completed = subprocess.run(
-            [
-                "git",
-                "hash-object",
-                f"--path={relative.as_posix()}",
-                str(resolved),
-            ],
-            cwd=repository_root,
-            capture_output=True,
+        object_id_raw = _trusted_git(
+            "hash-object",
+            f"--path={relative.as_posix()}",
+            str(resolved),
+            source_root=repository_root,
             text=True,
-            encoding="utf-8",
-            check=False,
         )
-    except OSError as exc:
-        raise RuntimeError("git hash-object is unavailable") from exc
-
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+    except ValueError as exc:
         raise RuntimeError(
-            f"git hash-object failed for {relative.as_posix()}: {detail}"
-        )
-    object_id = completed.stdout.strip()
+            f"trusted git hash-object failed for {relative.as_posix()}"
+        ) from exc
+    if not isinstance(object_id_raw, str):
+        raise RuntimeError("trusted git hash-object returned non-text output")
+    object_id = object_id_raw.strip()
     if GIT_OBJECT_ID.fullmatch(object_id) is None:
         raise RuntimeError(
             f"git hash-object returned a noncanonical object id for {relative.as_posix()}"

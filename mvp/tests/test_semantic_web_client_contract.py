@@ -1034,7 +1034,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_confirmed_command_response_is_scope_fenced_before_operation_rendering(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function commandScopeMatchesCurrentSnapshot(payload)", js)
+        self.assertIn("function commandContextMatchesCurrentSnapshot(payload, submittedHostId)", js)
         submit = js[
             js.index("async function submitCommand(event)"):
             js.index("async function refreshStateFromUser")
@@ -1100,22 +1100,66 @@ class SemanticWebClientContractTests(unittest.TestCase):
             poll.index("const pollEpoch = state.scopeEpoch"),
         )
 
-    def test_scope_change_is_explicitly_announced_with_new_account_and_environment(self):
+    def test_display_context_change_is_announced_with_host_account_and_environment(self):
         js = APP.read_text(encoding="utf-8")
         snapshot = js[
             js.index("function renderSnapshot(snapshot"):
             js.index("async function refreshSnapshot")
         ]
-        self.assertIn("Host scope changed to account ", snapshot)
+        self.assertIn("Host display context changed to host ", snapshot)
+        self.assertIn('", account " + parsed.accountId', snapshot)
         self.assertIn('" in " + parsed.environment', snapshot)
         self.assertIn(
-            "Old-scope operation, event, notification, and command-validation evidence was cleared.",
+            "Old-context operation, event, notification, and command-validation evidence was cleared.",
             snapshot,
         )
-        self.assertIn('parsed.environment === "LIVE"', snapshot)
-        markers = snapshot.index("state.renderedEnvironment = parsed.environment")
-        announcement = snapshot.index("Host scope changed to account ")
+        self.assertIn('parsed.environment === "LIVE" || hostChanged', snapshot)
+        markers = snapshot.index("state.renderedHostId = parsed.hostId")
+        announcement = snapshot.index("Host display context changed to host ")
         self.assertLess(markers, announcement)
+
+    def test_host_identity_change_resets_local_event_context_and_counters(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("renderedHostId: null", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const hostChanged =", snapshot)
+        self.assertIn("parsed.hostId !== state.renderedHostId", snapshot)
+        self.assertIn("const displayContextChanged = hostChanged || scopeChanged", snapshot)
+        changed = snapshot.index("if (displayContextChanged)")
+        cursor = snapshot.index("state.cursor = 0n", changed)
+        version = snapshot.index("state.version = 0n", changed)
+        operations = snapshot.index("resetOperationsForScope();", changed)
+        self.assertLess(changed, cursor)
+        self.assertLess(cursor, version)
+        self.assertLess(version, operations)
+
+    def test_unresolved_command_is_bound_to_exact_rendered_host_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("pendingCommandHostId: null", js)
+        self.assertIn(
+            "state.pendingCommandHostId = state.renderedHostId",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommandHostId === state.renderedHostId",
+            js,
+        )
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        self.assertIn(
+            "state.pendingCommandHostId !== state.renderedHostId",
+            submit,
+        )
+        self.assertIn("const submittedHostId = state.pendingCommandHostId", submit)
+        self.assertIn(
+            "commandContextMatchesCurrentSnapshot(payload, submittedHostId)",
+            submit,
+        )
 
     def test_same_scope_snapshot_cursor_jump_clears_event_derived_views(self):
         js = APP.read_text(encoding="utf-8")
@@ -1159,8 +1203,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
             snapshot.index("const skippedSameScopeEvents ="):
             snapshot.index("if (scopeChanged)")
         ]
-        self.assertIn("!scopeChanged", condition)
-        self.assertIn("state.renderedAccountId !== null", condition)
+        self.assertIn("!displayContextChanged", condition)
+        self.assertIn("state.renderedHostId !== null", condition)
         self.assertIn("parsed.cursor > priorCursor", condition)
         self.assertNotIn("parsed.cursor >= priorCursor", condition)
 
@@ -1182,9 +1226,12 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("async function pollEvents()"):
             js.index("function newCommandPayload")
         ]
-        self.assertIn("const pollEpoch = state.scopeEpoch", poll)
-        self.assertIn("const renderedAccountId = state.renderedAccountId", poll)
-        self.assertIn("const renderedEnvironment = state.renderedEnvironment", poll)
+        self.assertIn("let pollEpoch = null", poll)
+        self.assertIn("let pollRenderedHostId = null", poll)
+        self.assertIn("pollEpoch = state.scopeEpoch", poll)
+        self.assertIn("pollRenderedHostId = state.renderedHostId", poll)
+        self.assertIn("pollRenderedAccountId = state.renderedAccountId", poll)
+        self.assertIn("pollRenderedEnvironment = state.renderedEnvironment", poll)
         self.assertIn("pollEpoch !== state.scopeEpoch", poll)
         response = poll.index("const response = await jsonFetch(")
         fence = poll.index("pollEpoch !== state.scopeEpoch", response)
@@ -1200,7 +1247,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         catch_start = submit.rindex("    } catch {")
         catch_block = submit[catch_start:]
-        self.assertIn("if (commandScopeMatchesCurrentSnapshot(payload))", catch_block)
+        self.assertIn("if (commandContextMatchesCurrentSnapshot(payload, submittedHostId))", catch_block)
         self.assertIn("state.snapshotReady = false", catch_block)
         self.assertIn(
             "The current scope snapshot is not invalidated by this older request.",
@@ -1249,15 +1296,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "function resetCommandFeedbackForScope(accountId, environment)",
+            "function resetCommandFeedbackForContext(",
             js,
         )
         self.assertIn(
-            "An unresolved command from a different account/environment scope is retained with its original identity and will not be retargeted.",
+            "An unresolved command from a different host/session/account/environment context is retained with its original identity and will not be retargeted.",
             js,
         )
         self.assertIn(
-            "No host command has been submitted for this account/environment session.",
+            "No host command has been submitted for this host/account/environment session.",
             js,
         )
         self.assertIn('renderCommandValidationDetails([], "scope_changed")', js)
@@ -1275,7 +1322,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         operations = snapshot.index("resetOperationsForScope();")
         history = snapshot.index("resetEventHistoryForScope();")
         command = snapshot.index(
-            "resetCommandFeedbackForScope(parsed.accountId, parsed.environment);"
+            "resetCommandFeedbackForContext("
         )
         self.assertLess(notifications, filters)
         self.assertLess(filters, operations)

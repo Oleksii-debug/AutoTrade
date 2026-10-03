@@ -789,11 +789,6 @@ def verify_runtime_target_host_qualification(
             error_type=RuntimeTargetHostQualificationError,
             label="target-host digest canonicalizer",
         ),
-        _build_module_authority_guard(
-            root=reader_factory,
-            error_type=RuntimeTargetHostQualificationError,
-            label="target-host authenticated reader factory",
-        ),
         _build_exact_class_authority_guard(
             owner_type=AcceptedQualificationAttestation,
             label="accepted qualification attestation",

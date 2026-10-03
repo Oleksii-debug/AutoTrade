@@ -154,12 +154,12 @@ def _exact_sequence_snapshot(values, *, name: str) -> tuple[object, ...]:
         return values
     if type(values) is list:
         return tuple(list.copy(values))
-    raise TypeError(f"{name} must be an exact list or tuple")
+    raise TypeError(f"{name} must be a sequence backed by an exact list or tuple")
 
 
 def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
     if type(values) is not dict:
-        raise TypeError(f"{name} must be an exact dict")
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
     snapshot = dict.copy(values)
     normalized: dict[str, Decimal] = {}
     for raw_key, raw_value in snapshot.items():
@@ -230,7 +230,7 @@ def reservation_requirements_payload(
 
 def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
     if type(values) is not dict:
-        raise TypeError(f"{name} must be an exact dict")
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
     snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
     for raw_key, raw_value in snapshot.items():
@@ -273,7 +273,7 @@ def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
 
 def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
     if type(values) is not dict:
-        raise TypeError(f"{name} must be an exact dict")
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
     snapshot = dict.copy(values)
     normalized: dict[str, dict[str, Decimal]] = {}
     for raw_key, raw_value in snapshot.items():
@@ -344,7 +344,7 @@ def _normalize_scenario_digests(
     name: str,
 ) -> tuple[tuple[str, str], ...]:
     if type(values) is not dict:
-        raise TypeError(f"{name} must be an exact dict")
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
     snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
     for raw_label, raw_digest in snapshot.items():

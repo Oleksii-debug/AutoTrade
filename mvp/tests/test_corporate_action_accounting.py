@@ -576,22 +576,21 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertEqual(len(economics.transactions), 1)
 
     def test_journal_advance_after_entitlement_proof_fails_closed(self):
+        from mvp.autotrade_mvp import corporate_action_accounting as accounting_module
+
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
             durable_evidence = evidence_store(store)
             economics = economic_book(store)
             accepted = resolve_action(sealed_action())
-            original = store.commit_command
+            original = accounting_module._canonical_entitlement_position_proof
             injected = False
 
-            def advance_journal_then_commit(**kwargs):
+            def prove_then_advance(*args, **kwargs):
                 nonlocal injected
-                if (
-                    not injected
-                    and kwargs.get("actor")
-                    == "corporate-action-financial-integration"
-                ):
+                proof = original(*args, **kwargs)
+                if not injected:
                     injected = True
                     store.append_event(
                         {
@@ -607,9 +606,9 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                             ),
                         }
                     )
-                return original(**kwargs)
+                return proof
 
-            store.commit_command = advance_journal_then_commit
+            accounting_module._canonical_entitlement_position_proof = prove_then_advance
             try:
                 with self.assertRaisesRegex(
                     ValueError,
@@ -623,10 +622,11 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                         accepted=accepted,
                     )
             finally:
-                store.commit_command = original
+                accounting_module._canonical_entitlement_position_proof = original
 
             self.assertEqual(
-                store.load_events(
+                JournalStore.load_events(
+                    store,
                     "corporate_action_evidence",
                     durable_evidence.aggregate_id,
                 ),

@@ -1363,6 +1363,70 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
 
 
+    def test_display_context_change_is_announced_with_host_account_and_environment(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("Host display context changed to host ", snapshot)
+        self.assertIn('", account " + parsed.accountId', snapshot)
+        self.assertIn('" in " + parsed.environment', snapshot)
+        self.assertIn(
+            "Old-context operation, event, notification, and command-validation evidence was cleared.",
+            snapshot,
+        )
+        self.assertIn('parsed.environment === "LIVE" || hostChanged', snapshot)
+        markers = snapshot.index("state.renderedHostId = parsed.hostId")
+        announcement = snapshot.index("Host display context changed to host ")
+        self.assertLess(markers, announcement)
+
+
+    def test_host_identity_change_resets_local_event_context_and_counters(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("renderedHostId: null", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const hostChanged =", snapshot)
+        self.assertIn("parsed.hostId !== state.renderedHostId", snapshot)
+        self.assertIn("const displayContextChanged = hostChanged || scopeChanged", snapshot)
+        changed = snapshot.index("if (displayContextChanged)")
+        cursor = snapshot.index("state.cursor = 0n", changed)
+        version = snapshot.index("state.version = 0n", changed)
+        operations = snapshot.index("resetOperationsForScope();", changed)
+        self.assertLess(changed, cursor)
+        self.assertLess(cursor, version)
+        self.assertLess(version, operations)
+
+
+    def test_unresolved_command_is_bound_to_exact_rendered_host_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("pendingCommandHostId: null", js)
+        self.assertIn(
+            "state.pendingCommandHostId = state.renderedHostId",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommandHostId === state.renderedHostId",
+            js,
+        )
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        self.assertIn(
+            "state.pendingCommandHostId !== state.renderedHostId",
+            submit,
+        )
+        self.assertIn("const submittedHostId = state.pendingCommandHostId", submit)
+        self.assertIn(
+            "commandContextMatchesCurrentSnapshot(payload, submittedHostId)",
+            submit,
+        )
+
+
     def test_same_scope_snapshot_cursor_jump_clears_event_derived_views(self):
         js = APP.read_text(encoding="utf-8")
         snapshot = js[

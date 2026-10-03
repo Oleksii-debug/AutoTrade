@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+from contextlib import ExitStack, contextmanager
+import hashlib
+import json
+import os
+import stat
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any, BinaryIO, Callable, Iterator
+
+from ..resource_lock import ResourceLock, ResourceLockError
+
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCK_POISONS: dict[str, ResourceLock] = {}
+_PATH_LOCK_LOCAL = threading.local()
+
+
+class DurablePublishLockError(RuntimeError):
+    """Raised when publication path ownership or teardown cannot be proven safe."""
+
+
+def _add_secondary_failure_note(
+    primary: BaseException,
+    prefix: str,
+    secondary: BaseException,
+) -> None:
+    try:
+        secondary_text = f"{type(secondary).__name__}: {secondary}"
+    except BaseException:
+        secondary_text = "secondary exception details unavailable"
+    try:
+        primary.add_note(f"{prefix}: {secondary_text}")
+    except BaseException:
+        return
+
+
+def _resolved_key(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path.absolute())
+
+
+def _validate_publication_destination(path: Path) -> None:
+    """Reject final-component aliases before they can split publication identity."""
+
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise DurablePublishLockError(
+            "cannot inspect publication destination"
+        ) from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise DurablePublishLockError(
+            "publication destination must be a regular non-symlink file"
+        )
+    if path_stat.st_nlink != 1:
+        raise DurablePublishLockError(
+            "publication destination must not have hard-link aliases"
+        )
+
+
+def validate_publication_destination(path: str | Path) -> None:
+    """Validate the final publication entry without following aliases."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
+
+
+def _thread_lock_for(path: Path) -> threading.RLock:
+    key = _resolved_key(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+def _poison_for(key: str) -> ResourceLock | None:
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCK_POISONS.get(key)
+
+
+def _remember_poison(key: str, lock: ResourceLock) -> None:
+    with _PATH_LOCKS_GUARD:
+        _PATH_LOCK_POISONS[key] = lock
+
+
+@contextmanager
+def durable_path_lock(path: str | Path) -> Iterator[None]:
+    """Serialize cooperating cross-process publication for one durable path.
+
+    The sidecar lock reuses the canonical local ResourceLock implementation in
+    blocking mode. Final-component aliases are rejected and parent-directory
+    aliases converge on the resolved destination for the sidecar identity.
+    Re-entrancy is process/thread-local only. Any teardown path that cannot prove
+    the OS handle closed poisons this process/path permanently.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
+    key = _resolved_key(destination)
+    canonical_destination = Path(key)
+    thread_lock = _thread_lock_for(canonical_destination)
+
+    with thread_lock:
+        _validate_publication_destination(destination)
+        poisoned = _poison_for(key)
+        if poisoned is not None:
+            raise DurablePublishLockError(
+                "publication lock state is poisoned after an unproven release"
+            )
+
+        held = getattr(_PATH_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _PATH_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            current[0] += 1
+            try:
+                yield
+            finally:
+                current[0] -= 1
+            return
+
+        lock_path = canonical_destination.with_name(
+            f".{canonical_destination.name}.lock"
+        )
+        resource_lock = ResourceLock(lock_path, blocking=True)
+        try:
+            resource_lock.acquire()
+        except ResourceLockError as exc:
+            if resource_lock._handle is not None:
+                _remember_poison(key, resource_lock)
+            raise DurablePublishLockError(str(exc)) from exc
+
+        held[key] = [1, resource_lock]
+        primary_error: BaseException | None = None
+        try:
+            try:
+                yield
+            except BaseException as exc:
+                primary_error = exc
+                raise
+        finally:
+            del held[key]
+            try:
+                resource_lock.release()
+            except BaseException as release_error:
+                if resource_lock._handle is not None:
+                    _remember_poison(key, resource_lock)
+                if primary_error is not None:
+                    _add_secondary_failure_note(
+                        primary_error,
+                        "publication lock release also failed",
+                        release_error,
+                    )
+                else:
+                    raise DurablePublishLockError(
+                        "cannot prove publication lock release"
+                    ) from release_error
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_durable_file(path: str | Path) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("ab") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def sync_parent_directory(path: str | Path) -> None:
+    """Durably publish a directory-entry change where the platform supports it."""
+
+    destination = Path(path)
+    if os.name == "nt":
+        return
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _sync_parent_directory(path: Path) -> None:
+    """Compatibility fault-injection seam for atomic_write_json."""
+
+    sync_parent_directory(path)
+
+
+def atomic_write_stream(
+    path: str | Path,
+    writer: Callable[[BinaryIO], None],
+) -> None:
+    """Durably publish one file from a caller-supplied binary stream writer."""
+
+    if not callable(writer):
+        raise TypeError("writer must be callable")
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        with durable_path_lock(destination):
+            _validate_publication_destination(destination)
+            os.replace(temporary, destination)
+            temporary = None
+            _sync_parent_directory(destination)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def atomic_write_stream_with_sha256_sidecar(
+    path: str | Path,
+    sidecar_path: str | Path,
+    writer: Callable[[BinaryIO], None],
+) -> str:
+    """Publish bytes plus a matching SHA-256 sidecar without a final-path re-open.
+
+    Both payloads are fully staged and fsynced before either public destination
+    changes. The sidecar is replaced first and the primary object last, so a
+    process crash between replacements is fail-closed (old primary/new digest)
+    rather than a newly trusted primary paired with stale digest evidence.
+    Ordinary failures before primary publication restore the prior sidecar.
+    """
+
+    if not callable(writer):
+        raise TypeError("writer must be callable")
+
+    destination = Path(path)
+    sidecar = Path(sidecar_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    if _resolved_key(destination) == _resolved_key(sidecar):
+        raise DurablePublishLockError(
+            "primary publication and SHA-256 sidecar must be distinct paths"
+        )
+    _validate_publication_destination(destination)
+    _validate_publication_destination(sidecar)
+
+    primary_temp: Path | None = None
+    sidecar_temp: Path | None = None
+    rollback_temp: Path | None = None
+    old_sidecar_moved = False
+    sidecar_published = False
+    primary_published = False
+    preserve_rollback = False
+    digest_hex: str | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            primary_temp = Path(handle.name)
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.seek(0)
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            digest_hex = digest.hexdigest()
+
+        sidecar_payload = (
+            f"{digest_hex}  {destination.name}\n"
+        ).encode("utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=sidecar.parent,
+            prefix=f".{sidecar.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            sidecar_temp = Path(handle.name)
+            handle.write(sidecar_payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        lock_paths = sorted(
+            (destination, sidecar),
+            key=lambda item: _resolved_key(item),
+        )
+        with ExitStack() as stack:
+            for lock_path in lock_paths:
+                stack.enter_context(durable_path_lock(lock_path))
+            _validate_publication_destination(destination)
+            _validate_publication_destination(sidecar)
+
+            try:
+                try:
+                    os.stat(sidecar, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    with tempfile.NamedTemporaryFile(
+                        "w+b",
+                        dir=sidecar.parent,
+                        prefix=f".{sidecar.name}.rollback.",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as rollback_handle:
+                        rollback_temp = Path(rollback_handle.name)
+                    os.replace(sidecar, rollback_temp)
+                    old_sidecar_moved = True
+                    _sync_parent_directory(sidecar)
+
+                os.replace(sidecar_temp, sidecar)
+                sidecar_temp = None
+                sidecar_published = True
+                _sync_parent_directory(sidecar)
+
+                os.replace(primary_temp, destination)
+                primary_temp = None
+                primary_published = True
+                _sync_parent_directory(destination)
+            except BaseException as primary_error:
+                if not primary_published and (
+                    old_sidecar_moved or sidecar_published
+                ):
+                    try:
+                        if old_sidecar_moved and rollback_temp is not None:
+                            os.replace(rollback_temp, sidecar)
+                            rollback_temp = None
+                        elif sidecar_published:
+                            try:
+                                sidecar.unlink()
+                            except FileNotFoundError:
+                                pass
+                        _sync_parent_directory(sidecar)
+                    except BaseException as rollback_error:
+                        preserve_rollback = rollback_temp is not None
+                        _add_secondary_failure_note(
+                            primary_error,
+                            "SHA-256 sidecar rollback also failed",
+                            rollback_error,
+                        )
+                raise
+
+            if rollback_temp is not None:
+                rollback_temp.unlink()
+                rollback_temp = None
+                _sync_parent_directory(sidecar)
+
+        if digest_hex is None:
+            raise DurablePublishLockError(
+                "SHA-256 digest was not produced for staged publication"
+            )
+        return digest_hex
+    finally:
+        for temporary in (primary_temp, sidecar_temp):
+            if temporary is None:
+                continue
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        if rollback_temp is not None and not preserve_rollback:
+            try:
+                rollback_temp.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def atomic_write_bytes_with_sha256_sidecar(
+    path: str | Path,
+    sidecar_path: str | Path,
+    payload: bytes,
+) -> str:
+    """Publish exact bytes with a recovery-safe SHA-256 sidecar pair."""
+
+    if type(payload) is not bytes:
+        raise TypeError("payload must be bytes")
+
+    def write_payload(handle: BinaryIO) -> None:
+        handle.write(payload)
+
+    return atomic_write_stream_with_sha256_sidecar(
+        path,
+        sidecar_path,
+        write_payload,
+    )
+
+
+def atomic_write_bytes(path: str | Path, payload: bytes) -> None:
+    """Durably publish exact bytes through the canonical publication boundary."""
+
+    if type(payload) is not bytes:
+        raise TypeError("payload must be bytes")
+
+    def write_payload(handle: BinaryIO) -> None:
+        handle.write(payload)
+
+    atomic_write_stream(path, write_payload)
+
+
+def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    """Durably publish one whole JSON object for cooperating writers.
+
+    This is artifact/config publication only. It is not a multi-record database
+    transaction and must never be used as AutoTrade's financial ledger.
+    """
+    if type(payload) is not dict:
+        raise TypeError("payload must be a dict")
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        with durable_path_lock(destination):
+            _validate_publication_destination(destination)
+            os.replace(temporary, destination)
+            temporary = None
+            _sync_parent_directory(destination)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

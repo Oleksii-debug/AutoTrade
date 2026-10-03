@@ -540,6 +540,52 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
         )
         self.assertFalse(installer_manifest._has_windows_reparse_point(regular))
 
+    def test_lexical_self_overwrite_is_rejected_before_bundle_verification(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "release.zip"
+            output_alias = root / "nested" / ".." / "release.zip"
+
+            with patch.object(
+                installer_manifest,
+                "verify_release_bundle",
+            ) as verifier:
+                with self.assertRaisesRegex(
+                    installer_manifest.InstallerManifestError,
+                    "must not overwrite verified release bundle",
+                ):
+                    installer_manifest.build_installer_input_manifest(
+                        bundle=bundle,
+                        output=output_alias,
+                        target_framework="net8.0-windows",
+                        runtime_mode="SELF_CONTAINED",
+                    )
+
+            verifier.assert_not_called()
+
+    def test_digest_sidecar_alias_is_rejected_before_bundle_verification(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "installer-inputs.json"
+            bundle = root / "nested" / ".." / "installer-inputs.json.sha256"
+
+            with patch.object(
+                installer_manifest,
+                "verify_release_bundle",
+            ) as verifier:
+                with self.assertRaisesRegex(
+                    installer_manifest.InstallerManifestError,
+                    "digest output must not overwrite verified release bundle",
+                ):
+                    installer_manifest.build_installer_input_manifest(
+                        bundle=bundle,
+                        output=output,
+                        target_framework="net8.0-windows",
+                        runtime_mode="SELF_CONTAINED",
+                    )
+
+            verifier.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

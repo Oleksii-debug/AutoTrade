@@ -146,7 +146,7 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 BorrowEvidenceError,
-                "canonical ArtifactStore",
+                "exact canonical ArtifactStore",
             ):
                 verify_provider_borrow_evidence(bound, malicious)
 
@@ -209,8 +209,8 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
 
             malicious = MaliciousSnapshotStore(artifact_root)
             with self.assertRaisesRegex(
-                BorrowEvidenceError,
-                "canonical ArtifactStore",
+                TypeError,
+                "exact canonical ArtifactStore",
             ):
                 DurableBorrowRecallProjection(
                     JournalStore(journal.path),

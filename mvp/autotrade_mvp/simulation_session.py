@@ -206,18 +206,17 @@ def _require_prestart_cut(
         raise ValueError("state directory contains foreign durable journal authority")
 
 
-def _deliver_event(store: JournalStore, event_id: str) -> None:
-    for item in JournalStore.pending_outbox(store):
-        if item["event_id"] == event_id:
-            JournalStore.mark_outbox_delivered(
-                store,
-                item["outbox_id"],
-                expected_envelope_hash=item["envelope_hash"],
-            )
-            return
-    if JournalStore.get_event(store, event_id) is not None:
+def _deliver_event(store: JournalStore, event_id: str, *, topic: str) -> None:
+    state = JournalStore.outbox_delivery_state(
+        store, event_id, topic=topic
+    )
+    if state["delivered"]:
         return
-    raise ValueError("expected simulator bootstrap outbox event is missing")
+    JournalStore.mark_outbox_delivered(
+        store,
+        state["outbox_id"],
+        expected_envelope_hash=state["envelope_hash"],
+    )
 
 
 def _risk_policy() -> RiskPolicy:
@@ -430,7 +429,11 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         )
         if len(economic_events) != 1:
             raise RuntimeError("canonical simulation seed bootstrap was not persisted")
-    _deliver_event(store, economic_events[0]["event_id"])
+    _deliver_event(
+        store,
+        economic_events[0]["event_id"],
+        topic="autotrade.economic.events",
+    )
 
     admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
     if not admission_reconciliation.complete or admission_reconciliation.blocks_new_risk:
@@ -466,7 +469,11 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             host_id="local-simulation", owner_epoch="1",
         )
         reconciliation_events = [availability]
-    _deliver_event(store, availability["event_id"])
+    _deliver_event(
+        store,
+        availability["event_id"],
+        topic="autotrade.reconciliation.events",
+    )
     _require_prestart_cut(
         store,
         economic_events=economic_events,

@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 import threading
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.host_api import HostCommandStore
 from mvp.autotrade_mvp.security import SecurityBoundary
@@ -1082,6 +1083,20 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("api_key=[REDACTED]", redacted)
         self.assertIn("api_key=[REDACTED] [2]", redacted)
         self.assertEqual(redacted["safe"], "visible")
+
+    def test_diagnostic_redaction_fails_closed_if_key_sanitizer_errors(self):
+        with patch(
+            "mvp.autotrade_mvp.security._redact_embedded_secret_text",
+            side_effect=RecursionError("pathological diagnostic key"),
+        ):
+            redacted = self.boundary.redact(
+                {"safe-looking-key": "must-not-be-retained-under-failed-key"}
+            )
+
+        self.assertEqual(
+            redacted,
+            {"[REDACTED:KEY]": "must-not-be-retained-under-failed-key"},
+        )
 
     def test_diagnostic_redaction_preserves_synthetic_key_collisions(self):
         class HostileKey:

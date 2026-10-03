@@ -26,6 +26,7 @@ from .runtime_target_host_measurement import (
     RuntimeTargetHostMeasurementError,
     TargetHostMeasurementArtifact,
     collect_runtime_campaign_evidence_from_measurement_artifact,
+    snapshot_target_host_measurement,
 )
 
 
@@ -91,7 +92,7 @@ def collect_release_bound_target_host_evidence(
     # Snapshot caller-owned state before applying external authority checks. This
     # prevents object.__setattr__/concurrent mutation from changing the raw bundle
     # between release/window validation and the downstream campaign mechanics.
-    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    measurement = snapshot_target_host_measurement(measurement)
 
     frozen_release_artifact_id = _canonical_uuid(
         expected_release_artifact_id,

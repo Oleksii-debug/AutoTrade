@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from autotrade_mvp.bybit_credential_revocation import (
+from mvp.autotrade_mvp.bybit_credential_revocation import (
     BybitCredentialRevocationError,
     PRODUCT_DERIVATIVES,
     PRODUCT_SPOT,

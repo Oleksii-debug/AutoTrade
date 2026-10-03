@@ -295,25 +295,18 @@ class DurableSettlementBookTests(unittest.TestCase):
             hostile = HostileArtifactStore(
                 Path(store.path).parent / "settlement-evidence"
             )
-            settlements = DurableSettlementBook(
-                store,
-                provider_id=PROVIDER,
-                account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-                evidence_artifact_store=hostile,
-            )
             with self.assertRaisesRegex(
-                SettlementConflict,
-                "requires trusted ArtifactStore",
+                TypeError,
+                "canonical ArtifactStore",
             ):
-                settlements.register_obligations(
-                    (item,),
-                    command_id="hostile-rule",
-                    idempotency_key="hostile-rule",
-                    committed_at="2026-09-25T09:00:02Z",
+                DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_store=hostile,
                 )
             self.assertFalse(HostileArtifactStore.called)
-            self.assertEqual(settlements.obligations, ())
 
     def test_snapshot_oserror_fails_before_rule_or_completion_mutation(self):
         with TemporaryDirectory() as directory:

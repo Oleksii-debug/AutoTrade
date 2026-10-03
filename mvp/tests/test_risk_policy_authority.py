@@ -166,7 +166,7 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 RiskPolicyAuthorityError,
-                "changed after registry issuance",
+                "resolved policy content digest mismatch",
             ):
                 authority.require_registry_issued_resolved_policy(issued)
 

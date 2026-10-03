@@ -38,6 +38,7 @@ from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_measurement import (
     RuntimeTargetHostMeasurementError,
     TargetHostMeasurementArtifact,
+    snapshot_target_host_measurement,
 )
 from .runtime_target_host_measurement_authority import (
     collect_release_bound_target_host_evidence,
@@ -361,7 +362,7 @@ def bind_durable_financial_latency_to_target_host_measurement(
     _require_shared_monotonic_clock()
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
-    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    measurement = snapshot_target_host_measurement(measurement)
     if measurement.monotonic_clock_id != TARGET_HOST_SHARED_CLOCK_ID:
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement does not declare canonical time.monotonic_ns authority"
@@ -519,7 +520,7 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
 
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
-    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    measurement = snapshot_target_host_measurement(measurement)
     frozen_release_artifact_id = _canonical_uuid(
         expected_release_artifact_id,
         name="expected_release_artifact_id",

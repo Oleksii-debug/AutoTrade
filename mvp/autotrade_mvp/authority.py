@@ -1691,6 +1691,8 @@ class AuthorityService:
             settlement_book.scope.provider_id != expected_provider
             or settlement_book.scope.account_id != expected_account
             or settlement_book.scope.environment != expected_environment
+            or settlement_book.scope.provider_environment
+            != expected_provider_environment
             or economic_book.provider_id != expected_provider
             or economic_book.account_id != expected_account
             or economic_book.environment != expected_environment
@@ -1699,14 +1701,6 @@ class AuthorityService:
         ):
             raise AuthorityConflict(
                 "settlement/economic authority scope does not match admission"
-            )
-
-        # SettlementAccountScope v1 does not yet carry provider_environment.
-        # It is safe only where provider-domain identity is not narrower than
-        # runtime environment. Never let TESTNET/DEMO share one settlement cut.
-        if expected_provider_environment != expected_environment:
-            raise AuthorityConflict(
-                "durable settlement authority lacks exact provider_environment"
             )
 
         before = self._journal_operation(

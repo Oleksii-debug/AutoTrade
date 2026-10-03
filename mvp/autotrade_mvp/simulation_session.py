@@ -174,7 +174,7 @@ def _reconcile(
             available_resources={"CASH:USD": snapshot["balances"][0]["available"]},
             provider_as_of=snapshot["provider_as_of"],
             evidence_refs=(f"simulated:provider-snapshot:{snapshot['snapshot_id']}",),
-        ) if fill is None else None),
+        ) if provider_fill is None else None),
     )
     return result, snapshot
 

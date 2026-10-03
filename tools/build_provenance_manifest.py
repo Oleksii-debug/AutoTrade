@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -22,6 +23,13 @@ SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 UTC_EVIDENCE_TIME = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
+
+QUALIFICATION_TRUST_POLICY_COMPONENT_ID = "autotrade-qualification-trust-policy"
+QUALIFICATION_TRUST_POLICY_COMPONENT_KIND = "qualification-trust-policy"
+QUALIFICATION_TRUST_POLICY_COMPONENT_PATH = (
+    "mvp/autotrade_mvp/qualification_trust_policy.json"
+)
+QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION = "source-controlled"
 
 
 def release_evidence_document(
@@ -82,6 +90,124 @@ def release_evidence_document(
             return False, "invalid_evidence_refs"
         seen_artifact_ids.add(canonical_artifact_id)
     return True, None
+
+
+def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
+    """Read the one literal packaged-policy pin without importing product code."""
+
+    try:
+        source = path.read_text(encoding="utf-8")
+        module = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError) as error:
+        raise ValueError(
+            "qualification trust policy pin source is unavailable or invalid"
+        ) from error
+
+    values: list[object] = []
+    invalid_binding = object()
+    target_name = "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256"
+    for statement in module.body:
+        stores = [
+            node
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Name)
+            and node.id == target_name
+            and isinstance(node.ctx, ast.Store)
+        ]
+        if not stores:
+            continue
+        if (
+            len(stores) == 1
+            and isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == target_name
+        ):
+            value = statement.value
+            values.append(
+                value.value if isinstance(value, ast.Constant) else invalid_binding
+            )
+            continue
+        if (
+            len(stores) == 1
+            and isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == target_name
+        ):
+            value = statement.value
+            values.append(
+                value.value if isinstance(value, ast.Constant) else invalid_binding
+            )
+            continue
+        values.append(invalid_binding)
+
+    if len(values) != 1 or values[0] is invalid_binding:
+        raise ValueError(
+            "qualification trust policy pin must have one literal source definition"
+        )
+    value = values[0]
+    if value is None:
+        return None
+    if not isinstance(value, str) or SHA256_ID.fullmatch(value) is None:
+        raise ValueError(
+            "qualification trust policy pin must be None or canonical SHA-256"
+        )
+    return value
+
+
+def qualification_trust_policy_composition(
+    document: object,
+    *,
+    expected_digest: str | None,
+) -> tuple[bool, str | None, str | None]:
+    """Validate the canonical qualification-policy component in release composition.
+
+    The composition may contain unrelated product components, but the
+    qualification policy has one canonical identity. Its digest comes from the
+    source-controlled product pin; release metadata cannot select or override it.
+    """
+
+    if expected_digest is None:
+        return False, "policy_pin_missing", None
+    if not isinstance(expected_digest, str) or SHA256_ID.fullmatch(expected_digest) is None:
+        raise ValueError(
+            "expected qualification trust policy digest must be canonical SHA-256"
+        )
+    if not isinstance(document, dict):
+        return False, "composition_not_object", None
+    components = document.get("components")
+    if not isinstance(components, list):
+        return False, "components_missing", None
+
+    matches: list[dict[str, object]] = []
+    for item in components:
+        if not isinstance(item, dict):
+            return False, "component_not_object", None
+        if (
+            item.get("component_id") == QUALIFICATION_TRUST_POLICY_COMPONENT_ID
+            or item.get("path") == QUALIFICATION_TRUST_POLICY_COMPONENT_PATH
+        ):
+            matches.append(item)
+
+    if not matches:
+        return False, "component_missing", None
+    if len(matches) != 1:
+        return False, "component_ambiguous", None
+
+    expected = {
+        "component_id": QUALIFICATION_TRUST_POLICY_COMPONENT_ID,
+        "kind": QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
+        "path": QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
+        "version": QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+        "sha256": expected_digest,
+    }
+    candidate = matches[0]
+    if frozenset(candidate) != frozenset(expected):
+        return False, "component_fields_mismatch", None
+    for key, value in expected.items():
+        if candidate.get(key) != value:
+            return False, f"{key}_mismatch", None
+    return True, None, expected_digest
 
 
 def dependency_advisory_evidence_document(
@@ -355,10 +481,47 @@ def build_manifest() -> dict[str, object]:
         label="release composition",
     )
     release_source_sha: str | None = None
+    release_policy_digest: str | None = None
     if composition_ok:
-        release_source_sha = json.loads(
+        composition_document = json.loads(
             composition.read_text(encoding="utf-8")
-        )["source_sha"]
+        )
+        release_source_sha = composition_document["source_sha"]
+
+        qualification_pin_source = (
+            ROOT / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        )
+        try:
+            expected_policy_digest = qualification_trust_policy_digest_from_source(
+                qualification_pin_source
+            )
+        except ValueError:
+            policy_ok = False
+            policy_reason = "policy_pin_source_invalid"
+        else:
+            policy_ok, policy_reason, release_policy_digest = (
+                qualification_trust_policy_composition(
+                    composition_document,
+                    expected_digest=expected_policy_digest,
+                )
+            )
+        if not policy_ok:
+            blockers.append(
+                {
+                    "code": (
+                        "QUALIFICATION_TRUST_POLICY_PIN_MISSING"
+                        if policy_reason == "policy_pin_missing"
+                        else "QUALIFICATION_TRUST_POLICY_COMPONENT_MISSING"
+                        if policy_reason == "component_missing"
+                        else "QUALIFICATION_TRUST_POLICY_COMPONENT_UNQUALIFIED"
+                    ),
+                    "detail": (
+                        "Authenticated release composition does not bind the "
+                        "canonical qualification trust policy: "
+                        f"{policy_reason}."
+                    ),
+                }
+            )
     if not composition_ok:
         blockers.append(
             {
@@ -519,14 +682,26 @@ def build_manifest() -> dict[str, object]:
                     }
                 )
 
+    source_inventory = {
+        "components_blob_sha": git_blob_sha(components_path),
+        "requirements_dev_blob_sha": git_blob_sha(requirements_path),
+        "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
+        "global_json_blob_sha": git_blob_sha(global_path),
+    }
+    if release_policy_digest is not None:
+        qualification_pin_source = (
+            ROOT / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        )
+        source_inventory["qualification_attestation_blob_sha"] = git_blob_sha(
+            qualification_pin_source
+        )
+        source_inventory["qualification_trust_policy_sha256"] = (
+            release_policy_digest
+        )
+
     return {
         "schema_version": "1.0.0",
-        "source_inventory": {
-            "components_blob_sha": git_blob_sha(components_path),
-            "requirements_dev_blob_sha": git_blob_sha(requirements_path),
-            "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
-            "global_json_blob_sha": git_blob_sha(global_path),
-        },
+        "source_inventory": source_inventory,
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,

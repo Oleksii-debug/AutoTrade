@@ -103,6 +103,9 @@ internal static class Program
             !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html?mode=debug")),
             "query-selected UI document entered the trusted embedded surface");
         Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html#debug")),
+            "fragment-selected UI document entered the trusted embedded surface");
+        Check.True(
             !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8766/app/")),
             "cross-port navigation entered the trusted embedded surface");
         Check.True(
@@ -170,6 +173,7 @@ internal static class Program
             new Uri(HostOrigin, "/api/v1/state"),
             new Uri("http://127.0.0.1:8766/index.html"),
             new Uri(HostOrigin, "/index.html?debug=1"),
+            new Uri(HostOrigin, "/index.html#debug"),
         })
         {
             Check.True(

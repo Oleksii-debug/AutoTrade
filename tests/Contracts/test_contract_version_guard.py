@@ -119,7 +119,11 @@ class ContractVersionGuardTests(unittest.TestCase):
             self.assertTrue(any("without increasing" in item for item in errors))
 
     def test_tightening_existing_array_cardinality_requires_major_increment(self):
-        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+        with (
+            TemporaryDirectory() as left,
+            TemporaryDirectory() as right,
+            TemporaryDirectory() as major,
+        ):
             base_defs = {
                 "DatasetManifest": {
                     "type": "object",
@@ -143,8 +147,8 @@ class ContractVersionGuardTests(unittest.TestCase):
                 )
             )
 
-            write_tree(Path(right), version="6.0.0", defs=current_defs)
-            self.assertEqual(evaluate(Path(left), Path(right)), [])
+            write_tree(Path(major), version="6.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(major)), [])
 
     def test_decimal_envelope_member_change_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

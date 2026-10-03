@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,7 @@ from mvp.autotrade_mvp.trusted_chronology import ChronologyScope
 
 
 class TrustedChronologyCutTests(_cases.TrustedChronologyCutTests):
-    """Run the full predecessor suite plus fail-closed horizon composition cases."""
+    """Run the full predecessor suite plus fail-closed authority composition cases."""
 
     def _require_current(
         self,
@@ -146,6 +147,79 @@ class TrustedChronologyCutTests(_cases.TrustedChronologyCutTests):
                     cut=cut,
                     accepted=accepted,
                     artifact_store=artifacts,
+                    expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                    claimed_instants=("2026-10-03T14:00:00Z",),
+                )
+
+    def test_current_cut_rechecks_clock_incident_after_receipt_verifier(self):
+        with _cases.TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            evidence_ref = accepted.evidence_refs[0]
+            self.assertEqual(
+                evidence_ref.sha256,
+                "sha256:" + sha256(measurement).hexdigest(),
+            )
+            manifest = {
+                "artifact_id": evidence_ref.artifact_id,
+                "sha256": evidence_ref.sha256,
+                "media_type": evidence_ref.media_type,
+                "metadata": {"evidence_kind": evidence_ref.evidence_kind},
+                "source_refs": [f"git:{evidence_ref.source_sha}"],
+            }
+
+            def raced_verifier(*_args, **_kwargs):
+                recovery.set_clock_trusted(
+                    False,
+                    reason_code="clock-loss-during-reverify",
+                    evidence_ref="probe:loss-during-reverify",
+                )
+                recovery.set_clock_trusted(
+                    True,
+                    reason_code="clock-restored-during-reverify",
+                    evidence_ref="probe:restore-during-reverify",
+                )
+                return accepted
+
+            with (
+                patch.object(
+                    chronology,
+                    "parse_signed_qualification_attestation",
+                    return_value=self._dummy_receipt(),
+                ),
+                patch.object(
+                    chronology,
+                    "verify_canonical_qualification_attestation",
+                    side_effect=raced_verifier,
+                ),
+                patch.object(
+                    chronology,
+                    "trusted_authenticated_reader",
+                    return_value=lambda _artifact_id: (manifest, measurement),
+                ),
+                self.assertRaisesRegex(
+                    PermissionError,
+                    "clock incident generation changed",
+                ),
+            ):
+                chronology.require_current_trusted_chronology_cut(
+                    store=store,
+                    recovery=recovery,
+                    cut=cut,
+                    evidence_store=artifacts,
+                    evidence_root=str(artifacts.root),
+                    expected_source_sha=_cases.SOURCE_SHA,
                     expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                     claimed_instants=("2026-10-03T14:00:00Z",),
                 )

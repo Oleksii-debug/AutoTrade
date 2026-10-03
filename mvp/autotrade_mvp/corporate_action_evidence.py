@@ -23,7 +23,12 @@ import re
 
 from .corporate_actions import CorporateEvent
 from .instruments import InstrumentRegistry, InstrumentVersion
-from .persistence import JournalStore, payload_digest
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -624,8 +629,10 @@ class DurableCorporateActionEvidenceStore:
         account_id: str,
         environment: str,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        self._store_identity = require_exact_journal_store_authority(
+            store,
+            subject="corporate-action evidence JournalStore",
+        )
         self.store = store
         self.provider_id = _text(provider_id, "provider_id").upper()
         self.account_id = _text(account_id, "account_id")
@@ -643,11 +650,25 @@ class DurableCorporateActionEvidenceStore:
             )[7:]
         )
 
-    def _events(self) -> list[dict[str, object]]:
-        events = self.store.load_events(
-            self._AGGREGATE_TYPE,
-            self.aggregate_id,
+    def _validated_store(self):
+        identity = require_exact_journal_store_authority(
+            self.store,
+            subject="corporate-action evidence JournalStore",
         )
+        if identity != self._store_identity:
+            raise CorporateActionEvidenceConflict(
+                "corporate-action evidence JournalStore generation changed"
+            )
+        return self.store, identity
+
+    def _events(self) -> list[dict[str, object]]:
+        store, identity = self._validated_store()
+        with journal_store_authority_scope(store, identity):
+            events = JournalStore.load_events(
+                store,
+                self._AGGREGATE_TYPE,
+                self.aggregate_id,
+            )
         expected_version = 1
         for event in events:
             if event.get("aggregate_version") != expected_version:
@@ -717,8 +738,8 @@ class DurableCorporateActionEvidenceStore:
     ) -> PreparedCorporateActionEvidenceMutation:
         """Prepare source evidence for a shared JournalStore transaction."""
 
-        if not isinstance(accepted, AuthoritativeCorporateAction):
-            raise TypeError("accepted must be AuthoritativeCorporateAction")
+        if type(accepted) is not AuthoritativeCorporateAction:
+            raise TypeError("accepted must be canonical AuthoritativeCorporateAction")
         if (
             accepted.provider_id != self.provider_id
             or accepted.account_id != self.account_id
@@ -728,7 +749,7 @@ class DurableCorporateActionEvidenceStore:
                 "accepted corporate action does not match durable scope"
             )
 
-        events = self._events()
+        events = DurableCorporateActionEvidenceStore._events(self)
         same_identity = [
             event
             for event in events
@@ -904,7 +925,10 @@ class DurableCorporateActionEvidenceStore:
         self,
         accepted: AuthoritativeCorporateAction,
     ) -> DurableCorporateActionEvidenceResult:
-        plan = self.prepare_record_mutation(accepted)
+        plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+            self,
+            accepted,
+        )
         if plan.already_committed:
             return DurableCorporateActionEvidenceResult(
                 event_id=plan.event_id,
@@ -918,16 +942,19 @@ class DurableCorporateActionEvidenceStore:
             raise CorporateActionEvidenceConflict(
                 "fresh corporate-action evidence plan lacks durable envelope"
             )
-        _, inserted, _ = self.store.commit_command(
-            command_id=plan.command_id,
-            actor=self._ACTOR,
-            environment=self.environment,
-            idempotency_key=plan.idempotency_key,
-            request=plan.request,
-            result=plan.result,
-            state_version=plan.aggregate_version,
-            events=[(plan.envelope, None)],
-        )
+        store, identity = self._validated_store()
+        with journal_store_authority_scope(store, identity):
+            _, inserted, _ = JournalStore.commit_command(
+                store,
+                command_id=plan.command_id,
+                actor=self._ACTOR,
+                environment=self.environment,
+                idempotency_key=plan.idempotency_key,
+                request=plan.request,
+                result=plan.result,
+                state_version=plan.aggregate_version,
+                events=[(plan.envelope, None)],
+            )
         return DurableCorporateActionEvidenceResult(
             event_id=plan.event_id,
             external_event_id=accepted.external_event_id,

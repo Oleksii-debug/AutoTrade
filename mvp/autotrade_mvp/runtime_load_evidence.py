@@ -260,12 +260,17 @@ def collect_journal_conservation_evidence(
         store,
         subject="runtime qualification JournalStore",
     )
-    events = JournalStore.load_events_after_journal_sequence(
-        store,
-        start,
-        limit=limit,
-        allow_partial=False,
-    )
+    try:
+        events = JournalStore.load_events_after_journal_sequence(
+            store,
+            start,
+            limit=limit,
+            allow_partial=False,
+        )
+    except ValueError as error:
+        if "journal tail exceeds limit" not in str(error):
+            raise
+        raise RuntimeLoadEvidenceError("journal tail is incomplete") from error
 
     end = start
     recovered_records: list[dict[str, object]] = []

@@ -142,6 +142,87 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             finally:
                 successor.close()
 
+    def test_failed_listener_bootstrap_does_not_publish_runtime_occurrence(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    host_network,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    side_effect=RuntimeError("listener bootstrap failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "listener bootstrap failed"):
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=lambda headers, origin: None,
+                        snapshot_provider=lambda state, principal: {},
+                    )
+
+            journal = production_host.JournalStore(config.journal_path)
+            self.assertEqual(
+                journal.load_events(
+                    "production_host_runtime",
+                    config.host_id,
+                ),
+                [],
+            )
+
+    def test_occurrence_append_failure_closes_composed_listener_and_fence(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            server = Mock()
+            fence = Mock()
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    host_network,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host._InstanceFence,
+                    "acquire",
+                    return_value=fence,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    return_value=server,
+                ) as server_factory,
+                patch.object(
+                    production_host,
+                    "_issue_production_host_runtime_occurrence",
+                    side_effect=RuntimeError("occurrence append failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "occurrence append failed"):
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=lambda headers, origin: None,
+                        snapshot_provider=lambda state, principal: {},
+                    )
+
+            server_factory.assert_called_once()
+            server.server_close.assert_called_once_with()
+            fence.release.assert_called_once_with()
+
     def test_runtime_property_revalidates_after_returned_value_tamper(self) -> None:
         with TemporaryDirectory() as directory:
             config = self._config(directory)
@@ -166,15 +247,11 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
             runtime = self._build(config)
             try:
                 durable = runtime.runtime_occurrence
-                forged = production_host.ProductionHostRuntimeOccurrence(
-                    runtime_occurrence_id="33333333-3333-4333-8333-333333333333",
-                    host_id=durable.host_id,
-                    account_id=durable.account_id,
-                    environment=durable.environment,
-                    aggregate_version=durable.aggregate_version,
-                    journal_sequence=durable.journal_sequence,
+                object.__setattr__(
+                    runtime,
+                    "_runtime_occurrence_id",
+                    "33333333-3333-4333-8333-333333333333",
                 )
-                object.__setattr__(runtime, "_runtime_occurrence", forged)
                 self.assertEqual(
                     runtime.runtime_occurrence.runtime_occurrence_id,
                     durable.runtime_occurrence_id,
@@ -198,6 +275,59 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
                     _ = runtime.runtime_occurrence
+            finally:
+                runtime.close()
+
+    def test_stale_runtime_cannot_adopt_successor_occurrence_by_field_injection(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            first = self._build(config)
+            first_id = first.runtime_occurrence.runtime_occurrence_id
+            first.close()
+
+            successor = self._build(config)
+            try:
+                successor_id = successor.runtime_occurrence.runtime_occurrence_id
+                self.assertNotEqual(first_id, successor_id)
+                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                    _ = first.runtime_occurrence
+
+                object.__setattr__(
+                    first,
+                    "_runtime_occurrence_id",
+                    successor_id,
+                )
+                with self.assertRaisesRegex(RuntimeError, "latest durable occurrence"):
+                    _ = first.runtime_occurrence
+            finally:
+                successor.close()
+
+    def test_executable_injected_selector_is_not_evaluated(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            runtime = self._build(config)
+            try:
+                durable_id = runtime.runtime_occurrence.runtime_occurrence_id
+
+                class ExecutableSelector:
+                    invoked = False
+
+                    def __eq__(self, other):
+                        self.invoked = True
+                        raise AssertionError("injected selector executed")
+
+                    def __ne__(self, other):
+                        self.invoked = True
+                        raise AssertionError("injected selector executed")
+
+                hostile = ExecutableSelector()
+                object.__setattr__(runtime, "_runtime_occurrence_id", hostile)
+
+                self.assertEqual(
+                    runtime.runtime_occurrence.runtime_occurrence_id,
+                    durable_id,
+                )
+                self.assertFalse(hostile.invoked)
             finally:
                 runtime.close()
 

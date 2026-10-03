@@ -8,23 +8,23 @@ Optimize TIME_TO_WHOLE_FINISHED_AUTOTRADE. Useful progress is an accepted capabi
 
 There is no global worker, source-worker, auditor or open-PR cap; no RED/YELLOW/GREEN admission scheme or numeric capacity gate. Exclusive mutation applies only to overlapping semantic responsibility. Independent providers, asset models, UI workflows, science, tests and read-only research proceed concurrently. Infrastructure quotas are respected through queue/backoff, not recast as a product-wide worker limit.
 
-Ownership identity is `(AUTHORITY_FAMILY, SEMANTIC_KEY, MUTATION_SCOPE)`. Scope is a normalized set of module paths and contract responsibilities, not merely a filename list. Two different keys cannot bypass collision detection by both changing the same shared money/order semantics. Broad family names do not lock the whole family: distinct FINANCE/options and FINANCE/futures scopes can proceed together when shared schemas remain stable.
+`(AUTHORITY_FAMILY, SEMANTIC_KEY, MUTATION_SCOPE)` is advisory collision metadata only. It helps workers notice overlapping semantic responsibility but never locks a scope or prevents useful safe work. If overlap is detected, workers should prefer non-conflicting work or reconcile/rebase; they do not terminate merely because another worker is active.
 
 ## 2. Roles and useful work
 
 Implementation workers own exact packages. Integration workers own identified cross-package joins. Contract guardians review version/meaning changes without serially owning every implementation. Financial, scientific, provider, security, accessibility, recovery, reuse/license and integration auditors inspect independent evidence. Research workers reduce named uncertainty and stop when their question is answered; they do not repeatedly summarize the same source.
 
-Read-only work normally needs no exclusive mutation claim. An auditor who fixes code becomes an implementation worker for that exact scope and needs a claim; their own fix then requires independent review where policy calls for it. Auditor findings are tracked as defects with evidence, affected contract/build, severity, expected behavior, reproducible non-live scenario and a dedupe fingerprint.
+Read-only work needs no claim. An auditor who fixes code may create an isolated branch/commit/PR without obtaining an exclusive mutation claim; use advisory ownership metadata only when it helps collision awareness. Independent review remains required only where product/risk/release policy calls for it. Auditor findings are tracked as defects with evidence, affected contract/build, severity, expected behavior, reproducible non-live scenario and a dedupe fingerprint.
 
 ## 3. Self-dispatch loop
 
 1. Load `control/INDEX.json` from the live default branch, then the referenced contract versions, dependency graph, open findings, PRs and claim registry.
 2. Resume useful owned work first; check whether another PR already solves the package.
 3. Select a READY package maximizing critical-path impact, risk reduction and integration value while respecting dependencies and available evidence/tools.
-4. Request atomic ownership for the exact scopes. Wait for the accepted claim token/generation, not a comment saying “claimed.”
+4. Record advisory scope/ownership metadata when useful for coordination, but never wait for a claim token, lease, coordinator, or registry service before beginning useful isolated work.
 5. Work in an isolated branch/worktree based on the recorded source/contract revision. Keep changes within scope.
 6. Run meaningful tests, collect exact-head evidence, publish/update the canonical PR and its package result.
-7. Renew while actively making progress; hand off review/integration through the registry state. Release only through token-checked transition.
+7. Update coordination metadata while useful, but registry/lease state is not an execution or integration gate. Preserve progress in the branch/PR and continue useful work.
 8. Choose the next compatible READY responsibility. If no useful mutation is ready, perform a distinct bounded audit/research task or end the pulse without noise.
 
 A static prompt is only the entry instruction. Live repository state supplies tasks, claims, gates and priorities. Stale snapshots, old chats and Drive copies cannot override newer reviewed repository contracts once implementation has started.
@@ -33,9 +33,9 @@ A static prompt is only the entry instruction. Live repository state supplies ta
 
 Package states: PROPOSED → BLOCKED/READY → CLAIMED → IN_PROGRESS → REVIEW → INTEGRATING → DONE. REWORK returns to the same responsibility with an explicit finding. CANCELLED/SUPERSEDED preserve lineage. Dependencies unlock from accepted artifacts and evidence, not elapsed time or a merged unrelated PR.
 
-Claim fields: claim ID, package ID, authority family, semantic key, normalized mutation scope, owner identity, generation, base commit, contract versions, acquired/renewed/expiry timestamps, branch/PR, progress artifact and status. Expiry duration is a configurable lease for ownership recovery, not a worker-count cap. Renewal requires a valid owner token and evidence of continuing work; a chat pulse alone is not progress.
+Coordination records may contain package ID, authority family, semantic key, mutation scope, worker identity, base commit, contract versions, timestamps, branch/PR, progress artifact and status. These records are advisory and never authorize or forbid work. Expiry/lease concepts may be used for stale-metadata cleanup only, not as mutation, commit, PR, or merge gates.
 
-When a lease expires, inspect branch/PR/artifacts and preserve useful work. The new claimant gets a new generation and normally resumes the existing PR or an explicit successor, rather than rebuilding it. An old worker's private commits can exist, but cannot be accepted/merged under a stale generation. The merge gate rechecks current claim generation, scope, exact head and relevant audit evidence.
+When coordination metadata becomes stale, inspect branch/PR/artifacts and preserve useful work. Any authorized worker may resume, supersede, reconcile, or integrate that work using current repository truth. Stale claim/lease/generation metadata never invalidates otherwise correct commits and is never a merge gate.
 
 ## 5. Independent audit and integration
 
@@ -43,7 +43,7 @@ Financial audit checks money, units, fills, fees, FX, funding, margin and correc
 
 A finding becomes a package when it names a falsifiable defect and concrete acceptance. Fingerprint by affected contract/component, root cause and evidence so ten auditors do not open ten equivalent tasks. Critical authority/conservation/leakage defects block affected merges/qualification; unrelated work continues. A report without actionable evidence is a research note, not an automatic blocker or a completion claim.
 
-Use continuous integration for backward-compatible work. A coordinated wave is warranted for an incompatible schema/engine migration, release freeze or qualification baseline. It names participating packages, migration order and rollback; only dependent scopes wait. The integration owner owns the join, not every contributor's implementation.
+Use continuous integration for backward-compatible work. A coordinated wave is warranted for an incompatible schema/engine migration, release freeze or qualification baseline. It names participating packages, migration order and rollback; only dependent scopes wait. Integration is not reserved to an exclusive owner. Any authorized worker may perform the join when dependencies and product/release evidence make it safe.
 
 ## 6. Launch recommendations without caps
 

@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -232,15 +233,17 @@ def freeze_with_integrity_store(
             if receipt_override is not None
             else _qualification(candidate, trust_root)
         )
-        return freeze_release_candidate(
-            candidate,
-            evidence_store=store,
-            evidence_root=directory,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "load_canonical_qualification_trust_policy",
+            return_value=trust_policy,
+        ):
+            return freeze_release_candidate(
+                candidate,
+                evidence_store=store,
+                evidence_root=directory,
+                qualification_receipt=receipt,
+            )
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
@@ -375,7 +378,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReleaseCandidateError,
-            "requires verified factory authority",
+            "requires canonical evidence verification",
         ):
             ReleaseCandidateDecision(
                 status="FROZEN",
@@ -387,6 +390,91 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
             )
+
+    def test_frozen_rehydration_reverifies_embedded_signature(self):
+        candidate = self.candidate()
+        decision = freeze_with_integrity_store(
+            candidate,
+            with_attestation=True,
+        )
+        trust_root = _trust_root()
+        trust_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(trust_root,),
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            for item in candidate.artifacts:
+                store.publish_bytes(
+                    artifact_id=item.artifact_id,
+                    data=_ARTIFACT_BYTES[item.artifact_id],
+                    media_type=RELEASE_MEDIA_TYPE,
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{item.source_sha}"],
+                    metadata={
+                        "evidence_kind": RELEASE_EVIDENCE_KIND,
+                        "role": item.role,
+                        "source_sha": item.source_sha,
+                        "signature_status": item.signature_status,
+                        "evidence_status": item.evidence_status,
+                    },
+                )
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                restored = ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=decision.manifest_json,
+                    manifest_sha256=decision.manifest_sha256,
+                    qualification_attestation_id=decision.qualification_attestation_id,
+                    qualification_attestation_digest=decision.qualification_attestation_digest,
+                    qualification_policy_id=decision.qualification_policy_id,
+                    qualification_trust_root_id=decision.qualification_trust_root_id,
+                    verification_store=store,
+                    verification_root=directory,
+                )
+            self.assertEqual(restored, decision)
+
+            body = json.loads(decision.manifest_json)
+            body["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
+                b"\\x00" * 256
+            ).decode("ascii")
+            forged_json = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            forged_sha = "sha256:" + sha256(
+                forged_json.encode("utf-8")
+            ).hexdigest()
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "load_canonical_qualification_trust_policy",
+                    return_value=trust_policy,
+                ),
+                self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "canonical qualification verification failed",
+                ),
+            ):
+                ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=forged_json,
+                    manifest_sha256=forged_sha,
+                    qualification_attestation_id=decision.qualification_attestation_id,
+                    qualification_attestation_digest=decision.qualification_attestation_digest,
+                    qualification_policy_id=decision.qualification_policy_id,
+                    qualification_trust_root_id=decision.qualification_trust_root_id,
+                    verification_store=store,
+                    verification_root=directory,
+                )
 
     def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
         decision = freeze_with_integrity_store(
@@ -421,7 +509,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
@@ -459,7 +546,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):

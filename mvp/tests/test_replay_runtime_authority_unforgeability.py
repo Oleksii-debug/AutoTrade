@@ -103,6 +103,74 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 protocol_ref="protocol:walk-forward-v1",
             )
 
+    def test_trusted_verifier_binding_is_one_shot(self):
+        events = [_event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        forged_components = _components(forged_rng=True)
+
+        def forged_cut():
+            return "cut:caller-minted", replay.checkpoint(), forged_components
+
+        attacker = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_ATTACKER_SECRET),
+            cut_resolver=forged_cut,
+        )
+        verifier = _trusted_verifier()
+
+        with self.assertRaisesRegex(ReplayError, "already initialized"):
+            RuntimeStateVerifier.__init__(
+                verifier,
+                authority_id="runtime:production",
+                verifier_id="host-trust:runtime-production-v1",
+                verify_signature=lambda _material, _signature: True,
+            )
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "snapshot authority signature mismatch",
+        ):
+            replay.composite_checkpoint(
+                runtime_state_authority=attacker,
+                runtime_state_verifier=verifier,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_runtime_authority_binding_is_one_shot(self):
+        events = [_event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = _components()
+
+        def trusted_cut():
+            return "cut:trusted", replay.checkpoint(), components
+
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=trusted_cut,
+        )
+
+        with self.assertRaisesRegex(ReplayError, "already initialized"):
+            RuntimeStateAuthority.__init__(
+                authority,
+                authority_id="runtime:production",
+                signer=_signer(_ATTACKER_SECRET),
+                cut_resolver=lambda: (
+                    "cut:rebound",
+                    replay.checkpoint(),
+                    _components(forged_rng=True),
+                ),
+            )
+
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_authority=authority,
+            runtime_state_verifier=_trusted_verifier(),
+            build_sha="a" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+        self.assertEqual(dict(checkpoint.runtime_components), components)
+
     def test_trusted_signer_and_separately_provisioned_verifier_compose(self):
         events = [_event(1, "2026-09-24T10:00:00Z", 1)]
         replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")

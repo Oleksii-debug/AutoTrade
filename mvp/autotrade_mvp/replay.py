@@ -208,6 +208,10 @@ def _runtime_authority_state_operations():
         signer: RuntimeStateSigner,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
+        if authority in authority_states:
+            raise ReplayError(
+                "runtime state authority composition is already initialized"
+            )
         authority_states[authority] = (authority_id, signer, cut_resolver)
 
     def authority_id(authority: "RuntimeStateAuthority") -> str:
@@ -251,6 +255,10 @@ def _runtime_authority_state_operations():
         verifier_id_value: str,
         verify_signature: RuntimeStateSignatureVerifier,
     ) -> None:
+        if verifier in verifier_states:
+            raise ReplayError(
+                "runtime state verifier composition is already initialized"
+            )
         verifier_states[verifier] = (
             authority_id_value,
             verifier_id_value,

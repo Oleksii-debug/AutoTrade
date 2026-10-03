@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.runtime_load_campaign import _sha256_identity
 from mvp.autotrade_mvp.runtime_target_host_inventory import (
+    COLLECTOR_ID,
+    COLLECTOR_VERSION,
+    RAW_EVIDENCE_KIND,
     RuntimeTargetHostInventory,
     RuntimeTargetHostInventoryError,
     collect_runtime_target_host_inventory,
     host_identity_fingerprint,
+    publish_runtime_target_host_inventory,
 )
 
 
@@ -21,6 +28,8 @@ IDENTITY = {
     "python_version": "3.12.11",
     "cpu_count": 8,
 }
+SOURCE_SHA = "a" * 40
+ARTIFACT_ID = "00000000-0000-4000-8000-000000000065"
 
 
 class RuntimeTargetHostInventoryTests(unittest.TestCase):
@@ -130,6 +139,89 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
             "fingerprint does not match captured identity",
         ):
             RuntimeTargetHostInventory.parse(tampered)
+
+    def test_publication_retains_exact_raw_identity_and_digest(self) -> None:
+        expected = host_identity_fingerprint(IDENTITY)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "evidence")
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                return_value=dict(IDENTITY),
+            ):
+                published = publish_runtime_target_host_inventory(
+                    store,
+                    artifact_id=ARTIFACT_ID,
+                    expected_source_sha=SOURCE_SHA,
+                    expected_host_fingerprint=expected,
+                )
+
+            manifest = store.load_manifest(ARTIFACT_ID)
+            self.assertEqual(published.artifact_id, ARTIFACT_ID)
+            self.assertEqual(published.payload_sha256, manifest["sha256"])
+            self.assertEqual(published.host_fingerprint, expected)
+            self.assertEqual(published.collector_id, COLLECTOR_ID)
+            self.assertEqual(published.collector_version, COLLECTOR_VERSION)
+            self.assertEqual(manifest["media_type"], "application/json")
+            self.assertEqual(manifest["source_refs"], [f"git:{SOURCE_SHA}"])
+            self.assertEqual(
+                manifest["metadata"],
+                {
+                    "evidence_kind": RAW_EVIDENCE_KIND,
+                    "collector_id": COLLECTOR_ID,
+                    "collector_version": COLLECTOR_VERSION,
+                    "host_fingerprint": expected,
+                },
+            )
+            self.assertNotIn("created_at", RuntimeTargetHostInventory.parse(
+                RuntimeTargetHostInventory(
+                    host_identity=IDENTITY,
+                    host_fingerprint=expected,
+                ).canonical_bytes()
+            ).canonical_payload())
+
+    def test_publication_is_idempotent_for_exact_inventory(self) -> None:
+        expected = host_identity_fingerprint(IDENTITY)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "evidence")
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                return_value=dict(IDENTITY),
+            ):
+                first = publish_runtime_target_host_inventory(
+                    store,
+                    artifact_id=ARTIFACT_ID,
+                    expected_source_sha=SOURCE_SHA,
+                    expected_host_fingerprint=expected,
+                )
+                second = publish_runtime_target_host_inventory(
+                    store,
+                    artifact_id=ARTIFACT_ID,
+                    expected_source_sha=SOURCE_SHA,
+                    expected_host_fingerprint=expected,
+                )
+        self.assertEqual(first, second)
+
+    def test_publication_rejects_noncanonical_source_or_store_type(self) -> None:
+        expected = host_identity_fingerprint(IDENTITY)
+        with self.assertRaisesRegex(TypeError, "exact ArtifactStore"):
+            publish_runtime_target_host_inventory(
+                object(),
+                artifact_id=ARTIFACT_ID,
+                expected_source_sha=SOURCE_SHA,
+                expected_host_fingerprint=expected,
+            )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "evidence")
+            with self.assertRaisesRegex(
+                RuntimeTargetHostInventoryError,
+                "lowercase 40-character Git SHA",
+            ):
+                publish_runtime_target_host_inventory(
+                    store,
+                    artifact_id=ARTIFACT_ID,
+                    expected_source_sha="A" * 40,
+                    expected_host_fingerprint=expected,
+                )
 
 
 if __name__ == "__main__":

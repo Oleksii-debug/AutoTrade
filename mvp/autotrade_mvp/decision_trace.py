@@ -205,17 +205,23 @@ def _redact_embedded_secret_text(value: str) -> str:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, str):
+    if type(value) is str:
         return _redact_embedded_secret_text(value)
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         result: dict[str, Any] = {}
         for key, item in value.items():
-            result[str(key)] = "[REDACTED]" if _is_sensitive_key(key) else _redact(item)
+            if type(key) is not str:
+                raise ValueError("diagnostic object keys must be exact strings")
+            result[key] = "[REDACTED]" if _is_sensitive_key(key) else _redact(item)
         return result
-    if isinstance(value, list):
+    if type(value) is list:
         return [_redact(item) for item in value]
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return tuple(_redact(item) for item in value)
+    if isinstance(value, (str, Mapping, list, tuple)):
+        raise ValueError(
+            "diagnostic structured values must use exact built-in containers and strings"
+        )
     return value
 
 
@@ -241,8 +247,8 @@ def _validate_digest_map(
         raise ValueError(f"{name} keys must exactly match linked identities")
     for identity, digest in value.items():
         if (
-            not isinstance(identity, str)
-            or not isinstance(digest, str)
+            type(identity) is not str
+            or type(digest) is not str
             or len(digest) != 64
             or digest != digest.lower()
             or any(ch not in "0123456789abcdef" for ch in digest)
@@ -287,14 +293,14 @@ class DecisionTraceStore:
 
     @staticmethod
     def _validate_input(trace: dict[str, Any]) -> None:
-        if not isinstance(trace, dict):
-            raise ValueError("Decision trace must be an object")
+        if type(trace) is not dict:
+            raise ValueError("Decision trace must be an exact object")
         for field in REQUIRED_FIELDS:
             if field not in trace:
                 raise ValueError(f"Missing decision trace field: {field}")
         for field in ("trace_id", "input_hash", "strategy_version", "decision", "decision_reason", "risk_outcome"):
             value = trace[field]
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
         input_hash = trace["input_hash"]
         if (
@@ -306,7 +312,7 @@ class DecisionTraceStore:
 
         source_sha = trace.get("source_sha")
         if source_sha is not None and (
-            not isinstance(source_sha, str)
+            type(source_sha) is not str
             or len(source_sha) not in {40, 64}
             or source_sha != source_sha.lower()
             or any(ch not in "0123456789abcdef" for ch in source_sha)
@@ -315,16 +321,16 @@ class DecisionTraceStore:
 
         build_id = trace.get("build_id")
         if build_id is not None and (
-            not isinstance(build_id, str)
+            type(build_id) is not str
             or _BUILD_ID_PATTERN.fullmatch(build_id) is None
         ):
             raise ValueError("build_id must be a canonical bounded build token")
 
         refs = trace["evidence_refs"]
         if (
-            not isinstance(refs, list)
+            type(refs) is not list
             or any(
-                not isinstance(item, str)
+                type(item) is not str
                 or not item.strip()
                 or item != item.strip()
                 for item in refs
@@ -336,17 +342,17 @@ class DecisionTraceStore:
 
         correlation_id = trace.get("correlation_id")
         if correlation_id is not None and (
-            not isinstance(correlation_id, str) or not correlation_id.strip()
+            type(correlation_id) is not str or not correlation_id.strip()
         ):
             raise ValueError("correlation_id must be a non-empty string")
 
         event_ids = trace.get("event_ids")
         if event_ids is not None:
             if (
-                not isinstance(event_ids, list)
+                type(event_ids) is not list
                 or not event_ids
                 or any(
-                    not isinstance(item, str)
+                    type(item) is not str
                     or not item.strip()
                     or item != item.strip()
                     for item in event_ids
@@ -364,8 +370,8 @@ class DecisionTraceStore:
             _validate_digest_map("event_digests", event_digests, event_ids or [])
 
         attributes = trace.get("attributes")
-        if attributes is not None and not isinstance(attributes, dict):
-            raise ValueError("attributes must be an object")
+        if attributes is not None and type(attributes) is not dict:
+            raise ValueError("attributes must be an exact object")
 
     def append(self, trace: dict[str, Any]) -> bool:
         """Append a trace once; identical retry is a no-op, conflicting retry fails closed."""
@@ -413,8 +419,8 @@ class DecisionTraceStore:
     ) -> dict[str, Any]:
         """Reconstruct a durable decision only when all linked evidence is available."""
 
-        if not isinstance(trace_id, str) or not trace_id.strip():
-            raise ValueError("trace_id is required")
+        if type(trace_id) is not str or not trace_id.strip():
+            raise ValueError("trace_id must be an exact non-empty string")
         events = set(available_event_ids)
         evidence = set(available_evidence_ids)
         record = next(

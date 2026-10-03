@@ -1011,9 +1011,11 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("function renderHostEvent")
         ]
         self.assertIn("const scopeEpoch = state.scopeEpoch", refresh)
+        self.assertIn("const renderedHostId = state.renderedHostId", refresh)
         self.assertIn("const renderedAccountId = state.renderedAccountId", refresh)
         self.assertIn("const renderedEnvironment = state.renderedEnvironment", refresh)
         self.assertIn("scopeEpoch !== state.scopeEpoch", refresh)
+        self.assertIn("renderedHostId !== state.renderedHostId", refresh)
         self.assertIn("renderedAccountId !== state.renderedAccountId", refresh)
         self.assertIn("renderedEnvironment !== state.renderedEnvironment", refresh)
         fence = refresh.index("scopeEpoch !== state.scopeEpoch")
@@ -1097,7 +1099,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("if (!recovered)", poll)
         self.assertLess(
             poll.index("if (!recovered)"),
-            poll.index("const pollEpoch = state.scopeEpoch"),
+            poll.index("pollEpoch = state.scopeEpoch"),
         )
 
     def test_display_context_change_is_announced_with_host_account_and_environment(self):

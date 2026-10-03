@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -615,6 +616,102 @@ class TrustedChronologyCutTests(unittest.TestCase):
                             accepted,
                             artifacts,
                         )
+
+    def test_measurement_requirement_detaches_runtime_occurrence_from_parser_side_effect(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            expected = chronology_measurement_requirement(attempt, measurement)
+            original_host_id = attempt.runtime_occurrence.host_id
+            real_parser = chronology.parse_challenge_bound_measurement
+
+            def mutating_parser(data, *, challenge):
+                transcript = real_parser(data, challenge=challenge)
+                object.__setattr__(
+                    attempt.runtime_occurrence,
+                    "host_id",
+                    "attacker-controlled-host",
+                )
+                return transcript
+
+            try:
+                with patch.object(
+                    chronology,
+                    "parse_challenge_bound_measurement",
+                    side_effect=mutating_parser,
+                ):
+                    observed = chronology_measurement_requirement(
+                        attempt,
+                        measurement,
+                    )
+            finally:
+                object.__setattr__(
+                    attempt.runtime_occurrence,
+                    "host_id",
+                    original_host_id,
+                )
+
+            self.assertEqual(observed, expected)
+
+    def test_accept_detaches_attempt_before_final_frontier_side_effect(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            original_owner_id = attempt.challenge.owner_id
+            original_host_id = attempt.runtime_occurrence.host_id
+            real_current_sequence = chronology._current_sequence
+            current_sequence_calls = 0
+
+            def mutating_current_sequence(selected_store):
+                nonlocal current_sequence_calls
+                sequence = real_current_sequence(selected_store)
+                current_sequence_calls += 1
+                if current_sequence_calls == 2:
+                    object.__setattr__(
+                        attempt.challenge,
+                        "owner_id",
+                        "attacker-controlled-owner",
+                    )
+                    object.__setattr__(
+                        attempt.runtime_occurrence,
+                        "host_id",
+                        "attacker-controlled-host",
+                    )
+                return sequence
+
+            try:
+                with patch.object(
+                    chronology,
+                    "_current_sequence",
+                    side_effect=mutating_current_sequence,
+                ):
+                    cut = self._accept(
+                        store,
+                        recovery,
+                        attempt,
+                        measurement,
+                        accepted,
+                        artifacts,
+                    )
+            finally:
+                object.__setattr__(
+                    attempt.challenge,
+                    "owner_id",
+                    original_owner_id,
+                )
+                object.__setattr__(
+                    attempt.runtime_occurrence,
+                    "host_id",
+                    original_host_id,
+                )
+
+            self.assertGreaterEqual(current_sequence_calls, 2)
+            self.assertEqual(cut.owner_id, original_owner_id)
+            self.assertEqual(cut.host_id, original_host_id)
 
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")

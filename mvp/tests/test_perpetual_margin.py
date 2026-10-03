@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
@@ -275,6 +275,23 @@ def evaluate(**overrides):
         )
 
 
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def as_tuple(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def normalize(self, *args, **kwargs):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def __lt__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
+
+    def __le__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
+
+
 class PerpetualMarginTests(unittest.TestCase):
     def test_fresh_well_collateralized_position_allows_new_risk(self):
         result = evaluate()
@@ -525,6 +542,70 @@ class PerpetualMarginTests(unittest.TestCase):
             "canonical ArtifactStore",
         ):
             evaluate(evidence=trusted, artifact_store=fake_store)
+
+    def test_margin_evidence_payloads_ignore_ambient_decimal_context(self):
+        trusted = evidence(
+            mark_price=Decimal("1234567890123456789012345678.1"),
+            index_price=Decimal("1234567890123456789012345678.2"),
+            collateral_fx_to_settlement=Decimal("0.9999999999999999999999999999"),
+            margin_tiers=(
+                MarginTier(
+                    notional_upper_bound=Decimal(
+                        "1234567890123456789012345678.3"
+                    ),
+                    maintenance_rate=Decimal(
+                        "0.1234567890123456789012345678"
+                    ),
+                    maintenance_adjustment=Decimal(
+                        "0.000000000000000000123456789"
+                    ),
+                ),
+            ),
+        )
+
+        with localcontext() as context:
+            context.prec = 6
+            low_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+        with localcontext() as context:
+            context.prec = 80
+            high_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(
+            low_precision[1]["mark_price"],
+            "1234567890123456789012345678.1",
+        )
+        self.assertEqual(
+            low_precision[0]["tiers"][0]["maintenance_rate"],
+            "0.1234567890123456789012345678",
+        )
+
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("10000")
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound=hostile,
+                maintenance_rate=Decimal("0.005"),
+            )
+
+    def test_margin_numeric_ingress_uses_shared_resource_envelope(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound="1e1000000",
+                maintenance_rate="0.005",
+            )
 
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):

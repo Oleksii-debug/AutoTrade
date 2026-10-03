@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
+from mvp.autotrade_mvp import option_lifecycle as option_lifecycle_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -67,6 +68,7 @@ def option_version(
     settlement_method: str = "PHYSICAL",
     deliverable_quantity: str = "100",
     strike: str = "50",
+    contract_multiplier: str = "100",
     quantity_step: str = "1",
     minimum_quantity: str = "1",
     maximum_quantity: str | None = None,
@@ -82,7 +84,7 @@ def option_version(
         quote_currency="USD",
         settlement_currency="USD",
         quantity_unit="contract",
-        contract_multiplier=Decimal("100"),
+        contract_multiplier=Decimal(contract_multiplier),
         price_tick=Decimal("0.01"),
         quantity_step=Decimal(quantity_step),
         minimum_quantity=Decimal(minimum_quantity),
@@ -400,7 +402,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "0.000000000000000000123456789",
         )
 
-    def test_lifecycle_quantity_below_canonical_minimum_fails_before_mutation(self):
+    def test_lifecycle_quantity_below_order_minimum_is_valid_when_on_grid(self):
         registry = InstrumentRegistry(
             versions=(
                 option_version(
@@ -412,27 +414,21 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         authority = self._authority(registry=registry, economic_book=self.book)
         self.seed_option_position("1")
 
-        with self.assertRaisesRegex(
-            OptionLifecycleError,
-            "canonical instrument quantity authority",
-        ):
-            authority.apply(
-                self.evidence(
-                    external_event_id="below-minimum-life",
-                    signed_contracts="1",
-                )
+        result = authority.apply(
+            self.evidence(
+                external_event_id="below-order-minimum-life",
+                signed_contracts="1",
             )
-
-        self.assertEqual(
-            self.store.load_events("option_lifecycle", authority.aggregate_id),
-            [],
-        )
-        self.assertEqual(
-            self.book.position(f"{OPTION_ID}@1"),
-            Decimal("1"),
         )
 
-    def test_lifecycle_quantity_above_canonical_maximum_fails_before_mutation(self):
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            1,
+        )
+
+    def test_lifecycle_quantity_above_order_maximum_is_valid_when_on_grid(self):
         registry = InstrumentRegistry(
             versions=(
                 option_version(
@@ -445,14 +441,40 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         authority = self._authority(registry=registry, economic_book=self.book)
         self.seed_option_position("2")
 
+        result = authority.apply(
+            self.evidence(
+                external_event_id="above-order-maximum-life",
+                signed_contracts="2",
+            )
+        )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", authority.aggregate_id)),
+            1,
+        )
+
+    def test_lifecycle_quantity_off_grid_still_fails_before_mutation(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="2",
+                    minimum_quantity="1",
+                ),
+            )
+        )
+        authority = self._authority(registry=registry, economic_book=self.book)
+        self.seed_option_position("1")
+
         with self.assertRaisesRegex(
             OptionLifecycleError,
-            "canonical instrument quantity authority",
+            "canonical instrument quantity grid",
         ):
             authority.apply(
                 self.evidence(
-                    external_event_id="above-maximum-life",
-                    signed_contracts="2",
+                    external_event_id="off-grid-life",
+                    signed_contracts="1",
                 )
             )
 
@@ -460,9 +482,30 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             self.store.load_events("option_lifecycle", authority.aggregate_id),
             [],
         )
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+
+    def test_physical_exercise_cash_is_decimal_context_independent(self):
+        version = option_version(
+            strike="123456789.123456789",
+            contract_multiplier="100.000000001",
+            deliverable_quantity="100.000000001",
+        )
+        values = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        values.append(
+                            option_lifecycle_module._standard_physical_exercise_cash(
+                                version
+                            )
+                        )
+        self.assertTrue(all(value == values[0] for value in values))
         self.assertEqual(
-            self.book.position(f"{OPTION_ID}@1"),
-            Decimal("2"),
+            values[0],
+            Decimal("12345678912.469135689123456789"),
         )
 
     def test_sealed_provider_invalid_cash_settlement_fails_as_lifecycle_error(self):

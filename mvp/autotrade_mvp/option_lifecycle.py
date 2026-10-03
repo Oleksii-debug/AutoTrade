@@ -30,6 +30,8 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_abs,
+    exact_multiply,
+    is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
@@ -388,7 +390,12 @@ def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
         raise OptionLifecycleError(
             "adjusted physical deliverable requires explicit canonical exercise cash evidence"
         )
-    return version.strike * version.contract_multiplier
+    try:
+        return exact_multiply(version.strike, version.contract_multiplier)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "option exercise cash exceeds supported exact-decimal resource envelope"
+        ) from error
 
 
 def _contract_from_version(version: InstrumentVersion) -> OptionContract:
@@ -455,15 +462,18 @@ def _bind_version(
         raise OptionLifecycleError("lifecycle event is not bound to an option")
     try:
         quantity = exact_abs(observation.signed_contracts)
-        # Lifecycle quantities are financial inventory movements, so the exact
-        # InstrumentVersion must remain the one quantity authority here too.
-        # This binds step/min/max semantics (and, through the persisted
-        # instrument digest, quantity_unit identity) instead of reimplementing
-        # only one grid check at the lifecycle boundary.
-        version.validate_quantity(quantity)
-    except (ExactDecimalError, InstrumentRegistryError) as error:
+        # Lifecycle facts retire/settle already-existing inventory. Order-entry
+        # minimum/maximum limits are not lifecycle authority; only the bound
+        # immutable quantity grid applies unless separate lifecycle metadata says
+        # otherwise. Provider quantity-unit provenance remains independently
+        # qualified at the provider/parser boundary.
+        if not is_exact_decimal_multiple(quantity, version.quantity_step):
+            raise OptionLifecycleError(
+                "signed_contracts do not satisfy canonical instrument quantity grid"
+            )
+    except ExactDecimalError as error:
         raise OptionLifecycleError(
-            "signed_contracts do not satisfy canonical instrument quantity authority"
+            "signed_contracts exceed supported exact-decimal quantity authority"
         ) from error
     return version
 

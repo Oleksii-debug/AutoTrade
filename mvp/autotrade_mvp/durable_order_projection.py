@@ -317,7 +317,7 @@ class DurableOrderBookProjection:
                     self.evidence_artifact_store,
                     ref["artifact_id"],
                 )
-            except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
+            except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
                 ) from error

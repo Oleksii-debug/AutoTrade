@@ -322,6 +322,53 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
                 Decimal("0"),
             )
 
+    def test_matching_execution_cannot_carry_unrelated_extra_economics(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            seed(reservations, orders)
+            unrelated = book_equity_fill(
+                transaction_id="economic-fill-unrelated-extra",
+                cause_event_id="different-execution",
+                instrument="ABC",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1",
+                price="1",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "does not exclusively own",
+            ):
+                commit_order_fill_with_reservation_consumption(
+                    orders,
+                    economics,
+                    reservations,
+                    order_event_key="fill-1",
+                    client_order_id="order-1",
+                    fill_id="fill-1",
+                    provider_execution_id="provider-execution-1",
+                    quantity="1",
+                    price="100",
+                    command_id="extra-economic-effect",
+                    idempotency_key="extra-economic-effect",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USD": "100"},
+                    transactions=(transaction(), unrelated),
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
     def test_competing_oms_writer_fences_shared_commit(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

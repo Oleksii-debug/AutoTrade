@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -23,6 +23,7 @@ from .exact_decimal import (
     exact_add,
     exact_multiply,
     exact_subtract,
+    parse_bounded_exact_decimal,
 )
 from .instruments import InstrumentVersion
 
@@ -38,11 +39,11 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
     if isinstance(value, bool) or isinstance(value, float):
         raise FuturesError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FuturesError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FuturesError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FuturesError(
+            f"{name} must be a bounded finite exact decimal"
+        ) from error
     if positive and result <= 0:
         raise FuturesError(f"{name} must be positive")
     return result

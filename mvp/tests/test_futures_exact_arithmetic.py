@@ -24,6 +24,7 @@ from mvp.autotrade_mvp.futures import (
     settle_fraction,
     settlement_identity_digest,
 )
+from mvp.autotrade_mvp.exact_decimal import MAX_SIGNIFICANT_DIGITS
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 
 
@@ -279,6 +280,47 @@ class FuturesExactArithmeticTests(unittest.TestCase):
                 context.rounding = rounding
                 identities.add(settlement_identity_digest(settlement))
         self.assertEqual(len(identities), 1)
+
+
+    def test_financial_decimal_ingress_rejects_polymorphic_decimal_before_dispatch(self):
+        callbacks = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                callbacks.append("is_finite")
+                raise AssertionError("virtual decimal method executed")
+
+            def as_tuple(self):
+                callbacks.append("as_tuple")
+                raise AssertionError("virtual decimal method executed")
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "bounded finite exact decimal",
+        ):
+            linear_futures_pnl(
+                signed_contracts=HostileDecimal("1"),
+                multiplier=Decimal("1"),
+                entry_price=Decimal("100"),
+                exit_price=Decimal("101"),
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_authoritative_vm_state_rejects_oversized_decimal_at_construction(self):
+        contract = self._contract()
+        oversized = Decimal("9" * (MAX_SIGNIFICANT_DIGITS + 1))
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "bounded finite exact decimal",
+        ):
+            VariationMarginState(
+                contract=contract,
+                signed_contracts=Decimal("1"),
+                last_settlement_price=Decimal("1"),
+                settlement_scope=self._scope(),
+                cumulative_variation_margin=oversized,
+            )
 
 
 if __name__ == "__main__":

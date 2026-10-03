@@ -76,6 +76,24 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(f'id="{region}" class="table-scroll" role="region"', html)
             self.assertIn(f'"{region}"', js)
 
+    def test_dynamic_operation_and_event_tables_use_row_headers(self):
+        js = APP.read_text(encoding="utf-8")
+        operation = js[
+            js.index("function renderOperation(operation)"):
+            js.index("async function refreshOperation")
+        ]
+        event = js[
+            js.index("function renderHostEvent(event, cursor, stateVersion)"):
+            js.index("function resetOperationsForScope()")
+        ]
+        for scope in (operation, event):
+            self.assertIn('const rowHeader = document.createElement("th")', scope)
+            self.assertIn('rowHeader.scope = "row"', scope)
+            self.assertIn("row.appendChild(rowHeader)", scope)
+            self.assertIn("for (let index = 1; index < 4; index += 1)", scope)
+        self.assertIn("row.children[0].textContent = operation.operationId", operation)
+        self.assertIn("row.children[0].textContent = cursor.toString()", event)
+
     def test_received_host_events_are_exposed_as_read_only_semantic_history(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")

@@ -796,7 +796,10 @@
       }
       row = document.createElement("tr");
       row.dataset.operationId = operation.operationId;
-      for (let index = 0; index < 4; index += 1) {
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) {
         row.appendChild(document.createElement("td"));
       }
       body.appendChild(row);
@@ -836,7 +839,10 @@
     const row = document.createElement("tr");
     row.dataset.hostEventCursor = cursor.toString();
     row.dataset.filterableRow = "true";
-    for (let index = 0; index < 4; index += 1) {
+    const rowHeader = document.createElement("th");
+    rowHeader.scope = "row";
+    row.appendChild(rowHeader);
+    for (let index = 1; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
     row.children[0].textContent = cursor.toString();

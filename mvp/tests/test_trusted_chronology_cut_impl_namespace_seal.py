@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp import trusted_chronology_cut as chronology
 
@@ -22,6 +22,24 @@ class TrustedChronologyCutImplementationNamespaceSealTests(unittest.TestCase):
             "trusted chronology implementation authority changed: authority",
         ):
             guard()
+
+    def test_production_current_cut_rejects_pre_call_verifier_rebinding(self) -> None:
+        forged = Mock()
+        with (
+            patch.object(
+                chronology,
+                "verify_canonical_qualification_attestation",
+                forged,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "trusted chronology implementation authority changed: "
+                "verify_canonical_qualification_attestation",
+            ),
+        ):
+            chronology.require_current_trusted_chronology_cut()
+
+        forged.assert_not_called()
 
     def test_guard_ignores_only_explicitly_excluded_names(self) -> None:
         canonical = object()

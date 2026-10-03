@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.accessibility import format_accessible_status
 from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.cli import get_economic_report, get_status
 from mvp.autotrade_mvp.simulation_session import run_canonical_simulation
@@ -57,6 +58,12 @@ class SimulationBlockedOperatorTests(unittest.TestCase):
                 report["economic_edge_claim"],
                 "UNPROVEN_SIMULATION_ONLY",
             )
+            accessible = format_accessible_status(status, report)
+            self.assertIn("System state: Completed", accessible)
+            self.assertIn("Session outcome: BLOCKED", accessible)
+            self.assertIn("Blocked reason: test_pre_send_block", accessible)
+            self.assertIn("Active reservations: 0", accessible)
+            self.assertIn("Economic edge: unproven", accessible)
 
             replay = run_canonical_simulation(
                 BUY,

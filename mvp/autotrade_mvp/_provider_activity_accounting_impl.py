@@ -395,7 +395,7 @@ def _projected_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProjectedFillEvidence:
-    if not isinstance(payload, Mapping) or set(payload) != _PROJECTED_FILL_BINDING_FIELDS:
+    if type(payload) is not dict or set(payload) != _PROJECTED_FILL_BINDING_FIELDS:
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
     try:
@@ -424,11 +424,11 @@ def _provider_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProviderFillEvidence:
-    if not isinstance(payload, Mapping) or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
+    if type(payload) is not dict or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
     refs = raw["evidence_refs"]
-    if not isinstance(refs, list):
+    if type(refs) is not list:
         raise AccountingConflict(f"{name} evidence_refs are invalid")
     try:
         evidence = ProviderFillEvidence.create(

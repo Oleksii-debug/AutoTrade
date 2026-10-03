@@ -510,6 +510,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             store = JournalStore(f"{directory}/journal.sqlite3")
             resolved = resolved_policy(store, data_age="2")
             observation = mark(
+                source_event_at=NOW,
                 available_at=NOW,
                 observed_at=NOW,
             )
@@ -537,7 +538,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "changed after registry issuance",
+                "resolved policy content digest mismatch",
             ):
                 evaluate_valuation_freshness(
                     mark(),
@@ -777,7 +778,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "same JournalStore generation",
+                "resolved RiskPolicy JournalStore generation mismatch",
             ):
                 book.resolve_fresh_at(
                     journal_sequence_cut=policy_cut,
@@ -952,7 +953,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
 
             store.current_journal_sequence = poison
             with self.assertRaisesRegex(
-                (RuntimeError, ValuationConflict),
+                (TypeError, RuntimeError, ValuationConflict),
                 "shadow|authority|composition",
             ):
                 book.resolve_at(

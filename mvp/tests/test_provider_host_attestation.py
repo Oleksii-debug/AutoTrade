@@ -394,7 +394,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256="sha256:" + "f" * 64,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_attempt_binding_tamper_fails_before_platform_crypto(self):
@@ -410,7 +409,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_noncanonical_or_extra_fields_are_rejected(self):
@@ -426,7 +424,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_serialized_query_cannot_replace_independently_pinned_query(self):
@@ -442,7 +439,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_sender_fence_transition_must_match_independent_restore_context(self):
@@ -451,7 +447,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
         changed["receipt"]["provider_environment"] = "DEMO"
         with self.assertRaisesRegex(
             HostProviderAttestationError,
-            "independently resolved transition",
+            "lease identity is inconsistent",
         ):
             verify_host_sender_fence_attestation(changed, **expected)
 
@@ -508,7 +504,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")

@@ -89,7 +89,7 @@ class OptionLifecycleQuantityAuthorityTests(unittest.TestCase):
         registry = InstrumentRegistry(versions=(option_version(quantity_step="1"),))
         with self.assertRaisesRegex(
             OptionLifecycleError,
-            "quantity_step",
+            "canonical instrument quantity grid",
         ):
             _bind_version(registry, observation("0.5"))
 
@@ -110,7 +110,7 @@ class OptionLifecycleQuantityAuthorityTests(unittest.TestCase):
             side_effect=AssertionError("durable events must not be read for off-grid quantity")
         )
 
-        with self.assertRaisesRegex(OptionLifecycleError, "quantity_step"):
+        with self.assertRaisesRegex(OptionLifecycleError, "canonical instrument quantity grid"):
             authority.apply("provider-read:sha256:" + "0" * 64)
         authority._events.assert_not_called()
 
@@ -130,7 +130,7 @@ class OptionLifecycleQuantityAuthorityTests(unittest.TestCase):
         version = option_version(quantity_step="0.25")
         registry = InstrumentRegistry(versions=(version,))
         self.assertEqual(_bind_version(registry, observation("0.5")), version)
-        with self.assertRaisesRegex(OptionLifecycleError, "quantity_step"):
+        with self.assertRaisesRegex(OptionLifecycleError, "canonical instrument quantity grid"):
             _bind_version(registry, observation("0.3"))
 
     def test_grid_verdict_is_invariant_to_hostile_decimal_context(self):
@@ -150,7 +150,7 @@ class OptionLifecycleQuantityAuthorityTests(unittest.TestCase):
                     context.prec = precision
                     context.rounding = rounding
                     self.assertEqual(_bind_version(registry, aligned), version)
-                    with self.assertRaisesRegex(OptionLifecycleError, "quantity_step"):
+                    with self.assertRaisesRegex(OptionLifecycleError, "canonical instrument quantity grid"):
                         _bind_version(registry, off_grid)
 
     def test_instrument_digest_distinguishes_quantity_unit_and_version(self):

@@ -16,6 +16,7 @@ clock-authority contract and cannot be smuggled into this schema.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from gc import get_referents
 from hashlib import sha256
 import json
 import re
@@ -806,6 +807,207 @@ class TargetHostMeasurementArtifact:
             )
 
 
+def snapshot_target_host_measurement(
+    measurement: TargetHostMeasurementArtifact,
+) -> TargetHostMeasurementArtifact:
+    """Detach one issued artifact without executing post-issuance nested state."""
+
+    if type(measurement) is not TargetHostMeasurementArtifact:
+        raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
+
+    text_fields = (
+        "source_sha",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "scenario_id",
+        "spec_digest",
+        "configuration_hash",
+        "host_fingerprint",
+        "workload_profile_hash",
+        "plan_digest",
+        "journal_taxonomy_digest",
+        "journal_store_identity_digest",
+        "monotonic_clock_id",
+        "staleness_basis",
+        "research_interference_basis",
+        "measurement_method_id",
+        "measurement_method_version",
+        "schema_version",
+    )
+    text_values = {field: getattr(measurement, field) for field in text_fields}
+    for field, value in text_values.items():
+        if type(value) is not str:
+            raise RuntimeTargetHostMeasurementError(
+                f"measurement {field} must remain exact inert text"
+            )
+
+    integer_values = {
+        field: getattr(measurement, field)
+        for field in ("start_journal_sequence", "end_journal_sequence")
+    }
+    for field, value in integer_values.items():
+        if type(value) is not int:
+            raise RuntimeTargetHostMeasurementError(
+                f"measurement {field} must remain an exact integer"
+            )
+
+    financial_values = measurement.financial_samples
+    if type(financial_values) is not tuple:
+        raise RuntimeTargetHostMeasurementError(
+            "measurement financial_samples must remain an exact tuple"
+        )
+    financial_samples: list[FinancialTargetHostSample] = []
+    for sample in financial_values:
+        if type(sample) is not FinancialTargetHostSample:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement financial_samples must contain exact FinancialTargetHostSample"
+            )
+        sample_id = sample.sample_id
+        event_id = sample.event_id
+        numeric = {
+            field: getattr(sample, field)
+            for field in (
+                "journal_sequence",
+                "latency_start_monotonic_ns",
+                "latency_end_monotonic_ns",
+                "staleness_source_monotonic_ns",
+                "staleness_observed_monotonic_ns",
+            )
+        }
+        if type(sample_id) is not str or type(event_id) is not str:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement financial sample text must remain exact inert text"
+            )
+        for field, value in numeric.items():
+            if type(value) is not int:
+                raise RuntimeTargetHostMeasurementError(
+                    f"measurement financial sample {field} must remain an exact integer"
+                )
+        financial_samples.append(
+            FinancialTargetHostSample(
+                sample_id=sample_id,
+                event_id=event_id,
+                journal_sequence=numeric["journal_sequence"],
+                latency_start_monotonic_ns=numeric["latency_start_monotonic_ns"],
+                latency_end_monotonic_ns=numeric["latency_end_monotonic_ns"],
+                staleness_source_monotonic_ns=numeric[
+                    "staleness_source_monotonic_ns"
+                ],
+                staleness_observed_monotonic_ns=numeric[
+                    "staleness_observed_monotonic_ns"
+                ],
+            )
+        )
+
+    research_values = measurement.research_samples
+    if type(research_values) is not tuple:
+        raise RuntimeTargetHostMeasurementError(
+            "measurement research_samples must remain an exact tuple"
+        )
+    research_samples: list[ResearchInterferenceSample] = []
+    for sample in research_values:
+        if type(sample) is not ResearchInterferenceSample:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement research_samples must contain exact ResearchInterferenceSample"
+            )
+        sample_id = sample.sample_id
+        phase = sample.phase
+        numeric = {
+            field: getattr(sample, field)
+            for field in ("start_monotonic_ns", "end_monotonic_ns")
+        }
+        if type(sample_id) is not str or type(phase) is not str:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement research sample text must remain exact inert text"
+            )
+        for field, value in numeric.items():
+            if type(value) is not int:
+                raise RuntimeTargetHostMeasurementError(
+                    f"measurement research sample {field} must remain an exact integer"
+                )
+        research_samples.append(
+            ResearchInterferenceSample(
+                sample_id=sample_id,
+                phase=phase,
+                start_monotonic_ns=numeric["start_monotonic_ns"],
+                end_monotonic_ns=numeric["end_monotonic_ns"],
+            )
+        )
+
+    resource_values = measurement.resource_samples
+    if type(resource_values) is not tuple:
+        raise RuntimeTargetHostMeasurementError(
+            "measurement resource_samples must remain an exact tuple"
+        )
+    resource_samples: list[ResourceTargetHostSample] = []
+    for sample in resource_values:
+        if type(sample) is not ResourceTargetHostSample:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement resource_samples must contain exact ResourceTargetHostSample"
+            )
+        sample_id = sample.sample_id
+        phase = sample.phase
+        monotonic_ns = sample.monotonic_ns
+        metrics_value = sample.metrics
+        if type(sample_id) is not str or type(phase) is not str:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement resource sample text must remain exact inert text"
+            )
+        if type(monotonic_ns) is not int:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement resource sample monotonic_ns must remain an exact integer"
+            )
+        if type(metrics_value) is not MappingProxyType:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement resource sample metrics must remain canonical exact-dict mappingproxy"
+            )
+        referents = get_referents(metrics_value)
+        if len(referents) != 1 or type(referents[0]) is not dict:
+            raise RuntimeTargetHostMeasurementError(
+                "measurement resource sample metrics must remain canonical exact-dict mappingproxy"
+            )
+        metrics = dict(referents[0])
+        for key, metric_value in metrics.items():
+            if type(key) is not str or type(metric_value) is not int:
+                raise RuntimeTargetHostMeasurementError(
+                    "measurement resource sample metrics must contain exact str/int scalars"
+                )
+        resource_samples.append(
+            ResourceTargetHostSample(
+                sample_id=sample_id,
+                monotonic_ns=monotonic_ns,
+                phase=phase,
+                metrics=metrics,
+            )
+        )
+
+    detached = TargetHostMeasurementArtifact(
+        source_sha=text_values["source_sha"],
+        release_artifact_id=text_values["release_artifact_id"],
+        release_artifact_sha256=text_values["release_artifact_sha256"],
+        scenario_id=text_values["scenario_id"],
+        spec_digest=text_values["spec_digest"],
+        configuration_hash=text_values["configuration_hash"],
+        host_fingerprint=text_values["host_fingerprint"],
+        workload_profile_hash=text_values["workload_profile_hash"],
+        plan_digest=text_values["plan_digest"],
+        journal_taxonomy_digest=text_values["journal_taxonomy_digest"],
+        journal_store_identity_digest=text_values["journal_store_identity_digest"],
+        start_journal_sequence=integer_values["start_journal_sequence"],
+        end_journal_sequence=integer_values["end_journal_sequence"],
+        monotonic_clock_id=text_values["monotonic_clock_id"],
+        staleness_basis=text_values["staleness_basis"],
+        research_interference_basis=text_values["research_interference_basis"],
+        financial_samples=tuple(financial_samples),
+        research_samples=tuple(research_samples),
+        resource_samples=tuple(resource_samples),
+        measurement_method_id=text_values["measurement_method_id"],
+        measurement_method_version=text_values["measurement_method_version"],
+        schema_version=text_values["schema_version"],
+    )
+    return TargetHostMeasurementArtifact.parse(detached.canonical_bytes())
+
+
 def collect_runtime_campaign_evidence_from_measurement_artifact(
     *,
     journal: JournalStore,
@@ -827,7 +1029,7 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
 
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
-    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    measurement = snapshot_target_host_measurement(measurement)
     frozen_release_artifact_id = _uuid(
         expected_release_artifact_id,
         name="expected_release_artifact_id",

@@ -79,7 +79,23 @@ public sealed class HostLifetimeExclusiveLease : IDisposable
         FileStream? stream = null;
         try
         {
-            Directory.CreateDirectory(rootDirectory);
+            try
+            {
+                Directory.CreateDirectory(rootDirectory);
+            }
+            catch (IOException error)
+            {
+                throw new HostLifetimeFenceUnavailableException(
+                    "Host lifetime fence storage is not writable.",
+                    error);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                throw new HostLifetimeFenceUnavailableException(
+                    "Host lifetime fence storage is not writable.",
+                    error);
+            }
+
             string path = Path.Combine(rootDirectory, scopeId + ".lock");
             try
             {

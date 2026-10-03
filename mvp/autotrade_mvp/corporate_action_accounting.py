@@ -19,8 +19,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import (
     AccountingConflict,
+    EconomicBook,
     JournalTransaction,
     Posting,
+    _canonical_equity_split_terms,
+    book_equity_split_adjustment,
+    project_equity_position,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -29,13 +33,93 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    require_authoritative_corporate_action_issuance,
 )
-from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
+from .corporate_actions import (
+    CorporateActionBook,
+    CorporateEvent,
+    EquityState,
+    Transition,
+    _require_exact_event,
+)
+from .exact_decimal import ExactDecimalError, exact_add, exact_subtract, exact_sum
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
 
-_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
+_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
+_ACTIVATION_AGGREGATE_TYPE = "corporate_action_activation"
+_ACTIVATION_EVENT_TYPE = "CorporateActionFinancialActivated"
+
+
+def _exact_add_value(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
+
+
+def _exact_subtract_value(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
+
+
+def _exact_sum_values(values) -> Decimal:
+    try:
+        return exact_sum(values)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
+
+
+def _canonical_utc_cut(value: datetime, *, name: str) -> datetime:
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or type(value.tzinfo) is not timezone
+    ):
+        raise TypeError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
+
+
+def _require_authoritative_action(accepted: AuthoritativeCorporateAction) -> None:
+    if type(accepted) is not AuthoritativeCorporateAction:
+        raise TypeError(
+            "accepted must be an exact AuthoritativeCorporateAction"
+        )
+    _require_exact_event(accepted.event)
+    values = (
+        accepted.evidence_ref,
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
+        accepted.external_event_id,
+        accepted.provider_revision,
+        accepted.raw_evidence_digest,
+        accepted.query_digest,
+        accepted.capability_snapshot_id,
+        accepted.provider_instrument_version,
+        accepted.observed_at,
+        accepted.provenance_digest,
+    )
+    if any(type(value) is not str for value in values):
+        raise TypeError("accepted corporate-action identity must use exact strings")
+    if (
+        accepted.corrects_external_event_id is not None
+        and type(accepted.corrects_external_event_id) is not str
+    ):
+        raise TypeError(
+            "accepted correction identity must use an exact string"
+        )
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -46,6 +130,134 @@ def _identity(kind: str, *parts: str) -> str:
 
 def _order_key(external_event_id: str) -> str:
     return _identity("corporate-action-order", external_event_id)
+
+
+def _activation_aggregate_id(accepted: AuthoritativeCorporateAction) -> str:
+    return _identity(
+        "corporate-action-activation",
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
+        accepted.external_event_id,
+        accepted.provenance_digest,
+    )
+
+
+def _activation_event_id(accepted: AuthoritativeCorporateAction) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/corporate-action-activation/"
+            + _activation_aggregate_id(accepted),
+        )
+    )
+
+
+def _load_activation_fact(
+    store: JournalStore,
+    accepted: AuthoritativeCorporateAction,
+) -> dict[str, object] | None:
+    """Load one exact durable activation fact, independent of retained evidence."""
+
+    events = store.load_events(
+        _ACTIVATION_AGGREGATE_TYPE,
+        _activation_aggregate_id(accepted),
+    )
+    if not events:
+        return None
+    if len(events) != 1:
+        raise AccountingConflict(
+            "corporate-action activation history must contain exactly one fact"
+        )
+    event = events[0]
+    if (
+        event.get("event_id") != _activation_event_id(accepted)
+        or event.get("event_type") != _ACTIVATION_EVENT_TYPE
+        or event.get("aggregate_version") != 1
+    ):
+        raise AccountingConflict("corporate-action activation fact identity is invalid")
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping):
+        raise AccountingConflict("corporate-action activation payload is invalid")
+    required = {
+        "schema_version",
+        "provider_id",
+        "account_id",
+        "environment",
+        "external_event_id",
+        "provenance_digest",
+        "corrects_external_event_id",
+        "activation_at",
+        "pre_activation_journal_sequence",
+        "entitlement_position_digest",
+        "transaction_ids",
+        "next_state_digest",
+    }
+    if set(payload) != required:
+        raise AccountingConflict("corporate-action activation payload shape is invalid")
+    if (
+        payload.get("schema_version") != "1.0.0"
+        or payload.get("provider_id") != accepted.provider_id
+        or payload.get("account_id") != accepted.account_id
+        or payload.get("environment") != accepted.environment
+        or payload.get("external_event_id") != accepted.external_event_id
+        or payload.get("provenance_digest") != accepted.provenance_digest
+        or payload.get("corrects_external_event_id")
+        != accepted.corrects_external_event_id
+    ):
+        raise AccountingConflict("corporate-action activation fact scope is invalid")
+    pre_cut = payload.get("pre_activation_journal_sequence")
+    journal_sequence = event.get("journal_sequence")
+    if (
+        type(pre_cut) is not int
+        or pre_cut < 0
+        or type(journal_sequence) is not int
+        or journal_sequence <= pre_cut
+    ):
+        raise AccountingConflict("corporate-action activation journal cut is invalid")
+    transaction_ids = payload.get("transaction_ids")
+    if (
+        not isinstance(transaction_ids, list)
+        or any(not isinstance(item, str) or not item for item in transaction_ids)
+        or len(transaction_ids) != len(set(transaction_ids))
+    ):
+        raise AccountingConflict("corporate-action activation transaction identity is invalid")
+    return dict(payload)
+
+
+def _activation_envelope(
+    accepted: AuthoritativeCorporateAction,
+    *,
+    activation_at: str,
+    pre_activation_journal_sequence: int,
+    entitlement_position_digest: str,
+    transaction_ids: tuple[str, ...],
+    next_state_digest: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "1.0.0",
+        "provider_id": accepted.provider_id,
+        "account_id": accepted.account_id,
+        "environment": accepted.environment,
+        "external_event_id": accepted.external_event_id,
+        "provenance_digest": accepted.provenance_digest,
+        "corrects_external_event_id": accepted.corrects_external_event_id,
+        "activation_at": activation_at,
+        "pre_activation_journal_sequence": pre_activation_journal_sequence,
+        "entitlement_position_digest": entitlement_position_digest,
+        "transaction_ids": list(transaction_ids),
+        "next_state_digest": next_state_digest,
+    }
+    return {
+        "event_id": _activation_event_id(accepted),
+        "event_type": _ACTIVATION_EVENT_TYPE,
+        "aggregate_type": _ACTIVATION_AGGREGATE_TYPE,
+        "aggregate_id": _activation_aggregate_id(accepted),
+        "aggregate_version": "1",
+        "committed_at": activation_at,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+    }
 
 
 def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
@@ -94,12 +306,16 @@ def _canonical_entitlement_position_proof(
     accepted: AuthoritativeCorporateAction,
     *,
     activation_cut: datetime,
-) -> dict[str, object]:
-    """Prove dividend quantity from causal durable position history.
+    excluded_order_key: str,
+) -> tuple[dict[str, object], EquityState]:
+    """Derive one causal durable pre-action state for the pure calculator.
 
-    The pure CorporateActionBook remains a calculator, not a position authority.
-    Only POSITION postings already durable and causally knowable at the provider
-    observation may authorize the quantity used for dividend economics.
+    CorporateActionBook owns transition semantics and retained event chronology,
+    but it is not a mutable position or basis authority. Quantity, FIFO open
+    basis and unsettled corporate-action cash therefore come from the canonical
+    durable economic journal at one causal cut. Exact retry/correction excludes
+    the action lineage being rebuilt so it reconstructs the same pre-action
+    state instead of feeding its own durable effect back into the calculator.
     """
 
     version = corporate_book.instrument_version
@@ -115,35 +331,46 @@ def _canonical_entitlement_position_proof(
         raise AccountingConflict(
             "corporate-action entitlement requires exact economic effective cut"
         )
+    observed_cut = _canonical_utc_cut(
+        activation_cut,
+        name="activation_cut",
+    )
+    if type(excluded_order_key) is not str or not excluded_order_key.strip():
+        raise ValueError("excluded_order_key is required")
 
-    if (
-        not isinstance(activation_cut, datetime)
-        or activation_cut.tzinfo is None
-        or activation_cut.utcoffset() is None
-    ):
-        raise TypeError("activation_cut must be timezone-aware")
-    observed_cut = activation_cut.astimezone(timezone.utc)
+    current_order_key = excluded_order_key.strip()
     symbol = version.provider_symbol
+    settlement_currency = version.settlement_currency.upper()
     position_account = f"POSITION:{symbol}"
-    quantity = Decimal("0")
+    unsettled_account = f"UNSETTLED_CASH:{settlement_currency}"
+    causal_position_transactions: list[JournalTransaction] = []
+    unsettled_cash = Decimal("0")
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
     for transaction in economic_book.transactions:
+        if transaction.economic_order_key == current_order_key:
+            continue
         position_postings = tuple(
             posting
             for posting in transaction.postings
             if posting.ledger_account == position_account
             and posting.asset_or_currency == symbol
         )
-        if not position_postings:
+        unsettled_postings = tuple(
+            posting
+            for posting in transaction.postings
+            if posting.ledger_account == unsettled_account
+            and posting.asset_or_currency == settlement_currency
+        )
+        if not position_postings and not unsettled_postings:
             continue
         if (
             transaction.economic_effective_at is None
             or transaction.observed_at is None
         ):
             raise AccountingConflict(
-                "canonical position history lacks causal entitlement timestamps"
+                "canonical pre-action financial history lacks causal timestamps"
             )
         try:
             effective = datetime.fromisoformat(
@@ -154,13 +381,22 @@ def _canonical_entitlement_position_proof(
             ).astimezone(timezone.utc)
         except ValueError as error:
             raise AccountingConflict(
-                "canonical position history contains invalid entitlement timestamps"
+                "canonical pre-action financial history contains invalid timestamps"
             ) from error
-        if effective <= event.effective_at and observed <= observed_cut:
-            quantity += sum(
-                (posting.signed_amount for posting in position_postings),
-                Decimal("0"),
+        if effective == event.effective_at and observed <= observed_cut:
+            raise AccountingConflict(
+                "same-effective-time financial state and corporate action lack qualified causal order"
             )
+        if effective < event.effective_at and observed <= observed_cut:
+            if position_postings:
+                causal_position_transactions.append(transaction)
+            if unsettled_postings:
+                unsettled_cash = _exact_add_value(
+                    unsettled_cash,
+                    _exact_sum_values(
+                        posting.signed_amount for posting in unsettled_postings
+                    ),
+                )
             contributors.append(
                 {
                     "transaction_id": transaction.transaction_id,
@@ -168,16 +404,41 @@ def _canonical_entitlement_position_proof(
                 }
             )
 
-    if quantity != corporate_book.state.quantity:
+    projection = project_equity_position(
+        EconomicBook(causal_position_transactions),
+        instrument=symbol,
+        settlement_currency=settlement_currency,
+    )
+    if projection.quantity < 0:
+        if event.kind == "SPLIT":
+            raise AccountingConflict(
+                "equity split with short/borrow/recall state requires atomic borrow authority"
+            )
         raise AccountingConflict(
-            "corporate-action calculator quantity does not match canonical durable position at entitlement cut"
+            "short corporate-action entitlement requires canonical borrow authority"
+        )
+    if (
+        corporate_book.state.borrowed_quantity != 0
+        or corporate_book.state.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "corporate-action pre-action state requires canonical borrow authority"
         )
 
+    pre_action_state = EquityState.create(
+        symbol=symbol,
+        quantity=projection.quantity,
+        total_basis=projection.open_cost_basis,
+        settled_cash=corporate_book.state.settled_cash,
+        unsettled_cash=unsettled_cash,
+        currency=settlement_currency,
+        borrowed_quantity=Decimal("0"),
+        accrued_financing=corporate_book.state.accrued_financing,
+        recalled_quantity=Decimal("0"),
+    )
     proof: dict[str, object] = {
-        "schema_version": "1.0.0",
-        "instrument_version": (
-            f"{version.instrument_id}@{version.version}"
-        ),
+        "schema_version": "2.0.0",
+        "instrument_version": f"{version.instrument_id}@{version.version}",
         "provider_symbol": symbol,
         "economic_effective_cut": event.effective_at.isoformat().replace(
             "+00:00", "Z"
@@ -185,19 +446,32 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": str(quantity),
+        "quantity": str(projection.quantity),
+        "open_cost_basis": str(projection.open_cost_basis),
+        "realized_pnl": str(projection.realized_pnl),
+        "unsettled_cash": str(unsettled_cash),
+        "projection_policy_version": projection.policy_version,
+        "lots": [
+            {
+                "transaction_id": lot.transaction_id,
+                "quantity": str(lot.quantity),
+                "unit_price": str(lot.unit_price),
+            }
+            for lot in projection.lots
+        ],
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)
-    return proof
+    return proof, pre_action_state
 
 
 def _candidate_book(
     book: CorporateActionBook,
     accepted: AuthoritativeCorporateAction,
 ) -> tuple[CorporateActionBook, Transition]:
-    if not isinstance(book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
+    if type(book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be an exact CorporateActionBook")
+    _require_authoritative_action(accepted)
 
     event = accepted.event
     events = list(book.events)
@@ -242,6 +516,27 @@ def _candidate_book(
     return candidate, transition
 
 
+def _authoritative_candidate_book(
+    book: CorporateActionBook,
+    accepted: AuthoritativeCorporateAction,
+    *,
+    pre_action_state: EquityState,
+) -> tuple[CorporateActionBook, Transition]:
+    """Validate retained corporate chronology, then calculate from durable state."""
+
+    # Retained pure history still owns event identity, correction-target and
+    # chronology validation. Its mutable state is deliberately not financial
+    # authority, so the transition itself is rebuilt from the durable projection.
+    _candidate_book(book, accepted)
+    candidate = CorporateActionBook(
+        pre_action_state,
+        instrument_version=book.instrument_version,
+        registry=book.registry,
+    )
+    transition = candidate.apply(accepted.event)
+    return candidate, transition
+
+
 def _dividend_transaction(
     accepted: AuthoritativeCorporateAction,
     transition: Transition,
@@ -251,7 +546,10 @@ def _dividend_transaction(
     economic_effective_at: str | None = None,
     observed_at: str | None = None,
 ) -> JournalTransaction | None:
-    amount = transition.after.unsettled_cash - transition.before.unsettled_cash
+    amount = _exact_subtract_value(
+        transition.after.unsettled_cash,
+        transition.before.unsettled_cash,
+    )
     if amount == 0:
         return None
     currency = transition.after.currency
@@ -265,7 +563,11 @@ def _dividend_transaction(
         ),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
-            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
+            Posting(
+                f"CORPORATE_ACTION_INCOME:{currency}",
+                currency,
+                _exact_subtract_value(Decimal("0"), amount),
+            ),
         ),
         economic_effective_at=(
             economic_effective_at
@@ -277,6 +579,68 @@ def _dividend_transaction(
     )
     validate_transaction(transaction)
     return transaction
+
+
+def _split_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    observed_at: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+) -> JournalTransaction | None:
+    before = transition.before
+    after = transition.after
+    if (
+        before.quantity < 0
+        or before.borrowed_quantity != 0
+        or before.recalled_quantity != 0
+        or after.borrowed_quantity != 0
+        or after.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "equity split with short/borrow/recall state requires atomic borrow authority"
+        )
+    if (
+        after.total_basis != before.total_basis
+        or after.settled_cash != before.settled_cash
+        or after.unsettled_cash != before.unsettled_cash
+        or after.currency != before.currency
+        or after.symbol != before.symbol
+    ):
+        raise AccountingConflict(
+            "equity split durable mapping requires zero cash/P&L and unchanged basis"
+        )
+    if after.quantity == before.quantity:
+        return None
+    try:
+        numerator = accepted.event.payload["numerator"]
+        denominator = accepted.event.payload["denominator"]
+    except KeyError as error:
+        raise AccountingConflict(
+            "equity split evidence lacks exact numerator/denominator"
+        ) from error
+    return book_equity_split_adjustment(
+        transaction_id=_transaction_id(accepted, "effect"),
+        cause_event_id=_identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            "effect",
+        ),
+        instrument=after.symbol,
+        pre_split_quantity=before.quantity,
+        numerator=numerator,
+        denominator=denominator,
+        economic_effective_at=(
+            economic_effective_at
+            or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+        ),
+        economic_order_key=order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
+    )
 
 
 def _active_for_order_key(
@@ -304,6 +668,7 @@ def _correction_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
+    transaction_observed_at: str,
 ) -> tuple[JournalTransaction, ...]:
     target_id = accepted.corrects_external_event_id
     if target_id is None:
@@ -339,19 +704,41 @@ def _correction_transactions(
             original,
             transaction_id=expected_reversal_id,
             cause_event_id=committed_reversal.cause_event_id,
-            observed_at=accepted.observed_at,
+            observed_at=transaction_observed_at,
         )
         if rebuilt_reversal != committed_reversal:
             raise AccountingConflict(
                 "corporate-action correction reversal conflicts with retained evidence"
             )
-        replacement = _dividend_transaction(
-            accepted,
-            transition,
-            order_key=original.economic_order_key or order_key,
-            corrects_transaction_id=original.transaction_id,
-            economic_effective_at=original.economic_effective_at,
-        )
+        if accepted.event.kind == "CASH_DIVIDEND":
+            replacement = _dividend_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+                observed_at=transaction_observed_at,
+            )
+        elif accepted.event.kind == "SPLIT":
+            if _canonical_equity_split_terms(
+                original,
+                instrument=transition.after.symbol,
+            ) is None:
+                raise AccountingConflict(
+                    "equity split correction target lacks canonical split economics"
+                )
+            replacement = _split_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                observed_at=transaction_observed_at,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+            )
+        else:
+            raise AccountingConflict(
+                f"{accepted.event.kind} correction has no qualified durable mapping"
+            )
         committed_replacement = next(
             (
                 item
@@ -392,15 +779,37 @@ def _correction_transactions(
             accepted.provenance_digest,
             "reversal",
         ),
-        observed_at=accepted.observed_at,
+        observed_at=transaction_observed_at,
     )
-    replacement = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=original.economic_order_key or order_key,
-        corrects_transaction_id=original.transaction_id,
-        economic_effective_at=original.economic_effective_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        replacement = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if _canonical_equity_split_terms(
+            original,
+            instrument=transition.after.symbol,
+        ) is None:
+            raise AccountingConflict(
+                "equity split correction target lacks canonical split economics"
+            )
+        replacement = _split_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            observed_at=transaction_observed_at,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} correction has no qualified durable mapping"
+        )
     return (reversal,) if replacement is None else (reversal, replacement)
 
 
@@ -418,20 +827,41 @@ def _economic_transactions(
         )
 
     if accepted.corrects_external_event_id is not None:
+        if transaction_observed_at is None:
+            raise AccountingConflict(
+                "corporate-action correction requires causal observation time"
+            )
         return _correction_transactions(
             economic_book,
             accepted,
             transition,
             exact_retry=exact_retry,
+            transaction_observed_at=transaction_observed_at,
         )
 
     order_key = _order_key(accepted.external_event_id)
-    transaction = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=order_key,
-        observed_at=transaction_observed_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        transaction = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if transaction_observed_at is None:
+            raise AccountingConflict(
+                "equity split durable accounting requires causal observation time"
+            )
+        transaction = _split_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} has no qualified durable corporate-action accounting mapping"
+        )
     active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
         raise AccountingConflict(
@@ -462,20 +892,20 @@ def commit_authoritative_corporate_action(
     qualified host clock/scheduler boundary.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(evidence_store, DurableCorporateActionEvidenceStore):
+    if type(store) is not JournalStore:
+        raise TypeError("store must be an exact JournalStore")
+    if type(evidence_store) is not DurableCorporateActionEvidenceStore:
         raise TypeError(
-            "evidence_store must be DurableCorporateActionEvidenceStore"
+            "evidence_store must be an exact DurableCorporateActionEvidenceStore"
         )
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(corporate_book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
-    if not isinstance(accepted, AuthoritativeCorporateAction):
+    if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError(
-            "accepted must be AuthoritativeCorporateAction from sealed provider evidence"
+            "economic_book must be an exact DurableProviderEconomicBook"
         )
+    if type(corporate_book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be an exact CorporateActionBook")
+    _require_authoritative_action(accepted)
+    require_authoritative_corporate_action_issuance(accepted)
     if evidence_store.store is not store or economic_book.store is not store:
         raise ValueError(
             "corporate-action evidence and economics must share one JournalStore"
@@ -498,9 +928,7 @@ def commit_authoritative_corporate_action(
 
     cut = activation_at
     if cut is not None:
-        if not isinstance(cut, datetime) or cut.tzinfo is None:
-            raise TypeError("activation_at must be timezone-aware")
-        cut = cut.astimezone(timezone.utc)
+        cut = _canonical_utc_cut(cut, name="activation_at")
     activation_cut = observed_at if observed_at >= effective_at else cut
 
     if activation_cut is None or activation_cut < effective_at:
@@ -517,20 +945,38 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
-    entitlement_position = _canonical_entitlement_position_proof(
+    # The durable pre-action projection and final commit share one journal cut.
+    # A zero-effect action has no economic aggregate-version fence of its own,
+    # so any concurrent financial mutation must still invalidate activation.
+    journal_read_cut = store.current_journal_sequence()
+    entitlement_position, pre_action_state = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
         accepted,
         activation_cut=activation_cut,
+        excluded_order_key=_order_key(
+            accepted.corrects_external_event_id
+            or accepted.external_event_id
+        ),
     )
+    candidate, transition = _authoritative_candidate_book(
+        corporate_book,
+        accepted,
+        pre_action_state=pre_action_state,
+    )
+    if store.current_journal_sequence() != journal_read_cut:
+        raise AccountingConflict(
+            "corporate-action entitlement journal changed during projection"
+        )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
-    candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
+    activation_fact = _load_activation_fact(store, accepted)
+    activation_already_committed = activation_fact is not None
     transactions = _economic_transactions(
         economic_book,
         accepted,
         transition,
-        exact_retry=evidence_plan.already_committed,
+        exact_retry=activation_already_committed,
         transaction_observed_at=activation_text,
     )
     economic_plan = (
@@ -541,19 +987,61 @@ def commit_authoritative_corporate_action(
         if transactions
         else None
     )
+    transaction_ids = tuple(item.transaction_id for item in transactions)
+    next_state_digest = payload_digest(
+        {
+            "symbol": candidate.state.symbol,
+            "quantity": str(candidate.state.quantity),
+            "total_basis": str(candidate.state.total_basis),
+            "settled_cash": str(candidate.state.settled_cash),
+            "unsettled_cash": str(candidate.state.unsettled_cash),
+            "currency": candidate.state.currency,
+        }
+    )
+    if activation_fact is not None:
+        if (
+            activation_fact.get("activation_at") != activation_text
+            or activation_fact.get("entitlement_position_digest")
+            != entitlement_position["digest"]
+            or activation_fact.get("transaction_ids") != list(transaction_ids)
+            or activation_fact.get("next_state_digest") != next_state_digest
+        ):
+            raise AccountingConflict(
+                "corporate-action activation retry differs from durable activation fact"
+            )
 
     economic_committed = (
         economic_plan is None or economic_plan.already_committed
     )
-    if evidence_plan.already_committed and economic_committed:
+    if (
+        activation_already_committed
+        and evidence_plan.already_committed
+        and economic_committed
+    ):
         return CorporateActionFinancialResult(
             inserted=False,
             source_event_id=evidence_plan.event_id,
             accepted_event=accepted.event,
             transition=transition,
             next_state=candidate.state,
-            transaction_ids=tuple(item.transaction_id for item in transactions),
+            transaction_ids=transaction_ids,
             economically_active=True,
+        )
+    if activation_already_committed and not evidence_plan.already_committed:
+        raise AccountingConflict(
+            "corporate-action activation exists without retained provider evidence"
+        )
+    if activation_already_committed and not economic_committed:
+        raise AccountingConflict(
+            "corporate-action activation exists without complete durable economics"
+        )
+    if (
+        economic_plan is not None
+        and economic_plan.already_committed
+        and not activation_already_committed
+    ):
+        raise AccountingConflict(
+            "corporate-action economics are durable without matching activation fact"
         )
     if (
         not evidence_plan.already_committed
@@ -580,15 +1068,19 @@ def commit_authoritative_corporate_action(
         events.append((evidence_plan.envelope, None))
     if economic_plan is not None and not economic_plan.already_committed:
         events.append((economic_plan.envelope, "autotrade.economic.events"))
-    if not events:
-        return CorporateActionFinancialResult(
-            inserted=False,
-            source_event_id=evidence_plan.event_id,
-            accepted_event=accepted.event,
-            transition=transition,
-            next_state=candidate.state,
-            transaction_ids=tuple(item.transaction_id for item in transactions),
-            economically_active=True,
+    if not activation_already_committed:
+        events.append(
+            (
+                _activation_envelope(
+                    accepted,
+                    activation_at=activation_text,
+                    pre_activation_journal_sequence=journal_read_cut,
+                    entitlement_position_digest=str(entitlement_position["digest"]),
+                    transaction_ids=transaction_ids,
+                    next_state_digest=next_state_digest,
+                ),
+                None,
+            )
         )
 
     request = {
@@ -605,19 +1097,10 @@ def commit_authoritative_corporate_action(
         "source_event_id": evidence_plan.event_id,
         "external_event_id": accepted.external_event_id,
         "provenance_digest": accepted.provenance_digest,
-        "transaction_ids": [item.transaction_id for item in transactions],
+        "transaction_ids": list(transaction_ids),
         "activation_at": activation_text,
         "entitlement_position_digest": entitlement_position["digest"],
-        "next_state_digest": payload_digest(
-            {
-                "symbol": candidate.state.symbol,
-                "quantity": str(candidate.state.quantity),
-                "total_basis": str(candidate.state.total_basis),
-                "settled_cash": str(candidate.state.settled_cash),
-                "unsettled_cash": str(candidate.state.unsettled_cash),
-                "currency": candidate.state.currency,
-            }
-        ),
+        "next_state_digest": next_state_digest,
     }
     command_id = str(
         uuid5(
@@ -651,10 +1134,12 @@ def commit_authoritative_corporate_action(
             request=request,
             result=result,
             state_version=max(
+                1,
                 evidence_plan.aggregate_version,
                 0 if economic_plan is None else economic_plan.aggregate_version,
             ),
             events=events,
+            expected_journal_sequence=journal_read_cut,
         )
     except Exception:
         economic_book.refresh()
@@ -667,7 +1152,6 @@ def commit_authoritative_corporate_action(
         accepted_event=accepted.event,
         transition=transition,
         next_state=candidate.state,
-        transaction_ids=tuple(item.transaction_id for item in transactions),
+        transaction_ids=transaction_ids,
         economically_active=True,
     )
-

@@ -109,10 +109,24 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 cause_event_id="bootstrap-before-crash",
                 currency="USD", amount="1000",
             ))
-            result = run_canonical_simulation(BUY, directory, episode_id="orphan", now=NOW)
-            self.assertEqual(result["status"], "UNKNOWN")
-            self.assertEqual(result["new_outbound_requests"], 0)
-            self.assertFalse(result["reconciled"])
+            before_sequence = store.current_journal_sequence()
+            before_economic = store.load_events("economic_book", book.book_id)
+            with self.assertRaisesRegex(
+                ValueError, "foreign durable business authority"
+            ):
+                run_canonical_simulation(
+                    BUY, directory, episode_id="orphan", now=NOW
+                )
+            self.assertEqual(store.current_journal_sequence(), before_sequence)
+            self.assertEqual(
+                store.load_events("economic_book", book.book_id), before_economic
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "canonical_simulation_store_owner"
+                ),
+                [],
+            )
             self.assertEqual(store.load_events_by_aggregate_type("submission_attempt"), [])
 
     def test_buy_reconciles_durable_economics_and_resume_sends_nothing(self):

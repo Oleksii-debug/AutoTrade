@@ -32,7 +32,7 @@ from .reconciliation import (
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
-from .reconciliation_journal import record_reconciliation_checkpoint
+from .reconciliation_journal import reconciliation_payload, record_reconciliation_checkpoint
 from .risk import RiskContext, RiskIntent, RiskPolicy
 from .simulated_provider import SimulatedProvider
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
@@ -47,6 +47,9 @@ PROVIDER = "SIMULATED"
 INITIAL_CASH = Decimal("1000")
 FEE_RATE = Decimal("0.001")
 _AGGREGATE = "single-episode"
+_OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
+_OWNER_AGGREGATE_ID = "canonical"
+_BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
 
 
 def _uuid(kind: str, episode_id: str) -> str:
@@ -104,14 +107,128 @@ def _event(store: JournalStore, kind: str, episode_id: str, payload: dict, now: 
     return envelope
 
 
-def _deliver_event(store: JournalStore, event_id: str) -> None:
-    for item in store.pending_outbox():
-        if item["event_id"] == event_id:
-            store.mark_outbox_delivered(
-                item["outbox_id"], expected_envelope_hash=item["envelope_hash"]
-            )
-            return
-    raise ValueError("expected simulator bootstrap outbox event is missing")
+def _owner_payload(
+    *, episode_id: str, input_hash: str, decision: str, evidence_time: str
+) -> dict[str, object]:
+    return {
+        "schema_version": "1.0.0",
+        "bootstrap_contract": _BOOTSTRAP_CONTRACT,
+        "episode_id": episode_id,
+        "input_hash": input_hash,
+        "decision": decision,
+        "environment": ENVIRONMENT,
+        "evidence_time": evidence_time,
+    }
+
+
+def _claim_owner(
+    store: JournalStore, *, episode_id: str, payload: dict[str, object], now: str
+) -> dict:
+    envelope = {
+        "event_id": _uuid("SimulationSessionOwned", episode_id),
+        "event_type": "SimulationSessionOwned",
+        "schema_version": "1.0.0",
+        "aggregate_type": _OWNER_AGGREGATE_TYPE,
+        "aggregate_id": _OWNER_AGGREGATE_ID,
+        "aggregate_version": "1",
+        "host_id": "local-simulation",
+        "owner_epoch": "1",
+        "environment": ENVIRONMENT,
+        "occurred_at": now,
+        "observed_at": now,
+        "committed_at": now,
+        "correlation_id": _uuid("correlation", episode_id),
+        "causation_id": None,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "evidence_refs": [],
+    }
+    JournalStore.claim_first_event(store, envelope)
+    persisted = JournalStore.get_event(store, envelope["event_id"])
+    if persisted is None:
+        raise RuntimeError("canonical simulation ownership event was not persisted")
+    return persisted
+
+
+def _validate_owner(
+    owners: list[dict], *, episode_id: str, input_hash: str, decision: str
+) -> str:
+    if len(owners) != 1:
+        raise ValueError("durable simulation ownership chronology is invalid")
+    owner = owners[0]
+    if (
+        owner.get("event_type") != "SimulationSessionOwned"
+        or owner.get("aggregate_version") != 1
+        or owner.get("journal_sequence") != 1
+    ):
+        raise ValueError("durable simulation owner is not the first store authority")
+    payload = owner.get("payload")
+    if type(payload) is not dict:
+        raise ValueError("durable simulation owner payload is invalid")
+    expected_keys = {
+        "schema_version",
+        "bootstrap_contract",
+        "episode_id",
+        "input_hash",
+        "decision",
+        "environment",
+        "evidence_time",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("durable simulation owner payload schema is invalid")
+    evidence_time = payload.get("evidence_time")
+    if (
+        payload.get("schema_version") != "1.0.0"
+        or payload.get("bootstrap_contract") != _BOOTSTRAP_CONTRACT
+        or payload.get("episode_id") != episode_id
+        or payload.get("input_hash") != input_hash
+        or payload.get("decision") != decision
+        or payload.get("environment") != ENVIRONMENT
+        or type(evidence_time) is not str
+        or _now(evidence_time) != evidence_time
+    ):
+        raise ValueError("state directory belongs to another simulation input")
+    return evidence_time
+
+
+def _require_prestart_cut(
+    store: JournalStore,
+    *,
+    economic_events: list[dict],
+    reconciliation_events: list[dict],
+) -> None:
+    events = [*economic_events, *reconciliation_events]
+    expected = set(range(2, 2 + len(events)))
+    observed = {event.get("journal_sequence") for event in events}
+    if observed != expected:
+        raise ValueError("canonical simulation bootstrap prefix is not contiguous")
+    if JournalStore.current_journal_sequence(store) != 1 + len(events):
+        raise ValueError("state directory contains foreign durable journal authority")
+    counts = JournalStore.whole_store_state_counts(store)
+    expected_counts = {
+        "events": 1 + len(events),
+        "outbox": len(events),
+        "command_dedupe": 1 if economic_events else 0,
+        "projection_checkpoints": 0,
+        "global_projection_checkpoints": 0,
+    }
+    if counts != expected_counts:
+        raise ValueError(
+            "canonical simulation bootstrap durable state is not exact"
+        )
+
+
+def _deliver_event(store: JournalStore, event_id: str, *, topic: str) -> None:
+    state = JournalStore.outbox_delivery_state(
+        store, event_id, topic=topic
+    )
+    if state["delivered"]:
+        return
+    JournalStore.mark_outbox_delivered(
+        store,
+        state["outbox_id"],
+        expected_envelope_hash=state["envelope_hash"],
+    )
 
 
 def _risk_policy() -> RiskPolicy:
@@ -214,13 +331,61 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 decision, now: str | None, fault_after_send: bool,
                 buy_requirements: tuple[Decimal, Decimal] | None) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
-    prior = store.load_events("canonical_simulation_session", _AGGREGATE)
+    owners = JournalStore.load_events(store, _OWNER_AGGREGATE_TYPE, _OWNER_AGGREGATE_ID)
+    prior = JournalStore.load_events(store, "canonical_simulation_session", _AGGREGATE)
+    resumed_from_owner = bool(owners)
+
+    if owners:
+        timestamp = _validate_owner(
+            owners,
+            episode_id=episode_id,
+            input_hash=input_hash,
+            decision=decision.side,
+        )
+    else:
+        if prior:
+            raise ValueError(
+                "durable simulation session exists without first-store ownership"
+            )
+        timestamp = _now(now)
+        owner_payload = _owner_payload(
+            episode_id=episode_id,
+            input_hash=input_hash,
+            decision=decision.side,
+            evidence_time=timestamp,
+        )
+        try:
+            _claim_owner(
+                store,
+                episode_id=episode_id,
+                payload=owner_payload,
+                now=timestamp,
+            )
+        except ValueError as error:
+            if "durable business state" in str(error):
+                raise ValueError(
+                    "state directory contains foreign durable business authority"
+                ) from error
+            raise
+
     if prior:
+        if len(prior) > 2:
+            raise ValueError("canonical simulation session chronology is invalid")
         started = prior[0]
-        if (started["event_type"] != "SimulationSessionStarted"
-                or started["payload"].get("input_hash") != input_hash):
+        payload = started.get("payload")
+        if (
+            started.get("event_type") != "SimulationSessionStarted"
+            or type(payload) is not dict
+            or set(payload) != {"input_hash", "decision", "episode_id", "environment"}
+            or payload.get("input_hash") != input_hash
+            or payload.get("decision") != decision.side
+            or payload.get("episode_id") != episode_id
+            or payload.get("environment") != ENVIRONMENT
+        ):
             raise ValueError("state directory belongs to another simulation input")
-        if len(prior) == 2 and prior[1]["event_type"] == "SimulationSessionCompleted":
+        if len(prior) == 2:
+            if prior[1].get("event_type") != "SimulationSessionCompleted":
+                raise ValueError("canonical simulation session chronology is invalid")
             result = dict(prior[1]["payload"])
             economic = DurableProviderEconomicBook(
                 store, provider_id=PROVIDER, account_id=ACCOUNT,
@@ -238,7 +403,6 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
 
-    timestamp = _now(now)
     future = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
               + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     provider = SimulatedProvider(
@@ -252,30 +416,81 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     economic = DurableProviderEconomicBook(
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
     )
-    if store.load_events("economic_book", economic.book_id):
-        # A prior process may have died between bootstrap and the session marker.
-        # Its send state cannot be inferred from a fresh simulated provider.
-        return {
-            "status": "UNKNOWN", "environment": ENVIRONMENT,
-            "episode_id": episode_id, "reason": "orphaned_durable_state_requires_reconciliation",
-            "reconciled": False, "resumed": True, "new_outbound_requests": 0,
-        }
-    economic.append(book_external_cash_flow(
+    seed = book_external_cash_flow(
         transaction_id=_uuid("seed-transaction", episode_id),
         cause_event_id=_uuid("seed-cause", episode_id),
         currency="USD", amount=str(INITIAL_CASH),
-    ))
-    bootstrap = store.load_events("economic_book", economic.book_id)
-    _deliver_event(store, bootstrap[-1]["event_id"])
+    )
+    economic_events = JournalStore.load_events(store, "economic_book", economic.book_id)
+    reconciliation_events = JournalStore.load_events_by_aggregate_type(
+        store, "account_reconciliation"
+    )
+    _require_prestart_cut(
+        store,
+        economic_events=economic_events,
+        reconciliation_events=reconciliation_events,
+    )
+    if economic_events:
+        plan = economic.prepare_batch_mutation((seed,), committed_at=timestamp)
+        if len(economic_events) != 1 or not plan.already_committed:
+            raise ValueError("canonical simulation seed bootstrap is invalid")
+    else:
+        economic.append(seed)
+        economic_events = JournalStore.load_events(
+            store, "economic_book", economic.book_id
+        )
+        if len(economic_events) != 1:
+            raise RuntimeError("canonical simulation seed bootstrap was not persisted")
+    _deliver_event(
+        store,
+        economic_events[0]["event_id"],
+        topic="autotrade.economic.events",
+    )
+
     admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
     if not admission_reconciliation.complete or admission_reconciliation.blocks_new_risk:
         raise ValueError("initial simulated provider reconciliation failed")
-    availability = record_reconciliation_checkpoint(
-        store, reconciliation_id="canonical-simulation-admission",
-        result=admission_reconciliation, observed_at=timestamp,
-        host_id="local-simulation", owner_epoch="1",
+    expected_checkpoint_payload = reconciliation_payload(
+        admission_reconciliation, observed_at=timestamp
     )
-    _deliver_event(store, availability["event_id"])
+    expected_checkpoint_payload["checkpoint_owner"] = {
+        "host_id": "local-simulation",
+        "owner_epoch": "1",
+    }
+    reconciliation_events = JournalStore.load_events_by_aggregate_type(
+        store, "account_reconciliation"
+    )
+    _require_prestart_cut(
+        store,
+        economic_events=economic_events,
+        reconciliation_events=reconciliation_events,
+    )
+    if reconciliation_events:
+        if (
+            len(reconciliation_events) != 1
+            or reconciliation_events[0].get("event_type") != "AccountReconciled"
+            or reconciliation_events[0].get("aggregate_version") != 1
+            or reconciliation_events[0].get("payload") != expected_checkpoint_payload
+        ):
+            raise ValueError("canonical simulation reconciliation bootstrap is invalid")
+        availability = reconciliation_events[0]
+    else:
+        availability = record_reconciliation_checkpoint(
+            store, reconciliation_id="canonical-simulation-admission",
+            result=admission_reconciliation, observed_at=timestamp,
+            host_id="local-simulation", owner_epoch="1",
+        )
+        reconciliation_events = [availability]
+    _deliver_event(
+        store,
+        availability["event_id"],
+        topic="autotrade.reconciliation.events",
+    )
+    _require_prestart_cut(
+        store,
+        economic_events=economic_events,
+        reconciliation_events=reconciliation_events,
+    )
     _event(store, "SimulationSessionStarted", episode_id, {
         "input_hash": input_hash, "decision": decision.side,
         "episode_id": episode_id, "environment": ENVIRONMENT,
@@ -290,7 +505,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "new_outbound_requests": 0,
         }
         _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
-        return {**result, "resumed": False}
+        return {**result, "resumed": resumed_from_owner}
 
     policy = _risk_policy()
     context = _risk_context(decision.price)
@@ -370,7 +585,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "new_outbound_requests": 0,
         }
         _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
-        return {**result, "resumed": False}
+        return {**result, "resumed": resumed_from_owner}
 
     def final_check(candidate_hash, current_time):
         return authority.dispatch_allowed(

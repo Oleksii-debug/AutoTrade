@@ -154,7 +154,12 @@ class SemanticWebSurfaceTests(unittest.TestCase):
             },
             status_text="Ready",
         )
-        self.assertIn("<dd>0</dd>", html)
+        self.assertEqual(html.count("<dd>Unavailable</dd>"), 2)
+        self.assertIn(
+            "Commands are unavailable because the current state version is malformed or unavailable.",
+            html,
+        )
+        self.assertNotIn("<form", html)
         self.assertNotIn(">nan<", html.lower())
         self.assertNotIn(">inf<", html.lower())
 

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_runtime.artifacts import ArtifactStore
 
-from mvp.autotrade_mvp import production_host
+from mvp.autotrade_mvp import host_network, production_host
 from mvp.autotrade_mvp.journal_taxonomy import (
     NON_FINANCIAL,
     QUALIFICATION_NON_FINANCIAL,
@@ -92,6 +93,44 @@ class TrustedChronologyCutTests(unittest.TestCase):
         )
         return store, recovery, config, occurrence
 
+    class DummySecurityBoundary:
+        pass
+
+    def _runtime(self, directory: str):
+        path = Path(directory) / "journal.sqlite3"
+        config = ProductionHostConfig(
+            journal_path=path.resolve(),
+            account_id="paper-account",
+            environment="PAPER",
+            host_id="host-a",
+            bind_host="127.0.0.1",
+            bind_port=8765,
+            public_origin="http://127.0.0.1:8765",
+        )
+        with (
+            patch.object(
+                production_host,
+                "SecurityBoundary",
+                self.DummySecurityBoundary,
+            ),
+            patch.object(
+                host_network,
+                "SecurityBoundary",
+                self.DummySecurityBoundary,
+            ),
+            patch.object(
+                production_host,
+                "AuthenticatedHostServer",
+                return_value=Mock(),
+            ),
+        ):
+            return production_host.build_production_host(
+                config,
+                security_boundary=self.DummySecurityBoundary(),
+                principal_resolver=lambda headers, origin: None,
+                snapshot_provider=lambda state, principal: {},
+            )
+
     @staticmethod
     def _measurement(attempt, *, lower="2026-10-03T14:00:00Z", upper="2026-10-03T14:00:01Z"):
         return _canonical_bytes(
@@ -115,6 +154,10 @@ class TrustedChronologyCutTests(unittest.TestCase):
     @staticmethod
     def _accepted(attempt, measurement, *, result="PASS", unresolved_limits=(), release_marker="attempt"):
         measurement_sha = "sha256:" + sha256(measurement).hexdigest()
+        dynamic_requirement = chronology_measurement_requirement(
+            attempt,
+            measurement,
+        )
         ref = EvidenceArtifactRef(
             artifact_id=MEASUREMENT_ID,
             sha256=measurement_sha,
@@ -139,13 +182,16 @@ class TrustedChronologyCutTests(unittest.TestCase):
             trust_root_id=ROOT_ID,
             result=result,
             source_sha=SOURCE_SHA,
-            domain="RECOVERY",
-            gate="TRUSTED_CHRONOLOGY",
+            domain="HOST_CLOCK",
+            gate="CHRONOLOGY",
             package_id="WP-48",
-            protocol_id="trusted-chronology-v1",
+            protocol_id="trusted-chronology-cut-v1",
             protocol_version="1.0.0",
-            requirement_id=chronology_measurement_requirement(attempt, measurement),
-            requirement_ids=(chronology_measurement_requirement(attempt, measurement),),
+            requirement_id="independent-utc-chronology-cut",
+            requirement_ids=(
+                "independent-utc-chronology-cut",
+                dynamic_requirement,
+            ),
             evidence_refs=(ref,),
             producer_id="independent.qualifier",
             verifier_id="autotrade.qualifier",
@@ -163,12 +209,22 @@ class TrustedChronologyCutTests(unittest.TestCase):
             signature_b64="AA==",
         )
 
-    def _prepare(self, store, recovery, occurrence, *, scope=ChronologyScope.SOURCE_QUALIFICATION):
+    def _prepare(
+        self,
+        store,
+        recovery,
+        occurrence=None,
+        *,
+        scope=ChronologyScope.SOURCE_QUALIFICATION,
+        runtime=None,
+    ):
+        del occurrence
         kwargs = {}
         if scope is ChronologyScope.RELEASE_RUNTIME:
             kwargs = {
                 "release_artifact_id": RELEASE_ID,
                 "release_artifact_sha256": RELEASE_SHA,
+                "runtime": runtime,
             }
         with (
             patch.object(chronology.time, "monotonic_ns", return_value=10_000_000_000),
@@ -181,7 +237,6 @@ class TrustedChronologyCutTests(unittest.TestCase):
             return prepare_durable_chronology_challenge(
                 store=store,
                 recovery=recovery,
-                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=scope,
                 **kwargs,
@@ -199,6 +254,7 @@ class TrustedChronologyCutTests(unittest.TestCase):
         finish_mono=11_000_000_000,
         finish_wall="2026-10-03T14:00:01Z",
         verifier_side_effect=None,
+        runtime=None,
     ):
         if verifier_side_effect is None:
             verifier_side_effect = lambda *args, **kwargs: accepted
@@ -223,9 +279,48 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 receipt=self._dummy_receipt(),
                 evidence_store=artifact_store,
                 evidence_root=str(artifact_store.root),
+                runtime=runtime,
             )
 
-    def test_source_cut_is_durable_occurrence_bound_and_current(self):
+    def _require_current(
+        self,
+        *,
+        store,
+        recovery,
+        cut,
+        accepted,
+        artifact_store,
+        expected_scope,
+        runtime=None,
+        expected_release_artifact_id=None,
+        expected_release_artifact_sha256=None,
+    ):
+        with (
+            patch.object(
+                chronology,
+                "parse_signed_qualification_attestation",
+                return_value=self._dummy_receipt(),
+            ),
+            patch.object(
+                chronology,
+                "verify_canonical_qualification_attestation",
+                return_value=accepted,
+            ),
+        ):
+            return require_current_trusted_chronology_cut(
+                store=store,
+                recovery=recovery,
+                cut=cut,
+                evidence_store=artifact_store,
+                evidence_root=str(artifact_store.root),
+                expected_source_sha=SOURCE_SHA,
+                expected_scope=expected_scope,
+                expected_release_artifact_id=expected_release_artifact_id,
+                expected_release_artifact_sha256=expected_release_artifact_sha256,
+                runtime=runtime,
+            )
+
+    def test_source_cut_is_runtime_free_and_current(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
             attempt = self._prepare(store, recovery, occurrence)
@@ -244,7 +339,8 @@ class TrustedChronologyCutTests(unittest.TestCase):
 
             self.assertEqual(cut.scope, ChronologyScope.SOURCE_QUALIFICATION)
             self.assertIsNone(cut.release_artifact_id)
-            self.assertEqual(cut.runtime_occurrence_id, occurrence.runtime_occurrence_id)
+            self.assertIsNone(cut.runtime_occurrence_id)
+            self.assertIsNone(cut.runtime_host_id)
             self.assertEqual(cut.covered_utc, "2026-10-03T14:00:00Z")
             events = store.load_events_by_aggregate_type("trusted_chronology")
             self.assertEqual(
@@ -255,12 +351,12 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                require_current_trusted_chronology_cut(
+                self._require_current(
                     store=store,
                     recovery=recovery,
-                    runtime_occurrence=occurrence,
                     cut=cut,
-                    expected_source_sha=SOURCE_SHA,
+                    accepted=accepted,
+                    artifact_store=artifacts,
                     expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                 ),
                 cut,
@@ -342,7 +438,7 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 occurrence.runtime_occurrence_id,
             )
             artifacts = ArtifactStore(Path(directory) / "artifacts")
-            with self.assertRaisesRegex(PermissionError, "no longer current"):
+            with self.assertRaisesRegex(PermissionError, "journal advanced"):
                 self._accept(
                     store,
                     recovery,
@@ -471,11 +567,9 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 evidence_kind="TRUSTED_CHRONOLOGY_MEASUREMENT",
                 source_sha=SOURCE_SHA,
             )
-            accepted = AcceptedQualificationAttestation(
-                **{
-                    **accepted.__dict__,
-                    "evidence_refs": (wrong_ref,),
-                }
+            accepted = replace(
+                accepted,
+                evidence_refs=(wrong_ref,),
             )
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             with self.assertRaisesRegex(

@@ -894,6 +894,70 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertLess(operations, history)
         self.assertLess(operations, portfolio)
 
+    def test_async_operation_reads_cannot_repopulate_a_changed_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshOperation(operationId)"):
+            js.index("function renderHostEvent")
+        ]
+        self.assertIn("const scopeEpoch = state.scopeEpoch", refresh)
+        self.assertIn("const renderedAccountId = state.renderedAccountId", refresh)
+        self.assertIn("const renderedEnvironment = state.renderedEnvironment", refresh)
+        self.assertIn("scopeEpoch !== state.scopeEpoch", refresh)
+        self.assertIn("renderedAccountId !== state.renderedAccountId", refresh)
+        self.assertIn("renderedEnvironment !== state.renderedEnvironment", refresh)
+        fence = refresh.index("scopeEpoch !== state.scopeEpoch")
+        render = refresh.index("renderOperation(operation)")
+        self.assertLess(fence, render)
+        self.assertIn("return null", refresh)
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("const operation = await refreshOperation(operationId)", poll)
+        self.assertIn("if (operation === null)", poll)
+        self.assertLess(
+            poll.index("if (operation === null)"),
+            poll.index("renderHostEvent(event, cursor, version)"),
+        )
+
+    def test_confirmed_command_response_is_scope_fenced_before_operation_rendering(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function commandScopeMatchesCurrentSnapshot(payload)", js)
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        response = submit.index("const result = await submitCanonicalCommand(payload)")
+        fence = submit.index("if (!responseScopeCurrent)", response)
+        details = submit.index(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            response,
+        )
+        operation = submit.index("await refreshOperation(result.operationId)", response)
+        self.assertLess(fence, details)
+        self.assertLess(fence, operation)
+        self.assertIn(
+            "Operation and field-validation details from the original scope were not rendered into the current scope.",
+            submit,
+        )
+        self.assertIn("Acceptance is not a completed financial outcome.", submit)
+
+    def test_trust_invalidation_advances_async_scope_epoch(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("scopeEpoch: 0", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("state.scopeEpoch += 1", snapshot)
+        pagehide = js[
+            js.index('window.addEventListener("pagehide"'):
+            js.index('window.addEventListener("pageshow"')
+        ]
+        self.assertIn("state.scopeEpoch += 1", pagehide)
+
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
         html = INDEX.read_text(encoding="utf-8")

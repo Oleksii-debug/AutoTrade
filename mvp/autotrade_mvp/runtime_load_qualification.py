@@ -116,6 +116,17 @@ def _sorted_unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
+def _exact_plan_text_tuple(values: object, *, name: str) -> tuple[str, ...]:
+    """Reject post-issuance executable plan containers before any iteration."""
+
+    if type(values) is not tuple:
+        raise RuntimeBudgetError(f"{name} must remain an exact tuple")
+    for value in values:
+        if type(value) is not str:
+            raise RuntimeBudgetError(f"{name} must contain exact strings")
+    return values
+
+
 def _digest(payload: Mapping[str, object]) -> str:
     encoded = json.dumps(
         payload,
@@ -197,11 +208,19 @@ class RuntimeCampaignPlan:
             "declared_duration_ms",
             _positive_int(self.declared_duration_ms, name="declared_duration_ms"),
         )
+        expected_financial_event_ids = _exact_plan_text_tuple(
+            self.expected_financial_event_ids,
+            name="expected_financial_event_ids",
+        )
+        financial_aggregate_types = _exact_plan_text_tuple(
+            self.financial_aggregate_types,
+            name="financial_aggregate_types",
+        )
         object.__setattr__(
             self,
             "expected_financial_event_ids",
             _sorted_unique_text(
-                self.expected_financial_event_ids,
+                expected_financial_event_ids,
                 name="expected_financial_event_ids",
             ),
         )
@@ -209,7 +228,7 @@ class RuntimeCampaignPlan:
             self,
             "financial_aggregate_types",
             _sorted_unique_text(
-                self.financial_aggregate_types,
+                financial_aggregate_types,
                 name="financial_aggregate_types",
             ),
         )
@@ -276,6 +295,14 @@ class RuntimeCampaignPlan:
 
     @property
     def digest(self) -> str:
+        expected_financial_event_ids = _exact_plan_text_tuple(
+            self.expected_financial_event_ids,
+            name="expected_financial_event_ids",
+        )
+        financial_aggregate_types = _exact_plan_text_tuple(
+            self.financial_aggregate_types,
+            name="financial_aggregate_types",
+        )
         return _digest(
             {
                 "scenario_id": self.scenario_id,
@@ -285,8 +312,8 @@ class RuntimeCampaignPlan:
                 "host_fingerprint": self.host_fingerprint,
                 "workload_profile_hash": self.workload_profile_hash,
                 "declared_duration_ms": self.declared_duration_ms,
-                "expected_financial_event_ids": list(self.expected_financial_event_ids),
-                "financial_aggregate_types": list(self.financial_aggregate_types),
+                "expected_financial_event_ids": list(expected_financial_event_ids),
+                "financial_aggregate_types": list(financial_aggregate_types),
                 "release_artifact_sha256": self.release_artifact_sha256,
                 "journal_taxonomy_digest": self.journal_taxonomy_digest,
             }

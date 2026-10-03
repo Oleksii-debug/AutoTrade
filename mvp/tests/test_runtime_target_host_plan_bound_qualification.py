@@ -16,9 +16,6 @@ from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as pl
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
 )
-from mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification import (
-    verify_declared_plan_runtime_target_host_qualification,
-)
 
 
 SOURCE_SHA = "a" * 40
@@ -26,6 +23,18 @@ CONFIG = "sha256:" + ("b" * 64)
 HOST = "sha256:" + ("c" * 64)
 RELEASE_ID = "60000000-0000-4000-8000-000000000001"
 RELEASE_SHA = "sha256:" + ("d" * 64)
+
+
+def verify_declared_plan_runtime_target_host_qualification(*args, **kwargs):
+    """Focused tests inject current seams without making production globals authority."""
+
+    verifier = plan_bound_module._build_product_verifier(
+        plan_bound_module._terminal_chronology_dispatch,
+        signed_receipt_type=plan_bound_module.SignedQualificationAttestation,
+        composition_error_type=plan_bound_module.RuntimeTargetHostCompositionError,
+        chronology_free_verifier=plan_bound_module._build_chronology_free_verifier_for_tests(),
+    )
+    return verifier(*args, **kwargs)
 
 
 def _spec(**overrides: object) -> RuntimeBudgetSpec:
@@ -135,11 +144,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     "configuration_hash",
                     "sha256:" + ("9" * 64),
                 )
-                return original_loader(
-                    current_store,
-                    plan_id=plan_id,
-                    spec=spec,
-                )
+                return original_loader(current_store, plan_id=plan_id, spec=spec)
 
             caller_spec = spec
             with patch.object(
@@ -166,14 +171,8 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 )
 
             self.assertIs(result, accepted)
-            self.assertEqual(
-                terminal.call_args.kwargs["spec"].configuration_hash,
-                CONFIG,
-            )
-            self.assertEqual(
-                terminal.call_args.kwargs["spec"].release_sha,
-                SOURCE_SHA,
-            )
+            self.assertEqual(terminal.call_args.kwargs["spec"].configuration_hash, CONFIG)
+            self.assertEqual(terminal.call_args.kwargs["spec"].release_sha, SOURCE_SHA)
             self.assertNotEqual(caller_spec.configuration_hash, CONFIG)
 
     def test_changed_spec_cannot_rebind_existing_durable_plan(self) -> None:
@@ -186,17 +185,12 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 spec=declared_spec,
                 expected_events=(_expected_event(),),
             )
-            changed_spec = _spec(
-                configuration_hash="sha256:" + ("e" * 64),
-            )
+            changed_spec = _spec(configuration_hash="sha256:" + ("e" * 64))
             with patch.object(
                 plan_bound_module,
                 "verify_composed_runtime_target_host_qualification",
             ) as terminal:
-                with self.assertRaisesRegex(
-                    RuntimeLoadPlanError,
-                    "plan configuration conflicts",
-                ):
+                with self.assertRaisesRegex(RuntimeLoadPlanError, "plan configuration conflicts"):
                     verify_declared_plan_runtime_target_host_qualification(
                         object(),
                         evidence_store=object(),
@@ -253,10 +247,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 plan_bound_module,
                 "verify_composed_runtime_target_host_qualification",
             ) as terminal:
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "journal operation authority changed",
-                ):
+                with self.assertRaisesRegex(RuntimeError, "journal operation authority changed"):
                     verify_declared_plan_runtime_target_host_qualification(
                         object(),
                         evidence_store=object(),

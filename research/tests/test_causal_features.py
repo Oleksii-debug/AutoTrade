@@ -49,6 +49,40 @@ class CausalFeatureTests(unittest.TestCase):
         self.assertEqual(point.value, Decimal("0.1"))
         self.assertEqual(point.source_revisions, ("r1", "r2"))
 
+    def test_same_timestamp_distinct_source_identities_preserve_provider_order(self):
+        first = SourceValue.create(
+            observation_id="event-a@r1",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(seconds=1),
+            value="100",
+            source_revision="1",
+            source_identity="event-a",
+            source_sequence=10,
+            stream_generation=2,
+        )
+        second = SourceValue.create(
+            observation_id="event-b@r1",
+            symbol="AAA",
+            event_time=BASE,
+            available_at=BASE + timedelta(seconds=1),
+            value="110",
+            source_revision="1",
+            source_identity="event-b",
+            source_sequence=11,
+            stream_generation=2,
+        )
+
+        point = rolling_return(
+            [second, first],
+            symbol="AAA",
+            decision_time=BASE + timedelta(seconds=1),
+            count=2,
+        )
+
+        self.assertEqual(point.input_ids, ("event-a@r1", "event-b@r1"))
+        self.assertEqual(point.value, Decimal("0.1"))
+
     def test_delayed_revision_of_old_event_does_not_reverse_feature_time(self):
         original = source(0, "100", revision="r1")
         newer = source(1, "110", revision="r1")

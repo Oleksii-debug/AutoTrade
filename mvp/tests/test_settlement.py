@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -1199,6 +1199,161 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 self.assertEqual(book.cash("USD"), Decimal("1000"))
                 self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
                 self.assertEqual(rebuilt.obligations, ())
+
+
+    def test_settlement_numeric_ingress_rejects_decimal_subclass(self):
+        class ForgedDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+            def as_tuple(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            SettlementObligation(
+                "forged",
+                "forged-cause",
+                "USD",
+                ForgedDecimal("1"),
+                date(2026, 9, 24),
+                date(2026, 9, 25),
+            )
+
+    def test_settlement_numeric_ingress_rejects_oversized_text(self):
+        with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
+            SettlementObligation(
+                "oversized",
+                "oversized-cause",
+                "USD",
+                "9" * 10_000,
+                date(2026, 9, 24),
+                date(2026, 9, 25),
+            )
+
+    def test_settlement_accumulation_is_independent_of_ambient_decimal_context(self):
+        huge = "1000000000000000000000000000000"
+        tiny = "0.000000000000000000000000000001"
+        receive_tiny = SettlementObligation(
+            "receive-tiny",
+            "receive-tiny-cause",
+            "USD",
+            tiny,
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        pay_huge = SettlementObligation(
+            "pay-huge",
+            "pay-huge-cause",
+            "USD",
+            "-" + huge,
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        book = SettlementBook(
+            settled_cash={"USD": huge},
+            obligations=(receive_tiny, pay_huge),
+        )
+        with localcontext() as context:
+            context.prec = 3
+            context.rounding = ROUND_DOWN
+            self.assertTrue(
+                book.settle(
+                    "receive-tiny",
+                    as_of=date(2026, 9, 25),
+                    settlement_evidence=evidence(
+                        "receive-tiny",
+                        "provider:settlement:receive-tiny",
+                    ),
+                )
+            )
+            self.assertTrue(
+                book.settle(
+                    "pay-huge",
+                    as_of=date(2026, 9, 25),
+                    settlement_evidence=evidence(
+                        "pay-huge",
+                        "provider:settlement:pay-huge",
+                    ),
+                )
+            )
+            self.assertEqual(book.snapshot("USD").settled_cash, Decimal(tiny))
+            self.assertEqual(book.available_to_spend("USD"), Decimal(tiny))
+
+    def test_equity_obligation_and_capital_projection_ignore_hostile_decimal_context(self):
+        scope = SettlementAccountScope("SIMULATED", "acct", "PAPER")
+        rule = SettlementRuleBinding(
+            rule_id="rule",
+            rule_version="1",
+            scope=scope,
+            instrument_version="ABC-v1",
+            settlement_currency="USD",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider:rule",),
+        )
+        obligation = SettlementObligation(
+            obligation_id="bound-receivable",
+            cause_event_id="bound-receivable-cause",
+            currency="USD",
+            amount="0.000000000000000000000000000001",
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+            source_transaction_id="source-1",
+            rule_binding=rule,
+        )
+        book = SettlementBook(
+            settled_cash={"USD": "1000000000000000000000000000000"},
+            obligations=(obligation,),
+        )
+        credit = BuyingPowerEvidence(
+            evidence_id="bp",
+            scope=scope,
+            currency="USD",
+            additional_credit="0.000000000000000000000000000002",
+            observed_at=datetime(2026, 9, 24, 12, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 14, tzinfo=timezone.utc),
+            evidence_refs=("provider:bp",),
+        )
+
+        expected_obligation = equity_cash_obligation(
+            obligation_id="trade",
+            cause_event_id="trade-cause",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1.000000000000000000000000000001",
+            price="2.000000000000000000000000000002",
+            fee="0.000000000000000000000000000003",
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+        )
+        expected_capital = book.available_capital(
+            scope=scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),
+            buying_power_evidence=credit,
+        )
+        with localcontext() as context:
+            context.prec = 4
+            context.rounding = ROUND_DOWN
+            actual_obligation = equity_cash_obligation(
+                obligation_id="trade",
+                cause_event_id="trade-cause",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1.000000000000000000000000000001",
+                price="2.000000000000000000000000000002",
+                fee="0.000000000000000000000000000003",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+            )
+            actual_capital = book.available_capital(
+                scope=scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),
+                buying_power_evidence=credit,
+            )
+        self.assertEqual(actual_obligation.amount, expected_obligation.amount)
+        self.assertEqual(actual_capital, expected_capital)
 
 
 if __name__ == "__main__":

@@ -109,26 +109,32 @@ def _require_callable_binding(
 def _build_resource_metric_authority_guard():
     """Freeze builtin resource readers across the observation callback interval."""
 
+    error_type = RuntimeTargetHostRunnerError
+    journal_store_type = JournalStore
+    threading_module = threading
+    time_module = time
+    require_binding = _require_callable_binding
+    require_binding_state = _capture_python_function_state(require_binding)
     bindings = (
         (
             "JournalStore.current_journal_sequence",
-            JournalStore.current_journal_sequence,
-            _capture_python_function_state(JournalStore.current_journal_sequence),
+            journal_store_type.current_journal_sequence,
+            _capture_python_function_state(journal_store_type.current_journal_sequence),
         ),
         (
             "JournalStore.pending_outbox_count",
-            JournalStore.pending_outbox_count,
-            _capture_python_function_state(JournalStore.pending_outbox_count),
+            journal_store_type.pending_outbox_count,
+            _capture_python_function_state(journal_store_type.pending_outbox_count),
         ),
         (
             "threading.active_count",
-            threading.active_count,
-            _capture_python_function_state(threading.active_count),
+            threading_module.active_count,
+            _capture_python_function_state(threading_module.active_count),
         ),
         (
             "time.process_time_ns",
-            time.process_time_ns,
-            _capture_python_function_state(time.process_time_ns),
+            time_module.process_time_ns,
+            _capture_python_function_state(time_module.process_time_ns),
         ),
     )
     sequence_reader = bindings[0][1]
@@ -136,20 +142,46 @@ def _build_resource_metric_authority_guard():
     active_count = bindings[2][1]
     process_time_ns = bindings[3][1]
 
+    def require_guard_helper_authority(*, prefix: str) -> None:
+        if _require_callable_binding is not require_binding:
+            raise error_type(prefix + "_require_callable_binding")
+        if require_binding_state is None:
+            return
+        code, defaults, kwdefaults = require_binding_state
+        if (
+            require_binding.__code__ is not code
+            or require_binding.__defaults__ is not defaults
+        ):
+            raise error_type(prefix + "_require_callable_binding")
+        current_kwdefaults = require_binding.__kwdefaults__
+        if kwdefaults is None:
+            if current_kwdefaults is not None:
+                raise error_type(prefix + "_require_callable_binding")
+        elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+            raise error_type(prefix + "_require_callable_binding")
+
     def require_resource_metric_authority() -> None:
+        prefix = "resource metric authority changed: "
+        require_guard_helper_authority(prefix=prefix)
+        if JournalStore is not journal_store_type:
+            raise error_type(prefix + "JournalStore")
+        if threading is not threading_module:
+            raise error_type(prefix + "threading")
+        if time is not time_module:
+            raise error_type(prefix + "time")
         current_values = (
-            JournalStore.current_journal_sequence,
-            JournalStore.pending_outbox_count,
-            threading.active_count,
-            time.process_time_ns,
+            journal_store_type.current_journal_sequence,
+            journal_store_type.pending_outbox_count,
+            threading_module.active_count,
+            time_module.process_time_ns,
         )
         for (label, expected, state), current in zip(bindings, current_values):
-            _require_callable_binding(
+            require_binding(
                 label=label,
                 current=current,
                 expected=expected,
                 function_state=state,
-                error_prefix="resource metric authority changed: ",
+                error_prefix=prefix,
             )
 
     return (
@@ -164,9 +196,16 @@ def _build_resource_metric_authority_guard():
 def _build_runner_callback_authority_guard(*, monotonic_ns: object):
     """Freeze runner authority that caller callbacks must not retarget."""
 
+    error_type = RuntimeTargetHostRunnerError
     namespace = globals()
+    journal_store_type = JournalStore
+    threading_module = threading
+    time_module = time
+    require_binding = _require_callable_binding
+    require_binding_state = _capture_python_function_state(require_binding)
     names = (
         "FinancialTargetHostSample",
+        "JournalStore",
         "MONOTONIC_CLOCK_ID",
         "ParsedRuntimeTargetHostCampaign",
         "RESEARCH_INTERFERENCE_BASIS",
@@ -176,32 +215,95 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
         "RuntimeTargetHostRunResult",
         "STALENESS_BASIS",
         "TargetHostMeasurementArtifact",
+        "_build_resource_metric_authority_guard",
         "_capture_resource_metrics",
         "collect_runtime_campaign_evidence_from_measurement_artifact",
         "evaluate_runtime_budget",
         "measure_declared_financial_operation",
+        "threading",
+        "time",
     )
     captured = tuple(
         (name, namespace[name], _capture_python_function_state(namespace[name]))
         for name in names
     )
+    resource_bindings = (
+        (
+            "JournalStore.current_journal_sequence",
+            journal_store_type.current_journal_sequence,
+            _capture_python_function_state(journal_store_type.current_journal_sequence),
+        ),
+        (
+            "JournalStore.pending_outbox_count",
+            journal_store_type.pending_outbox_count,
+            _capture_python_function_state(journal_store_type.pending_outbox_count),
+        ),
+        (
+            "threading.active_count",
+            threading_module.active_count,
+            _capture_python_function_state(threading_module.active_count),
+        ),
+        (
+            "time.process_time_ns",
+            time_module.process_time_ns,
+            _capture_python_function_state(time_module.process_time_ns),
+        ),
+    )
     clock_state = _capture_python_function_state(monotonic_ns)
 
+    def require_guard_helper_authority() -> None:
+        prefix = "runner callback authority changed: "
+        if _require_callable_binding is not require_binding:
+            raise error_type(prefix + "_require_callable_binding")
+        if require_binding_state is None:
+            return
+        code, defaults, kwdefaults = require_binding_state
+        if (
+            require_binding.__code__ is not code
+            or require_binding.__defaults__ is not defaults
+        ):
+            raise error_type(prefix + "_require_callable_binding")
+        current_kwdefaults = require_binding.__kwdefaults__
+        if kwdefaults is None:
+            if current_kwdefaults is not None:
+                raise error_type(prefix + "_require_callable_binding")
+        elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+            raise error_type(prefix + "_require_callable_binding")
+
     def require_runner_callback_authority() -> None:
+        prefix = "runner callback authority changed: "
+        require_guard_helper_authority()
         for name, expected, state in captured:
-            _require_callable_binding(
+            require_binding(
                 label=name,
                 current=namespace.get(name),
                 expected=expected,
                 function_state=state,
-                error_prefix="runner callback authority changed: ",
+                error_prefix=prefix,
             )
-        _require_callable_binding(
+        current_resource_values = (
+            journal_store_type.current_journal_sequence,
+            journal_store_type.pending_outbox_count,
+            threading_module.active_count,
+            time_module.process_time_ns,
+        )
+        for (label, expected, state), current in zip(
+            resource_bindings,
+            current_resource_values,
+        ):
+            require_binding(
+                label=label,
+                current=current,
+                expected=expected,
+                function_state=state,
+                error_prefix=prefix,
+            )
+        require_binding(
             label="time.monotonic_ns",
-            current=time.monotonic_ns,
+            current=time_module.monotonic_ns,
             expected=monotonic_ns,
             function_state=clock_state,
-            error_prefix="runner callback authority changed: ",
+            error_prefix=prefix,
         )
 
     return require_runner_callback_authority

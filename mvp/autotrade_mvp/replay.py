@@ -286,24 +286,6 @@ class RuntimeStateAuthority:
             allow_nan=False,
         ).encode("utf-8")
 
-    def _seal(
-        self,
-        *,
-        cut_id: str,
-        replay: "ReplayCheckpoint",
-        runtime_components: Mapping[str, str],
-    ) -> str:
-        authority_id = _runtime_state_authority_id(self)
-        return _seal_runtime_authority_material(
-            self,
-            self._binding_material(
-                authority_id=authority_id,
-                cut_id=cut_id,
-                replay=replay,
-                runtime_components=runtime_components,
-            ),
-        )
-
     @staticmethod
     def _checkpoint_binding_material(
         *,
@@ -409,10 +391,14 @@ class RuntimeStateAuthority:
             replay=replay,
             runtime_components=components,
             authority_id=authority_id,
-            authority_seal=self._seal(
-                cut_id=cut_id,
-                replay=replay,
-                runtime_components=components,
+            authority_seal=_seal_runtime_authority_material(
+                self,
+                self._binding_material(
+                    authority_id=authority_id,
+                    cut_id=cut_id,
+                    replay=replay,
+                    runtime_components=components,
+                ),
             ),
         )
 
@@ -424,10 +410,14 @@ class RuntimeStateAuthority:
         authority_id = _runtime_state_authority_id(self)
         if snapshot.authority_id != authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
-        expected = self._seal(
-            cut_id=snapshot.cut_id,
-            replay=snapshot.replay,
-            runtime_components=snapshot.runtime_components,
+        expected = _seal_runtime_authority_material(
+            self,
+            self._binding_material(
+                authority_id=authority_id,
+                cut_id=snapshot.cut_id,
+                replay=snapshot.replay,
+                runtime_components=snapshot.runtime_components,
+            ),
         )
         if not hmac.compare_digest(expected, snapshot.authority_seal):
             raise ReplayError("runtime state snapshot authority seal mismatch")

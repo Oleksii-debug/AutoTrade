@@ -592,5 +592,156 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
             )
 
 
+    def test_text_subclass_is_rejected_before_string_dispatch(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile text strip")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile text upper")
+
+        with self.assertRaisesRegex(AllocationValuationError, "allocation symbol"):
+            normalize_allocation_valuation(
+                symbol=HostileText("AAA"),
+                market_payload=self.market(),
+                valuation_payload=self.valuation(),
+                source_price="10",
+                expected_cost_rate="0.001",
+                expected_capital_requirement_rate="1",
+                expected_min_notional_base="0",
+                expected_fee_floor_base="0",
+                expected_max_executable_notional_base="10000",
+                decision_time=self.DECISION_TIME,
+                portfolio_base_currency="USD",
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_mapping_subclasses_are_rejected_before_callbacks(self):
+        touched = []
+
+        class HostileDict(dict):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile mapping iteration")
+
+            def get(self, *args, **kwargs):
+                touched.append("get")
+                raise AssertionError("hostile mapping get")
+
+            def __contains__(self, key):
+                touched.append("contains")
+                raise AssertionError("hostile mapping contains")
+
+        for market, valuation in (
+            (HostileDict(self.market()), self.valuation()),
+            (self.market(), HostileDict(self.valuation())),
+        ):
+            touched.clear()
+            with self.subTest(
+                market_type=type(market).__name__,
+                valuation_type=type(valuation).__name__,
+            ):
+                with self.assertRaisesRegex(AllocationValuationError, "exact dict"):
+                    self.normalize(market, valuation)
+                self.assertEqual(touched, [])
+
+    def test_nonexact_mapping_key_is_rejected_before_key_dispatch(self):
+        touched = []
+
+        class HostileKey(str):
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile key equality")
+
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile key strip")
+
+            __hash__ = str.__hash__
+
+        market = self.market()
+        market[HostileKey("attacker")] = "value"
+        touched.clear()
+
+        with self.assertRaisesRegex(AllocationValuationError, "keys must be exact"):
+            self.normalize(market, self.valuation())
+
+        self.assertEqual(touched, [])
+
+    def test_nested_cost_mapping_subclass_is_rejected_before_callbacks(self):
+        touched = []
+
+        class HostileCosts(dict):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile cost iteration")
+
+            def __getitem__(self, key):
+                touched.append("getitem")
+                raise AssertionError("hostile cost lookup")
+
+        valuation = self.valuation()
+        valuation["cost_rate_components"] = HostileCosts(
+            {
+                "execution": "0.001",
+                "financing": "0",
+                "funding": "0",
+                "borrow": "0",
+                "fx": "0",
+            }
+        )
+        touched.clear()
+
+        with self.assertRaisesRegex(AllocationValuationError, "exact dict"):
+            self.normalize(self.market(), valuation)
+
+        self.assertEqual(touched, [])
+
+    def test_fx_max_age_integer_subclass_is_rejected_before_comparison(self):
+        touched = []
+
+        class HostileInt(int):
+            def __le__(self, other):
+                touched.append("le")
+                raise AssertionError("hostile int comparison")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile int equality")
+
+        digest = "sha256:" + "a" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.10",
+            "ask": "1.11",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v7",
+            "evidence_sha256": digest,
+            "max_age_seconds": HostileInt(60),
+            "haircut": "0",
+        }
+        valuation = self.valuation(
+            quote_currency="EUR",
+            portfolio_base_currency="USD",
+            unit_base_notional="11.00",
+            fx_rate="1.10",
+            fx_source_id="fx:eurusd:venue:v7",
+            fx_quote=quote,
+            fx_evidence_sha256=digest,
+        )
+        touched.clear()
+
+        with self.assertRaisesRegex(AllocationValuationError, "positive integer"):
+            self.normalize(self.market(quote_currency="EUR"), valuation)
+
+        self.assertEqual(touched, [])
+
+
 if __name__ == "__main__":
     unittest.main()

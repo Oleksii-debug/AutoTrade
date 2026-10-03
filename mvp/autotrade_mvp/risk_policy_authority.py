@@ -71,17 +71,23 @@ def _journal_store_identity_payload(
         identity,
         subject="resolved risk policy journal identity",
     )
+    if exact.identity_source == "windows_by_handle":
+        # Windows path spelling is not physical JournalStore identity.  Reopen
+        # continuity is carried by the retained HANDLE volume/file-index tuple.
+        return {
+            "schema_version": "1.0.0",
+            "identity_source": exact.identity_source,
+            "windows_volume_serial": exact.windows_volume_serial,
+            "windows_file_index_high": exact.windows_file_index_high,
+            "windows_file_index_low": exact.windows_file_index_low,
+        }
     return {
         "schema_version": "1.0.0",
+        "identity_source": exact.identity_source,
         "canonical_path": exact.canonical_path,
         "filesystem_device": exact.filesystem_device,
         "filesystem_inode": exact.filesystem_inode,
-        "identity_source": exact.identity_source,
-        "windows_volume_serial": exact.windows_volume_serial,
-        "windows_file_index_high": exact.windows_file_index_high,
-        "windows_file_index_low": exact.windows_file_index_low,
     }
-
 
 def journal_store_identity_digest(identity: JournalStoreIdentity) -> str:
     return payload_digest(_journal_store_identity_payload(identity))

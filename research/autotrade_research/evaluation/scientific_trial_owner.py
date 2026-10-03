@@ -38,6 +38,20 @@ from ..science.registry import (
 
 _GATE_PROFILE_ID_FIELD = "gate_profile_id"
 _GATE_PROFILE_DIGEST_FIELD = "gate_profile_digest"
+_REGISTRY_CRITICAL_INSTANCE_OVERRIDES = frozenset(
+    {"_connect", "trial_completeness_evidence"}
+)
+
+
+def _assert_registry_dispatch_unshadowed(registry: ScientificRegistry) -> None:
+    if type(registry) is not ScientificRegistry:
+        raise TypeError("registry must be exact ScientificRegistry")
+    shadowed = _REGISTRY_CRITICAL_INSTANCE_OVERRIDES.intersection(registry.__dict__)
+    if shadowed:
+        raise TypeError(
+            "ScientificRegistry authority methods must not be instance-shadowed: "
+            + ", ".join(sorted(shadowed))
+        )
 
 
 def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
@@ -133,9 +147,8 @@ class ScientificTrialOwnerEvidence:
 
 
 def _registered_protocol_rows(registry: ScientificRegistry) -> tuple[dict[str, Any], ...]:
-    if type(registry) is not ScientificRegistry:
-        raise TypeError("registry must be exact ScientificRegistry")
-    with registry._connect() as con:
+    _assert_registry_dispatch_unshadowed(registry)
+    with ScientificRegistry._connect(registry) as con:
         con.execute("BEGIN")
         rows = con.execute(
             "SELECT protocol_id,protocol_hash,payload_json "
@@ -241,17 +254,21 @@ def resolve_scientific_trial_owner(
     mixed profile-owner/trial-population composition.
     """
 
-    if type(registry) is not ScientificRegistry:
-        raise TypeError("registry must be exact ScientificRegistry")
+    _assert_registry_dispatch_unshadowed(registry)
+    if type(profile) is not GateProfile:
+        raise TypeError("profile must be exact GateProfile")
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
-    with registry._connect() as authority_guard:
+    with ScientificRegistry._connect(registry) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
             registry=registry,
             profile=profile,
         )
-        trial_evidence = registry.trial_completeness_evidence(binding.protocol_id)
+        trial_evidence = ScientificRegistry.trial_completeness_evidence(
+            registry,
+            binding.protocol_id,
+        )
         if trial_evidence.protocol_hash != binding.protocol_hash:
             raise ProtocolViolation(
                 "trial completeness snapshot does not match bound protocol hash"
@@ -292,6 +309,11 @@ def evaluate_gates_with_scientific_trial_owner(
     semantic-owner INCONCLUSIVE remains unavailable for terminal PASS.
     """
 
+    if type(profile) is not GateProfile:
+        raise TypeError("profile must be exact GateProfile")
+    if type(evidence) is not EvaluationEvidence:
+        raise TypeError("evidence must be exact EvaluationEvidence")
+    _assert_registry_dispatch_unshadowed(scientific_registry)
     base = evaluate_gates(profile, evidence, **gate_kwargs)
     checks = dict(base.checks)
     provenance = dict(base.provenance or {})

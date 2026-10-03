@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from tempfile import TemporaryDirectory
+import sys
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.runtime_load_measurement as measurement_module
+import mvp.autotrade_mvp.runtime_target_host_runner as runner_module
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
+from mvp.autotrade_mvp.runtime_load_measurement import RuntimeLoadMeasurementError
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.runtime_load_campaign import capture_runtime_host_identity
 from mvp.autotrade_mvp.runtime_load_evidence import ExpectedJournalEvent
@@ -12,6 +16,7 @@ from mvp.autotrade_mvp.runtime_load_plan import declare_runtime_event_plan
 from mvp.autotrade_mvp.runtime_target_host_inventory import host_identity_fingerprint
 from mvp.autotrade_mvp.runtime_target_host_runner import (
     RuntimeTargetHostRunnerError,
+    _require_shared_clock_contract,
     run_cpu_pressure_probe,
     run_declared_target_host_campaign,
 )
@@ -244,6 +249,356 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             )
             self.assertEqual(result.campaign_evidence.reconnect_backlog_remaining, 1)
             self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
+
+    def test_research_callback_cannot_replace_terminal_budget_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.evaluate_runtime_budget
+
+            def poison_budget_authority() -> None:
+                runner_module.evaluate_runtime_budget = lambda *_args, **_kwargs: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "budget evaluator callable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget", poison_budget_authority),),
+                    )
+            finally:
+                runner_module.evaluate_runtime_budget = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_replace_evidence_class_member(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.ResearchInterferenceSample.__post_init__
+
+            def poison_research_sample_authority() -> None:
+                runner_module.ResearchInterferenceSample.__post_init__ = lambda self: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ class member changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-class", poison_research_sample_authority),),
+                    )
+            finally:
+                runner_module.ResearchInterferenceSample.__post_init__ = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_mutate_evidence_class_code_in_place(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            function = runner_module.ResearchInterferenceSample.__post_init__
+            original_code = function.__code__
+
+            def permissive_post_init(self) -> None:
+                return None
+
+            def poison_research_sample_code() -> None:
+                function.__code__ = permissive_post_init.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ResearchInterferenceSample.__post_init__ executable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-code", poison_research_sample_code),),
+                    )
+            finally:
+                function.__code__ = original_code
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_replace_budget_transitive_dependency(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            namespace = runner_module.evaluate_runtime_budget.__globals__
+            original = namespace["nearest_rank_percentile"]
+
+            def poison_budget_dependency() -> None:
+                namespace["nearest_rank_percentile"] = lambda *_args, **_kwargs: 0
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "budget evaluator global dependency changed.*nearest_rank_percentile",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget-dependency", poison_budget_dependency),),
+                    )
+            finally:
+                namespace["nearest_rank_percentile"] = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_financial_operation_cannot_replace_latency_clock_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+
+            def poison_latency_clock() -> None:
+                append_expected(journal, "fin-1")
+                measurement_module.perf_counter_ns = lambda: 1
+
+            with self.assertRaisesRegex(
+                RuntimeLoadMeasurementError,
+                "financial latency clock authority changed",
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": poison_latency_clock},
+                    clock=clock,
+                )
+
+            self.assertIsNotNone(journal.get_event("fin-1"))
+
+
+    def test_operation_mapping_rejects_string_subclass_before_hash_dispatch(self):
+        class HostileOperationKey(str):
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return super().__hash__()
+
+            def __eq__(self, other):
+                type(self).calls += 1
+                return super().__eq__(other)
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            key = HostileOperationKey("fin-1")
+            operations = {key: lambda: append_expected(journal, "fin-1")}
+            HostileOperationKey.calls = 0
+            before = journal.current_journal_sequence()
+
+            with (
+                patch.object(
+                    runner_module,
+                    "_require_shared_clock_contract",
+                    return_value=None,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "operation keys must be exact strings",
+                ),
+            ):
+                run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="runner-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations=operations,
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertEqual(HostileOperationKey.calls, 0)
+            self.assertEqual(journal.current_journal_sequence(), before)
+
+    def test_research_callback_cannot_mutate_input_budget_spec_instance(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = spec.max_p95_financial_latency_us
+
+            def poison_input_spec() -> None:
+                object.__setattr__(
+                    spec,
+                    "max_p95_financial_latency_us",
+                    spec.strategy_horizon_us,
+                )
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "input RuntimeBudgetSpec state changed during campaign callback: "
+                    "max_p95_financial_latency_us",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget-spec", poison_input_spec),),
+                    )
+            finally:
+                object.__setattr__(
+                    spec,
+                    "max_p95_financial_latency_us",
+                    original,
+                )
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_disable_callback_guard_helper(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module._require_callable_authority
+
+            def disabled_guard(*_args, **_kwargs) -> None:
+                return None
+
+            def poison_guard_helper() -> None:
+                runner_module._require_callable_authority = disabled_guard
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "runner callback guard helper authority changed: "
+                    "_require_callable_authority",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-guard-helper", poison_guard_helper),),
+                    )
+            finally:
+                runner_module._require_callable_authority = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_research_callback_cannot_rebind_measurement_basis(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.STALENESS_BASIS
+
+            def poison_basis() -> None:
+                runner_module.STALENESS_BASIS = "forged-staleness-basis"
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "staleness basis changed during campaign callback",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-basis", poison_basis),),
+                    )
+            finally:
+                runner_module.STALENESS_BASIS = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_resource_timestamp_and_metrics_share_one_durable_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original_capture = runner_module._capture_resource_metrics
+            raced = False
+
+            def racing_capture(store, resource_probe, **kwargs):
+                nonlocal raced
+                metrics = original_capture(store, resource_probe, **kwargs)
+                if not raced:
+                    append_expected(store, "resource-race")
+                    raced = True
+                return metrics
+
+            with (
+                patch.object(
+                    runner_module,
+                    "_capture_resource_metrics",
+                    side_effect=racing_capture,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "resource sample crossed a durable JournalStore cut",
+                ),
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": lambda: append_expected(journal, "fin-1")},
+                    clock=clock,
+                )
+
+            self.assertTrue(raced)
+            self.assertIsNotNone(journal.get_event("resource-race"))
+
+    @unittest.skipUnless(
+        sys.version_info >= (3, 13),
+        "language-level shared perf_counter/monotonic clock contract requires Python 3.13+",
+    )
+    def test_supported_runtime_executes_unpatched_shared_clock_campaign(self):
+        _require_shared_clock_contract()
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            result = run_declared_target_host_campaign(
+                journal=journal,
+                spec=spec,
+                declared_plan_id="runner-plan",
+                release_artifact_id=RELEASE_ID,
+                release_artifact_sha256=RELEASE_SHA,
+                declared_duration_ms=1_000,
+                operations={"fin-1": lambda: append_expected(journal, "fin-1")},
+                research_operations=(
+                    ("cpu-contention", lambda: run_cpu_pressure_probe(iterations=1)),
+                ),
+            )
+            self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
+            self.assertEqual(len(result.measurement.financial_latency_us), 1)
+            self.assertEqual(len(result.measurement.research_interference_us), 1)
+            self.assertIn(result.budget_decision.status, {"PASS", "FAIL"})
 
     def test_cpu_pressure_probe_is_bounded_and_deterministic(self):
         first = run_cpu_pressure_probe(iterations=3)

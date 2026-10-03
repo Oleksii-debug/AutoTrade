@@ -254,6 +254,10 @@ def measure_declared_financial_operation(
 
     if not callable(operation):
         raise TypeError("operation must be callable")
+    # Freeze the exact clock callable before caller-controlled product code runs.
+    # Rebinding the module global during the operation cannot change the terminal
+    # sample; attempted replacement is rejected before latency evidence commits.
+    clock = perf_counter_ns
     store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
@@ -274,12 +278,16 @@ def measure_declared_financial_operation(
             )
 
         pre_sequence = JournalStore.current_journal_sequence(store)
-        start_ns = perf_counter_ns()
+        start_ns = clock()
         if JournalStore.get_event(store, expected.event_id) is not None:
             raise RuntimeLoadMeasurementError(
                 "predeclared financial event appeared before monotonic measurement start"
             )
         result = operation()
+        if perf_counter_ns is not clock:
+            raise RuntimeLoadMeasurementError(
+                "financial latency clock authority changed during measured operation"
+            )
         # Bind the expected durable event before sampling the terminal clock. If the
         # operation returned without publishing it, an unrelated commit racing with
         # end-clock sampling must not be attributed to the measured operation.
@@ -288,7 +296,7 @@ def measure_declared_financial_operation(
             expected,
             after_sequence=pre_sequence,
         )
-        end_ns = perf_counter_ns()
+        end_ns = clock()
         if (
             type(start_ns) is not int
             or type(end_ns) is not int

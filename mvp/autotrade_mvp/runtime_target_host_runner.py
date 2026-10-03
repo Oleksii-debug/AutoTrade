@@ -21,9 +21,10 @@ from hashlib import sha256
 import sys
 import threading
 import time
-from types import FunctionType
+from types import FunctionType, MethodType
 from typing import Callable, Mapping
 
+from . import runtime_load_measurement as _runtime_load_measurement
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetSpec,
@@ -66,247 +67,6 @@ class RuntimeTargetHostRunnerError(ValueError):
 
 STALENESS_BASIS = "declared-work-ready-to-durable-financial-event-monotonic-v1"
 RESEARCH_INTERFERENCE_BASIS = "measured-research-pressure-active-interval-monotonic-v1"
-
-
-def _capture_python_function_state(value: object) -> tuple[object, ...] | None:
-    """Snapshot mutation-sensitive state for an exact Python function."""
-
-    if type(value) is not FunctionType:
-        return None
-    return (
-        value.__code__,
-        value.__defaults__,
-        None if value.__kwdefaults__ is None else dict(value.__kwdefaults__),
-    )
-
-
-def _require_callable_binding(
-    *,
-    label: str,
-    current: object,
-    expected: object,
-    function_state: tuple[object, ...] | None,
-    error_prefix: str,
-) -> None:
-    if current is not expected:
-        raise RuntimeTargetHostRunnerError(error_prefix + label)
-    if function_state is None:
-        return
-    code, defaults, kwdefaults = function_state
-    function = expected
-    if type(function) is not FunctionType:
-        raise RuntimeTargetHostRunnerError(error_prefix + label)
-    if function.__code__ is not code or function.__defaults__ is not defaults:
-        raise RuntimeTargetHostRunnerError(error_prefix + label)
-    current_kwdefaults = function.__kwdefaults__
-    if kwdefaults is None:
-        if current_kwdefaults is not None:
-            raise RuntimeTargetHostRunnerError(error_prefix + label)
-    elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
-        raise RuntimeTargetHostRunnerError(error_prefix + label)
-
-
-def _build_resource_metric_authority_guard():
-    """Freeze builtin resource readers across the observation callback interval."""
-
-    error_type = RuntimeTargetHostRunnerError
-    journal_store_type = JournalStore
-    threading_module = threading
-    time_module = time
-    require_binding = _require_callable_binding
-    require_binding_state = _capture_python_function_state(require_binding)
-    bindings = (
-        (
-            "JournalStore.current_journal_sequence",
-            journal_store_type.current_journal_sequence,
-            _capture_python_function_state(journal_store_type.current_journal_sequence),
-        ),
-        (
-            "JournalStore.pending_outbox_count",
-            journal_store_type.pending_outbox_count,
-            _capture_python_function_state(journal_store_type.pending_outbox_count),
-        ),
-        (
-            "threading.active_count",
-            threading_module.active_count,
-            _capture_python_function_state(threading_module.active_count),
-        ),
-        (
-            "time.process_time_ns",
-            time_module.process_time_ns,
-            _capture_python_function_state(time_module.process_time_ns),
-        ),
-    )
-    sequence_reader = bindings[0][1]
-    pending_reader = bindings[1][1]
-    active_count = bindings[2][1]
-    process_time_ns = bindings[3][1]
-
-    def require_guard_helper_authority(*, prefix: str) -> None:
-        if _require_callable_binding is not require_binding:
-            raise error_type(prefix + "_require_callable_binding")
-        if require_binding_state is None:
-            return
-        code, defaults, kwdefaults = require_binding_state
-        if (
-            require_binding.__code__ is not code
-            or require_binding.__defaults__ is not defaults
-        ):
-            raise error_type(prefix + "_require_callable_binding")
-        current_kwdefaults = require_binding.__kwdefaults__
-        if kwdefaults is None:
-            if current_kwdefaults is not None:
-                raise error_type(prefix + "_require_callable_binding")
-        elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
-            raise error_type(prefix + "_require_callable_binding")
-
-    def require_resource_metric_authority() -> None:
-        prefix = "resource metric authority changed: "
-        require_guard_helper_authority(prefix=prefix)
-        if JournalStore is not journal_store_type:
-            raise error_type(prefix + "JournalStore")
-        if threading is not threading_module:
-            raise error_type(prefix + "threading")
-        if time is not time_module:
-            raise error_type(prefix + "time")
-        current_values = (
-            journal_store_type.current_journal_sequence,
-            journal_store_type.pending_outbox_count,
-            threading_module.active_count,
-            time_module.process_time_ns,
-        )
-        for (label, expected, state), current in zip(bindings, current_values):
-            require_binding(
-                label=label,
-                current=current,
-                expected=expected,
-                function_state=state,
-                error_prefix=prefix,
-            )
-
-    return (
-        require_resource_metric_authority,
-        sequence_reader,
-        pending_reader,
-        active_count,
-        process_time_ns,
-    )
-
-
-def _build_runner_callback_authority_guard(*, monotonic_ns: object):
-    """Freeze runner authority that caller callbacks must not retarget."""
-
-    error_type = RuntimeTargetHostRunnerError
-    namespace = globals()
-    journal_store_type = JournalStore
-    threading_module = threading
-    time_module = time
-    require_binding = _require_callable_binding
-    require_binding_state = _capture_python_function_state(require_binding)
-    names = (
-        "FinancialTargetHostSample",
-        "JournalStore",
-        "MONOTONIC_CLOCK_ID",
-        "ParsedRuntimeTargetHostCampaign",
-        "RESEARCH_INTERFERENCE_BASIS",
-        "ResearchInterferenceSample",
-        "ResourceTargetHostSample",
-        "RuntimeLoadCampaignEvidence",
-        "RuntimeTargetHostRunResult",
-        "STALENESS_BASIS",
-        "TargetHostMeasurementArtifact",
-        "_build_resource_metric_authority_guard",
-        "_capture_resource_metrics",
-        "collect_runtime_campaign_evidence_from_measurement_artifact",
-        "evaluate_runtime_budget",
-        "measure_declared_financial_operation",
-        "threading",
-        "time",
-    )
-    captured = tuple(
-        (name, namespace[name], _capture_python_function_state(namespace[name]))
-        for name in names
-    )
-    resource_bindings = (
-        (
-            "JournalStore.current_journal_sequence",
-            journal_store_type.current_journal_sequence,
-            _capture_python_function_state(journal_store_type.current_journal_sequence),
-        ),
-        (
-            "JournalStore.pending_outbox_count",
-            journal_store_type.pending_outbox_count,
-            _capture_python_function_state(journal_store_type.pending_outbox_count),
-        ),
-        (
-            "threading.active_count",
-            threading_module.active_count,
-            _capture_python_function_state(threading_module.active_count),
-        ),
-        (
-            "time.process_time_ns",
-            time_module.process_time_ns,
-            _capture_python_function_state(time_module.process_time_ns),
-        ),
-    )
-    clock_state = _capture_python_function_state(monotonic_ns)
-
-    def require_guard_helper_authority() -> None:
-        prefix = "runner callback authority changed: "
-        if _require_callable_binding is not require_binding:
-            raise error_type(prefix + "_require_callable_binding")
-        if require_binding_state is None:
-            return
-        code, defaults, kwdefaults = require_binding_state
-        if (
-            require_binding.__code__ is not code
-            or require_binding.__defaults__ is not defaults
-        ):
-            raise error_type(prefix + "_require_callable_binding")
-        current_kwdefaults = require_binding.__kwdefaults__
-        if kwdefaults is None:
-            if current_kwdefaults is not None:
-                raise error_type(prefix + "_require_callable_binding")
-        elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
-            raise error_type(prefix + "_require_callable_binding")
-
-    def require_runner_callback_authority() -> None:
-        prefix = "runner callback authority changed: "
-        require_guard_helper_authority()
-        for name, expected, state in captured:
-            require_binding(
-                label=name,
-                current=namespace.get(name),
-                expected=expected,
-                function_state=state,
-                error_prefix=prefix,
-            )
-        current_resource_values = (
-            journal_store_type.current_journal_sequence,
-            journal_store_type.pending_outbox_count,
-            threading_module.active_count,
-            time_module.process_time_ns,
-        )
-        for (label, expected, state), current in zip(
-            resource_bindings,
-            current_resource_values,
-        ):
-            require_binding(
-                label=label,
-                current=current,
-                expected=expected,
-                function_state=state,
-                error_prefix=prefix,
-            )
-        require_binding(
-            label="time.monotonic_ns",
-            current=time_module.monotonic_ns,
-            expected=monotonic_ns,
-            function_state=clock_state,
-            error_prefix=prefix,
-        )
-
-    return require_runner_callback_authority
 
 
 def _require_shared_clock_contract() -> None:
@@ -403,9 +163,229 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
     return value
 
 
+def _callable_authority_state(value: object) -> tuple[
+    object,
+    tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+    tuple[tuple[dict[str, object], str, object], ...],
+    tuple[tuple[object, bool, object | None], ...],
+]:
+    """Capture callback-adjacent callable plus first-party transitive dependencies."""
+
+    target = value.__func__ if type(value) is MethodType else value
+    if type(target) is not FunctionType:
+        return (target, (), (), ())
+
+    function_states: list[
+        tuple[
+            FunctionType,
+            object,
+            object,
+            object,
+            tuple[tuple[object, object], ...] | None,
+        ]
+    ] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    closure_bindings: list[tuple[object, bool, object | None]] = []
+    seen_functions: set[int] = set()
+
+    def capture(function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        kwdefaults = function.__kwdefaults__
+        function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                kwdefaults,
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+            )
+        )
+        namespace = function.__globals__
+        for dependency_name in function.__code__.co_names:
+            if dependency_name not in namespace:
+                continue
+            expected_dependency = namespace[dependency_name]
+            global_bindings.append(
+                (namespace, dependency_name, expected_dependency)
+            )
+            dependency_target = (
+                expected_dependency.__func__
+                if type(expected_dependency) is MethodType
+                else expected_dependency
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+        for cell in function.__closure__ or ():
+            try:
+                expected_value = cell.cell_contents
+            except ValueError:
+                closure_bindings.append((cell, False, None))
+                continue
+            closure_bindings.append((cell, True, expected_value))
+            dependency_target = (
+                expected_value.__func__
+                if type(expected_value) is MethodType
+                else expected_value
+            )
+            if (
+                type(dependency_target) is FunctionType
+                and (
+                    dependency_target.__module__ == "mvp.autotrade_mvp"
+                    or dependency_target.__module__.startswith("mvp.autotrade_mvp.")
+                )
+            ):
+                capture(dependency_target)
+
+    capture(target)
+    return (
+        target,
+        tuple(function_states),
+        tuple(global_bindings),
+        tuple(closure_bindings),
+    )
+
+
+def _require_callable_authority(
+    value: object,
+    state: tuple[
+        object,
+        tuple[tuple[FunctionType, object, object, object, tuple[tuple[object, object], ...] | None], ...],
+        tuple[tuple[dict[str, object], str, object], ...],
+        tuple[tuple[object, bool, object | None], ...],
+    ],
+    *,
+    name: str,
+) -> None:
+    target = value.__func__ if type(value) is MethodType else value
+    expected_target, function_states, global_bindings, closure_bindings = state
+    if target is not expected_target:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} callable authority changed during campaign callback"
+        )
+    for function, code, defaults, kwdefaults, kwdefault_items in function_states:
+        if (
+            function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or (
+                kwdefaults is not None
+                and tuple(sorted(kwdefaults.items())) != kwdefault_items
+            )
+        ):
+            raise RuntimeTargetHostRunnerError(
+                f"{name} executable authority changed during campaign callback"
+            )
+    missing = object()
+    for namespace, dependency_name, expected_dependency in global_bindings:
+        if namespace.get(dependency_name, missing) is not expected_dependency:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} global dependency changed during campaign callback: "
+                f"{dependency_name}"
+            )
+    for cell, had_value, expected_value in closure_bindings:
+        try:
+            current_value = cell.cell_contents
+        except ValueError:
+            if had_value:
+                raise RuntimeTargetHostRunnerError(
+                    f"{name} closure dependency changed during campaign callback"
+                )
+            continue
+        if not had_value or current_value is not expected_value:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} closure dependency changed during campaign callback"
+            )
+
+def _class_member_executables(value: object) -> tuple[FunctionType, ...]:
+    if type(value) is FunctionType:
+        return (value,)
+    if type(value) is staticmethod or type(value) is classmethod:
+        function = value.__func__
+        return (function,) if type(function) is FunctionType else ()
+    if type(value) is property:
+        return tuple(
+            function
+            for function in (value.fget, value.fset, value.fdel)
+            if type(function) is FunctionType
+        )
+    return ()
+
+
+def _class_authority_state(
+    value: type,
+) -> tuple[
+    tuple[
+        str,
+        object,
+        tuple[
+            tuple[FunctionType, tuple],
+            ...,
+        ],
+    ],
+    ...,
+]:
+    if type(value) is not type:
+        raise TypeError("class authority must be an exact class")
+    return tuple(
+        (
+            key,
+            member,
+            tuple(
+                (function, _callable_authority_state(function))
+                for function in _class_member_executables(member)
+            ),
+        )
+        for key, member in sorted(vars(value).items())
+    )
+
+
+def _require_class_authority(
+    value: type,
+    state: tuple,
+    *,
+    name: str,
+) -> None:
+    if type(value) is not type:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class authority changed during campaign callback"
+        )
+    namespace = vars(value)
+    expected_keys = tuple(key for key, _member, _executables in state)
+    if tuple(sorted(namespace)) != expected_keys:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class namespace changed during campaign callback"
+        )
+    for key, member, executables in state:
+        if namespace[key] is not member:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{key} class member changed during campaign callback"
+            )
+        for function, function_state in executables:
+            _require_callable_authority(
+                function,
+                function_state,
+                name=f"{name}.{key}",
+            )
+
+
 def _capture_resource_metrics(
     store: JournalStore,
     resource_probe: Callable[[], Mapping[str, int]] | None,
+    *,
+    current_journal_sequence: Callable[[JournalStore], int] | None = None,
+    pending_outbox_count: Callable[[JournalStore], int] | None = None,
+    active_count: Callable[[], int] | None = None,
+    process_time_ns: Callable[[], int] | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     """Capture one cut-consistent portable/optional resource observation.
 
@@ -417,21 +397,21 @@ def _capture_resource_metrics(
     replace runner-owned metric keys.
     """
 
-    (
-        require_resource_metric_authority,
-        sequence_reader,
-        pending_reader,
-        active_count,
-        process_time_ns,
-    ) = _build_resource_metric_authority_guard()
-    require_resource_metric_authority()
-    sequence_before = sequence_reader(store)
+    if current_journal_sequence is None:
+        current_journal_sequence = JournalStore.current_journal_sequence
+    if pending_outbox_count is None:
+        pending_outbox_count = JournalStore.pending_outbox_count
+    if active_count is None:
+        active_count = threading.active_count
+    if process_time_ns is None:
+        process_time_ns = time.process_time_ns
+
+    if authority_check is not None:
+        authority_check()
+    sequence_before = current_journal_sequence(store)
     extras: dict[str, int] = {}
     if resource_probe is not None:
         raw = resource_probe()
-        # A caller-controlled observation callback may not retarget the readers
-        # that mint canonical builtin resource evidence.
-        require_resource_metric_authority()
         if type(raw) is not dict:
             raise RuntimeTargetHostRunnerError(
                 "resource_probe must return an exact dict"
@@ -439,15 +419,18 @@ def _capture_resource_metrics(
         for key, metric in raw.items():
             name = _text(key, name="resource metric")
             extras[name] = _non_negative_int(metric, name=f"resource metric {name}")
+        if authority_check is not None:
+            authority_check()
 
     # Keep every observation inside the same journal-sequence bracket. The final
     # sequence read is intentionally last: a write that races pending-outbox or
     # the optional probe invalidates the complete resource sample.
-    pending_outbox = pending_reader(store)
+    pending_outbox = pending_outbox_count(store)
     active_threads = active_count()
     process_cpu_time_ns = process_time_ns()
-    sequence_after = sequence_reader(store)
-    require_resource_metric_authority()
+    sequence_after = current_journal_sequence(store)
+    if authority_check is not None:
+        authority_check()
     if sequence_after != sequence_before:
         raise RuntimeTargetHostRunnerError(
             "resource observation crossed a durable JournalStore cut"
@@ -535,6 +518,38 @@ def run_declared_target_host_campaign(
     _require_shared_clock_contract()
     if type(spec) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
+
+    # Detach the authority-bearing budget from the caller-owned object before
+    # any caller callback runs. Frozen dataclasses can still be mutated through
+    # object.__setattr__, so evaluating against the original instance would let
+    # a callback widen its own qualification thresholds after the campaign cut.
+    input_spec = spec
+    budget_spec_fields = (
+        "scenario_id",
+        "release_sha",
+        "configuration_hash",
+        "host_fingerprint",
+        "strategy_horizon_us",
+        "max_p95_financial_latency_us",
+        "max_financial_staleness_us",
+        "max_research_interference_us",
+        "min_financial_samples",
+        "min_research_samples",
+    )
+    input_spec_dict = input_spec.__dict__
+    if (
+        type(input_spec_dict) is not dict
+        or tuple(sorted(input_spec_dict)) != tuple(sorted(budget_spec_fields))
+    ):
+        raise RuntimeTargetHostRunnerError(
+            "input RuntimeBudgetSpec instance state is non-canonical"
+        )
+    input_spec_state = tuple(
+        (name, input_spec_dict[name]) for name in budget_spec_fields
+    )
+    spec = RuntimeBudgetSpec(
+        **{name: value for name, value in input_spec_state}
+    )
     duration_ms = _positive_int(declared_duration_ms, name="declared_duration_ms")
     require_exact_journal_store_authority(
         journal,
@@ -552,6 +567,206 @@ def run_declared_target_host_campaign(
         minimum=spec.min_research_samples,
     )
     resource_probe = _snapshot_resource_probe(resource_probe)
+
+    # Freeze every authority callable used after a caller-supplied callback. A
+    # callback may exercise product/research code, but it cannot replace clocks,
+    # durable-store readers, evidence collection, evaluation, or terminal parse.
+    monotonic_ns = time.monotonic_ns
+    process_time_ns = time.process_time_ns
+    active_count = threading.active_count
+    financial_clock = _runtime_load_measurement.perf_counter_ns
+    journal_store_type = JournalStore
+    current_journal_sequence = JournalStore.current_journal_sequence
+    pending_outbox_count = JournalStore.pending_outbox_count
+    measure_financial = measure_declared_financial_operation
+    capture_resource_metrics = _capture_resource_metrics
+    collect_campaign_evidence = (
+        collect_runtime_campaign_evidence_from_measurement_artifact
+    )
+    evaluate_budget = evaluate_runtime_budget
+    parsed_campaign_type = ParsedRuntimeTargetHostCampaign
+    parse_campaign = ParsedRuntimeTargetHostCampaign.parse
+    measurement_type = TargetHostMeasurementArtifact
+    financial_sample_type = FinancialTargetHostSample
+    research_sample_type = ResearchInterferenceSample
+    resource_sample_type = ResourceTargetHostSample
+    retained_campaign_type = RuntimeLoadCampaignEvidence
+    run_result_type = RuntimeTargetHostRunResult
+    budget_spec_type = RuntimeBudgetSpec
+    budget_decision_type = RuntimeBudgetDecision
+    declared_plan_type = DeclaredRuntimeEventPlan
+    campaign_plan_type = RuntimeCampaignPlan
+    campaign_cut_type = RuntimeCampaignCut
+    campaign_evidence_type = RuntimeCampaignEvidence
+    durable_sample_type = DurableFinancialLatencySample
+    inventory_type = RuntimeTargetHostInventory
+    error_type = RuntimeTargetHostRunnerError
+    monotonic_clock_id = MONOTONIC_CLOCK_ID
+    staleness_basis = STALENESS_BASIS
+    research_interference_basis = RESEARCH_INTERFERENCE_BASIS
+
+    require_callable_authority_helper = _require_callable_authority
+    require_class_authority_helper = _require_class_authority
+    require_callable_kwdefaults = require_callable_authority_helper.__kwdefaults__
+    require_class_kwdefaults = require_class_authority_helper.__kwdefaults__
+    require_callable_helper_state = (
+        require_callable_authority_helper.__code__,
+        require_callable_authority_helper.__defaults__,
+        require_callable_kwdefaults,
+        None
+        if require_callable_kwdefaults is None
+        else tuple(sorted(require_callable_kwdefaults.items())),
+    )
+    require_class_helper_state = (
+        require_class_authority_helper.__code__,
+        require_class_authority_helper.__defaults__,
+        require_class_kwdefaults,
+        None
+        if require_class_kwdefaults is None
+        else tuple(sorted(require_class_kwdefaults.items())),
+    )
+
+    class_states = tuple(
+        (name, value, _class_authority_state(value))
+        for name, value in (
+            ("RuntimeBudgetSpec", budget_spec_type),
+            ("RuntimeBudgetDecision", budget_decision_type),
+            ("DeclaredRuntimeEventPlan", declared_plan_type),
+            ("RuntimeCampaignPlan", campaign_plan_type),
+            ("RuntimeCampaignCut", campaign_cut_type),
+            ("RuntimeCampaignEvidence", campaign_evidence_type),
+            ("DurableFinancialLatencySample", durable_sample_type),
+            ("RuntimeTargetHostInventory", inventory_type),
+            ("ParsedRuntimeTargetHostCampaign", parsed_campaign_type),
+            ("TargetHostMeasurementArtifact", measurement_type),
+            ("FinancialTargetHostSample", financial_sample_type),
+            ("ResearchInterferenceSample", research_sample_type),
+            ("ResourceTargetHostSample", resource_sample_type),
+            ("RuntimeLoadCampaignEvidence", retained_campaign_type),
+            ("RuntimeTargetHostRunResult", run_result_type),
+        )
+    )
+
+    callable_states = (
+        ("runner monotonic clock", lambda: time.monotonic_ns, _callable_authority_state(monotonic_ns)),
+        ("runner process CPU clock", lambda: time.process_time_ns, _callable_authority_state(process_time_ns)),
+        ("runner thread counter", lambda: threading.active_count, _callable_authority_state(active_count)),
+        ("financial latency clock", lambda: _runtime_load_measurement.perf_counter_ns, _callable_authority_state(financial_clock)),
+        ("JournalStore current-sequence reader", lambda: JournalStore.current_journal_sequence, _callable_authority_state(current_journal_sequence)),
+        ("JournalStore pending-outbox reader", lambda: JournalStore.pending_outbox_count, _callable_authority_state(pending_outbox_count)),
+        ("financial measurement authority", lambda: measure_declared_financial_operation, _callable_authority_state(measure_financial)),
+        ("resource capture authority", lambda: _capture_resource_metrics, _callable_authority_state(capture_resource_metrics)),
+        ("campaign evidence collector", lambda: collect_runtime_campaign_evidence_from_measurement_artifact, _callable_authority_state(collect_campaign_evidence)),
+        ("budget evaluator", lambda: evaluate_runtime_budget, _callable_authority_state(evaluate_budget)),
+        ("terminal campaign parser", lambda: ParsedRuntimeTargetHostCampaign.parse, _callable_authority_state(parse_campaign)),
+    )
+
+    def require_guard_helper_authority() -> None:
+        if RuntimeTargetHostRunnerError is not error_type:
+            raise error_type(
+                "runner callback guard helper authority changed: "
+                "RuntimeTargetHostRunnerError"
+            )
+        helper_checks = (
+            (
+                "_require_callable_authority",
+                _require_callable_authority,
+                require_callable_authority_helper,
+                require_callable_helper_state,
+            ),
+            (
+                "_require_class_authority",
+                _require_class_authority,
+                require_class_authority_helper,
+                require_class_helper_state,
+            ),
+        )
+        for name, current, expected, state in helper_checks:
+            if current is not expected:
+                raise error_type(
+                    f"runner callback guard helper authority changed: {name}"
+                )
+            code, defaults, kwdefaults, kwdefault_items = state
+            if (
+                expected.__code__ is not code
+                or expected.__defaults__ is not defaults
+                or expected.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    f"runner callback guard helper executable authority changed: {name}"
+                )
+
+    def require_input_spec_authority() -> None:
+        if type(input_spec) is not budget_spec_type:
+            raise error_type(
+                "input RuntimeBudgetSpec authority changed during campaign callback"
+            )
+        current_state = input_spec.__dict__
+        if (
+            type(current_state) is not dict
+            or tuple(sorted(current_state)) != tuple(sorted(budget_spec_fields))
+        ):
+            raise error_type(
+                "input RuntimeBudgetSpec state changed during campaign callback"
+            )
+        missing = object()
+        for name, expected in input_spec_state:
+            current = current_state.get(name, missing)
+            if type(current) is not type(expected) or current != expected:
+                raise error_type(
+                    "input RuntimeBudgetSpec state changed during campaign callback: "
+                    + name
+                )
+
+    def require_callback_authority() -> None:
+        require_guard_helper_authority()
+        require_input_spec_authority()
+        if JournalStore is not journal_store_type:
+            raise error_type(
+                "JournalStore authority changed during campaign callback"
+            )
+        if MONOTONIC_CLOCK_ID is not monotonic_clock_id:
+            raise error_type(
+                "monotonic clock identity changed during campaign callback"
+            )
+        if STALENESS_BASIS is not staleness_basis:
+            raise error_type(
+                "staleness basis changed during campaign callback"
+            )
+        if RESEARCH_INTERFERENCE_BASIS is not research_interference_basis:
+            raise error_type(
+                "research interference basis changed during campaign callback"
+            )
+        class_bindings = (
+            ("budget spec type", RuntimeBudgetSpec, budget_spec_type),
+            ("budget decision type", RuntimeBudgetDecision, budget_decision_type),
+            ("declared plan type", DeclaredRuntimeEventPlan, declared_plan_type),
+            ("campaign plan type", RuntimeCampaignPlan, campaign_plan_type),
+            ("campaign cut type", RuntimeCampaignCut, campaign_cut_type),
+            ("campaign evidence type", RuntimeCampaignEvidence, campaign_evidence_type),
+            ("durable sample type", DurableFinancialLatencySample, durable_sample_type),
+            ("inventory type", RuntimeTargetHostInventory, inventory_type),
+            ("terminal campaign type", ParsedRuntimeTargetHostCampaign, parsed_campaign_type),
+            ("measurement type", TargetHostMeasurementArtifact, measurement_type),
+            ("financial sample type", FinancialTargetHostSample, financial_sample_type),
+            ("research sample type", ResearchInterferenceSample, research_sample_type),
+            ("resource sample type", ResourceTargetHostSample, resource_sample_type),
+            ("retained campaign type", RuntimeLoadCampaignEvidence, retained_campaign_type),
+            ("run result type", RuntimeTargetHostRunResult, run_result_type),
+        )
+        for name, current, expected in class_bindings:
+            if current is not expected:
+                raise RuntimeTargetHostRunnerError(
+                    f"{name} authority changed during campaign callback"
+                )
+        for name, resolve, state in callable_states:
+            require_callable_authority_helper(resolve(), state, name=name)
+        for name, value, state in class_states:
+            require_class_authority_helper(value, state, name=name)
 
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,
@@ -573,46 +788,29 @@ def run_declared_target_host_campaign(
         plan=campaign_plan,
     )
 
-    monotonic_ns = time.monotonic_ns
-    require_runner_callback_authority = _build_runner_callback_authority_guard(
-        monotonic_ns=monotonic_ns
-    )
-    capture_resource_metrics = _capture_resource_metrics
-    resource_sample_type = ResourceTargetHostSample
-    research_sample_type = ResearchInterferenceSample
-    measure_financial_operation = measure_declared_financial_operation
-    financial_sample_type = FinancialTargetHostSample
-    measurement_type = TargetHostMeasurementArtifact
-    collect_campaign_evidence = collect_runtime_campaign_evidence_from_measurement_artifact
-    evaluate_budget = evaluate_runtime_budget
-    retained_campaign_type = RuntimeLoadCampaignEvidence
-    parsed_campaign_type = ParsedRuntimeTargetHostCampaign
-    result_type = RuntimeTargetHostRunResult
-    monotonic_clock_id = MONOTONIC_CLOCK_ID
-    staleness_basis = STALENESS_BASIS
-    research_interference_basis = RESEARCH_INTERFERENCE_BASIS
-    end_sequence_reader = JournalStore.current_journal_sequence
-    require_runner_callback_authority()
-
     resource_samples: list[ResourceTargetHostSample] = []
     research_samples: list[ResearchInterferenceSample] = []
 
     def capture_resource(phase: str) -> None:
-        require_runner_callback_authority()
-        sample_sequence_before = end_sequence_reader(journal)
+        require_callback_authority()
+        sample_sequence_before = current_journal_sequence(journal)
         sample_monotonic_ns = monotonic_ns()
-        metrics = capture_resource_metrics(journal, resource_probe)
-        # The resource timestamp is authority-bearing evidence too. Bracket it
-        # with the same durable JournalStore generation/cut as the metrics so a
-        # write between clock sampling and metric sampling cannot create a
-        # mixed-time/mixed-journal resource observation.
-        require_runner_callback_authority()
-        sample_sequence_after = end_sequence_reader(journal)
+        metrics = capture_resource_metrics(
+            journal,
+            resource_probe,
+            current_journal_sequence=current_journal_sequence,
+            pending_outbox_count=pending_outbox_count,
+            active_count=active_count,
+            process_time_ns=process_time_ns,
+            authority_check=require_callback_authority,
+        )
+        require_callback_authority()
+        sample_sequence_after = current_journal_sequence(journal)
         if (
             sample_sequence_after != sample_sequence_before
             or metrics.get("journal_sequence") != sample_sequence_before
         ):
-            raise RuntimeTargetHostRunnerError(
+            raise error_type(
                 "resource sample crossed a durable JournalStore cut"
             )
         resource_samples.append(
@@ -623,14 +821,14 @@ def run_declared_target_host_campaign(
                 metrics=metrics,
             )
         )
-        require_runner_callback_authority()
+        require_callback_authority()
 
     capture_resource("campaign-start")
     for phase, research_operation in research_snapshot:
-        require_runner_callback_authority()
+        require_callback_authority()
         started = monotonic_ns()
         research_operation()
-        require_runner_callback_authority()
+        require_callback_authority()
         ended = monotonic_ns()
         if type(started) is not int or type(ended) is not int or started < 0 or ended < started:
             raise RuntimeTargetHostRunnerError(
@@ -648,24 +846,20 @@ def run_declared_target_host_campaign(
 
     durable_samples: list[DurableFinancialLatencySample] = []
     for event_id, operation in operation_snapshot:
-        require_runner_callback_authority()
-        _result, durable_sample = measure_financial_operation(
+        require_callback_authority()
+        _result, durable_sample = measure_financial(
             journal,
             spec,
             plan_id=declared.plan_id,
             event_id=event_id,
             operation=operation,
         )
-        # Product operations are caller-provided callbacks. They may mutate
-        # durable state only through their declared operation; they may not
-        # retarget the qualification machinery used after the event is observed.
-        require_runner_callback_authority()
+        require_callback_authority()
         durable_samples.append(durable_sample)
         capture_resource(f"after-financial:{event_id}")
 
-    require_runner_callback_authority()
-    end_sequence = end_sequence_reader(journal)
-    require_runner_callback_authority()
+    require_callback_authority()
+    end_sequence = current_journal_sequence(journal)
     financial_samples = tuple(
         financial_sample_type(
             sample_id=sample.measurement_event_id,
@@ -699,7 +893,7 @@ def run_declared_target_host_campaign(
         research_samples=tuple(research_samples),
         resource_samples=tuple(resource_samples),
     )
-    require_runner_callback_authority()
+    require_callback_authority()
     campaign_evidence = collect_campaign_evidence(
         journal=journal,
         spec=spec,
@@ -708,11 +902,11 @@ def run_declared_target_host_campaign(
         measurement=measurement,
         expected_release_artifact_id=release_artifact_id,
     )
-    require_runner_callback_authority()
+    require_callback_authority()
     observation = campaign_evidence.to_observation(spec)
-    require_runner_callback_authority()
+    require_callback_authority()
     decision = evaluate_budget(spec, observation)
-    require_runner_callback_authority()
+    require_callback_authority()
     retained_campaign = retained_campaign_type(
         observation=observation,
         journal_sequence_before=campaign_evidence.start_journal_sequence,
@@ -728,13 +922,14 @@ def run_declared_target_host_campaign(
     )
     # Reparse canonical campaign bytes now so the executable runner cannot return
     # a retained document that the terminal WP-65 parser would later reject.
-    retained_campaign = parsed_campaign_type.parse(
+    require_callback_authority()
+    retained_campaign = parse_campaign(
         parsed_campaign_type(
             evidence=retained_campaign
         ).canonical_bytes
     ).evidence
-    require_runner_callback_authority()
-    return result_type(
+    require_callback_authority()
+    return run_result_type(
         declared_plan=declared,
         campaign_plan=campaign_plan,
         campaign_cut=campaign_cut,

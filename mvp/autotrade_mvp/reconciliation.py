@@ -1238,6 +1238,154 @@ def _amount_map(
     return result
 
 
+def _snapshot_coverage_surface(
+    evidence: CoverageSurfaceEvidence,
+    *,
+    source_name: str,
+) -> CoverageSurfaceEvidence:
+    """Detach caller-owned coverage booleans/timestamps before verdict use."""
+
+    if type(evidence) is not CoverageSurfaceEvidence:
+        raise TypeError(f"{source_name} must contain exact CoverageSurfaceEvidence")
+    raw_state = object.__getattribute__(evidence, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("coverage evidence state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "surface",
+        "coverage_start",
+        "coverage_end",
+        "pagination_complete",
+        "consistency_horizon_satisfied",
+        "provider_semantics_exclude_execution",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("coverage evidence contains unexpected state fields")
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "surface",
+        "coverage_start",
+        "coverage_end",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"coverage evidence {name} must be exact str")
+    for name in (
+        "pagination_complete",
+        "consistency_horizon_satisfied",
+        "provider_semantics_exclude_execution",
+    ):
+        if type(state[name]) is not bool:
+            raise TypeError(f"coverage evidence {name} must be exact bool")
+
+    snapshot = CoverageSurfaceEvidence(**state)
+    observed = tuple(state[name] for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "surface",
+        "coverage_start",
+        "coverage_end",
+        "pagination_complete",
+        "consistency_horizon_satisfied",
+        "provider_semantics_exclude_execution",
+    ))
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.surface,
+        snapshot.coverage_start,
+        snapshot.coverage_end,
+        snapshot.pagination_complete,
+        snapshot.consistency_horizon_satisfied,
+        snapshot.provider_semantics_exclude_execution,
+    )
+    if observed != canonical:
+        raise ValueError("coverage evidence changed from canonical normalized state")
+    return snapshot
+
+
+def _snapshot_consistency_evidence(
+    evidence: SnapshotConsistencyEvidence,
+) -> SnapshotConsistencyEvidence:
+    """Detach one caller-owned coherent-snapshot assertion before other ingress."""
+
+    if type(evidence) is not SnapshotConsistencyEvidence:
+        raise TypeError(
+            "snapshot_consistency must be exact SnapshotConsistencyEvidence"
+        )
+    raw_state = object.__getattribute__(evidence, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("snapshot consistency state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "mode",
+        "query_started_at",
+        "query_completed_at",
+        "buffered_stream_events",
+        "replay_complete",
+        "sequence_gap_detected",
+    }
+    if set(state) != expected_fields:
+        raise TypeError(
+            "snapshot consistency evidence contains unexpected state fields"
+        )
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "mode",
+        "query_started_at",
+        "query_completed_at",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"snapshot consistency {name} must be exact str")
+    for name in (
+        "buffered_stream_events",
+        "replay_complete",
+        "sequence_gap_detected",
+    ):
+        if type(state[name]) is not bool:
+            raise TypeError(f"snapshot consistency {name} must be exact bool")
+
+    snapshot = SnapshotConsistencyEvidence(**state)
+    observed = tuple(state[name] for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "mode",
+        "query_started_at",
+        "query_completed_at",
+        "buffered_stream_events",
+        "replay_complete",
+        "sequence_gap_detected",
+    ))
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.mode,
+        snapshot.query_started_at,
+        snapshot.query_completed_at,
+        snapshot.buffered_stream_events,
+        snapshot.replay_complete,
+        snapshot.sequence_gap_detected,
+    )
+    if observed != canonical:
+        raise ValueError(
+            "snapshot consistency evidence changed from canonical normalized state"
+        )
+    return snapshot
+
+
 def _absence_coverage_index(
     evidence: Sequence[CoverageSurfaceEvidence],
     *,
@@ -1247,10 +1395,10 @@ def _absence_coverage_index(
 ) -> dict[str, CoverageSurfaceEvidence]:
     result: dict[str, CoverageSurfaceEvidence] = {}
     for item in evidence:
-        if not isinstance(item, CoverageSurfaceEvidence):
-            raise TypeError(
-                "absence_coverage must contain CoverageSurfaceEvidence"
-            )
+        item = _snapshot_coverage_surface(
+            item,
+            source_name="absence_coverage",
+        )
         if (
             item.provider_id != provider_id
             or item.account_id != account_id
@@ -1460,11 +1608,9 @@ def reconcile_account(
         )
     )
 
-    if snapshot_consistency is not None and not isinstance(
-        snapshot_consistency, SnapshotConsistencyEvidence
-    ):
-        raise TypeError(
-            "snapshot_consistency must be SnapshotConsistencyEvidence"
+    if snapshot_consistency is not None:
+        snapshot_consistency = _snapshot_consistency_evidence(
+            snapshot_consistency
         )
     snapshot_window_covered = False
     snapshot_started: datetime | None = None
@@ -1718,10 +1864,11 @@ def reconcile_account(
         )
     )
 
-    if activity_coverage is not None and not isinstance(
-        activity_coverage, CoverageSurfaceEvidence
-    ):
-        raise TypeError("activity_coverage must be CoverageSurfaceEvidence")
+    if activity_coverage is not None:
+        activity_coverage = _snapshot_coverage_surface(
+            activity_coverage,
+            source_name="activity_coverage",
+        )
     if activity_coverage is not None and (
         activity_coverage.provider_id != provider_scope
         or activity_coverage.account_id != account_scope

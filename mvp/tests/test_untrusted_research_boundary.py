@@ -254,18 +254,62 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 arguments=payload,
             )
 
-    def test_oversized_text_is_rejected_without_materializing_utf8_copy(self):
+    def test_scalar_subclass_is_rejected_before_overridden_encode_runs(self):
         class EncodeMustNotRun(str):
             def encode(self, *args, **kwargs):
-                raise AssertionError("oversized text must be rejected before encode")
+                raise AssertionError("untrusted scalar method must not execute")
 
         hostile = EncodeMustNotRun("x" * 1_048_577)
-        with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
+        with self.assertRaisesRegex(ResearchBoundaryError, "JSON-compatible"):
             ResearchModelResult(
-                result_id="oversized-no-encode",
+                result_id="subclass-no-encode",
                 proposal={"text": hostile},
                 evidence_refs=("evidence:1",),
             )
+
+    def test_executable_container_subclasses_are_rejected_before_callbacks(self):
+        class HostileDict(dict):
+            def items(self):
+                raise AssertionError("untrusted mapping callback must not execute")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("untrusted list callback must not execute")
+
+        with self.assertRaisesRegex(ResearchBoundaryError, "exact object"):
+            ResearchToolRequest(
+                request_id="hostile-top-level-mapping",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments=HostileDict({"safe": 1}),
+            )
+        for hostile in (
+            HostileDict({"safe": 1}),
+            HostileList([1, 2, 3]),
+        ):
+            with self.subTest(hostile=type(hostile).__name__), self.assertRaisesRegex(
+                ResearchBoundaryError,
+                "JSON-compatible",
+            ):
+                ResearchToolRequest(
+                    request_id="hostile-nested-container",
+                    tool_name="statistics",
+                    requested_capabilities=("COMPUTE_STATISTICS",),
+                    arguments={"nested": hostile},
+                )
+
+    def test_boundary_rejects_request_subclass_before_attribute_dispatch(self):
+        class RequestSubclass(ResearchToolRequest):
+            pass
+
+        forged = RequestSubclass(
+            request_id="request-subclass",
+            tool_name="statistics",
+            requested_capabilities=("COMPUTE_STATISTICS",),
+            arguments={},
+        )
+        with self.assertRaisesRegex(TypeError, "exact ResearchToolRequest"):
+            self.boundary().admit(forged)
 
     def test_aggregate_text_budget_blocks_many_individually_valid_strings(self):
         chunk = "x" * 1_048_576

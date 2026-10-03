@@ -87,6 +87,15 @@ def _windows_path_key(relative: str) -> str:
     return relative.casefold()
 
 
+def _lexical_path_key(path: Path, *, name: str) -> str:
+    """Freeze one caller-selected path without following mutable filesystem links."""
+
+    if type(path) is not type(Path()):
+        raise InstallerManifestError(f"{name} must be an exact platform Path")
+    absolute = os.path.abspath(os.fspath(path))
+    return os.path.normcase(absolute) if os.name == "nt" else absolute
+
+
 def _digest(value: object, *, name: str) -> str:
     raw = _text(value, name=name)
     if not raw.startswith("sha256:") or _SHA256.fullmatch(raw[7:]) is None:
@@ -686,10 +695,25 @@ def build_installer_input_manifest(
             "self-contained runtime cannot claim external runtime prerequisite"
         )
 
+    bundle_key = _lexical_path_key(bundle, name="release bundle")
+    output_key = _lexical_path_key(output, name="installer manifest output")
+    digest_path = output.with_suffix(output.suffix + ".sha256")
+    digest_key = _lexical_path_key(
+        digest_path,
+        name="installer manifest digest output",
+    )
+    if output_key == bundle_key:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_key == bundle_key:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
+        )
+
     verified = verify_release_bundle(bundle)
     bundle_resolved = bundle.resolve(strict=False)
     output_resolved = output.resolve(strict=False)
-    digest_path = output.with_suffix(output.suffix + ".sha256")
     digest_resolved = digest_path.resolve(strict=False)
     if output_resolved == bundle_resolved:
         raise InstallerManifestError(

@@ -48,37 +48,38 @@ def _envelope(event_id: str) -> dict[str, object]:
 
 
 class RuntimeLoadNestedTextAuthorityTests(unittest.TestCase):
-    def test_expected_event_identity_rejects_executable_str_subclass(self):
-        unexpected_event_id = "fin-unexpected"
-
+    def test_expected_event_identity_rejects_executable_str_subclass_at_construction(self):
         class ForgedExpectedId(str):
             def strip(self):
-                return self
+                raise AssertionError("executable nested text must never be evaluated")
 
             def __hash__(self):
-                # Deliberately collide with the undeclared durable event so the
-                # current set-difference/membership path dispatches our equality.
-                return hash(unexpected_event_id)
+                raise AssertionError("executable nested text must never be hashed")
 
             def __eq__(self, other):
-                return True
+                raise AssertionError("executable nested text must never be compared")
 
-            def __ne__(self, other):
-                return False
+        with self.assertRaisesRegex(
+            RuntimeBudgetError,
+            "expected_financial_event_ids must contain exact strings",
+        ):
+            RuntimeCampaignPlan.create(
+                spec=_spec(),
+                workload_profile_hash=WORKLOAD,
+                declared_duration_ms=1,
+                expected_financial_event_ids=(ForgedExpectedId("fin-expected"),),
+                financial_aggregate_types=("risk_decision",),
+            )
 
+    def test_issued_plan_rejects_executable_container_before_iteration_or_journal_mutation(self):
         spec = _spec()
-        forged_expected_id = ForgedExpectedId("fin-expected")
         plan = RuntimeCampaignPlan.create(
             spec=spec,
             workload_profile_hash=WORKLOAD,
             declared_duration_ms=1,
-            expected_financial_event_ids=(forged_expected_id,),
+            expected_financial_event_ids=("fin-expected",),
             financial_aggregate_types=("risk_decision",),
         )
-
-        # The immutable digest still serializes the underlying declared text,
-        # proving this is executable nested authority rather than a digest change.
-        self.assertEqual(str(plan.expected_financial_event_ids[0]), "fin-expected")
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")
@@ -88,12 +89,25 @@ class RuntimeLoadNestedTextAuthorityTests(unittest.TestCase):
             ):
                 cut = begin_runtime_campaign(journal=journal, spec=spec, plan=plan)
 
-            journal.append_event(_envelope(unexpected_event_id))
+            class ExecutableExpectedIds(list):
+                iterated = False
+
+                def __iter__(self):
+                    self.iterated = True
+                    journal.append_event(_envelope("fin-expected"))
+                    return super().__iter__()
+
+            hostile = ExecutableExpectedIds(["fin-expected"])
+            object.__setattr__(plan, "expected_financial_event_ids", hostile)
+            before_sequence = JournalStore.current_journal_sequence(journal)
 
             with patch(
                 "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
                 return_value=1_001_000_000,
-            ), self.assertRaisesRegex(RuntimeBudgetError, "undeclared financial event"):
+            ), self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "expected_financial_event_ids must remain an exact tuple",
+            ):
                 collect_runtime_campaign_evidence(
                     journal=journal,
                     spec=spec,
@@ -105,6 +119,13 @@ class RuntimeLoadNestedTextAuthorityTests(unittest.TestCase):
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 1},
                 )
+
+            self.assertFalse(hostile.iterated)
+            self.assertEqual(
+                JournalStore.current_journal_sequence(journal),
+                before_sequence,
+            )
+            self.assertIsNone(JournalStore.get_event(journal, "fin-expected"))
 
 
 if __name__ == "__main__":

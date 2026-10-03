@@ -1086,6 +1086,43 @@ class DurableOrderBookProjection:
             evidence_refs=evidence_refs,
         )
 
+    def prepare_correct_fill_mutation(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        fill_id: str,
+        quantity,
+        price,
+        provider_revision: str,
+        committed_at: str,
+        correction_fill_id: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> PreparedOrderMutation:
+        """Prepare one provider correction for the shared financial barrier."""
+
+        request = {
+            "client_order_id": _text(client_order_id, name="client_order_id"),
+            "fill_id": _text(fill_id, name="fill_id"),
+            "quantity": _decimal_text(quantity, name="quantity"),
+            "price": _decimal_text(price, name="price"),
+            "provider_revision": _text(
+                provider_revision,
+                name="provider_revision",
+            ),
+            "correction_fill_id": _optional_text(
+                correction_fill_id,
+                name="correction_fill_id",
+            ),
+        }
+        return self._prepare(
+            event_key=event_key,
+            operation="CORRECT_FILL",
+            request=request,
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
+        )
+
     def correct_fill(
         self,
         *,

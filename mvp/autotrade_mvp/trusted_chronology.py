@@ -553,6 +553,10 @@ def prepare_chronology_challenge(
 def _validate_challenge(challenge: ChronologyChallenge) -> ChronologyChallenge:
     if type(challenge) is not ChronologyChallenge:
         raise TypeError("challenge must be exact ChronologyChallenge")
+    # frozen=True blocks ordinary assignment, not object.__setattr__() on a
+    # caller-retained object. Detach once before validation so every consumer
+    # operates on one private, self-consistent challenge value.
+    challenge = replace(challenge)
     if challenge.schema_version != _CHALLENGE_SCHEMA_VERSION:
         raise ValueError("chronology challenge schema version is unsupported")
     if type(challenge.scope) is not ChronologyScope:

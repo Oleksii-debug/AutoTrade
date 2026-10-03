@@ -7,6 +7,10 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.production_host import (
+    ProductionHostConfig,
+    _issue_production_host_runtime_occurrence,
+)
 from mvp.autotrade_mvp.recovery import RecoveryController
 from mvp.autotrade_mvp.trusted_chronology import (
     ChronologyScope,
@@ -30,21 +34,43 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 class TrustedChronologyChallengeTests(unittest.TestCase):
-    def _durable_controller(self, root: Path):
+    @staticmethod
+    def _runtime_config(root: Path, *, host_id: str = "host-a", environment: str = "PAPER"):
+        return ProductionHostConfig(
+            journal_path=root / "journal.sqlite3",
+            account_id="account-1",
+            environment=environment,
+            host_id=host_id,
+            bind_host="127.0.0.1",
+            bind_port=8765,
+            public_origin="http://127.0.0.1:8765",
+        )
+
+    def _durable_controller(
+        self,
+        root: Path,
+        *,
+        owner_scope: str = "PAPER:account-1",
+    ):
         store = JournalStore(root / "journal.sqlite3")
         recovery = RecoveryController(
             owner_store=store,
-            owner_scope="PAPER:account-1",
+            owner_scope=owner_scope,
         )
         recovery.start("owner-a")
-        return store, recovery
+        occurrence = _issue_production_host_runtime_occurrence(
+            store,
+            self._runtime_config(root),
+        )
+        return store, recovery, occurrence
 
     def test_challenge_binds_physical_store_owner_incident_and_journal_cut(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -52,7 +78,15 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
             self.assertEqual(challenge.owner_scope, "PAPER:account-1")
             self.assertEqual(challenge.owner_id, "owner-a")
             self.assertEqual(challenge.owner_epoch, 1)
+            self.assertEqual(challenge.schema_version, "1.1.0")
             self.assertEqual(challenge.clock_incident_generation, 0)
+            self.assertEqual(challenge.runtime_host_id, occurrence.host_id)
+            self.assertEqual(challenge.runtime_account_id, occurrence.account_id)
+            self.assertEqual(
+                challenge.runtime_occurrence_id,
+                occurrence.runtime_occurrence_id,
+            )
+            self.assertEqual(challenge.runtime_environment, occurrence.environment)
             self.assertEqual(
                 challenge.journal_sequence,
                 store.current_journal_sequence(),
@@ -64,14 +98,16 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 challenge=challenge,
                 store=store,
                 recovery=recovery,
+            runtime_occurrence=occurrence,
             )
 
     def test_broad_local_clock_recovery_cannot_reuse_pre_incident_challenge(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -84,15 +120,17 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                     challenge=challenge,
                     store=store,
                     recovery=recovery,
+                runtime_occurrence=occurrence,
                 )
 
     def test_source_scope_rejects_release_identity_and_release_scope_requires_it(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             with self.assertRaises(ValueError):
                 prepare_chronology_challenge(
                     store=store,
                     recovery=recovery,
+                    runtime_occurrence=occurrence,
                     source_sha=SOURCE_SHA,
                     scope=ChronologyScope.SOURCE_QUALIFICATION,
                     release_artifact_id="11111111-1111-1111-1111-111111111111",
@@ -102,16 +140,35 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 prepare_chronology_challenge(
                     store=store,
                     recovery=recovery,
+                    runtime_occurrence=occurrence,
                     source_sha=SOURCE_SHA,
                     scope=ChronologyScope.RELEASE_RUNTIME,
                 )
+            valid_release = prepare_chronology_challenge(
+                store=store,
+                recovery=recovery,
+                runtime_occurrence=occurrence,
+                source_sha=SOURCE_SHA,
+                scope=ChronologyScope.RELEASE_RUNTIME,
+                release_artifact_id="11111111-1111-1111-1111-111111111111",
+                release_artifact_sha256="sha256:" + ("b" * 64),
+            )
+            self.assertEqual(
+                valid_release.runtime_occurrence_id,
+                occurrence.runtime_occurrence_id,
+            )
+            self.assertEqual(
+                valid_release.release_artifact_id,
+                "11111111-1111-1111-1111-111111111111",
+            )
 
     def test_measurement_must_echo_exact_fresh_challenge(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -122,7 +179,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 "protocol_version": "1.0.0",
                 "request_nonce": challenge.request_nonce,
                 "response_id": "response-1",
-                "schema_version": "1.0.0",
+                "schema_version": challenge.schema_version,
                 "utc_lower_bound": "2026-10-01T04:00:00Z",
                 "utc_upper_bound": "2026-10-01T04:00:00.25Z",
             }
@@ -145,10 +202,11 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
 
     def test_measurement_rejects_noncanonical_or_reversed_time_evidence(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -159,7 +217,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 "protocol_version": "1.0.0",
                 "request_nonce": challenge.request_nonce,
                 "response_id": "response-1",
-                "schema_version": "1.0.0",
+                "schema_version": challenge.schema_version,
                 "utc_lower_bound": "2026-10-01T04:00:01Z",
                 "utc_upper_bound": "2026-10-01T04:00:00Z",
             }
@@ -179,10 +237,11 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
 
     def test_measurement_utc_fraction_is_canonical_and_bounded(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -193,7 +252,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 "protocol_version": "1.0.0",
                 "request_nonce": challenge.request_nonce,
                 "response_id": "response-1",
-                "schema_version": "1.0.0",
+                "schema_version": challenge.schema_version,
                 "utc_lower_bound": "2026-10-01T04:00:00Z",
                 "utc_upper_bound": "2026-10-01T04:00:00.25Z",
             }
@@ -218,10 +277,11 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
 
     def test_measurement_resource_envelope_rejects_before_json_decode(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -248,10 +308,11 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
 
     def test_measurement_lone_surrogate_fails_as_canonical_value_error(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -262,7 +323,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                 "protocol_version": "1.0.0",
                 "request_nonce": challenge.request_nonce,
                 "response_id": "response-1",
-                "schema_version": "1.0.0",
+                "schema_version": challenge.schema_version,
                 "utc_lower_bound": "2026-10-01T04:00:00Z",
                 "utc_upper_bound": "2026-10-01T04:00:00.25Z",
             }
@@ -278,7 +339,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
 
     def test_challenge_rejects_in_process_owner_scope_rebinding_mid_capture(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             from mvp.autotrade_mvp import trusted_chronology as chronology_module
 
             original_sequence = chronology_module._current_journal_sequence
@@ -303,16 +364,18 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                     prepare_chronology_challenge(
                         store=store,
                         recovery=recovery,
+                        runtime_occurrence=occurrence,
                         source_sha=SOURCE_SHA,
                         scope=ChronologyScope.SOURCE_QUALIFICATION,
                     )
 
     def test_current_challenge_rejects_owner_scope_rebinding_during_final_read(self):
         with TemporaryDirectory() as directory:
-            store, recovery = self._durable_controller(Path(directory))
+            store, recovery, occurrence = self._durable_controller(Path(directory))
             challenge = prepare_chronology_challenge(
                 store=store,
                 recovery=recovery,
+                runtime_occurrence=occurrence,
                 source_sha=SOURCE_SHA,
                 scope=ChronologyScope.SOURCE_QUALIFICATION,
             )
@@ -337,18 +400,19 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                         challenge=challenge,
                         store=store,
                         recovery=recovery,
+                    runtime_occurrence=occurrence,
                     )
 
     def test_challenge_requires_nonempty_canonical_owner_scope_suffix(self):
         with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            for owner_scope in ("PAPER", "PAPER:", "PAPER: account"):
+            for index, owner_scope in enumerate(("PAPER", "PAPER:", "PAPER: account")):
                 with self.subTest(owner_scope=owner_scope):
-                    recovery = RecoveryController(
-                        owner_store=store,
+                    root = Path(directory) / str(index)
+                    root.mkdir()
+                    store, recovery, occurrence = self._durable_controller(
+                        root,
                         owner_scope=owner_scope,
                     )
-                    recovery.start("owner-a")
                     with self.assertRaisesRegex(
                         PermissionError,
                         "environment-scoped recovery owner",
@@ -356,14 +420,77 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                         prepare_chronology_challenge(
                             store=store,
                             recovery=recovery,
+                            runtime_occurrence=occurrence,
                             source_sha=SOURCE_SHA,
                             scope=ChronologyScope.SOURCE_QUALIFICATION,
                         )
 
+    def test_challenge_rejects_stale_runtime_occurrence_after_restart_identity_advances(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, recovery, occurrence = self._durable_controller(root)
+            challenge = prepare_chronology_challenge(
+                store=store,
+                recovery=recovery,
+                runtime_occurrence=occurrence,
+                source_sha=SOURCE_SHA,
+                scope=ChronologyScope.SOURCE_QUALIFICATION,
+            )
+            successor = _issue_production_host_runtime_occurrence(
+                store,
+                self._runtime_config(root),
+            )
+            self.assertNotEqual(
+                successor.runtime_occurrence_id,
+                occurrence.runtime_occurrence_id,
+            )
+            with self.assertRaisesRegex(PermissionError, "no longer current"):
+                require_current_chronology_challenge(
+                    challenge=challenge,
+                    store=store,
+                    recovery=recovery,
+                    runtime_occurrence=occurrence,
+                )
+            replacement = prepare_chronology_challenge(
+                store=store,
+                recovery=recovery,
+                runtime_occurrence=successor,
+                source_sha=SOURCE_SHA,
+                scope=ChronologyScope.SOURCE_QUALIFICATION,
+            )
+            self.assertEqual(
+                replacement.runtime_occurrence_id,
+                successor.runtime_occurrence_id,
+            )
+
+    def test_challenge_rejects_runtime_occurrence_from_other_environment(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, recovery, _ = self._durable_controller(root)
+            live_occurrence = _issue_production_host_runtime_occurrence(
+                store,
+                self._runtime_config(
+                    root,
+                    host_id="host-live",
+                    environment="LIVE",
+                ),
+            )
+            with self.assertRaisesRegex(
+                PermissionError,
+                "environment does not match recovery owner scope",
+            ):
+                prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    runtime_occurrence=live_occurrence,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.SOURCE_QUALIFICATION,
+                )
+
     def test_challenge_rejects_shadowed_second_store_on_same_physical_journal(self):
         with TemporaryDirectory() as directory:
             path = Path(directory)
-            owner_store, recovery = self._durable_controller(path)
+            owner_store, recovery, occurrence = self._durable_controller(path)
             selected_store = JournalStore(path / "journal.sqlite3")
             self.assertEqual(
                 owner_store.store_identity,
@@ -377,6 +504,7 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                     prepare_chronology_challenge(
                         store=selected_store,
                         recovery=recovery,
+                        runtime_occurrence=occurrence,
                         source_sha=SOURCE_SHA,
                         scope=ChronologyScope.SOURCE_QUALIFICATION,
                     )

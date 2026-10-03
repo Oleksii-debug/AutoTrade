@@ -6,7 +6,6 @@ from mvp.autotrade_mvp.replay import (
     ReplayError,
     ReplayEvent,
     RuntimeStateAuthority,
-    resume_from_composite_checkpoint,
 )
 
 
@@ -66,20 +65,11 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             secret=b"caller-selected-runtime-authority-secret-0001",
             cut_resolver=forged_cut,
         )
-        forged_checkpoint = replay.composite_checkpoint(
-            runtime_state_authority=attacker,
-            build_sha="a" * 64,
-            protocol_ref="protocol:walk-forward-v1",
-        )
-
         with self.assertRaisesRegex(
             ReplayError,
-            "authority|issuer|composition",
+            "not composition-issued",
         ):
-            resume_from_composite_checkpoint(
-                events,
-                start_at="2026-09-24T09:59:00Z",
-                checkpoint=forged_checkpoint,
+            replay.composite_checkpoint(
                 runtime_state_authority=attacker,
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",

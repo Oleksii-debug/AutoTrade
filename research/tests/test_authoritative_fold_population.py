@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from hashlib import sha256
@@ -315,6 +316,45 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 fold=self.fold,
                 spec=self.spec,
             )
+
+    def test_stateful_manifest_mapping_cannot_switch_provenance_between_reads(self):
+        rows = self._base_events()
+        content_digest = market_event_population_digest(rows)
+        raw = self._manifest([content_digest])
+        bound_evidence = list(raw["source_evidence"]) + [
+            {
+                "artifact_id": _uuid(42, 1),
+                "sha256": content_digest,
+                "observed_at": _iso(BASE + timedelta(days=8)),
+                "rights_id": "research-fixture",
+            }
+        ]
+
+        class FlippingManifest(Mapping):
+            def __init__(self, payload):
+                self.payload = payload
+                self.source_reads = 0
+
+            def __iter__(self):
+                return iter(self.payload)
+
+            def __len__(self):
+                return len(self.payload)
+
+            def __getitem__(self, key):
+                if key == "source_evidence":
+                    self.source_reads += 1
+                    if self.source_reads > 1:
+                        return bound_evidence
+                return self.payload[key]
+
+        hostile = FlippingManifest(raw)
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "dataset-manifest-content-authority-v1",
+        ):
+            self.registry.commit(hostile)
+        self.assertEqual(hostile.source_reads, 1)
 
     def test_registry_rejects_legacy_unbound_content_hash(self):
         rows = self._base_events()

@@ -607,6 +607,10 @@ def validate_multiplicative_adjustment(
 def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         raise HistoricalDataError("dataset manifest must be an object")
+    try:
+        manifest = dict(manifest)
+    except Exception as error:
+        raise HistoricalDataError("dataset manifest cannot be detached") from error
     required = {
         "dataset_id",
         "version",
@@ -643,11 +647,6 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(source_evidence, list) or not source_evidence:
         raise HistoricalDataError("source_evidence must be non-empty")
     evidence = [_evidence(item) for item in source_evidence]
-    if not is_valid_dataset_manifest_semantics(manifest):
-        raise HistoricalDataError(
-            "dataset manifest fails canonical "
-            "dataset-manifest-content-authority-v1 semantics"
-        )
 
     created_at = _utc(manifest["created_at"], "created_at")
     latest_evidence_at = max(
@@ -729,6 +728,11 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "source_evidence": evidence,
         "created_at": _utc_text(created_at),
     }
+    if not is_valid_dataset_manifest_semantics(normalized):
+        raise HistoricalDataError(
+            "dataset manifest fails canonical "
+            "dataset-manifest-content-authority-v1 semantics"
+        )
     return normalized
 
 

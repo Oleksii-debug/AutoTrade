@@ -219,6 +219,18 @@ def _reject_release_evidence_constant(value: str) -> None:
     raise ValueError(f"non-standard release-evidence JSON constant: {value}")
 
 
+def _strict_json_loads_bytes(raw: bytes) -> object:
+    """Decode one unambiguous UTF-8 JSON value for provenance authority."""
+
+    if type(raw) is not bytes:
+        raise TypeError("strict provenance JSON input must be exact bytes")
+    return json.loads(
+        raw.decode("utf-8", errors="strict"),
+        object_pairs_hook=_unique_release_evidence_object,
+        parse_constant=_reject_release_evidence_constant,
+    )
+
+
 def release_evidence_snapshot(
     path: Path,
     *,
@@ -234,11 +246,7 @@ def release_evidence_snapshot(
     except OSError:
         return False, "invalid_json", None
     try:
-        value = json.loads(
-            raw.decode("utf-8", errors="strict"),
-            object_pairs_hook=_unique_release_evidence_object,
-            parse_constant=_reject_release_evidence_constant,
-        )
+        value = _strict_json_loads_bytes(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return False, "invalid_json", None
     if type(value) is not dict:
@@ -735,8 +743,8 @@ def build_manifest() -> dict[str, object]:
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
-    components_doc = json.loads(components_path.read_text(encoding="utf-8"))
-    global_doc = json.loads(global_path.read_text(encoding="utf-8"))
+    components_doc = _strict_json_loads_bytes(components_path.read_bytes())
+    global_doc = _strict_json_loads_bytes(global_path.read_bytes())
 
     components, unresolved_first_party = normalize_inspected_components(
         components_doc

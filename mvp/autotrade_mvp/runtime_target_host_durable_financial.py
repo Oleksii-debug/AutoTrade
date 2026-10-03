@@ -240,6 +240,9 @@ class DurableTargetHostFinancialBinding:
             raise TypeError("bindings must be an exact tuple")
         snapshotted: list[DurableFinancialIdentityBinding] = []
         seen_events: set[str] = set()
+        seen_target_samples: set[str] = set()
+        seen_latency_events: set[str] = set()
+        seen_latency_sequences: set[int] = set()
         previous_sequence = 0
         for value in self.bindings:
             if type(value) is not DurableFinancialIdentityBinding:
@@ -255,8 +258,23 @@ class DurableTargetHostFinancialBinding:
                 raise RuntimeTargetHostDurableFinancialError(
                     "durable financial bindings must follow strict journal order"
                 )
+            if value.target_sample_id in seen_target_samples:
+                raise RuntimeTargetHostDurableFinancialError(
+                    "durable financial bindings must have unique target sample IDs"
+                )
+            if value.latency_measurement_event_id in seen_latency_events:
+                raise RuntimeTargetHostDurableFinancialError(
+                    "durable financial bindings must have unique latency measurement event IDs"
+                )
+            if value.latency_measurement_journal_sequence in seen_latency_sequences:
+                raise RuntimeTargetHostDurableFinancialError(
+                    "durable financial bindings must have unique latency measurement journal sequences"
+                )
             previous_sequence = value.event_journal_sequence
             seen_events.add(value.event_id)
+            seen_target_samples.add(value.target_sample_id)
+            seen_latency_events.add(value.latency_measurement_event_id)
+            seen_latency_sequences.add(value.latency_measurement_journal_sequence)
             snapshotted.append(value)
         if not snapshotted:
             raise RuntimeTargetHostDurableFinancialError(
@@ -333,6 +351,10 @@ def bind_durable_financial_latency_to_target_host_measurement(
     if measurement.source_sha != spec.release_sha:
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement source SHA conflicts with runtime budget"
+        )
+    if measurement.scenario_id != spec.scenario_id:
+        raise RuntimeTargetHostDurableFinancialError(
+            "target-host measurement scenario conflicts with runtime budget"
         )
     if measurement.spec_digest != spec.digest:
         raise RuntimeTargetHostDurableFinancialError(

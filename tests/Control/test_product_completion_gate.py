@@ -382,6 +382,12 @@ if preloaded:
     raise AssertionError(f"research package preloaded: {preloaded}")
 
 sys.meta_path.insert(0, BlockResearch())
+import mvp.autotrade_mvp.bounded_real
+import mvp.autotrade_mvp.execution_qualification
+import mvp.autotrade_mvp.provider_qualification_authority
+import mvp.autotrade_mvp.recovery_qualification
+import mvp.autotrade_mvp.release_qualification
+import mvp.autotrade_mvp.supply_chain_qualification
 import tools.check_nvda_qualification
 import tools.check_product_completion
 

@@ -6,8 +6,14 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.simulation_session import run_canonical_simulation
+from mvp.autotrade_mvp.simulation_session import (
+    ACCOUNT,
+    ENVIRONMENT,
+    run_canonical_simulation,
+)
+from mvp.autotrade_mvp.simulation_status import inspect_canonical_simulation
 
 
 BUY = ["100", "101", "103"]
@@ -60,6 +66,21 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("submission_attempt"),
                 before,
             )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT,
+            )
+            self.assertEqual(len(reservations.active()), 1)
+            self.assertEqual(reservations.active()[0].state, "WORKING")
+            operator = inspect_canonical_simulation(directory)["status"]
+            self.assertEqual(operator["status"], "needs_recovery")
+            self.assertEqual(operator["session_status"], "UNKNOWN")
+            self.assertFalse(operator["reconciled"])
+            self.assertEqual(len(operator["active_reservations"]), 1)
+            self.assertEqual(
+                operator["active_reservations"][0]["state"], "WORKING"
+            )
 
             recovered = run_canonical_simulation(
                 BUY,
@@ -83,6 +104,14 @@ class SimulationPreparedRecoveryTests(unittest.TestCase):
                 ],
                 ["SubmissionPrepared", "SubmissionUnknown"],
             )
+            reservations.refresh()
+            self.assertEqual(len(reservations.active()), 1)
+            self.assertEqual(reservations.active()[0].state, "WORKING")
+            operator = inspect_canonical_simulation(directory)["status"]
+            self.assertEqual(operator["status"], "needs_recovery")
+            self.assertEqual(operator["session_status"], "UNKNOWN")
+            self.assertFalse(operator["reconciled"])
+            self.assertEqual(len(operator["active_reservations"]), 1)
 
             again = run_canonical_simulation(
                 BUY,

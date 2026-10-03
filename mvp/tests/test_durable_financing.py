@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 import json
 from pathlib import Path
 from uuid import uuid4
 import tempfile
 import unittest
+from unittest.mock import patch
 from typing import Mapping
 
 from mvp.autotrade_mvp.durable_financing import (
@@ -1195,7 +1196,7 @@ class DurableFinancingTests(unittest.TestCase):
                 artifact_id=artifact,
                 row_id="funding-income",
                 instrument_registry=bybit_instrument_registry()[0],
-            instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
+                instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
                 committed_at=(BASE + timedelta(seconds=1)).isoformat(),
             )
         self.assertEqual(
@@ -1244,6 +1245,105 @@ class DurableFinancingTests(unittest.TestCase):
                 committed_at=BASE.isoformat(),
             )
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
+
+
+    def test_exact_authority_types_accept_distinct_handles_to_same_backing_generation(self):
+        second_store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
+        second_economic = DurableProviderEconomicBook(
+            second_store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        composed = DurableFinancingBook(
+            self.store,
+            second_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        self.assertIsNone(composed.latest("same-backing-empty"))
+
+        class ForgedStore(JournalStore):
+            pass
+
+        forged_store = ForgedStore(Path(self.temp.name) / "forged.sqlite3")
+        forged_economic = DurableProviderEconomicBook(
+            forged_store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        with self.assertRaisesRegex(TypeError, "exact canonical JournalStore"):
+            DurableFinancingBook(
+                forged_store,
+                forged_economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+
+        class ForgedEconomicBook(DurableProviderEconomicBook):
+            pass
+
+        forged_book = ForgedEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        with self.assertRaisesRegex(TypeError, "exact canonical DurableProviderEconomicBook"):
+            DurableFinancingBook(
+                self.store,
+                forged_book,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+
+    def test_durable_delta_is_independent_of_ambient_decimal_context(self):
+        first = "00000000-0000-0000-0000-000000000091"
+        second = "00000000-0000-0000-0000-000000000092"
+        base_amount = "1000000000000000000000000000000"
+        revised_amount = "1000000000000000000000000000000.00000000000000000001"
+        self.artifacts.put(first, revision=1, amount=base_amount)
+        self.artifacts.put(second, revision=2, amount=revised_amount)
+
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_DOWN
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=first,
+                committed_at=BASE.isoformat(),
+            )
+            result = self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=second,
+                committed_at=(BASE + timedelta(minutes=1)).isoformat(),
+            )
+
+        self.assertEqual(result.update.economic_delta, Decimal("0.00000000000000000001"))
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            Decimal(revised_amount),
+        )
+
+    def test_unstable_journal_cut_fails_closed_without_financing_mutation(self):
+        with patch.object(
+            JournalStore,
+            "current_journal_sequence",
+            side_effect=[0, 1, 1, 2, 2, 3, 3, 4],
+        ):
+            with self.assertRaisesRegex(FinancingConflict, "stable JournalStore cut"):
+                self.financing.latest("never-recorded")
+        self.assertEqual(
+            self.store.load_events(
+                "provider_financing_charge",
+                self.financing._aggregate_id("never-recorded"),
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

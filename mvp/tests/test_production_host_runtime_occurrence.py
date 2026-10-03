@@ -179,6 +179,50 @@ class ProductionHostRuntimeOccurrenceContractTests(unittest.TestCase):
                 [],
             )
 
+    def test_occurrence_append_failure_closes_composed_listener_and_fence(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            server = Mock()
+            fence = Mock()
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    host_network,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host._InstanceFence,
+                    "acquire",
+                    return_value=fence,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    return_value=server,
+                ) as server_factory,
+                patch.object(
+                    production_host,
+                    "_issue_production_host_runtime_occurrence",
+                    side_effect=RuntimeError("occurrence append failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "occurrence append failed"):
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=lambda headers, origin: None,
+                        snapshot_provider=lambda state, principal: {},
+                    )
+
+            server_factory.assert_called_once()
+            server.server_close.assert_called_once_with()
+            fence.release.assert_called_once_with()
+
     def test_runtime_property_revalidates_after_returned_value_tamper(self) -> None:
         with TemporaryDirectory() as directory:
             config = self._config(directory)

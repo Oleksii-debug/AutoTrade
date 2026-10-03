@@ -199,6 +199,27 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
                 )
         self.assertEqual(first, second)
 
+    def test_noncanonical_artifact_id_fails_before_capture_or_publication(self) -> None:
+        expected = host_identity_fingerprint(IDENTITY)
+        noncanonical = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "evidence")
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity"
+            ) as capture:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostInventoryError,
+                    "artifact_id must be a canonical UUID",
+                ):
+                    publish_runtime_target_host_inventory(
+                        store,
+                        artifact_id=noncanonical,
+                        expected_source_sha=SOURCE_SHA,
+                        expected_host_fingerprint=expected,
+                    )
+            capture.assert_not_called()
+            self.assertEqual(list(store.manifests.iterdir()), [])
+
     def test_publication_rejects_noncanonical_source_or_store_type(self) -> None:
         expected = host_identity_fingerprint(IDENTITY)
         with self.assertRaisesRegex(TypeError, "exact ArtifactStore"):

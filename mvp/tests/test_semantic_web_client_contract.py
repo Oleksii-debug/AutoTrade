@@ -646,6 +646,18 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
 
 
+    def test_command_submit_moves_focus_to_inflight_status_before_network_wait(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        message = submit.index('"Submitting host command " + commandId + "."')
+        focus = submit.index('byId("command-result").focus();', message)
+        network = submit.index("await submitCanonicalCommand(payload)", focus)
+        self.assertLess(message, focus)
+        self.assertLess(focus, network)
+
     def test_exact_authority_payload_locks_visible_policy_before_network_wait(self):
         js = APP.read_text(encoding="utf-8")
         submit = js[

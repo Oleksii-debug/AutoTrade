@@ -40,17 +40,21 @@ _ACCEPTED_MAPPING_FIELDS = (
 )
 
 
-def _snapshot_inert_text_map(value: object, *, name: str) -> dict[str, str]:
+def _snapshot_inert_text_map(
+    value: object,
+    *,
+    name: str,
+    _mapping_proxy_type=_MAPPING_PROXY_TYPE,
+    _error_type=_impl.RuntimeTargetHostChronologyBindingError,
+) -> dict[str, str]:
     """Detach one constructor-owned mapping without invoking caller callbacks."""
 
-    if type(value) is not _MAPPING_PROXY_TYPE:
-        raise _impl.RuntimeTargetHostChronologyBindingError(
-            f"{name} must remain exact immutable mapping state"
-        )
+    if type(value) is not _mapping_proxy_type:
+        raise _error_type(f"{name} must remain exact immutable mapping state")
     detached = dict(value)
     for key, item in detached.items():
         if type(key) is not str or not key or type(item) is not str or not item:
-            raise _impl.RuntimeTargetHostChronologyBindingError(
+            raise _error_type(
                 f"{name} must contain only exact non-empty text pairs"
             )
     return detached
@@ -58,52 +62,178 @@ def _snapshot_inert_text_map(value: object, *, name: str) -> dict[str, str]:
 
 def _snapshot_terminal_qualification(
     value: _impl.AcceptedComposedRuntimeTargetHostQualification,
+    *,
+    _composed_type=_impl.AcceptedComposedRuntimeTargetHostQualification,
+    _accepted_type=_impl.AcceptedRuntimeTargetHostQualification,
+    _error_type=_impl.RuntimeTargetHostChronologyBindingError,
+    _exact_text=_impl._exact_text,
+    _map_snapshot=_snapshot_inert_text_map,
+    _text_fields=_ACCEPTED_TEXT_FIELDS,
+    _mapping_fields=_ACCEPTED_MAPPING_FIELDS,
 ) -> _impl.AcceptedComposedRuntimeTargetHostQualification:
     """Detach verifier-owned terminal authority before returning it to consumers."""
 
-    if type(value) is not _impl.AcceptedComposedRuntimeTargetHostQualification:
-        raise _impl.RuntimeTargetHostChronologyBindingError(
-            "WP-65 verifier returned non-canonical composed acceptance"
-        )
+    if type(value) is not _composed_type:
+        raise _error_type("WP-65 verifier returned non-canonical composed acceptance")
     accepted = value.qualification
-    if type(accepted) is not _impl.AcceptedRuntimeTargetHostQualification:
-        raise _impl.RuntimeTargetHostChronologyBindingError(
-            "WP-65 verifier returned non-canonical signed acceptance"
-        )
+    if type(accepted) is not _accepted_type:
+        raise _error_type("WP-65 verifier returned non-canonical signed acceptance")
 
     accepted_text = {
-        field: _impl._exact_text(
+        field: _exact_text(
             getattr(accepted, field),
             name=f"signed WP-65 {field}",
         )
-        for field in _ACCEPTED_TEXT_FIELDS
+        for field in _text_fields
     }
     accepted_maps = {
-        field: _snapshot_inert_text_map(
+        field: _map_snapshot(
             getattr(accepted, field),
             name=f"signed WP-65 {field}",
         )
-        for field in _ACCEPTED_MAPPING_FIELDS
+        for field in _mapping_fields
     }
-    accepted_snapshot = _impl.AcceptedRuntimeTargetHostQualification(
-        **accepted_text,
-        **accepted_maps,
-    )
-    return _impl.AcceptedComposedRuntimeTargetHostQualification(
+    accepted_snapshot = _accepted_type(**accepted_text, **accepted_maps)
+    return _composed_type(
         qualification=accepted_snapshot,
-        target_host_measurement_digest=_impl._exact_text(
+        target_host_measurement_digest=_exact_text(
             value.target_host_measurement_digest,
             name="signed WP-65 target_host_measurement_digest",
         ),
-        durable_financial_binding_digest=_impl._exact_text(
+        durable_financial_binding_digest=_exact_text(
             value.durable_financial_binding_digest,
             name="signed WP-65 durable_financial_binding_digest",
         ),
-        projection_sha256_by_kind=_snapshot_inert_text_map(
+        projection_sha256_by_kind=_map_snapshot(
             value.projection_sha256_by_kind,
             name="signed WP-65 projection_sha256_by_kind",
         ),
     )
+
+
+def _build_pre_binding_checker(*, trusted_cut_type, binding_error_type):
+    """Build the immutable terminal identity pre-binding checker."""
+
+    def require_pre_binding(
+        chronology,
+        *,
+        source_sha,
+        journal_store_identity_digest,
+        expected_release_artifact_id,
+        expected_release_artifact_sha256,
+    ) -> None:
+        if type(chronology) is not trusted_cut_type:
+            raise binding_error_type(
+                "chronology verifier returned non-canonical cut"
+            )
+        bindings = (
+            ("source SHA", chronology.source_sha, source_sha),
+            (
+                "release artifact id",
+                chronology.release_artifact_id,
+                expected_release_artifact_id,
+            ),
+            (
+                "release artifact digest",
+                chronology.release_artifact_sha256,
+                expected_release_artifact_sha256,
+            ),
+            (
+                "JournalStore identity",
+                chronology.store_identity_digest,
+                journal_store_identity_digest,
+            ),
+        )
+        for name, observed, expected in bindings:
+            if (
+                type(observed) is not str
+                or type(expected) is not str
+                or observed != expected
+            ):
+                raise binding_error_type(
+                    f"runtime chronology {name} does not match terminal WP-65 authority"
+                )
+
+    return require_pre_binding
+
+
+def _build_cross_binding_checker(
+    *,
+    composed_type,
+    accepted_type,
+    binding_error_type,
+    pre_binding_checker,
+):
+    """Build one closed cross-authority checker with no mutable module lookup."""
+
+    def require_cross_binding(
+        qualification,
+        chronology,
+        *,
+        receipt_attestation_id,
+        receipt_attestation_digest,
+        source_sha,
+        journal_store_identity_digest,
+        measurement_digest,
+        expected_release_artifact_id,
+        expected_release_artifact_sha256,
+    ) -> None:
+        if type(qualification) is not composed_type:
+            raise binding_error_type(
+                "WP-65 verifier returned non-canonical composed acceptance"
+            )
+        accepted = qualification.qualification
+        if type(accepted) is not accepted_type:
+            raise binding_error_type(
+                "WP-65 verifier returned non-canonical signed acceptance"
+            )
+        pre_binding_checker(
+            chronology,
+            source_sha=source_sha,
+            journal_store_identity_digest=journal_store_identity_digest,
+            expected_release_artifact_id=expected_release_artifact_id,
+            expected_release_artifact_sha256=expected_release_artifact_sha256,
+        )
+        bindings = (
+            ("attestation id", accepted.attestation_id, receipt_attestation_id),
+            (
+                "attestation digest",
+                accepted.attestation_digest,
+                receipt_attestation_digest,
+            ),
+            ("source SHA", accepted.source_sha, source_sha),
+            (
+                "release artifact id",
+                accepted.release_artifact_id,
+                expected_release_artifact_id,
+            ),
+            (
+                "release artifact digest",
+                accepted.release_artifact_sha256,
+                expected_release_artifact_sha256,
+            ),
+            (
+                "JournalStore identity",
+                accepted.journal_store_identity_digest,
+                journal_store_identity_digest,
+            ),
+            (
+                "target-host measurement digest",
+                qualification.target_host_measurement_digest,
+                measurement_digest,
+            ),
+        )
+        for name, observed, expected in bindings:
+            if (
+                type(observed) is not str
+                or type(expected) is not str
+                or observed != expected
+            ):
+                raise binding_error_type(
+                    f"signed WP-65 {name} does not match runtime chronology authority"
+                )
+
+    return require_cross_binding
 
 
 def _horizon_observer(_chronology: object, *_claimed_instants: str) -> None:
@@ -369,15 +499,25 @@ _impl._build_terminal_verifier = _build_terminal_verifier
 _impl._build_terminal_verifier_for_tests = _build_terminal_verifier_for_tests
 _impl._build_product_dispatcher = _build_product_dispatcher
 
+_PRODUCTION_PRE_BINDING_CHECKER = _build_pre_binding_checker(
+    trusted_cut_type=_impl.TrustedChronologyCut,
+    binding_error_type=_impl.RuntimeTargetHostChronologyBindingError,
+)
+_PRODUCTION_CROSS_BINDING_CHECKER = _build_cross_binding_checker(
+    composed_type=_impl.AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=_impl.AcceptedRuntimeTargetHostQualification,
+    binding_error_type=_impl.RuntimeTargetHostChronologyBindingError,
+    pre_binding_checker=_PRODUCTION_PRE_BINDING_CHECKER,
+)
 _PRODUCTION_TERMINAL_VERIFIER = _build_terminal_verifier(
     receipt_snapshotter=_impl._snapshot_signed_receipt,
     measurement_snapshotter=_impl._snapshot_measurement,
     exact_text=_impl._exact_text,
     current_cut_verifier=_impl.require_current_trusted_chronology_cut,
-    pre_binding_checker=_impl._require_pre_binding,
+    pre_binding_checker=_PRODUCTION_PRE_BINDING_CHECKER,
     plan_verifier=_impl.verify_declared_plan_runtime_target_host_qualification,
     terminal_snapshotter=_snapshot_terminal_qualification,
-    cross_binding_checker=_impl._require_cross_binding,
+    cross_binding_checker=_PRODUCTION_CROSS_BINDING_CHECKER,
     horizon_observer=_horizon_observer,
     accepted_result_type=_impl.AcceptedChronologyBoundRuntimeTargetHostQualification,
     trusted_cut_type=_impl.TrustedChronologyCut,

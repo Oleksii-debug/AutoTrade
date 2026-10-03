@@ -244,6 +244,8 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             binding = bind_release_bound_durable_financial_latency_to_target_host_measurement(
                 store=store,
                 spec=current_spec,
+                campaign_plan=current_plan,
+                campaign_cut=cut,
                 declared_plan_id=declared.plan_id,
                 measurement=measurement,
                 expected_release_artifact_id=RELEASE_ID,
@@ -267,6 +269,8 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             bind_release_bound_durable_financial_latency_to_target_host_measurement(
                 store=store,
                 spec=current_spec,
+                campaign_plan=current_plan,
+                campaign_cut=cut,
                 declared_plan_id=declared.plan_id,
                 measurement=measurement,
                 expected_release_artifact_id="50000000-0000-4000-8000-000000000002",
@@ -290,10 +294,45 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             bind_release_bound_durable_financial_latency_to_target_host_measurement(
                 store=store,
                 spec=current_spec,
+                campaign_plan=current_plan,
+                campaign_cut=cut,
                 declared_plan_id=declared.plan_id,
                 measurement=measurement,
                 expected_release_artifact_id=RELEASE_ID,
                 expected_release_artifact_sha256="sha256:" + "9" * 64,
+            )
+        mechanics.assert_not_called()
+
+    def test_release_bound_facade_rejects_other_campaign_before_durable_mechanics(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        other_plan = RuntimeCampaignPlan.create(
+            spec=current_spec,
+            workload_profile_hash="sha256:" + "9" * 64,
+            declared_duration_ms=1_000,
+            expected_financial_event_ids=(durable.event_id,),
+            financial_aggregate_types=("risk_decision",),
+            release_artifact_sha256=RELEASE_SHA,
+        )
+        with patch.object(
+            durable_financial_module,
+            "bind_durable_financial_latency_to_target_host_measurement",
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "another campaign identity",
+        ):
+            bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                campaign_plan=other_plan,
+                campaign_cut=cut,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
             )
         mechanics.assert_not_called()
 

@@ -34,6 +34,7 @@ from .runtime_load_measurement import (
     load_declared_financial_latency_samples,
 )
 from .runtime_load_plan import load_declared_runtime_event_plan
+from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_measurement import (
     RuntimeTargetHostMeasurementError,
     TargetHostMeasurementArtifact,
@@ -496,6 +497,8 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
     *,
     store: JournalStore,
     spec: RuntimeBudgetSpec,
+    campaign_plan: RuntimeCampaignPlan,
+    campaign_cut: RuntimeCampaignCut,
     declared_plan_id: str,
     measurement: TargetHostMeasurementArtifact,
     expected_release_artifact_id: str,
@@ -505,8 +508,8 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
 
     The low-level durable bridge proves JournalStore/measurement identity. Terminal
     consumers must additionally freeze the delivered artifact UUID and SHA-256
-    outside caller-owned measurement state so a favorable measurement bundle
-    cannot self-assert which release it qualifies.
+    outside caller-owned measurement state and reuse the parent WP-65 campaign
+    authority for exact workload/plan/taxonomy/start-cut identity.
     """
 
     if type(measurement) is not TargetHostMeasurementArtifact:
@@ -528,6 +531,15 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement belongs to another delivered release digest"
         )
+    # Reuse the parent measurement authority rather than reproducing its campaign
+    # contract here. This checks exact workload profile, plan digest, taxonomy,
+    # JournalStore generation/start cut and plan-delivered-artifact SHA before any
+    # durable-financial JournalStore mechanics are allowed to run.
+    measurement.require_campaign_binding(
+        spec=spec,
+        plan=campaign_plan,
+        cut=campaign_cut,
+    )
     return bind_durable_financial_latency_to_target_host_measurement(
         store,
         spec,

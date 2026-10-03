@@ -17,6 +17,7 @@ attestation, provider authority, economic edge, or trading authority.
 from __future__ import annotations
 
 from copy import copy
+import sys
 from typing import TYPE_CHECKING
 
 from autotrade_runtime.artifacts import ArtifactStore
@@ -280,3 +281,15 @@ def verify_declared_plan_runtime_target_host_qualification(
         campaign_cut=campaign_cut,
         measurement=measurement,
     )
+
+
+# Install the captured production dispatcher before a direct import of this module
+# can return the historical lazy-dispatch function. When the terminal facade is
+# already importing us through its private implementation, the sys.modules guard
+# avoids a circular read of a partially initialized facade; that facade installs
+# the same captured dispatcher immediately after its dependencies finish loading.
+_TERMINAL_FACADE_MODULE = (
+    f"{__package__}.runtime_target_host_chronology_bound_qualification"
+)
+if _TERMINAL_FACADE_MODULE not in sys.modules:
+    from . import runtime_target_host_chronology_bound_qualification as _terminal_bootstrap

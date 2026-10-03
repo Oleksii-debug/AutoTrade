@@ -12,6 +12,20 @@ from dataclasses import dataclass
 from enum import StrEnum
 import os
 from pathlib import Path
+import sys
+
+from autotrade_foundation.local_filesystem import (
+    LocalFilesystemQualificationError,
+    freeze_local_filesystem_path,
+    require_qualified_local_filesystem_path,
+)
+from autotrade_foundation.windows_namespace import (
+    create_windows_regular_file_exclusive,
+    require_windows_namespace_component,
+    retain_windows_parent_namespace,
+    retain_windows_regular_file,
+    retain_windows_regular_file_for_delete,
+)
 
 
 class DiskReserveError(ValueError):
@@ -47,11 +61,73 @@ class EmergencyDiskReserve:
             raise DiskReserveError(
                 "reserve_bytes must be an integer large enough for the reserve header"
             )
-        self.path = Path(path)
+
+        candidate = Path(path).expanduser()
+        if sys.platform == "win32":
+            try:
+                frozen = Path(freeze_local_filesystem_path(candidate))
+                require_qualified_local_filesystem_path(frozen)
+                require_windows_namespace_component(
+                    frozen.name,
+                    subject="emergency reserve file",
+                )
+            except (LocalFilesystemQualificationError, RuntimeError) as error:
+                raise DiskReserveError(
+                    "emergency reserve path lacks qualified Windows filesystem authority"
+                ) from error
+            self.path = frozen
+        else:
+            self.path = candidate
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.reserve_bytes = reserve_bytes
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _absent_status(self) -> DiskReserveStatus:
+        return DiskReserveStatus(
+            path=str(self.path),
+            expected_bytes=self.reserve_bytes,
+            present=False,
+            exact_size=False,
+            available_for_emergency=False,
+        )
+
+    def _status_from_descriptor(self, descriptor: int) -> DiskReserveStatus:
+        stat = os.fstat(descriptor)
+        exact = stat.st_size == self.reserve_bytes
+        signature_matches = False
+        if exact:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            signature_matches = os.read(descriptor, len(_RESERVE_MAGIC)) == _RESERVE_MAGIC
+        return DiskReserveStatus(
+            path=str(self.path),
+            expected_bytes=self.reserve_bytes,
+            present=True,
+            exact_size=exact,
+            available_for_emergency=exact and signature_matches,
+        )
+
+    def _windows_status(self) -> DiskReserveStatus:
+        try:
+            with retain_windows_parent_namespace(
+                self.path,
+                create=False,
+            ) as parent_authority:
+                with retain_windows_regular_file(
+                    parent_authority,
+                    target_name=self.path.name,
+                    subject="emergency reserve file",
+                ) as descriptor:
+                    return self._status_from_descriptor(descriptor)
+        except FileNotFoundError:
+            return self._absent_status()
+        except (OSError, RuntimeError, TypeError) as error:
+            raise DiskReserveError(
+                "emergency reserve Windows namespace authority verification failed"
+            ) from error
 
     def status(self) -> DiskReserveStatus:
+        if sys.platform == "win32":
+            return self._windows_status()
+
         if self.path.is_symlink():
             return DiskReserveStatus(
                 path=str(self.path),
@@ -63,13 +139,7 @@ class EmergencyDiskReserve:
         try:
             stat = self.path.stat()
         except FileNotFoundError:
-            return DiskReserveStatus(
-                path=str(self.path),
-                expected_bytes=self.reserve_bytes,
-                present=False,
-                exact_size=False,
-                available_for_emergency=False,
-            )
+            return self._absent_status()
         exact = self.path.is_file() and stat.st_size == self.reserve_bytes
         signature_matches = False
         if exact:
@@ -86,7 +156,77 @@ class EmergencyDiskReserve:
             available_for_emergency=exact and signature_matches,
         )
 
+    def _write_reserve_descriptor(self, descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        header_view = memoryview(_RESERVE_MAGIC)
+        header_written = 0
+        while header_written < len(header_view):
+            count = os.write(descriptor, header_view[header_written:])
+            if count <= 0:
+                raise OSError("short write while provisioning disk reserve header")
+            header_written += count
+
+        remaining = self.reserve_bytes - len(_RESERVE_MAGIC)
+        chunk = b"\0" * min(1024 * 1024, max(1, remaining))
+        while remaining:
+            piece = chunk if remaining >= len(chunk) else chunk[:remaining]
+            written = os.write(descriptor, piece)
+            if written <= 0:
+                raise OSError("short write while provisioning disk reserve")
+            remaining -= written
+        os.fsync(descriptor)
+
+    def _provision_windows(self) -> DiskReserveStatus:
+        try:
+            with retain_windows_parent_namespace(
+                self.path,
+                create=True,
+            ) as parent_authority:
+                try:
+                    with retain_windows_regular_file(
+                        parent_authority,
+                        target_name=self.path.name,
+                        subject="emergency reserve file",
+                    ) as descriptor:
+                        current = self._status_from_descriptor(descriptor)
+                except FileNotFoundError:
+                    current = None
+
+                if current is not None:
+                    if current.available_for_emergency:
+                        return current
+                    raise DiskReserveError(
+                        "existing emergency reserve path is invalid; refusing to overwrite"
+                    )
+
+                try:
+                    with create_windows_regular_file_exclusive(
+                        parent_authority,
+                        target_name=self.path.name,
+                        subject="emergency reserve file",
+                    ) as descriptor:
+                        self._write_reserve_descriptor(descriptor)
+                        result = self._status_from_descriptor(descriptor)
+                        if not result.available_for_emergency:
+                            raise DiskReserveError(
+                                "emergency reserve provisioning did not persist exact bytes"
+                            )
+                        return result
+                except FileExistsError as error:
+                    raise DiskReserveError(
+                        "emergency reserve appeared during provisioning"
+                    ) from error
+        except DiskReserveError:
+            raise
+        except (OSError, RuntimeError, TypeError) as error:
+            raise DiskReserveError(
+                "emergency reserve Windows provisioning authority failed"
+            ) from error
+
     def provision(self) -> DiskReserveStatus:
+        if sys.platform == "win32":
+            return self._provision_windows()
+
         current = self.status()
         if current.available_for_emergency:
             return current
@@ -134,6 +274,34 @@ class EmergencyDiskReserve:
             raise DiskReserveError("emergency reserve provisioning did not persist exact bytes")
         return result
 
+    def _release_windows(self) -> DiskReserveStatus:
+        try:
+            with retain_windows_parent_namespace(
+                self.path,
+                create=False,
+            ) as parent_authority:
+                with retain_windows_regular_file_for_delete(
+                    parent_authority,
+                    target_name=self.path.name,
+                    subject="emergency reserve file",
+                ) as descriptor:
+                    current = self._status_from_descriptor(descriptor)
+                    if not current.available_for_emergency:
+                        raise DiskReserveError(
+                            "no verified emergency reserve is available"
+                        )
+        except FileNotFoundError as error:
+            raise DiskReserveError(
+                "no verified emergency reserve is available"
+            ) from error
+        except DiskReserveError:
+            raise
+        except (OSError, RuntimeError, TypeError) as error:
+            raise DiskReserveError(
+                "emergency reserve Windows release authority failed"
+            ) from error
+        return self._absent_status()
+
     def release_for_emergency(
         self,
         *,
@@ -141,6 +309,9 @@ class EmergencyDiskReserve:
     ) -> DiskReserveStatus:
         if not isinstance(reason, ReserveReleaseReason):
             raise DiskReserveError("release reason must be explicit")
+        if sys.platform == "win32":
+            return self._release_windows()
+
         current = self.status()
         if not current.available_for_emergency:
             raise DiskReserveError("no verified emergency reserve is available")

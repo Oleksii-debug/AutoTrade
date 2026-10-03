@@ -1,7 +1,11 @@
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import mvp.autotrade_mvp.disk_reserve as disk_reserve_module
 from mvp.autotrade_mvp.disk_reserve import (
     DiskReserveError,
     EmergencyDiskReserve,
@@ -98,6 +102,93 @@ class EmergencyDiskReserveTests(unittest.TestCase):
             restored = reserve.restore_after_recovery(journal_writable=True)
             self.assertTrue(restored.available_for_emergency)
             self.assertEqual(path.stat().st_size, 256)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows reserve authority")
+    def test_windows_release_blocks_leaf_and_parent_replacement_during_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "recovery"
+            path = parent / "reserve.bin"
+            replacement = parent / "replacement.bin"
+            moved_parent = root / "recovery-moved"
+            reserve = EmergencyDiskReserve(path, reserve_bytes=4097)
+            reserve.provision()
+            replacement.write_bytes(b"replacement")
+
+            original = reserve._status_from_descriptor
+            observed = {"leaf": False, "parent": False}
+
+            def verify_while_attacker_attempts_rebind(descriptor):
+                status = original(descriptor)
+                with self.assertRaises(OSError):
+                    os.replace(replacement, path)
+                observed["leaf"] = True
+                with self.assertRaises(OSError):
+                    parent.rename(moved_parent)
+                observed["parent"] = True
+                return status
+
+            with patch.object(
+                reserve,
+                "_status_from_descriptor",
+                side_effect=verify_while_attacker_attempts_rebind,
+            ):
+                released = reserve.release_for_emergency(
+                    reason=ReserveReleaseReason.RECOVERY_CRITICAL
+                )
+
+            self.assertEqual(observed, {"leaf": True, "parent": True})
+            self.assertFalse(released.present)
+            self.assertFalse(path.exists())
+            self.assertTrue(replacement.exists())
+            self.assertTrue(parent.is_dir())
+            self.assertFalse(moved_parent.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows reserve authority")
+    def test_windows_hardlink_alias_fails_closed_before_reserve_use(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "reserve.bin"
+            alias = root / "reserve-alias.bin"
+            reserve = EmergencyDiskReserve(path, reserve_bytes=4097)
+            reserve.provision()
+            os.link(path, alias)
+
+            with self.assertRaisesRegex(
+                DiskReserveError,
+                "namespace authority verification failed",
+            ):
+                reserve.status()
+            with self.assertRaisesRegex(
+                DiskReserveError,
+                "release authority failed",
+            ):
+                reserve.release_for_emergency(
+                    reason=ReserveReleaseReason.RECOVERY_CRITICAL
+                )
+
+            self.assertTrue(path.exists())
+            self.assertTrue(alias.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows reserve authority")
+    def test_windows_locality_rejection_precedes_parent_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "must-not-exist" / "reserve.bin"
+            with patch.object(
+                disk_reserve_module,
+                "require_qualified_local_filesystem_path",
+                side_effect=disk_reserve_module.LocalFilesystemQualificationError(
+                    "unqualified"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    DiskReserveError,
+                    "qualified Windows filesystem authority",
+                ):
+                    EmergencyDiskReserve(path, reserve_bytes=4097)
+
+            self.assertFalse(path.parent.exists())
 
     def test_configuration_and_boolean_inputs_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

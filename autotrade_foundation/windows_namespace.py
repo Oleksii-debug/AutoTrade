@@ -967,6 +967,118 @@ def retain_windows_regular_file(
 
 
 @contextmanager
+def create_windows_regular_file_exclusive(
+    authority: RetainedWindowsDirectory,
+    *,
+    target_name: str,
+    subject: str,
+) -> Iterator[int]:
+    """Create one exact regular leaf and retain it through caller initialization.
+
+    Creation is relative to the already-retained parent HANDLE, uses
+    FILE_OPEN_REPARSE_POINT, rejects hard-link aliases, and grants no sharing.
+    If caller initialization fails, the exact opened leaf is marked for
+    deletion before its HANDLE is closed; cleanup never falls back to a visible
+    pathname.
+    """
+
+    parent = _retained_authority_handle(authority)
+    target_name = _validate_component(target_name)
+    handle = _nt_create_relative_file(
+        parent,
+        target_name,
+        disposition=_NT_FILE_CREATE,
+        desired_access=(
+            _WINDOWS_GENERIC_READ
+            | _WINDOWS_GENERIC_WRITE
+            | _NT_DELETE
+            | _NT_SYNCHRONIZE
+        ),
+        share_access=0,
+        subject=subject,
+    )
+    descriptor = _file_handle_to_descriptor(handle)
+    primary: BaseException | None = None
+    try:
+        yield descriptor
+    except BaseException as error:
+        primary = error
+        try:
+            _mark_descriptor_delete_on_close(descriptor)
+        except BaseException as cleanup_error:
+            _add_cleanup_failure_note(
+                error,
+                context="Windows exclusive-file cleanup also failed",
+                failure=cleanup_error,
+            )
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            if primary is not None:
+                _add_cleanup_failure_note(
+                    primary,
+                    context="Windows exclusive-file descriptor close also failed",
+                    failure=close_error,
+                )
+            else:
+                raise
+
+
+@contextmanager
+def retain_windows_regular_file_for_delete(
+    authority: RetainedWindowsDirectory,
+    *,
+    target_name: str,
+    subject: str,
+) -> Iterator[int]:
+    """Retain one existing leaf and delete that exact object after body success.
+
+    The leaf is opened relative to the retained parent with DELETE authority
+    and without WRITE/DELETE sharing. A body exception leaves the exact leaf in
+    place. Successful body completion marks that same opened object
+    delete-on-close, eliminating verify-then-path-unlink races.
+    """
+
+    parent = _retained_authority_handle(authority)
+    target_name = _validate_component(target_name)
+    handle = _nt_create_relative_file(
+        parent,
+        target_name,
+        disposition=_NT_FILE_OPEN,
+        desired_access=(
+            _WINDOWS_GENERIC_READ
+            | _NT_FILE_READ_ATTRIBUTES
+            | _NT_DELETE
+            | _NT_SYNCHRONIZE
+        ),
+        share_access=_WINDOWS_FILE_SHARE_READ,
+        subject=subject,
+    )
+    descriptor = _file_handle_to_read_descriptor(handle)
+    primary: BaseException | None = None
+    try:
+        yield descriptor
+        _mark_descriptor_delete_on_close(descriptor)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            if primary is not None:
+                _add_cleanup_failure_note(
+                    primary,
+                    context="Windows retained-delete descriptor close also failed",
+                    failure=close_error,
+                )
+            else:
+                raise
+
+
+@contextmanager
 def publish_windows_regular_bytes_retained(
     authority: RetainedWindowsDirectory,
     *,

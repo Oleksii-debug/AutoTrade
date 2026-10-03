@@ -91,8 +91,17 @@ internal static class Program
             policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/")),
             "canonical host root was not admitted");
         Check.True(
-            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/app/index.html")),
-            "same-origin product content was not admitted");
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html")),
+            "canonical index document was not admitted");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/app/index.html")),
+            "arbitrary same-origin document entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/api/v1/state")),
+            "Host API JSON was admitted as a trusted top-level document");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/index.html?mode=debug")),
+            "query-selected UI document entered the trusted embedded surface");
         Check.True(
             !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8766/app/")),
             "cross-port navigation entered the trusted embedded surface");
@@ -124,6 +133,7 @@ internal static class Program
     {
         WebExperienceSecurityPolicy policy = new(HostOrigin);
 
+        Uri trustedDocument = new(HostOrigin, "/index.html");
         foreach (string path in new[]
         {
             "/api/v1",
@@ -133,7 +143,9 @@ internal static class Program
         })
         {
             Check.True(
-                policy.AllowsSessionHeaderForwarding(new Uri(HostOrigin, path)),
+                policy.AllowsSessionHeaderForwarding(
+                    new Uri(HostOrigin, path),
+                    trustedDocument),
                 "canonical Host API request lost session-header eligibility: " + path);
         }
 
@@ -148,8 +160,24 @@ internal static class Program
         })
         {
             Check.True(
-                !policy.AllowsSessionHeaderForwarding(target),
+                !policy.AllowsSessionHeaderForwarding(target, trustedDocument),
                 "credential forwarding escaped canonical Host API origin/path: " + target);
+        }
+
+        foreach (Uri untrustedDocument in new[]
+        {
+            new Uri(HostOrigin, "/app.js"),
+            new Uri(HostOrigin, "/api/v1/state"),
+            new Uri("http://127.0.0.1:8766/index.html"),
+            new Uri(HostOrigin, "/index.html?debug=1"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    new Uri(HostOrigin, "/api/v1/state"),
+                    untrustedDocument),
+                "untrusted top-level document gained bearer forwarding authority: "
+                    + untrustedDocument);
         }
     }
 

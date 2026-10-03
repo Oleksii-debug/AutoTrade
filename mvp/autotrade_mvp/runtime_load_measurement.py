@@ -265,6 +265,10 @@ def measure_declared_financial_operation(
 
     pre_sequence = JournalStore.current_journal_sequence(store)
     start_ns = perf_counter_ns()
+    if JournalStore.get_event(store, expected.event_id) is not None:
+        raise RuntimeLoadMeasurementError(
+            "predeclared financial event appeared before monotonic measurement start"
+        )
     result = operation()
     end_ns = perf_counter_ns()
     if (

@@ -537,6 +537,46 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         ):
             verify_release_bundle(tampered)
 
+    def test_executable_string_subclasses_fail_before_bundle_verification(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip callback executed")
+
+            def upper(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile upper callback executed")
+
+        cases = (
+            ("target_framework", HostileText("net10.0-windows")),
+            ("runtime_mode", HostileText("FRAMEWORK_DEPENDENT")),
+            ("runtime_prerequisite", HostileText(".NET 10 Windows Desktop Runtime")),
+        )
+        for field, hostile in cases:
+            with self.subTest(field=field):
+                HostileText.callbacks = 0
+                arguments = {
+                    "bundle": self.root / "must-not-be-read.zip",
+                    "output": self.root / f"{field}.json",
+                    "target_framework": "net10.0-windows",
+                    "runtime_mode": "FRAMEWORK_DEPENDENT",
+                    "runtime_prerequisite": ".NET 10 Windows Desktop Runtime",
+                }
+                arguments[field] = hostile
+                with patch.object(
+                    installer_manifest_module,
+                    "verify_release_bundle",
+                ) as verify_release:
+                    with self.assertRaisesRegex(
+                        InstallerManifestError,
+                        "is required",
+                    ):
+                        build_installer_input_manifest(**arguments)
+                verify_release.assert_not_called()
+                self.assertEqual(HostileText.callbacks, 0)
+
     def test_runtime_prerequisite_policy_is_explicit(self):
         bundle = self.release_bundle()
         with self.assertRaisesRegex(

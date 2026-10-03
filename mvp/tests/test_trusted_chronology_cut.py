@@ -758,6 +758,44 @@ class TrustedChronologyCutTests(unittest.TestCase):
 
             self.assertEqual(durable.owner_id, original_owner_id)
 
+    def test_prepared_event_rejects_rehashed_nested_challenge_tamper(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            self._prepare(store, recovery, occurrence)
+            event = dict(
+                store.load_events_by_aggregate_type("trusted_chronology")[0]
+            )
+            payload = dict(event["payload"])
+            nested = dict(payload["challenge"])
+            nested["owner_id"] = "attacker-controlled-owner"
+            payload["challenge"] = nested
+            event["payload"] = payload
+            event["payload_hash"] = payload_digest(payload)
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "challenge digest mismatch",
+            ):
+                chronology._validate_prepared_event(event)
+
+    def test_prepared_event_rejects_rehashed_projection_tamper(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            self._prepare(store, recovery, occurrence)
+            event = dict(
+                store.load_events_by_aggregate_type("trusted_chronology")[0]
+            )
+            payload = dict(event["payload"])
+            payload["owner_id"] = "attacker-controlled-owner"
+            event["payload"] = payload
+            event["payload_hash"] = payload_digest(payload)
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "challenge projection mismatch",
+            ):
+                chronology._validate_prepared_event(event)
+
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")
         self.assertEqual(descriptor.domain_classification, NON_FINANCIAL)

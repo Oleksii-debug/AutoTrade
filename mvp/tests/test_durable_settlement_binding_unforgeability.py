@@ -19,6 +19,7 @@ class DurableSettlementBindingUnforgeabilityTests(unittest.TestCase):
             provider_id="PROVIDER-A",
             account_id="acct-1",
             environment="PAPER",
+            evidence_artifact_root=root / "evidence",
             evidence_artifact_store=ArtifactStore(root / "evidence"),
         )
 

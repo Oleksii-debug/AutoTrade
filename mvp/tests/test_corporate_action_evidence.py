@@ -630,6 +630,83 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                 1,
             )
 
+    def test_journal_store_subclass_is_rejected_before_evidence_reads(self):
+        class ForgedJournalStore(JournalStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableCorporateActionEvidenceStore(
+                    ForgedJournalStore(path),
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+
+    def test_construction_time_journal_method_shadow_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(path)
+            journal.load_events = lambda *args, **kwargs: []
+            with self.assertRaisesRegex(TypeError, "shadowed"):
+                DurableCorporateActionEvidenceStore(
+                    journal,
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+
+    def test_post_construction_journal_shadow_fails_before_mutation(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            journal.commit_command = lambda **kwargs: (kwargs["command_id"], True, {})
+            with self.assertRaisesRegex(TypeError, "shadowed"):
+                durable.record(accepted)
+            del journal.commit_command
+            self.assertEqual(
+                JournalStore.load_events(
+                    journal,
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_construction_store_swap_fails_before_either_store_mutates(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            first_path = f"{directory}/first.sqlite3"
+            second_path = f"{directory}/second.sqlite3"
+            first, durable = self._store(first_path)
+            second = JournalStore(second_path)
+            durable.store = second
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "generation changed",
+            ):
+                durable.record(accepted)
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    first,
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    second,
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

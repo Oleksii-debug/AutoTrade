@@ -56,6 +56,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
         run: |
@@ -64,6 +65,7 @@ jobs:
           import os
           from pathlib import Path
           import re
+          import subprocess
           import urllib.parse
           import urllib.request
 
@@ -153,11 +155,63 @@ jobs:
                   break
               page += 1
 
+          bootstrap_paths = {
+              ".github/workflows/reconvergence-integrity.yml",
+              "control/tools/reconvergence_integrity.py",
+              "tests/Control/test_reconvergence_integrity.py",
+              "tests/Control/test_reconvergence_integrity_entrypoint.py",
+              "tests/Control/test_reconvergence_integrity_security_regressions.py",
+              "tests/Control/test_reconvergence_workflow_authority.py",
+          }
+          base_sha = os.environ["BASE_SHA"]
+          changed = {
+              line
+              for line in subprocess.run(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      "--no-renames",
+                      base_sha,
+                      head_sha,
+                  ],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              ).stdout.splitlines()
+              if line
+          }
+          for path in changed:
+              canonical_path(path)
+          sensitive = changed.intersection(bootstrap_paths)
+          approved_set = set(approved)
+          if sensitive:
+              outside = changed - bootstrap_paths
+              if outside:
+                  raise RuntimeError(
+                      "trust-root bootstrap candidate contains out-of-scope paths: "
+                      + ", ".join(sorted(outside))
+                  )
+              if approved_set != changed:
+                  raise RuntimeError(
+                      "current-head OWNER approval must exactly equal the bounded "
+                      "bootstrap candidate path set"
+                  )
+          elif approved_set:
+              raise RuntimeError(
+                  "OWNER bootstrap scope is forbidden for a candidate without "
+                  "bootstrap-sensitive paths"
+              )
+
+          approved = sorted(approved_set)
           target.write_text(
               "".join(f"{path}\n" for path in approved),
               encoding="utf-8",
           )
-          print(f"Resolved {len(approved)} exact current-head scope path(s).")
+          print(
+              f"Resolved {len(approved)} exact bounded current-head scope path(s)."
+          )
           PY
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
@@ -183,6 +237,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
           RECHECK_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes-recheck.txt
@@ -192,6 +247,7 @@ jobs:
           import os
           from pathlib import Path
           import re
+          import subprocess
           import urllib.parse
           import urllib.request
 
@@ -282,6 +338,56 @@ jobs:
                   break
               page += 1
 
+          bootstrap_paths = {
+              ".github/workflows/reconvergence-integrity.yml",
+              "control/tools/reconvergence_integrity.py",
+              "tests/Control/test_reconvergence_integrity.py",
+              "tests/Control/test_reconvergence_integrity_entrypoint.py",
+              "tests/Control/test_reconvergence_integrity_security_regressions.py",
+              "tests/Control/test_reconvergence_workflow_authority.py",
+          }
+          base_sha = os.environ["BASE_SHA"]
+          changed = {
+              line
+              for line in subprocess.run(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      "--no-renames",
+                      base_sha,
+                      head_sha,
+                  ],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              ).stdout.splitlines()
+              if line
+          }
+          for path in changed:
+              canonical_path(path)
+          sensitive = changed.intersection(bootstrap_paths)
+          approved_set = set(approved)
+          if sensitive:
+              outside = changed - bootstrap_paths
+              if outside:
+                  raise RuntimeError(
+                      "trust-root bootstrap candidate contains out-of-scope paths: "
+                      + ", ".join(sorted(outside))
+                  )
+              if approved_set != changed:
+                  raise RuntimeError(
+                      "current-head OWNER approval must exactly equal the bounded "
+                      "bootstrap candidate path set"
+                  )
+          elif approved_set:
+              raise RuntimeError(
+                  "OWNER bootstrap scope is forbidden for a candidate without "
+                  "bootstrap-sensitive paths"
+              )
+
+          approved = sorted(approved_set)
           target.write_text(
               "".join(f"{path}\n" for path in approved),
               encoding="utf-8",

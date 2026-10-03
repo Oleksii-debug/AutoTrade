@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -712,6 +711,52 @@ class TrustedChronologyCutTests(unittest.TestCase):
             self.assertGreaterEqual(current_sequence_calls, 2)
             self.assertEqual(cut.owner_id, original_owner_id)
             self.assertEqual(cut.host_id, original_host_id)
+
+    def test_current_cut_validation_detaches_caller_cut_before_runtime_read(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            original_owner_id = cut.owner_id
+            real_snapshot = chronology._snapshot_occurrence
+
+            def mutating_snapshot(*, store, occurrence):
+                snapshot = real_snapshot(store=store, occurrence=occurrence)
+                object.__setattr__(
+                    cut,
+                    "owner_id",
+                    "attacker-controlled-owner",
+                )
+                return snapshot
+
+            try:
+                with patch.object(
+                    chronology,
+                    "_snapshot_occurrence",
+                    side_effect=mutating_snapshot,
+                ):
+                    durable = require_current_trusted_chronology_cut(
+                        store=store,
+                        recovery=recovery,
+                        runtime_occurrence=occurrence,
+                        cut=cut,
+                        expected_source_sha=SOURCE_SHA,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                    )
+            finally:
+                object.__setattr__(cut, "owner_id", original_owner_id)
+
+            self.assertEqual(durable.owner_id, original_owner_id)
 
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")

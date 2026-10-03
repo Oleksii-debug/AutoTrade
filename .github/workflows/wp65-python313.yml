@@ -8,6 +8,7 @@ on:
       - "mvp/tests/test_runtime_load_measurement.py"
       - "mvp/tests/test_runtime_target_host_runner.py"
       - "mvp/tests/test_runtime_target_host_runner_resource_cut.py"
+      - "mvp/tests/test_runtime_target_host_runner_terminal_observation_type_authority.py"
       - ".github/workflows/wp65-python313.yml"
 
 concurrency:
@@ -40,11 +41,12 @@ jobs:
           mvp.tests.test_runtime_load_measurement
           mvp.tests.test_runtime_target_host_runner
           mvp.tests.test_runtime_target_host_runner_resource_cut
+          mvp.tests.test_runtime_target_host_runner_terminal_observation_type_authority
       - name: Write exact-head Python 3.13 target-host evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite wp65-target-host-python313
-          --command "python -m unittest -v mvp.tests.test_runtime_load_measurement mvp.tests.test_runtime_target_host_runner mvp.tests.test_runtime_target_host_runner_resource_cut"
+          --command "python -m unittest -v mvp.tests.test_runtime_load_measurement mvp.tests.test_runtime_target_host_runner mvp.tests.test_runtime_target_host_runner_resource_cut mvp.tests.test_runtime_target_host_runner_terminal_observation_type_authority"
           --output "artifacts/wp65-target-host-python313-${{ runner.os }}.json"
       - name: Upload exact-head Python 3.13 target-host evidence
         uses: actions/upload-artifact@v4

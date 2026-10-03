@@ -84,9 +84,17 @@ class RuntimeTargetHostDurableFinancialAuthorityTests(unittest.TestCase):
 
         current = Measurement()
         snapshotter = Mock(return_value=current)
-        graph_changed = DurableError("measurement graph changed after parent evidence")
-        measurement_guard = Mock(side_effect=(None, graph_changed))
-        parent = Mock()
+        state = {"measurement_graph_changed": False}
+
+        def require_measurement_graph() -> None:
+            if state["measurement_graph_changed"]:
+                raise DurableError("measurement graph changed after parent evidence")
+
+        def mutate_measurement_graph(**_kwargs) -> None:
+            state["measurement_graph_changed"] = True
+
+        measurement_guard = Mock(side_effect=require_measurement_graph)
+        parent = Mock(side_effect=mutate_measurement_graph)
         durable_guard = Mock()
         mechanics = Mock()
 

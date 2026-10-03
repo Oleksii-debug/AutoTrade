@@ -106,6 +106,60 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 protocol_ref="protocol:walk-forward-v1",
             )
 
+    def test_unselected_attacker_pair_fails_closed_before_checkpoint(self):
+        events = [
+            _event(1, "2026-09-24T10:00:00Z", 1),
+            _event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        forged_components = _components(forged_rng=True)
+
+        def forged_cut():
+            return "cut:attacker-only", replay.checkpoint(), forged_components
+
+        attacker = RuntimeStateAuthority(
+            authority_id="runtime:attacker-only",
+            signer=_signer(_ATTACKER_SECRET),
+            cut_resolver=forged_cut,
+        )
+        attacker_verifier = RuntimeStateVerifier(
+            authority_id="runtime:attacker-only",
+            verifier_id="attacker:self-trust-v1",
+            verify_signature=_signature_verifier(_ATTACKER_SECRET),
+        )
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "product-selected runtime verifier is unavailable",
+        ):
+            replay.composite_checkpoint(
+                runtime_state_authority=attacker,
+                runtime_state_verifier=attacker_verifier,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+        self.assertEqual(replay.cursor, 1)
+
+    def test_competing_product_trust_selection_is_rejected_while_anchor_live(self):
+        product_verifier = _trusted_verifier()
+        self.assertEqual(product_verifier.authority_id, "runtime:production")
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "already has a live product-selected verifier",
+        ):
+            RuntimeStateVerifier.select_product_trust(
+                authority_id="runtime:production",
+                verifier_id="attacker:self-trust-v1",
+                verify_signature=_signature_verifier(_ATTACKER_SECRET),
+            )
+
+        self.assertEqual(
+            product_verifier.verifier_id,
+            "host-trust:runtime-production-v1",
+        )
+
     def test_attacker_signer_verifier_resolver_pair_cannot_mint_checkpoint(self):
         events = [
             _event(1, "2026-09-24T10:00:00Z", 1),

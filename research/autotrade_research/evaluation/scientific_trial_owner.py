@@ -1,12 +1,12 @@
 """Canonical ScientificRegistry trial-owner binding for WP-36 gates.
 
 The base gate evaluator intentionally cannot manufacture scientific ownership
-from caller-provided booleans.  This module resolves one GateProfile to exactly
+from caller-provided booleans. This module resolves one GateProfile to exactly
 one preregistered ScientificRegistry protocol by scanning immutable protocol
-payloads for a profile id + profile digest binding.  The caller never supplies
-which protocol should win after seeing trial outcomes.
+payloads for a profile id + full profile digest binding. The caller never
+supplies which protocol should win after seeing trial outcomes.
 
-This does not create terminal scientific PASS by itself.  It adds one
+This does not create terminal scientific PASS by itself. It adds one
 registry-owned trial-population check around the existing gate decision while
 the remaining semantic owners stay independently fail-closed.
 """
@@ -41,7 +41,13 @@ _GATE_PROFILE_DIGEST_FIELD = "gate_profile_digest"
 
 
 def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
-    """Return the complete immutable GateProfile subject payload."""
+    """Return the complete immutable GateProfile subject payload.
+
+    Every dataclass field that can change evaluation authority is included.
+    Sequence order is preserved exactly because GateProfile itself preserves it;
+    the subject digest must not silently canonicalize two distinct exact values
+    into one identity.
+    """
 
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
@@ -56,10 +62,12 @@ def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
         "baseline_ids": list(profile.baseline_ids),
         "selection_correction": profile.selection_correction,
         "max_trials": profile.max_trials,
-        "required_regimes": sorted(profile.required_regimes),
+        "required_regimes": list(profile.required_regimes),
         "require_complete_trials": profile.require_complete_trials,
         "require_causal_audit": profile.require_causal_audit,
         "require_financial_invariants": profile.require_financial_invariants,
+        "require_untouched_holdout": profile.require_untouched_holdout,
+        "require_walk_forward": profile.require_walk_forward,
     }
 
 
@@ -160,8 +168,8 @@ def resolve_gate_profile_protocol_binding(
 ) -> GateProfileProtocolBinding:
     """Resolve exactly one immutable protocol owner for one exact GateProfile.
 
-    Matching is derived from the full append-only registry population.  A
-    caller cannot select a favorable protocol after results.  Duplicate profile
+    Matching is derived from the full append-only registry population. A
+    caller cannot select a favorable protocol after results. Duplicate profile
     bindings, id/digest rebinds and malformed bindings fail closed.
     """
 
@@ -264,9 +272,9 @@ def evaluate_gates_with_scientific_trial_owner(
 ) -> GateDecision:
     """Evaluate gates plus canonical registry-owned trial completeness.
 
-    Missing owner identity is INCONCLUSIVE.  Conflicting/corrupt identity,
+    Missing owner identity is INCONCLUSIVE. Conflicting/corrupt identity,
     population mismatch, incomplete required trials or a gate/profile budget
-    contradiction are FAIL.  Existing gate FAIL remains FAIL and existing
+    contradiction are FAIL. Existing gate FAIL remains FAIL and existing
     semantic-owner INCONCLUSIVE remains unavailable for terminal PASS.
     """
 

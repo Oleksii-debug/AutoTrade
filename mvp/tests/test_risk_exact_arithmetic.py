@@ -236,6 +236,66 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 )
         self.assertEqual(len(results), 1)
 
+    def test_concentration_and_participation_compare_exact_one_third(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        configured = policy(
+            max_asset_concentration_fraction="0.3333331",
+            max_order_participation_fraction="0.3333331",
+        )
+        fingerprints = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as decimal_context:
+                    decimal_context.prec = precision
+                    decimal_context.rounding = rounding
+                    decision = evaluate_risk(
+                        intent,
+                        RiskContext.create(
+                            state_version=7,
+                            equity="100",
+                            positions={"XYZ": "1", "QRS": "1"},
+                            marks={"ABC": "1", "XYZ": "1", "QRS": "1"},
+                            reserved_position_delta={},
+                            daily_pnl="0",
+                            drawdown_fraction="0",
+                            market_data_age_seconds="0",
+                            fx_age_seconds={},
+                            margin_headroom="1",
+                            capability_allowed=True,
+                            borrow_available=True,
+                            stress_scenarios=(
+                                {"ABC": "0", "XYZ": "0", "QRS": "0"},
+                            ),
+                            asset_buckets={
+                                "ABC": "asset-a",
+                                "XYZ": "asset-b",
+                                "QRS": "asset-c",
+                            },
+                            liquidity_capacity={"ABC": "3"},
+                            instrument_types={
+                                "XYZ": "GENERIC",
+                                "QRS": "GENERIC",
+                            },
+                        ),
+                        configured,
+                    )
+                failed = {
+                    rule.rule
+                    for rule in decision.rules
+                    if not rule.passed
+                }
+                self.assertIn("asset_concentration", failed)
+                self.assertIn("liquidity_participation", failed)
+                self.assertFalse(decision.admitted)
+                fingerprints.add(risk_decision_fingerprint(decision))
+        self.assertEqual(len(fingerprints), 1)
+
     def test_tail_count_exact_ceiling_does_not_round_to_wrong_sample(self):
         tail = (
             {"ABC": "-9"},

@@ -4,6 +4,7 @@ import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import book_equity_fill
 from mvp.autotrade_mvp.capabilities import (
@@ -430,6 +431,103 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             self.store.load_events("option_lifecycle", self.authority.aggregate_id),
             [],
         )
+
+    def test_stale_facade_cannot_authorize_option_position_consumption(self):
+        self.seed_option_position("1")
+        stale_position = self.book.position(f"{OPTION_ID}@1")
+        self.assertEqual(stale_position, Decimal("1"))
+
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        competing_book.append(
+            book_equity_fill(
+                transaction_id="competing-option-consume",
+                cause_event_id="competing-option-consume-cause",
+                instrument=f"{OPTION_ID}@1",
+                settlement_currency="USD",
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+            )
+        )
+        self.assertEqual(competing_book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+
+        before_economic = tuple(
+            self.store.load_events("economic_book", self.book.book_id)
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "exceed canonical option position",
+        ):
+            self.authority.apply(self.evidence(external_event_id="stale-cut-life"))
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            tuple(self.store.load_events("economic_book", self.book.book_id)),
+            before_economic,
+        )
+
+    def test_economic_writer_between_position_cut_and_prepare_fails_closed(self):
+        self.seed_option_position("1")
+        competing_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        original_prepare = self.book.prepare_batch_mutation
+        raced = False
+
+        def racing_prepare(transactions, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                competing_book.append(
+                    book_equity_fill(
+                        transaction_id="racing-option-consume",
+                        cause_event_id="racing-option-consume-cause",
+                        instrument=f"{OPTION_ID}@1",
+                        settlement_currency="USD",
+                        side="SELL",
+                        quantity=Decimal("1"),
+                        price=Decimal("1"),
+                    )
+                )
+            return original_prepare(transactions, **kwargs)
+
+        with patch.object(
+            self.book,
+            "prepare_batch_mutation",
+            side_effect=racing_prepare,
+        ):
+            with self.assertRaisesRegex(
+                OptionLifecycleConflict,
+                "changed after lifecycle position validation",
+            ):
+                self.authority.apply(
+                    self.evidence(external_event_id="race-cut-life")
+                )
+
+        self.assertTrue(raced)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        current = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        self.assertEqual(current.position(f"{OPTION_ID}@1"), Decimal("0"))
 
     def test_physical_exercise_is_exactly_once_across_restart(self):
         self.seed_option_position("1")

@@ -1,15 +1,10 @@
 """Signed target-host runtime qualification profile for WP-65.
 
-This module does not create performance evidence, sign attestations, or grant
-trading authority.  It specializes the repository's canonical qualification
-trust boundary for the terminal target-host portion of WP-65.  A trusted result
-is possible only when an independently signed qualification attestation and all
-of its immutable artifacts agree on the exact source, budget, configuration,
-host, workload, and measurement provenance.
-
-The canonical qualification trust policy remains separately controlled.  If no
-policy/root is authorized for PERFORMANCE/RUNTIME_TARGET_HOST, canonical
-verification fails closed; this module never widens signer authority.
+This module creates no measurements, signer authority, release authority, or
+trading authority. It specializes the repository's existing signed qualification
+boundary for terminal target-host runtime evidence. Canonical verification fails
+closed unless a separately controlled trust policy authorizes the exact
+PERFORMANCE/RUNTIME_TARGET_HOST scope.
 """
 
 from __future__ import annotations
@@ -26,18 +21,16 @@ from autotrade_runtime.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
-
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
-    QualificationTrustError,
     SignedQualificationAttestation,
     verify_canonical_qualification_attestation,
 )
 
 
 class RuntimeTargetHostQualificationError(ValueError):
-    """Raised when terminal target-host runtime evidence is incomplete or stale."""
+    """Raised when target-host runtime evidence is incomplete or inconsistent."""
 
 
 DOMAIN = "PERFORMANCE"
@@ -47,6 +40,7 @@ PROTOCOL_ID = "runtime-target-host-v1"
 PROTOCOL_VERSION = "1.0.0"
 REQUIREMENT_ID = "target-host-pressure-budget"
 BINDING_SCHEMA_VERSION = "1.0.0"
+PROVENANCE_SCHEMA_VERSION = "1.0.0"
 BINDING_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_BINDING"
 CAMPAIGN_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_CAMPAIGN"
 STALENESS_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_STALENESS"
@@ -55,9 +49,8 @@ RESOURCE_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_RESOURCES"
 HOST_INVENTORY_EVIDENCE_KIND = "RUNTIME_TARGET_HOST_INVENTORY"
 JSON_MEDIA_TYPE = "application/json"
 
-_REQUIRED_KINDS = frozenset(
+_PROVENANCE_KINDS = frozenset(
     {
-        BINDING_EVIDENCE_KIND,
         CAMPAIGN_EVIDENCE_KIND,
         STALENESS_EVIDENCE_KIND,
         INTERFERENCE_EVIDENCE_KIND,
@@ -65,6 +58,7 @@ _REQUIRED_KINDS = frozenset(
         HOST_INVENTORY_EVIDENCE_KIND,
     }
 )
+_REQUIRED_KINDS = _PROVENANCE_KINDS | {BINDING_EVIDENCE_KIND}
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -100,7 +94,7 @@ def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, objec
     for key, value in pairs:
         if key in result:
             raise RuntimeTargetHostQualificationError(
-                "target-host binding contains duplicate JSON object key"
+                "target-host evidence contains duplicate JSON object key"
             )
         result[key] = value
     return result
@@ -116,9 +110,126 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _strict_json(raw: bytes, *, name: str) -> dict[str, object]:
+    if type(raw) is not bytes or not raw:
+        raise RuntimeTargetHostQualificationError(f"{name} must be non-empty bytes")
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_object,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                RuntimeTargetHostQualificationError(
+                    f"{name} contains invalid JSON constant {token}"
+                )
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} is not valid UTF-8 JSON"
+        ) from error
+    if type(value) is not dict:
+        raise RuntimeTargetHostQualificationError(f"{name} must be a JSON object")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTargetHostProvenance:
+    """Canonical envelope retained by each target-host evidence family."""
+
+    evidence_kind: str
+    source_sha: str
+    scenario_id: str
+    spec_digest: str
+    configuration_hash: str
+    host_fingerprint: str
+    workload_profile_hash: str
+    journal_store_identity_digest: str
+    collector_id: str
+    collector_version: str
+    payload_sha256: str
+    schema_version: str = PROVENANCE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != PROVENANCE_SCHEMA_VERSION:
+            raise RuntimeTargetHostQualificationError(
+                "unsupported target-host provenance schema_version"
+            )
+        kind = _text(self.evidence_kind, name="evidence_kind")
+        if kind not in _PROVENANCE_KINDS:
+            raise RuntimeTargetHostQualificationError(
+                "unsupported target-host provenance evidence_kind"
+            )
+        object.__setattr__(self, "evidence_kind", kind)
+        object.__setattr__(
+            self, "source_sha", _git_sha(self.source_sha, name="source_sha")
+        )
+        for field in ("scenario_id", "collector_id", "collector_version"):
+            object.__setattr__(
+                self, field, _text(getattr(self, field), name=field)
+            )
+        for field in (
+            "spec_digest",
+            "configuration_hash",
+            "host_fingerprint",
+            "workload_profile_hash",
+            "journal_store_identity_digest",
+            "payload_sha256",
+        ):
+            object.__setattr__(
+                self, field, _digest(getattr(self, field), name=field)
+            )
+
+    def canonical_payload(self) -> dict[str, str]:
+        return {
+            "collector_id": self.collector_id,
+            "collector_version": self.collector_version,
+            "configuration_hash": self.configuration_hash,
+            "evidence_kind": self.evidence_kind,
+            "host_fingerprint": self.host_fingerprint,
+            "journal_store_identity_digest": self.journal_store_identity_digest,
+            "payload_sha256": self.payload_sha256,
+            "scenario_id": self.scenario_id,
+            "schema_version": self.schema_version,
+            "source_sha": self.source_sha,
+            "spec_digest": self.spec_digest,
+            "workload_profile_hash": self.workload_profile_hash,
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json(self.canonical_payload())
+
+    @classmethod
+    def parse(cls, raw: bytes) -> "RuntimeTargetHostProvenance":
+        value = _strict_json(raw, name="target-host provenance")
+        expected = {
+            "collector_id",
+            "collector_version",
+            "configuration_hash",
+            "evidence_kind",
+            "host_fingerprint",
+            "journal_store_identity_digest",
+            "payload_sha256",
+            "scenario_id",
+            "schema_version",
+            "source_sha",
+            "spec_digest",
+            "workload_profile_hash",
+        }
+        if set(value) != expected:
+            raise RuntimeTargetHostQualificationError(
+                "target-host provenance fields are non-canonical"
+            )
+        envelope = cls(**value)
+        if envelope.canonical_bytes() != raw:
+            raise RuntimeTargetHostQualificationError(
+                "target-host provenance bytes are not canonical JSON"
+            )
+        return envelope
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostBinding:
-    """Canonical identity bridge across all terminal WP-65 evidence families."""
+    """Canonical digest bridge across all terminal WP-65 evidence families."""
 
     source_sha: str
     scenario_id: str
@@ -158,9 +269,7 @@ class RuntimeTargetHostBinding:
             "host_inventory_evidence_sha256",
         ):
             object.__setattr__(
-                self,
-                field,
-                _digest(getattr(self, field), name=field),
+                self, field, _digest(getattr(self, field), name=field)
             )
 
     def canonical_payload(self) -> dict[str, str]:
@@ -189,28 +298,7 @@ class RuntimeTargetHostBinding:
 
     @classmethod
     def parse(cls, raw: bytes) -> "RuntimeTargetHostBinding":
-        if type(raw) is not bytes or not raw:
-            raise RuntimeTargetHostQualificationError(
-                "target-host binding must be non-empty bytes"
-            )
-        try:
-            value = json.loads(
-                raw.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_object,
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    RuntimeTargetHostQualificationError(
-                        f"target-host binding contains invalid JSON constant {value}"
-                    )
-                ),
-            )
-        except (UnicodeError, json.JSONDecodeError) as error:
-            raise RuntimeTargetHostQualificationError(
-                "target-host binding is not valid UTF-8 JSON"
-            ) from error
-        if type(value) is not dict:
-            raise RuntimeTargetHostQualificationError(
-                "target-host binding must be a JSON object"
-            )
+        value = _strict_json(raw, name="target-host binding")
         expected = {
             "campaign_evidence_sha256",
             "configuration_hash",
@@ -252,12 +340,18 @@ class AcceptedRuntimeTargetHostQualification:
     binding_artifact_id: str
     binding_sha256: str
     evidence_sha256_by_kind: Mapping[str, str]
+    collector_by_kind: Mapping[str, str]
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "evidence_sha256_by_kind",
             MappingProxyType(dict(self.evidence_sha256_by_kind)),
+        )
+        object.__setattr__(
+            self,
+            "collector_by_kind",
+            MappingProxyType(dict(self.collector_by_kind)),
         )
 
 
@@ -315,18 +409,50 @@ def _read_artifact_bytes(
         _manifest, raw = reader(ref.artifact_id)
     except (ArtifactIntegrityError, FileNotFoundError, OSError) as error:
         raise RuntimeTargetHostQualificationError(
-            "target-host binding artifact cannot be read with integrity"
+            "target-host artifact cannot be read with integrity"
         ) from error
     if type(raw) is not bytes:
         raise RuntimeTargetHostQualificationError(
-            "target-host binding artifact reader returned non-bytes"
+            "target-host artifact reader returned non-bytes"
         )
-    observed = "sha256:" + sha256(raw).hexdigest()
-    if observed != ref.sha256:
+    if "sha256:" + sha256(raw).hexdigest() != ref.sha256:
         raise RuntimeTargetHostQualificationError(
-            "target-host binding bytes do not match accepted evidence digest"
+            "target-host artifact bytes do not match accepted evidence digest"
         )
     return raw
+
+
+def _identity_tuple(
+    *,
+    source_sha: str,
+    scenario_id: str,
+    spec_digest: str,
+    configuration_hash: str,
+    host_fingerprint: str,
+    workload_profile_hash: str,
+    journal_store_identity_digest: str,
+) -> tuple[str, ...]:
+    return (
+        source_sha,
+        scenario_id,
+        spec_digest,
+        configuration_hash,
+        host_fingerprint,
+        workload_profile_hash,
+        journal_store_identity_digest,
+    )
+
+
+def _provenance_identity(value: RuntimeTargetHostProvenance) -> tuple[str, ...]:
+    return _identity_tuple(
+        source_sha=value.source_sha,
+        scenario_id=value.scenario_id,
+        spec_digest=value.spec_digest,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        workload_profile_hash=value.workload_profile_hash,
+        journal_store_identity_digest=value.journal_store_identity_digest,
+    )
 
 
 def verify_runtime_target_host_qualification(
@@ -342,13 +468,7 @@ def verify_runtime_target_host_qualification(
     expected_workload_profile_hash: str,
     expected_journal_store_identity_digest: str,
 ) -> AcceptedRuntimeTargetHostQualification:
-    """Accept one terminal WP-65 target-host receipt through canonical trust only.
-
-    This function cannot authorize a new signer.  It first delegates signature,
-    scope, exact-source and immutable-artifact verification to the canonical
-    qualification verifier.  It then validates the WP-65 evidence profile and
-    cross-binds every provenance family through one canonical binding artifact.
-    """
+    """Accept one terminal WP-65 target-host receipt through canonical trust only."""
 
     if type(receipt) is not SignedQualificationAttestation:
         raise TypeError("receipt must be exact SignedQualificationAttestation")
@@ -370,22 +490,28 @@ def verify_runtime_target_host_qualification(
         expected_journal_store_identity_digest,
         name="expected_journal_store_identity_digest",
     )
+    expected_identity = _identity_tuple(
+        source_sha=source_sha,
+        scenario_id=scenario_id,
+        spec_digest=spec_digest,
+        configuration_hash=configuration_hash,
+        host_fingerprint=host_fingerprint,
+        workload_profile_hash=workload_profile_hash,
+        journal_store_identity_digest=journal_identity,
+    )
 
-    try:
-        accepted = verify_canonical_qualification_attestation(
-            receipt,
-            evidence_store=evidence_store,
-            evidence_root=evidence_root,
-            expected_source_sha=source_sha,
-            expected_domain=DOMAIN,
-            expected_gate=GATE,
-            expected_package_id=PACKAGE_ID,
-            expected_protocol_id=PROTOCOL_ID,
-            expected_protocol_version=PROTOCOL_VERSION,
-            expected_requirement_id=REQUIREMENT_ID,
-        )
-    except QualificationTrustError:
-        raise
+    accepted = verify_canonical_qualification_attestation(
+        receipt,
+        evidence_store=evidence_store,
+        evidence_root=evidence_root,
+        expected_source_sha=source_sha,
+        expected_domain=DOMAIN,
+        expected_gate=GATE,
+        expected_package_id=PACKAGE_ID,
+        expected_protocol_id=PROTOCOL_ID,
+        expected_protocol_version=PROTOCOL_VERSION,
+        expected_requirement_id=REQUIREMENT_ID,
+    )
     if type(accepted) is not AcceptedQualificationAttestation:
         raise RuntimeTargetHostQualificationError(
             "canonical verifier returned non-canonical accepted attestation"
@@ -409,29 +535,21 @@ def verify_runtime_target_host_qualification(
         raise RuntimeTargetHostQualificationError(
             "target-host evidence authority cannot be bound"
         ) from error
+
     binding_ref = refs[BINDING_EVIDENCE_KIND]
     binding = RuntimeTargetHostBinding.parse(
         _read_artifact_bytes(reader, binding_ref)
     )
-    expected_identity = (
-        source_sha,
-        scenario_id,
-        spec_digest,
-        configuration_hash,
-        host_fingerprint,
-        workload_profile_hash,
-        journal_identity,
+    binding_identity = _identity_tuple(
+        source_sha=binding.source_sha,
+        scenario_id=binding.scenario_id,
+        spec_digest=binding.spec_digest,
+        configuration_hash=binding.configuration_hash,
+        host_fingerprint=binding.host_fingerprint,
+        workload_profile_hash=binding.workload_profile_hash,
+        journal_store_identity_digest=binding.journal_store_identity_digest,
     )
-    observed_identity = (
-        binding.source_sha,
-        binding.scenario_id,
-        binding.spec_digest,
-        binding.configuration_hash,
-        binding.host_fingerprint,
-        binding.workload_profile_hash,
-        binding.journal_store_identity_digest,
-    )
-    if observed_identity != expected_identity:
+    if binding_identity != expected_identity:
         raise RuntimeTargetHostQualificationError(
             "target-host binding identity does not match requested qualification"
         )
@@ -443,11 +561,25 @@ def verify_runtime_target_host_qualification(
         RESOURCE_EVIDENCE_KIND: binding.resource_evidence_sha256,
         HOST_INVENTORY_EVIDENCE_KIND: binding.host_inventory_evidence_sha256,
     }
-    for kind, expected_digest in digest_bindings.items():
-        if refs[kind].sha256 != expected_digest:
+    collectors: dict[str, str] = {}
+    for kind in sorted(_PROVENANCE_KINDS):
+        ref = refs[kind]
+        if ref.sha256 != digest_bindings[kind]:
             raise RuntimeTargetHostQualificationError(
                 f"target-host binding does not match {kind} artifact"
             )
+        provenance = RuntimeTargetHostProvenance.parse(
+            _read_artifact_bytes(reader, ref)
+        )
+        if provenance.evidence_kind != kind:
+            raise RuntimeTargetHostQualificationError(
+                f"target-host provenance kind conflicts for {kind}"
+            )
+        if _provenance_identity(provenance) != expected_identity:
+            raise RuntimeTargetHostQualificationError(
+                f"target-host provenance identity conflicts for {kind}"
+            )
+        collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
     return AcceptedRuntimeTargetHostQualification(
         attestation_id=accepted.attestation_id,
@@ -464,4 +596,5 @@ def verify_runtime_target_host_qualification(
         evidence_sha256_by_kind={
             kind: ref.sha256 for kind, ref in sorted(refs.items())
         },
+        collector_by_kind=collectors,
     )

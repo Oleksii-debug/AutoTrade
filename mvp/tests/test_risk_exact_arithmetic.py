@@ -52,6 +52,52 @@ def exact_context():
 
 
 class RiskExactArithmeticTests(unittest.TestCase):
+    def test_risk_domain_subclass_is_rejected_before_virtual_reads(self):
+        base = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+
+        class HostileRiskIntent(RiskIntent):
+            reads = 0
+
+            def __getattribute__(self, name):
+                if name in {"symbol", "side", "quantity", "price"}:
+                    type(self).reads += 1
+                    raise AssertionError("hostile risk semantic read")
+                return super().__getattribute__(name)
+
+        hostile = HostileRiskIntent(**vars(base))
+        with self.assertRaisesRegex(TypeError, "exact RiskIntent"):
+            evaluate_risk(hostile, exact_context(), policy())
+        self.assertEqual(HostileRiskIntent.reads, 0)
+
+    def test_hostile_text_scalar_is_rejected_before_normalization(self):
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip")
+
+            def upper(self):
+                type(self).calls += 1
+                raise AssertionError("hostile upper")
+
+        hostile = HostileText("ABC")
+        with self.assertRaisesRegex(ValueError, "symbol is required"):
+            RiskIntent.create(
+                symbol=hostile,
+                side="BUY",
+                quantity="1",
+                price="1",
+                expected_state_version=7,
+            )
+        self.assertEqual(HostileText.calls, 0)
+
     def test_input_fingerprint_binds_arithmetic_policy_identity(self):
         intent = RiskIntent.create(
             symbol="ABC",

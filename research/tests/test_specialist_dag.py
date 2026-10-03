@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Inexact, Rounded, localcontext
 import unittest
 
 from autotrade_research.agents.dag import (
+    AggregatedProposal,
+    DagPlan,
     SpecialistDagError,
     SpecialistRun,
     SpecialistSpec,
@@ -94,6 +96,91 @@ class SpecialistDagTests(unittest.TestCase):
                 completed_at=NOW,
             )
 
+    def test_numeric_authority_rejects_oversized_inputs_before_decimal_construction(self):
+        oversized_text = "9" * 10_000
+        oversized_integer = 1 << 40_000
+        hostile_exponent = "1e999999999999999999999999999"
+
+        for value in (oversized_text, oversized_integer, hostile_exponent):
+            with self.subTest(value_type=type(value).__name__), self.assertRaisesRegex(
+                SpecialistDagError,
+                "bounded exact decimal input",
+            ):
+                SpecialistSpec(
+                    role_id="resource-bound",
+                    correlation_group="g",
+                    max_cost=value,
+                    expected_incremental_value="1",
+                )
+
+            with self.subTest(
+                budget_type=type(value).__name__
+            ), self.assertRaisesRegex(
+                SpecialistDagError,
+                "bounded exact decimal input",
+            ):
+                plan_specialists(
+                    [spec("a", "g")],
+                    input_snapshot_id="cut-1",
+                    available_inputs=(),
+                    total_budget=value,
+                )
+
+            with self.subTest(
+                marginal_type=type(value).__name__
+            ), self.assertRaisesRegex(
+                SpecialistDagError,
+                "bounded exact decimal input",
+            ):
+                marginal_value(
+                    full_utility=value,
+                    ablated_utility="0",
+                    incremental_cost="0",
+                )
+
+    def test_decimal_subclass_cannot_invoke_caller_defined_numeric_semantics(self):
+        calls = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                calls.append("is_finite")
+                raise AssertionError("caller callback must not execute")
+
+            def as_tuple(self):
+                calls.append("as_tuple")
+                raise AssertionError("caller callback must not execute")
+
+        hostile = HostileDecimal("1")
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "bounded exact decimal input",
+        ):
+            SpecialistSpec(
+                role_id="subclass",
+                correlation_group="g",
+                max_cost=hostile,
+                expected_incremental_value="1",
+            )
+        self.assertEqual(calls, [])
+
+    def test_shared_numeric_authority_preserves_valid_exact_inputs(self):
+        planned = SpecialistSpec(
+            role_id="valid",
+            correlation_group="g",
+            max_cost=2,
+            expected_incremental_value="0.125",
+        )
+        self.assertEqual(planned.max_cost, Decimal("2"))
+        self.assertEqual(planned.expected_incremental_value, Decimal("0.125"))
+        self.assertEqual(
+            marginal_value(
+                full_utility=Decimal("1.25"),
+                ablated_utility="0.5",
+                incremental_cost=1,
+            ),
+            Decimal("-0.25"),
+        )
+
     def test_dag_plan_rejects_non_exact_numeric_identity(self):
         canonical = full_plan([spec("a", "g1", cost="1")], budget="1")
         with self.assertRaisesRegex(SpecialistDagError, "exact decimal input"):
@@ -148,6 +235,81 @@ class SpecialistDagTests(unittest.TestCase):
             plan.skipped_roles,
             (("base", "missing_inputs"), ("child", "dependency_not_scheduled")),
         )
+
+    def test_planning_budget_is_independent_of_mutable_decimal_context(self):
+        specs = [
+            spec("a", "g1", cost="0.123456789", value="1"),
+            spec("b", "g2", cost="0.123456789", value="1"),
+        ]
+        with localcontext() as context:
+            context.prec = 4
+            low_precision = full_plan(specs, budget="0.246913578")
+        with localcontext() as context:
+            context.prec = 50
+            high_precision = full_plan(specs, budget="0.246913578")
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_precision.scheduled_roles, ("a", "b"))
+        self.assertEqual(low_precision.reserved_cost, Decimal("0.246913578"))
+
+    def test_aggregation_is_independent_of_mutable_decimal_context(self):
+        specs = [
+            spec("a", "same"),
+            spec("b", "same"),
+        ]
+        runs = [
+            run("a", "1", confidence="0.5"),
+            run("b", "0", confidence="1"),
+        ]
+        plan = full_plan(specs)
+        with localcontext() as context:
+            context.prec = 4
+            context.traps[Inexact] = True
+            context.traps[Rounded] = True
+            low_precision = aggregate(
+                specs,
+                runs,
+                plan=plan,
+                decision_deadline=NOW,
+            )
+        with localcontext() as context:
+            context.prec = 50
+            high_precision = aggregate(
+                specs,
+                runs,
+                plan=plan,
+                decision_deadline=NOW,
+            )
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_precision.direction, "LONG")
+        self.assertGreater(low_precision.score, Decimal("0"))
+        self.assertLess(low_precision.score, Decimal("1"))
+
+    def test_confidence_probability_bounds_are_preserved(self):
+        for confidence in ("0", "1"):
+            with self.subTest(confidence=confidence):
+                self.assertEqual(run("a", "1", confidence=confidence).confidence, Decimal(confidence))
+        for confidence in ("-0.001", "1.0001", "2"):
+            with self.subTest(confidence=confidence):
+                with self.assertRaises(SpecialistDagError):
+                    run("a", "1", confidence=confidence)
+
+    def test_marginal_value_is_independent_of_mutable_decimal_context(self):
+        with localcontext() as context:
+            context.prec = 4
+            low_precision = marginal_value(
+                full_utility="1.000000009",
+                ablated_utility="0.999999999",
+                incremental_cost="0.000000001",
+            )
+        with localcontext() as context:
+            context.prec = 50
+            high_precision = marginal_value(
+                full_utility="1.000000009",
+                ablated_utility="0.999999999",
+                incremental_cost="0.000000001",
+            )
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_precision, Decimal("0.000000009"))
 
     def test_correlated_clones_do_not_outvote_independent_group(self):
         specs = [
@@ -212,6 +374,83 @@ class SpecialistDagTests(unittest.TestCase):
         self.assertEqual(result.direction, "SHORT")
         self.assertEqual(result.accepted_roles, ("admitted",))
         self.assertIn(("rejected", "not_scheduled"), result.rejected_roles)
+
+    def test_child_result_is_rejected_when_dependency_result_is_missing(self):
+        specs = [
+            spec("base", "g1"),
+            spec("child", "g2", dependencies=("base",)),
+        ]
+        plan = full_plan(specs)
+        self.assertEqual(plan.scheduled_roles, ("base", "child"))
+        result = aggregate(
+            specs,
+            [run("child", "0.8")],
+            plan=plan,
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertEqual(result.direction, "FLAT")
+        self.assertIn(("base", "missing_result"), result.rejected_roles)
+        self.assertIn(
+            ("child", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_child_result_is_rejected_when_dependency_is_late(self):
+        specs = [
+            spec("base", "g1"),
+            spec("child", "g2", dependencies=("base",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("base", "0.5", late=True), run("child", "0.9")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertIn(("base", "late"), result.rejected_roles)
+        self.assertIn(
+            ("child", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_dependency_rejection_cascades_across_multiple_levels(self):
+        specs = [
+            spec("base", "g1"),
+            spec("middle", "g2", dependencies=("base",)),
+            spec("leaf", "g3", dependencies=("middle",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("middle", "0.6"), run("leaf", "0.9")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertIn(("base", "missing_result"), result.rejected_roles)
+        self.assertIn(
+            ("middle", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+        self.assertIn(
+            ("leaf", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_accepted_dependency_allows_child_to_contribute(self):
+        specs = [
+            spec("base", "same"),
+            spec("child", "other", dependencies=("base",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("child", "0.8"), run("base", "0.2")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ("base", "child"))
+        self.assertEqual(result.score, Decimal("0.5"))
+        self.assertEqual(result.direction, "LONG")
 
     def test_missing_planned_result_is_explicit_evidence(self):
         specs = [spec("a", "g1"), spec("b", "g2")]
@@ -332,6 +571,111 @@ class SpecialistDagTests(unittest.TestCase):
                 decision_deadline=NOW,
             )
 
+    def test_dag_plan_subclass_cannot_override_canonical_equality_fence(self):
+        specs = [spec("a", "g1")]
+        canonical = full_plan(specs)
+
+        class ForgedPlan(DagPlan):
+            def __eq__(self, other):
+                return True
+
+        forged = ForgedPlan(
+            canonical.input_snapshot_id,
+            ("forged",),
+            (),
+            Decimal("0"),
+            canonical.available_inputs,
+            canonical.total_budget,
+        )
+        with self.assertRaisesRegex(SpecialistDagError, "exact DagPlan"):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=forged,
+                decision_deadline=NOW,
+            )
+
+    def test_mutated_spec_is_readmitted_before_planning(self):
+        value = spec("a", "g1", cost="1")
+        object.__setattr__(value, "max_cost", "9" * 10_000)
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "bounded exact decimal input",
+        ):
+            full_plan([value])
+
+    def test_specialist_subclasses_are_not_authority_values(self):
+        class SpecSubclass(SpecialistSpec):
+            pass
+
+        class RunSubclass(SpecialistRun):
+            pass
+
+        forged_spec = SpecSubclass(
+            role_id="a",
+            correlation_group="g1",
+            max_cost="1",
+            expected_incremental_value="1",
+        )
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "exact SpecialistSpec",
+        ):
+            full_plan([forged_spec])
+
+        specs = [spec("a", "g1")]
+        forged_run = RunSubclass(
+            role_id="a",
+            input_snapshot_id="cut-1",
+            direction="LONG",
+            score="0.5",
+            confidence="1",
+            evidence_refs=("evidence:a",),
+            cost="1",
+            completed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "exact SpecialistRun",
+        ):
+            aggregate(
+                specs,
+                [forged_run],
+                plan=full_plan(specs),
+                decision_deadline=NOW,
+            )
+
+    def test_blocking_critique_terms_do_not_coerce_arbitrary_objects(self):
+        specs = [spec("a", "g1")]
+
+        class HostileTerm:
+            def __str__(self):
+                raise AssertionError("arbitrary str callback must not execute")
+
+        with self.assertRaisesRegex(SpecialistDagError, "exact string"):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=full_plan(specs),
+                decision_deadline=NOW,
+                blocking_critique_terms=(HostileTerm(),),
+            )
+
+    def test_aggregated_proposal_can_never_claim_live_authority(self):
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "cannot grant live financial authority",
+        ):
+            AggregatedProposal(
+                direction="FLAT",
+                score=Decimal("0"),
+                accepted_roles=(),
+                rejected_roles=(),
+                evidence_refs=(),
+                total_cost=Decimal("0"),
+                live_authority_granted=True,
+            )
+
     def test_direction_must_match_score_sign(self):
         with self.assertRaisesRegex(SpecialistDagError, "direction must match score sign"):
             SpecialistRun(
@@ -355,6 +699,21 @@ class SpecialistDagTests(unittest.TestCase):
                 cost=Decimal("0"),
                 completed_at=NOW,
             )
+
+    def test_direct_aggregate_direction_matches_exact_score_sign(self):
+        for score, expected in (("-1", "SHORT"), ("-1e-256", "SHORT"),
+                                ("-0", "FLAT"), ("0", "FLAT"),
+                                ("1e-256", "LONG"), ("1", "LONG")):
+            for direction in ("LONG", "SHORT", "FLAT"):
+                with self.subTest(score=score, direction=direction):
+                    values = dict(direction=direction, score=Decimal(score),
+                                  accepted_roles=(), rejected_roles=(),
+                                  evidence_refs=(), total_cost=Decimal("0"))
+                    if direction == expected:
+                        self.assertEqual(AggregatedProposal(**values).direction, expected)
+                    else:
+                        with self.assertRaisesRegex(SpecialistDagError, "aggregate direction must match score sign"):
+                            AggregatedProposal(**values)
 
     def test_output_requires_evidence_and_rejects_binary_floats(self):
         with self.assertRaises(SpecialistDagError):

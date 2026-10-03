@@ -1,11 +1,16 @@
+from contextlib import ExitStack
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext, ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.instruments import (
     DeliverableLeg,
@@ -102,6 +107,40 @@ def option(
     )
 
 
+def publish_metadata_evidence(
+    artifact_store: ArtifactStore,
+    observed_at: datetime,
+    *,
+    version: InstrumentVersion,
+    artifact_id: str = B,
+    committed_at: datetime | None = None,
+) -> dict[str, str]:
+    committed = committed_at or observed_at
+    with ExitStack() as stack:
+        for module in ("store", "_publication_transaction_fix", "_crash_atomic_publication", "_retained_publication_hardening", "_windows_retained_publication_hardening"):
+            clock = stack.enter_context(patch(f"research.autotrade_research.artifacts.{module}.datetime"))
+            clock.now.return_value = committed
+        manifest = artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=f"instrument-metadata:{artifact_id}".encode("utf-8"),
+            media_type="application/vnd.autotrade.instrument-metadata+json",
+            rights={"storage": True, "export": False, "rights_id": "provider-metadata-rights"},
+            source_refs=["provider:instrument-metadata"],
+            metadata={
+                "kind": "instrument-metadata",
+                "instrument_version_binding": version.metadata_evidence_binding(),
+            },
+        )
+    return {
+        "artifact_id": artifact_id,
+        "sha256": manifest["sha256"],
+        "observed_at": observed_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "rights_id": "provider-metadata-rights",
+    }
+
+
 class InstrumentRegistryTests(unittest.TestCase):
     def test_symbol_rename_preserves_identity_and_history(self):
         registry = InstrumentRegistry()
@@ -117,6 +156,279 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(after.version, 2)
         with self.assertRaises(InstrumentNotFound):
             registry.resolve("simulated", "simulated-venue", "OLD", when(7))
+
+    def test_causal_lookup_does_not_let_late_metadata_retroactively_truncate_history(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            old_version = spot(symbol="OLD")
+            new_version = spot(
+                version=2,
+                symbol="NEW",
+                effective_from=when(6),
+            )
+            old_evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                version=old_version,
+                artifact_id=B,
+            )
+            new_evidence = publish_metadata_evidence(
+                artifact_store,
+                when(8),
+                version=new_version,
+                artifact_id=C,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    symbol="OLD",
+                    metadata_evidence=(old_evidence,),
+                )
+            )
+            registry.add(
+                spot(
+                    version=2,
+                    symbol="NEW",
+                    effective_from=when(6),
+                    metadata_evidence=(new_evidence,),
+                )
+            )
+
+            # Current operational truth knows v2 and therefore sees the rename.
+            self.assertEqual(registry.at(A, when(7)).version, 2)
+
+            # A replay at July 1 could not have known metadata committed in August.
+            causal = registry.at_known(
+                A,
+                when(7),
+                knowledge_cutoff=when(7),
+                artifact_store=artifact_store,
+            )
+            self.assertEqual(causal.version, 1)
+            self.assertEqual(causal.provider_symbol, "OLD")
+            self.assertEqual(
+                registry.resolve_known(
+                    "simulated",
+                    "simulated-venue",
+                    "OLD",
+                    when(7),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
+            with self.assertRaises(InstrumentNotFound):
+                registry.resolve_known(
+                    "simulated",
+                    "simulated-venue",
+                    "NEW",
+                    when(7),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                )
+
+            # Once immutable evidence exists by the cutoff, the same instant resolves to v2.
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(7),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                ).version,
+                2,
+            )
+
+    def test_causal_lookup_rejects_evidence_bound_to_different_instrument_version(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version_one = spot(symbol="OLD")
+            evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                version=version_one,
+                artifact_id=B,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    symbol="OLD",
+                    metadata_evidence=(evidence,),
+                )
+            )
+            registry.add(
+                spot(
+                    version=2,
+                    symbol="NEW",
+                    effective_from=when(6),
+                    metadata_evidence=(evidence,),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "not bound to this instrument version",
+            ):
+                registry.at_known(
+                    A,
+                    when(7),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                )
+
+    def test_causal_lookup_requires_resolvable_immutable_metadata_evidence(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    metadata_evidence=(
+                        {
+                            "artifact_id": B,
+                            "sha256": "sha256:" + "a" * 64,
+                            "observed_at": "2026-01-01T00:00:00Z",
+                            "rights_id": "provider-metadata-rights",
+                        },
+                    ),
+                )
+            )
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "cannot be integrity verified",
+            ):
+                registry.at_known(
+                    A,
+                    when(1),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+
+    def test_causal_lookup_uses_immutable_commit_time_not_claimed_observation_only(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version = spot()
+            evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                version=version,
+                artifact_id=B,
+                committed_at=when(8),
+            )
+            registry = InstrumentRegistry()
+            registry.add(spot(metadata_evidence=(evidence,)))
+
+            with self.assertRaises(InstrumentNotFound):
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                )
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
+
+    def test_causal_lookup_requires_metadata_evidence_and_no_future_effective_query(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            registry = InstrumentRegistry()
+            registry.add(spot())
+            with self.assertRaisesRegex(InstrumentNotFound, "causally known"):
+                registry.at_known(
+                    A,
+                    when(1),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+            with self.assertRaisesRegex(InstrumentRegistryError, "later than causal"):
+                registry.at_known(
+                    A,
+                    when(3),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+
+    def test_all_metadata_evidence_must_be_committed_before_causal_version_is_visible(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version = spot()
+            first = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                version=version,
+                artifact_id=B,
+            )
+            second = publish_metadata_evidence(
+                artifact_store,
+                when(3),
+                version=version,
+                artifact_id=C,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    metadata_evidence=(first, second),
+                )
+            )
+            with self.assertRaises(InstrumentNotFound):
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(3),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
+
+    def test_causal_reads_ignore_instance_authority_shadows_and_detach_results(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            evidence = publish_metadata_evidence(store, when(1), version=spot())
+            registry = InstrumentRegistry(versions=(spot(metadata_evidence=(evidence,)),))
+            registry._versions = {A: [spot(symbol="FORGED")]}
+            registry._metadata_known_by = lambda *a, **k: self.fail("shadow metadata lookup")
+            registry.at_known = lambda *a, **k: self.fail("shadow causal lookup")
+            version = InstrumentRegistry.resolve_known(registry, "simulated", "simulated-venue", "ABC", when(2), knowledge_cutoff=when(2), artifact_store=store)
+            object.__setattr__(version, "quantity_step", Decimal("999"))
+            fresh = InstrumentRegistry.at_known(registry, A, when(2), knowledge_cutoff=when(2), artifact_store=store)
+            self.assertEqual(fresh.quantity_step, Decimal("0.001"))
+
+    def test_causal_reads_use_one_authenticated_snapshot_without_split_reads(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            evidence = publish_metadata_evidence(store, when(1), version=spot())
+            registry = InstrumentRegistry(versions=(spot(metadata_evidence=(evidence,)),))
+            store.load_manifest = lambda *a: self.fail("split manifest read")
+            store.read_bytes = lambda *a: self.fail("split object read")
+            store.read_authenticated_snapshot = lambda *a: self.fail("mutable caller reader")
+            version = registry.at_known(A, when(2), knowledge_cutoff=when(2), artifact_store=store)
+            self.assertEqual(version.version, 1)
+
+    def test_causal_reads_reject_rights_mismatch_and_hostile_store_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            evidence = publish_metadata_evidence(store, when(1), version=spot())
+            evidence["rights_id"] = "other-rights"
+            registry = InstrumentRegistry(versions=(spot(metadata_evidence=(evidence,)),))
+            with self.assertRaisesRegex(InstrumentRegistryError, "rights identity mismatch"):
+                registry.at_known(A, when(2), knowledge_cutoff=when(2), artifact_store=store)
+            class HostileStore(ArtifactStore):
+                def read_authenticated_snapshot(self, *a):
+                    raise AssertionError("hostile reader called")
+            with self.assertRaises(TypeError):
+                registry.at_known(A, when(2), knowledge_cutoff=when(2), artifact_store=HostileStore(Path(directory) / "hostile"))
 
     def test_uuid_identity_aliases_are_canonicalized_before_registry_use(self):
         braced = spot(instrument_id="{" + A + "}")
@@ -188,6 +500,70 @@ class InstrumentRegistryTests(unittest.TestCase):
             instrument.validate_quantity("10.001")
         with self.assertRaisesRegex(InstrumentRegistryError, "exact decimal"):
             instrument.validate_price(100.1)
+
+    def test_high_significance_contract_and_grid_are_context_independent(self):
+        observed_contracts = []
+        aligned = "1.234567890123456789"
+        off_grid = "1.2345678901234567891"
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        instrument = InstrumentVersion(
+                            instrument_id=A,
+                            version=1,
+                            provider_id="simulated",
+                            venue_id="exact-grid",
+                            provider_symbol="EXACT-USD",
+                            asset_class="CRYPTO_SPOT",
+                            base_currency="EXACT",
+                            quote_currency="USD",
+                            settlement_currency="USD",
+                            quantity_unit="EXACT",
+                            contract_multiplier="1.000000000000000001",
+                            price_tick="1e-18",
+                            quantity_step="1e-18",
+                            minimum_quantity="1e-18",
+                            maximum_quantity="10",
+                            calendar_id="CONTINUOUS_24_7",
+                            timezone_id="UTC",
+                            effective_from=when(1),
+                        )
+                        observed_contracts.append(instrument.to_contract_dict())
+                        self.assertEqual(
+                            instrument.validate_price(aligned),
+                            Decimal(aligned),
+                        )
+                        self.assertEqual(
+                            instrument.validate_quantity(aligned),
+                            Decimal(aligned),
+                        )
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price_tick",
+                        ):
+                            instrument.validate_price(off_grid)
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "quantity_step",
+                        ):
+                            instrument.validate_quantity(off_grid)
+
+        self.assertTrue(
+            all(contract == observed_contracts[0] for contract in observed_contracts)
+        )
+        self.assertEqual(
+            observed_contracts[0]["contract_multiplier"],
+            "1.000000000000000001",
+        )
+        self.assertEqual(observed_contracts[0]["price_tick"], "0.000000000000000001")
+        self.assertEqual(
+            observed_contracts[0]["quantity_step"],
+            "0.000000000000000001",
+        )
+
 
     def test_calendar_uses_explicit_dst_transition_evidence(self):
         sessions = tuple(

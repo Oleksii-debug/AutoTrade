@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
 import base64
 import hashlib
 import hmac
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -15,12 +16,15 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
+    WhiteBitCredentialBoundary,
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
     WhiteBitPreparedRequest,
     WhiteBitPageEvidence,
     WhiteBitRecoveryCheckpoint,
+    WhiteBitRateLimitBudget,
     absence_evidence_from_coverages,
+    classify_whitebit_http_retry,
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
@@ -666,6 +670,54 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 http_status=200,
             )
 
+    def test_submission_parser_rejects_duplicate_decision_fields(self):
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="0.010",
+            price="40000.00",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-duplicate-1",
+            account_id="account-1",
+            environment="PAPER",
+            capability=capability(),
+            market_rules=market_rules(),
+            at=NOW,
+        )
+        cases = (
+            (
+                200,
+                '{"orderId":1,"orderId":2,'
+                '"clientOrderId":"at-duplicate-1",'
+                '"market":"BTC_USDT","status":"NEW"}',
+            ),
+            (
+                422,
+                '{"code":30,"code":31,"message":"Validation failed",'
+                '"errors":{"amount":["Invalid argument."]}}',
+            ),
+        )
+        for http_status, response_body in cases:
+            with self.subTest(http_status=http_status):
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "duplicate object key",
+                ):
+                    parse_submission_result(
+                        request,
+                        attempt_id=f"attempt-duplicate-{http_status}",
+                        account_id="account-1",
+                        environment="PAPER",
+                        observed_at=NOW,
+                        response_body=response_body,
+                        http_status=http_status,
+                    )
+
     def test_ambiguous_transport_requires_reconcile_before_retry(self):
         intent = WhiteBitOrderIntent.create(
             instrument_version="BTC_USDT:v1",
@@ -878,12 +930,79 @@ class WhiteBitAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(WhiteBitAdapterError, "invalid"):
             decode_whitebit_json('{"broken":')
 
+    def test_provider_json_decoder_rejects_resource_hostile_numeric_tokens(self):
+        with patch(
+            "autotrade_numeric.exact_decimal.Decimal",
+            side_effect=AssertionError("Decimal construction reached"),
+        ) as decimal_constructor:
+            with self.assertRaisesRegex(
+                WhiteBitAdapterError,
+                "resource envelope",
+            ):
+                decode_whitebit_json('{"value":1e999999}')
+            decimal_constructor.assert_not_called()
+
+        with self.assertRaisesRegex(WhiteBitAdapterError, "resource envelope"):
+            decode_whitebit_json('{"value":' + ("9" * 300) + '}')
+
+        decoded = decode_whitebit_json(
+            '{"price":65000.10,"count":123,"zero":-0}'
+        )
+        self.assertIs(type(decoded["price"]), Decimal)
+        self.assertEqual(decoded["price"], Decimal("65000.10"))
+        self.assertIs(type(decoded["count"]), int)
+        self.assertEqual(decoded["count"], 123)
+        self.assertIs(type(decoded["zero"]), int)
+        self.assertEqual(decoded["zero"], 0)
+
+    def test_provider_json_decoder_rejects_duplicate_decoded_object_keys(self):
+        duplicates = (
+            '{"orderId":1,"orderId":2}',
+            '{"orderId":1,"\\u006frderId":2}',
+            '{"outer":{"status":"NEW","status":"FILLED"}}',
+        )
+        for raw in duplicates:
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "duplicate object key",
+                ):
+                    decode_whitebit_json(raw)
+
+    def test_provider_json_decoder_requires_exact_raw_scalar_types(self):
+        class StrSubclass(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("subclass strip must not execute")
+
+        class BytesSubclass(bytes):
+            def decode(self, *args, **kwargs):
+                raise AssertionError("subclass decode must not execute")
+
+        for raw in (
+            StrSubclass('{"value":1}'),
+            BytesSubclass(b'{"value":1}'),
+        ):
+            with self.subTest(type=type(raw).__name__):
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "exact str or bytes",
+                ):
+                    decode_whitebit_json(raw)
+
+    def test_provider_json_decoder_reuses_shared_structural_resource_budget(self):
+        too_deep = ("[" * 70) + "0" + ("]" * 70)
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "maximum depth or resource budget",
+        ):
+            decode_whitebit_json(too_deep)
+
     def test_unique_execution_deal_maps_to_reconciliation_fill(self):
         deal = parse_execution_deal(
             {
                 "id": 123,
                 "clientOrderId": "at-order-123",
-                "time": "1593233939.123456",
+                "time": Decimal("1593233939.123456"),
                 "side": "buy",
                 "role": 2,
                 "amount": "0.001",
@@ -899,7 +1018,10 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(deal.provider_order_id, "456")
         self.assertEqual(deal.role, "TAKER")
         self.assertEqual(deal.trade_time, "2020-06-27T04:58:59.123456Z")
-        fill = deal.to_reconciliation_fill(account_id="paper-1", environment="PAPER")
+        fill = deal.to_reconciliation_fill(
+            account_id="paper-1",
+            environment="PAPER",
+        )
         self.assertEqual(fill.provider_execution_id, "123")
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
@@ -908,29 +1030,38 @@ class WhiteBitAdapterTests(unittest.TestCase):
     def test_execution_deal_without_client_id_remains_reconcilable(self):
         deal = parse_execution_deal(
             {
-                "id": "manual-1",
+                "id": 1001,
                 "clientOrderId": "",
-                "time": "1593233939",
+                "time": 1593233939,
                 "side": "sell",
                 "role": 1,
                 "amount": "0.001",
                 "price": "40000",
                 "deal": "40",
                 "fee": "0",
-                "orderId": "external-order",
+                "orderId": 2001,
                 "feeAsset": "USDT",
             },
             market="BTC_USDT",
         )
         self.assertIsNone(deal.client_order_id)
-        self.assertIsNone(deal.to_reconciliation_fill(account_id="paper-1", environment="PAPER").client_order_id)
+        self.assertIsNone(
+            deal.to_reconciliation_fill(
+                account_id="paper-1",
+                environment="PAPER",
+            ).client_order_id
+        )
 
     def test_execution_deal_requires_exact_economic_identity(self):
-        with self.assertRaisesRegex(WhiteBitAdapterError, "multiplied by price"):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "multiplied by price",
+        ):
             parse_execution_deal(
                 {
                     "id": 123,
-                    "time": "1593233939",
+                    "clientOrderId": "",
+                    "time": 1593233939,
                     "side": "buy",
                     "role": 1,
                     "amount": "0.001",
@@ -947,7 +1078,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         row = {
             "id": 123,
             "clientOrderId": "at-order-123",
-            "time": "1593233939",
+            "time": 1593233939,
             "side": "buy",
             "role": 1,
             "amount": "0.001",
@@ -977,6 +1108,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
     def test_execution_time_rejects_binary_float_and_excess_precision(self):
         row = {
             "id": 123,
+            "clientOrderId": "",
             "time": 1593233939.123456,
             "side": "sell",
             "role": 2,
@@ -987,11 +1119,122 @@ class WhiteBitAdapterTests(unittest.TestCase):
             "orderId": 456,
             "feeAsset": "USDT",
         }
-        with self.assertRaisesRegex(WhiteBitAdapterError, "exact decimal"):
+        with self.assertRaisesRegex(WhiteBitAdapterError, "exact JSON number"):
             parse_execution_deal(row, market="BTC_USDT")
-        row["time"] = "1593233939.1234567"
+
+        row["time"] = Decimal("1593233939.1234567")
         with self.assertRaisesRegex(WhiteBitAdapterError, "microsecond"):
             parse_execution_deal(row, market="BTC_USDT")
+
+        row["time"] = Decimal("1e20")
+        with self.assertRaisesRegex(WhiteBitAdapterError, "supported UTC range"):
+            parse_execution_deal(row, market="BTC_USDT")
+
+    def test_execution_deal_exact_economics_ignore_ambient_decimal_context(self):
+        row = {
+            "id": 123,
+            "clientOrderId": "at-exact-context",
+            "time": Decimal("1593233939.123456"),
+            "side": "buy",
+            "role": 1,
+            "amount": "12345678901234567890.123456",
+            "price": "0.00000000000000000001",
+            "deal": "0.12345678901234567890123456",
+            "fee": "0",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        expected = None
+        for precision, rounding in (
+            (6, ROUND_DOWN),
+            (10, ROUND_UP),
+            (80, ROUND_DOWN),
+        ):
+            with self.subTest(
+                precision=precision,
+                rounding=rounding,
+            ), localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                deal = parse_execution_deal(row, market="BTC_USDT")
+                identity = (
+                    deal.provider_execution_id,
+                    deal.quantity,
+                    deal.price,
+                    deal.deal_value,
+                    deal.trade_time,
+                )
+                if expected is None:
+                    expected = identity
+                self.assertEqual(identity, expected)
+
+    def test_execution_deal_requires_documented_exact_json_field_types(self):
+        base = {
+            "id": 123,
+            "clientOrderId": "",
+            "time": 1593233939,
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        invalid = (
+            ("id", "123"),
+            ("orderId", True),
+            ("role", "1"),
+            ("clientOrderId", 1),
+            ("side", "BUY"),
+            ("amount", Decimal("0.001")),
+            ("price", 40000),
+            ("deal", 40),
+            ("fee", 0),
+            ("feeAsset", 1),
+            ("time", "1593233939"),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(WhiteBitAdapterError):
+                    parse_execution_deal(
+                        {**base, field: value},
+                        market="BTC_USDT",
+                    )
+
+    def test_execution_deal_rejects_bounded_domain_numeric_subclasses_and_oversize(self):
+        class DecimalSubclass(Decimal):
+            pass
+
+        base = {
+            "id": 123,
+            "clientOrderId": "",
+            "time": 1593233939,
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 456,
+            "feeAsset": "USDT",
+        }
+        cases = (
+            ("amount", DecimalSubclass("0.001"), "exact JSON string"),
+            ("amount", "1e256", "bounded exact decimal"),
+            ("fee", 10**300, "exact JSON string"),
+        )
+        for field, value, expected_error in cases:
+            with self.subTest(field=field, value=repr(value)):
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    expected_error,
+                ):
+                    parse_execution_deal(
+                        {**base, field: value},
+                        market="BTC_USDT",
+                    )
 
     def test_exact_id_lookup_uses_active_and_history_surfaces(self):
         requests = order_lookup_requests(market="btc_usdt", client_order_id="at-lookup-1")
@@ -1671,6 +1914,195 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 api_key="key",
                 api_secret="secret",
             )
+
+    def test_credential_boundary_admits_only_info_trading_live_key(self):
+        evidence = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:account-1",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"Info", "Trading"}),
+            ip_whitelist_enabled=True,
+            environment="live",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        self.assertIs(evidence.assert_autotrade_safe(), evidence)
+        self.assertEqual(evidence.permissions, frozenset({"INFO", "TRADING"}))
+        self.assertEqual(evidence.environment, "LIVE")
+
+    def test_credential_boundary_rejects_invalid_generation(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "credential_generation must be a positive integer",
+        ):
+            WhiteBitCredentialBoundary(
+                credential_binding_id="credential-binding:whitebit:invalid",
+                credential_generation=0,
+                account_id="acct-wb",
+                permissions=frozenset({"INFO", "TRADING"}),
+                ip_whitelist_enabled=True,
+                environment="LIVE",
+                observed_at=NOW,
+                evidence_ref="https://docs.whitebit.com/best-practices/security",
+            )
+
+    def test_credential_boundary_rejects_fund_movement_authority(self):
+        for extra in ("DEPOSIT", "WITHDRAW"):
+            with self.subTest(extra=extra):
+                evidence = WhiteBitCredentialBoundary(
+                    credential_binding_id="credential-binding:whitebit:unsafe",
+                    credential_generation=1,
+                    account_id="acct-wb",
+                    permissions=frozenset({"INFO", "TRADING", extra}),
+                    ip_whitelist_enabled=True,
+                    environment="LIVE",
+                    observed_at=NOW,
+                    evidence_ref="https://docs.whitebit.com/best-practices/security",
+                )
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "deposit/withdraw authority is forbidden",
+                ):
+                    evidence.assert_autotrade_safe()
+
+    def test_credential_boundary_rejects_unqualified_environment_and_open_ip(self):
+        paper = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:paper",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=True,
+            environment="PAPER",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "no public sandbox"):
+            paper.assert_autotrade_safe()
+
+        unrestricted = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:live",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=False,
+            environment="LIVE",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "IP whitelist"):
+            unrestricted.assert_autotrade_safe()
+
+    def test_rate_budget_preserves_recovery_and_cancel_capacity(self):
+        budget = WhiteBitRateLimitBudget(
+            capacity=10,
+            reserved_recovery=2,
+            reserved_cancel=2,
+        )
+        for _ in range(6):
+            budget = budget.consume("NORMAL")
+        self.assertEqual(budget.remaining, 4)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("NORMAL")
+
+        budget = budget.consume("RECOVERY")
+        budget = budget.consume("RECOVERY")
+        self.assertEqual(budget.remaining, 2)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("RECOVERY")
+
+        budget = budget.consume("CANCEL")
+        budget = budget.consume("CANCEL")
+        self.assertEqual(budget.remaining, 0)
+        self.assertFalse(budget.can_admit("CANCEL"))
+
+    def test_retry_policy_backs_off_safe_reads_without_blind_financial_write_retry(self):
+        timed_out_write = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(timed_out_write.automatic_retry)
+        self.assertTrue(timed_out_write.requires_reconciliation)
+        self.assertEqual(
+            timed_out_write.classification,
+            "AMBIGUOUS_WRITE_TIMEOUT",
+        )
+
+        timed_out_cancel = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="CANCEL",
+        )
+        self.assertFalse(timed_out_cancel.automatic_retry)
+        self.assertTrue(timed_out_cancel.requires_reconciliation)
+
+        timed_out_read = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(timed_out_read.automatic_retry)
+        self.assertEqual(timed_out_read.base_delay_seconds, 2)
+        self.assertTrue(timed_out_read.jitter_required)
+        self.assertFalse(timed_out_read.requires_reconciliation)
+        self.assertEqual(timed_out_read.classification, "REQUEST_TIMEOUT")
+
+        rate_limited_write = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(rate_limited_write.automatic_retry)
+        self.assertIsNone(rate_limited_write.base_delay_seconds)
+        self.assertTrue(rate_limited_write.requires_reconciliation)
+        self.assertEqual(
+            rate_limited_write.classification,
+            "AMBIGUOUS_WRITE_RATE_LIMIT",
+        )
+
+        rate_limited_cancel = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=2,
+            request_class="CANCEL",
+        )
+        self.assertFalse(rate_limited_cancel.automatic_retry)
+        self.assertTrue(rate_limited_cancel.requires_reconciliation)
+
+        capped = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=20,
+            request_class="READ",
+        )
+        self.assertTrue(capped.automatic_retry)
+        self.assertEqual(capped.base_delay_seconds, 30)
+        self.assertTrue(capped.jitter_required)
+        self.assertFalse(capped.requires_reconciliation)
+
+        ambiguous = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(ambiguous.automatic_retry)
+        self.assertTrue(ambiguous.requires_reconciliation)
+        self.assertEqual(ambiguous.classification, "AMBIGUOUS_WRITE")
+
+        read_retry = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(read_retry.automatic_retry)
+        self.assertEqual(read_retry.base_delay_seconds, 2)
+        self.assertFalse(read_retry.requires_reconciliation)
+
+        auth = classify_whitebit_http_retry(
+            status_code=401,
+            attempt=1,
+            request_class="READ",
+        )
+        self.assertFalse(auth.automatic_retry)
+        self.assertEqual(auth.classification, "AUTHENTICATION")
 
     def test_recursive_debug_redaction_covers_nested_auth_fields(self):
         redacted = redact_whitebit_debug(

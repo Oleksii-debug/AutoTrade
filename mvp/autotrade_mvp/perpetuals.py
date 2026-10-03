@@ -9,26 +9,73 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
-from typing import Literal
+from typing import Literal, Mapping
+
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    as_fraction as _exact_as_fraction,
+    bounded_fraction as _exact_bounded_fraction,
+    canonical_decimal_text as _exact_canonical_decimal_text,
+    exact_add as _exact_add,
+    exact_multiply as _exact_multiply,
+    exact_sum as _exact_sum,
+    terminating_decimal as _exact_terminating_decimal,
+)
 
 
 class PerpetualError(ValueError):
     pass
 
 
+def _translate_exact(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except ExactDecimalError as error:
+        raise PerpetualError(
+            "exact financial arithmetic exceeds the supported resource envelope"
+        ) from error
+
+
+def as_fraction(value: Decimal) -> Fraction:
+    return _translate_exact(_exact_as_fraction, value)
+
+
+def bounded_fraction(value: Fraction) -> Fraction:
+    return _translate_exact(_exact_bounded_fraction, value)
+
+
+def exact_add(left: Decimal, right: Decimal) -> Decimal:
+    return _translate_exact(_exact_add, left, right)
+
+
+def exact_multiply(*values: Decimal) -> Decimal:
+    return _translate_exact(_exact_multiply, *values)
+
+
+def exact_sum(values, *, start: Decimal = Decimal("0")) -> Decimal:
+    return _translate_exact(_exact_sum, values, start=start)
+
+
+def terminating_decimal(value: Fraction) -> Decimal:
+    return _translate_exact(_exact_terminating_decimal, value)
+
+
+def canonical_decimal_text(value: Decimal) -> str:
+    return _translate_exact(_exact_canonical_decimal_text, value)
+
+
 def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise PerpetualError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise PerpetualError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise PerpetualError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise PerpetualError(f"{name} exceeds the supported exact-decimal resource envelope") from error
     if positive and result <= 0:
         raise PerpetualError(f"{name} must be positive")
     return result
@@ -47,15 +94,29 @@ def _utc(value: datetime, name: str) -> datetime:
 
 
 def _fraction(value: Decimal) -> Fraction:
-    sign, digits, exponent = value.as_tuple()
-    integer = 0
-    for digit in digits:
-        integer = integer * 10 + digit
-    if sign:
-        integer = -integer
-    if exponent >= 0:
-        return Fraction(integer * (10**exponent), 1)
-    return Fraction(integer, 10 ** (-exponent))
+    return as_fraction(value)
+
+
+def _finite(value: Fraction) -> Decimal:
+    return terminating_decimal(value)
+
+
+def _fadd(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left + right)
+
+
+def _fsub(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left - right)
+
+
+def _fmul(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left * right)
+
+
+def _fdiv(left: Fraction, right: Fraction) -> Fraction:
+    if right == 0:
+        raise ZeroDivisionError("exact rational divisor must be non-zero")
+    return bounded_fraction(left / right)
 
 
 @dataclass(frozen=True)
@@ -166,8 +227,11 @@ class MarketSnapshot:
             raise PerpetualError("market snapshot cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("market snapshot is stale")
-        distance = abs(_fraction(self.mark_price) - _fraction(self.index_price))
-        permitted = _fraction(self.max_mark_index_deviation) * _fraction(self.index_price)
+        distance = abs(_fsub(_fraction(self.mark_price), _fraction(self.index_price)))
+        permitted = _fmul(
+            _fraction(self.max_mark_index_deviation),
+            _fraction(self.index_price),
+        )
         if distance > permitted:
             raise PerpetualError("mark/index deviation exceeds configured bound")
 
@@ -196,7 +260,7 @@ class CollateralQuote:
             raise PerpetualError("collateral quote cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("collateral quote is stale")
-        return _decimal(amount, "amount") * self.rate
+        return exact_multiply(_decimal(amount, "amount"), self.rate)
 
 
 @dataclass(frozen=True)
@@ -257,15 +321,19 @@ class LiquidationSnapshot:
         if point - self.observed_at > self.max_age:
             raise PerpetualError("liquidation snapshot is stale")
 
-    def headroom_fraction(self, mark_price: Decimal | str | int) -> Decimal:
+    def headroom_fraction(self, mark_price: Decimal | str | int) -> Fraction:
+        """Return exact rational liquidation headroom; never ambient-round."""
+
         mark = _decimal(mark_price, "mark_price", positive=True)
+        mark_fraction = _fraction(mark)
+        liquidation_fraction = _fraction(self.liquidation_price)
         if self.side == "LONG":
             if self.liquidation_price >= mark:
                 raise PerpetualError("long liquidation boundary must be below current mark")
-            return (mark - self.liquidation_price) / mark
+            return _fdiv(_fsub(mark_fraction, liquidation_fraction), mark_fraction)
         if self.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        return (self.liquidation_price - mark) / mark
+        return _fdiv(_fsub(liquidation_fraction, mark_fraction), mark_fraction)
 
 
 def require_liquidation_headroom(
@@ -274,8 +342,8 @@ def require_liquidation_headroom(
     market: MarketSnapshot,
     minimum_headroom_fraction: Decimal | str | int,
     at: datetime,
-) -> Decimal:
-    """Require fresh provider-tier evidence and a bounded liquidation buffer."""
+) -> Fraction:
+    """Require fresh provider-tier evidence and return exact liquidation headroom."""
 
     if not isinstance(liquidation, LiquidationSnapshot):
         raise TypeError("liquidation must be LiquidationSnapshot")
@@ -290,12 +358,12 @@ def require_liquidation_headroom(
     if liquidation.side == "LONG":
         if liquidation.liquidation_price >= mark:
             raise PerpetualError("long liquidation boundary must be below current mark")
-        distance = _fraction(mark) - _fraction(liquidation.liquidation_price)
+        distance = _fsub(_fraction(mark), _fraction(liquidation.liquidation_price))
     else:
         if liquidation.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        distance = _fraction(liquidation.liquidation_price) - _fraction(mark)
-    required_distance = _fraction(minimum) * _fraction(mark)
+        distance = _fsub(_fraction(liquidation.liquidation_price), _fraction(mark))
+    required_distance = _fmul(_fraction(minimum), _fraction(mark))
     if distance < required_distance:
         raise PerpetualError("liquidation headroom is below configured minimum")
     return liquidation.headroom_fraction(mark)
@@ -310,7 +378,7 @@ def linear_notional(
     contracts = _decimal(signed_contracts, "signed_contracts")
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     mark = _decimal(price, "price", positive=True)
-    return contracts * contract_multiplier * mark
+    return exact_multiply(contracts, contract_multiplier, mark)
 
 
 def inverse_perpetual_pnl_exact(
@@ -332,11 +400,11 @@ def inverse_perpetual_pnl_exact(
     face = _decimal(contract.multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    notional = bounded_fraction(_fraction(contracts) * _fraction(face))
+    entry_inverse = bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    reciprocal_delta = bounded_fraction(entry_inverse - exit_inverse)
+    return bounded_fraction(notional * reciprocal_delta)
 
 
 def inverse_funding_cashflow_exact(
@@ -355,13 +423,14 @@ def inverse_funding_cashflow_exact(
     contracts = _decimal(signed_contracts, "signed_contracts")
     rate = _decimal(funding_rate, "funding_rate")
     basis = snapshot.mark_price if convention.price_basis == "MARK" else snapshot.index_price
-    position_value = (
-        _fraction(contracts)
-        * _fraction(contract.multiplier)
-        / _fraction(basis)
+    position_numerator = bounded_fraction(
+        _fraction(contracts) * _fraction(contract.multiplier)
     )
-    raw = position_value * _fraction(rate)
-    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    position_value = bounded_fraction(position_numerator / _fraction(basis))
+    raw = bounded_fraction(position_value * _fraction(rate))
+    cashflow = bounded_fraction(
+        -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    )
     return contract.settlement_currency, cashflow
 
 
@@ -382,14 +451,20 @@ def inverse_stressed_loss_exact(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    exit_price = mark * (Decimal("1") - move if contracts > 0 else Decimal("1") + move)
-    pnl = inverse_perpetual_pnl_exact(
-        contract=contract,
-        signed_contracts=contracts,
-        entry_price=mark,
-        exit_price=exit_price,
+    contracts_f = _fraction(contracts)
+    face_f = _fraction(contract.multiplier)
+    mark_f = _fraction(mark)
+    move_f = _fraction(move)
+    move_factor = bounded_fraction(
+        Fraction(1, 1) - move_f if contracts > 0 else Fraction(1, 1) + move_f
     )
-    return -pnl if pnl < 0 else Fraction(0, 1)
+    exit_f = bounded_fraction(mark_f * move_factor)
+    mark_inverse = bounded_fraction(Fraction(1, 1) / mark_f)
+    exit_inverse = bounded_fraction(Fraction(1, 1) / exit_f)
+    reciprocal_delta = bounded_fraction(mark_inverse - exit_inverse)
+    notional = bounded_fraction(contracts_f * face_f)
+    pnl = bounded_fraction(notional * reciprocal_delta)
+    return bounded_fraction(-pnl if pnl < 0 else Fraction(0, 1))
 
 
 def funding_cashflow(
@@ -413,8 +488,8 @@ def funding_cashflow(
         multiplier=contract.multiplier,
         price=basis,
     )
-    raw = notional * rate
-    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    raw = exact_multiply(notional, rate)
+    cashflow = exact_multiply(raw, Decimal("-1")) if convention.positive_rate_effect == "LONG_PAYS" else raw
     return contract.settlement_currency, cashflow
 
 
@@ -432,7 +507,10 @@ def stressed_loss(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    return abs(position) * contract.multiplier * mark * move
+    loss = _fmul(abs(_fraction(position)), _fraction(contract.multiplier))
+    loss = _fmul(loss, _fraction(mark))
+    loss = _fmul(loss, _fraction(move))
+    return _finite(loss)
 
 
 def require_new_risk_capacity(
@@ -453,7 +531,7 @@ def require_new_risk_capacity(
     buffer = _decimal(reserve_buffer, "reserve_buffer")
     if buffer < 0:
         raise PerpetualError("reserve_buffer cannot be negative")
-    required = margin.maintenance_requirement + loss + buffer
+    required = exact_sum((margin.maintenance_requirement, loss, buffer))
     if margin.equity <= required:
         raise PerpetualError("insufficient fresh margin for new risk")
 
@@ -472,7 +550,7 @@ class FundingLedger:
             {
                 "instrument_id": instrument_id,
                 "currency": currency,
-                "amount": format(amount, "f"),
+                "amount": canonical_decimal_text(amount),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -513,10 +591,92 @@ class FundingLedger:
             self._events[identifier] = (fingerprint, period, unit, value)
             return old_amount
 
+        new_balance = exact_add(self._balances.get(unit, Decimal("0")), value)
         self._events[identifier] = (fingerprint, period, unit, value)
         self._periods[period_key] = (fingerprint, unit, value)
-        self._balances[unit] = self._balances.get(unit, Decimal("0")) + value
+        self._balances[unit] = new_balance
         return value
+
+    def export_state(self) -> dict[str, object]:
+        """Detach this lifecycle accumulator for the canonical runtime checkpoint.
+
+        This component serialization does not issue checkpoint/financial trust;
+        the existing composite replay authority authenticates the captured state.
+        """
+        if type(self) is not FundingLedger:
+            raise TypeError("state export requires exact FundingLedger")
+        periods = {
+            (fingerprint, period): (instrument, currency, amount)
+            for (instrument, period), (fingerprint, currency, amount)
+            in self._periods.items()
+        }
+        events = []
+        # Preserve the original event order: bounded exact accumulations may
+        # reject a reordered intermediate even when their final sum fits.
+        for event_id, (fingerprint, period, currency, amount) in self._events.items():
+            owner = periods.get((fingerprint, period))
+            if owner is None or owner[1:] != (currency, amount):
+                raise PerpetualError("funding event is detached from its period state")
+            events.append({
+                "event_id": event_id, "funding_period_id": period,
+                "instrument_id": owner[0], "currency": currency,
+                "amount": canonical_decimal_text(amount),
+            })
+        state = {
+            "schema_version": "funding-ledger@1", "events": events,
+            "balances": {currency: canonical_decimal_text(amount)
+                         for currency, amount in sorted(self._balances.items())},
+        }
+        # Detect partial/mutated component state instead of publishing a
+        # checkpoint which omits a period or invents a retained balance.
+        restored = FundingLedger.from_state(state)
+        if (restored._events != self._events or restored._periods != self._periods
+                or restored._balances != self._balances):
+            raise PerpetualError("funding component state is inconsistent")
+        return state
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, object]) -> "FundingLedger":
+        """Rebuild dedupe, period membership and balances by canonical apply()."""
+        if cls is not FundingLedger:
+            raise TypeError("state restore requires exact FundingLedger")
+        if type(state) is not dict or set(state) != {"schema_version", "events", "balances"}:
+            raise PerpetualError("funding state has missing or unexpected components")
+        if type(state["schema_version"]) is not str or state["schema_version"] != "funding-ledger@1":
+            raise PerpetualError("unsupported funding state schema_version")
+        events, balances = state["events"], state["balances"]
+        if type(events) is not list or type(balances) is not dict:
+            raise PerpetualError("funding events and balances must be exact collections")
+        expected_balances = {}
+        for currency, amount in balances.items():
+            if type(currency) is not str or type(amount) is not str:
+                raise PerpetualError("serialized funding units and amounts must be exact text")
+            unit = _text(currency, "currency").upper()
+            if unit != currency:
+                raise PerpetualError("serialized funding currency is not canonical")
+            value = _decimal(amount, "balance")
+            if canonical_decimal_text(value) != amount:
+                raise PerpetualError("serialized funding balance is not canonical")
+            expected_balances[unit] = value
+        result = FundingLedger()
+        seen = set()
+        keys = {"event_id", "funding_period_id", "instrument_id", "currency", "amount"}
+        for event in events:
+            if type(event) is not dict or set(event) != keys or any(type(value) is not str for value in event.values()):
+                raise PerpetualError("serialized funding event has invalid shape")
+            if any(not event[key] or event[key] != event[key].strip()
+                   for key in keys) or event["currency"] != event["currency"].upper():
+                raise PerpetualError("serialized funding event identity is not canonical")
+            if event["event_id"] in seen:
+                raise PerpetualError("serialized funding event identity is duplicated")
+            seen.add(event["event_id"])
+            amount = _decimal(event["amount"], "amount")
+            if canonical_decimal_text(amount) != event["amount"]:
+                raise PerpetualError("serialized funding event amount is not canonical")
+            FundingLedger.apply(result, **event)
+        if result._balances != expected_balances:
+            raise PerpetualError("serialized funding balances do not match events")
+        return result
 
     def balance(self, currency: str) -> Decimal:
         return self._balances.get(_text(currency, "currency").upper(), Decimal("0"))

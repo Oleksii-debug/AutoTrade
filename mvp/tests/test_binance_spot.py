@@ -6,6 +6,15 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotAdapterError,
+    BinanceSpotDepthContinuityPolicy,
+    BinanceSpotDepthBootstrapBuffer,
+    BinanceSpotDepthCursor,
+    BinanceSpotDepthRange,
+    BINANCE_SPOT_DEPTH_POLICY_ID,
+    binance_spot_depth_stream_policy,
+    begin_binance_spot_depth_generation,
+    register_binance_spot_depth_snapshot,
+    apply_binance_spot_depth_event,
     BinanceSpotOrderIntent,
     BinanceSpotReferencePrice,
     BinanceSpotSymbolRules,
@@ -14,6 +23,13 @@ from mvp.autotrade_mvp.binance_spot import (
     parse_order_ack,
     prepare_order_request,
 )
+from mvp.autotrade_mvp.market_data import (
+    MarketDataError,
+    MarketNormalizer,
+    RawMarketUpdate,
+    _issue_qualified_book_range_admission,
+)
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
     Surface,
     observe_authenticated_json_response,
@@ -33,6 +49,66 @@ from mvp.autotrade_mvp.capabilities import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+DEPTH_EVIDENCE = {
+    "artifact_id": "33333333-3333-4333-8333-333333333333",
+    "sha256": "sha256:" + "b" * 64,
+    "observed_at": "2026-09-24T20:00:00.100000Z",
+}
+
+
+def depth_registry():
+    registry = InstrumentRegistry()
+    registry.add(
+        InstrumentVersion(
+            instrument_id="44444444-4444-4444-8444-444444444444",
+            version=1,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            asset_class="CRYPTO_SPOT",
+            base_currency="BTC",
+            quote_currency="USDT",
+            settlement_currency="USDT",
+            quantity_unit="BTC",
+            contract_multiplier=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("0.001"),
+            minimum_quantity=Decimal("0.001"),
+            maximum_quantity=Decimal("1000"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=NOW - timedelta(days=1),
+            status="ACTIVE",
+        )
+    )
+    return registry
+
+
+def depth_raw(
+    kind,
+    payload,
+    *,
+    sequence,
+    available_ms=100,
+    ingested_ms=200,
+    generation=None,
+):
+    return RawMarketUpdate(
+        provider_id="BINANCE",
+        venue_id="SPOT",
+        provider_symbol="BTCUSDT",
+        kind=kind,
+        source_event_at=NOW,
+        available_at=NOW + timedelta(milliseconds=available_ms),
+        ingested_at=NOW + timedelta(milliseconds=ingested_ms),
+        availability_basis="PROVIDER_TIMESTAMP",
+        source_sequence=sequence,
+        stream_generation=generation,
+        sequence_stream="book",
+        revision=0,
+        payload=payload,
+        raw_evidence_ref=DEPTH_EVIDENCE,
+    )
 
 
 def execution_observation(
@@ -220,7 +296,721 @@ def provider_reference(
     )
 
 
+class BinanceSpotDepthContinuityTests(unittest.TestCase):
+    def depth_event(self, *, first=101, final=105, symbol="BTCUSDT"):
+        return BinanceSpotDepthRange.from_diff_depth_payload(
+            {
+                "e": "depthUpdate",
+                "E": 1672515782136,
+                "s": symbol,
+                "U": first,
+                "u": final,
+                "b": [["100", "1"]],
+                "a": [["101", "2"]],
+            }
+        )
+
+    def test_diff_depth_range_parser_preserves_exact_provider_range(self):
+        event = self.depth_event()
+        self.assertEqual(event.symbol, "BTCUSDT")
+        self.assertEqual(event.first_update_id, 101)
+        self.assertEqual(event.final_update_id, 105)
+
+    def test_depth_range_parser_rejects_coercion_and_reversed_ranges(self):
+        class IntSubclass(int):
+            pass
+
+        invalid = (
+            {"e": "depthUpdate", "s": "BTCUSDT", "U": True, "u": 105},
+            {"e": "depthUpdate", "s": "BTCUSDT", "U": IntSubclass(101), "u": 105},
+            {"e": "depthUpdate", "s": "btcusdt", "U": 101, "u": 105},
+            {"e": "depthUpdate", "s": "BTCUSDT", "U": 106, "u": 105},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(
+                BinanceSpotAdapterError
+            ):
+                BinanceSpotDepthRange.from_diff_depth_payload(payload)
+
+    def test_snapshot_cursor_binds_symbol_and_exact_update_id(self):
+        cursor = BinanceSpotDepthCursor.from_snapshot(
+            symbol="BTCUSDT",
+            payload={"lastUpdateId": 100, "bids": [], "asks": []},
+        )
+        self.assertEqual((cursor.symbol, cursor.update_id), ("BTCUSDT", 100))
+        for value in (True, -1, "100"):
+            with self.subTest(value=value), self.assertRaises(
+                BinanceSpotAdapterError
+            ):
+                BinanceSpotDepthCursor.from_snapshot(
+                    symbol="BTCUSDT",
+                    payload={"lastUpdateId": value},
+                )
+
+    def test_bootstrap_discards_old_accepts_covering_range_and_detects_gap(self):
+        snapshot = BinanceSpotDepthCursor.from_snapshot(
+            symbol="BTCUSDT",
+            payload={"lastUpdateId": 100},
+        )
+        old = self.depth_event(first=95, final=100)
+        covering = self.depth_event(first=101, final=105)
+        gap = self.depth_event(first=102, final=105)
+        self.assertEqual(
+            BinanceSpotDepthContinuityPolicy.bootstrap(
+                snapshot=snapshot,
+                event=old,
+            ).disposition,
+            "DISCARD",
+        )
+        accepted = BinanceSpotDepthContinuityPolicy.bootstrap(
+            snapshot=snapshot,
+            event=covering,
+        )
+        self.assertEqual(accepted.disposition, "APPLY")
+        self.assertEqual(accepted.next_update_id, 105)
+        self.assertEqual(
+            BinanceSpotDepthContinuityPolicy.bootstrap(
+                snapshot=snapshot,
+                event=gap,
+            ).disposition,
+            "GAP",
+        )
+
+    def test_subsequent_ranges_allow_overlap_and_advance_to_final_id(self):
+        local = BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=105)
+        contiguous = self.depth_event(first=106, final=110)
+        first = BinanceSpotDepthContinuityPolicy.advance(
+            local=local,
+            event=contiguous,
+        )
+        self.assertEqual((first.disposition, first.next_update_id), ("APPLY", 110))
+        second = BinanceSpotDepthContinuityPolicy.advance(
+            local=BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=110),
+            event=self.depth_event(first=108, final=112),
+        )
+        self.assertEqual((second.disposition, second.next_update_id), ("APPLY", 112))
+        self.assertEqual(
+            BinanceSpotDepthContinuityPolicy.advance(
+                local=local,
+                event=self.depth_event(first=100, final=104),
+            ).disposition,
+            "DISCARD",
+        )
+        self.assertEqual(
+            BinanceSpotDepthContinuityPolicy.advance(
+                local=local,
+                event=self.depth_event(first=107, final=110),
+            ).disposition,
+            "GAP",
+        )
+
+    def test_cross_symbol_depth_range_cannot_use_foreign_cursor(self):
+        snapshot = BinanceSpotDepthCursor.from_snapshot(
+            symbol="BTCUSDT",
+            payload={"lastUpdateId": 100},
+        )
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "does not match local depth cursor",
+        ):
+            BinanceSpotDepthContinuityPolicy.bootstrap(
+                snapshot=snapshot,
+                event=self.depth_event(symbol="ETHUSDT"),
+            )
+
+
+    def test_bootstrap_buffer_replays_old_then_covering_range_after_snapshot(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        buffer = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=7,
+        )
+
+        old_range = self.depth_event(first=95, final=100)
+        old_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.98", "1"]],
+                    "asks": [],
+                    "first_sequence": 95,
+                    "last_sequence": 100,
+                },
+                sequence=100,
+            
+                generation=7,
+            )
+        )
+        buffer.buffer(old_event, old_range, generation=7)
+
+        covering_range = self.depth_event(first=101, final=105)
+        covering_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=7,
+            )
+        )
+        buffer.buffer(covering_event, covering_range, generation=7)
+
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+                available_ms=500,
+                ingested_ms=600,
+            
+                generation=7,
+            )
+        )
+        decisions = buffer.install_snapshot_and_replay(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=snapshot_payload,
+            ),
+            generation=7,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+
+        self.assertEqual(
+            [(item.disposition, item.next_update_id) for item in decisions],
+            [("DISCARD", None), ("APPLY", 105)],
+        )
+        self.assertEqual(buffer.buffered_count, 0)
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            105,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "precedes the accepted book availability cut",
+        ):
+            normalizer.executable_book(
+                as_of=NOW + timedelta(milliseconds=400),
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            )
+        view = normalizer.executable_book(
+            as_of=NOW + timedelta(milliseconds=500),
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(view["bids"][0], {"price": "100", "quantity": "2"})
+
+    def test_bootstrap_buffer_is_bounded_idempotent_and_fails_before_overflow_mutation(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        buffer = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=3,
+            max_events=1,
+        )
+        first_range = self.depth_event(first=101, final=105)
+        first_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "1"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+            
+                generation=3,
+            )
+        )
+        buffer.buffer(first_event, first_range, generation=3)
+        buffer.buffer(first_event, first_range, generation=3)
+        self.assertEqual(buffer.buffered_count, 1)
+
+        second_range = self.depth_event(first=106, final=110)
+        second_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 106,
+                    "last_sequence": 110,
+                },
+                sequence=110,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=3,
+            )
+        )
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "supported event envelope",
+        ):
+            buffer.buffer(second_event, second_range, generation=3)
+        self.assertEqual(buffer.buffered_count, 1)
+
+    def test_reconnect_invalidates_old_generation_and_discards_buffered_events(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        old = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=11,
+        )
+        depth_range = self.depth_event(first=101, final=105)
+        event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "1"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+            
+                generation=11,
+            )
+        )
+        old.buffer(event, depth_range, generation=11)
+        new = old.reconnect(
+            normalizer,
+            generation=12,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(new.generation, 12)
+        self.assertEqual(new.buffered_count, 0)
+        self.assertEqual(old.buffered_count, 0)
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "sealed"):
+            old.buffer(event, depth_range, generation=11)
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "generation"):
+            new.buffer(event, depth_range, generation=11)
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "strictly increase"):
+            new.reconnect(
+                normalizer,
+                generation=12,
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            )
+
+    def test_bootstrap_buffer_gap_stops_replay_and_leaves_book_non_executable(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        buffer = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=20,
+        )
+        gap_range = self.depth_event(first=102, final=105)
+        gap_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 102,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+            
+                generation=20,
+            )
+        )
+        buffer.buffer(gap_event, gap_range, generation=20)
+
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=20,
+            )
+        )
+        decisions = buffer.install_snapshot_and_replay(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=snapshot_payload,
+            ),
+            generation=20,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(
+            [(item.disposition, item.next_update_id) for item in decisions],
+            [("GAP", None)],
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "GAPPED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                as_of=NOW + timedelta(seconds=1),
+            )
+
+
+    def test_bootstrap_replay_exception_revokes_partially_ready_book(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                    stream="book",
+                ),
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                    stream="shadow-book",
+                ),
+            ),
+        )
+        buffer = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=25,
+            stream="book",
+        )
+        normalizer.begin_provider_book_generation(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=25,
+            stream="shadow-book",
+            policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+        )
+
+        valid_range = self.depth_event(first=101, final=105)
+        valid_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                generation=25,
+            )
+        )
+        buffer.buffer(valid_event, valid_range, generation=25)
+
+        foreign_range = self.depth_event(first=106, final=110)
+        foreign_event = normalizer.normalize(
+            RawMarketUpdate(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                kind="BOOK_DELTA",
+                source_event_at=NOW,
+                available_at=NOW + timedelta(milliseconds=300),
+                ingested_at=NOW + timedelta(milliseconds=400),
+                availability_basis="PROVIDER_TIMESTAMP",
+                source_sequence=110,
+                stream_generation=25,
+                sequence_stream="shadow-book",
+                revision=0,
+                payload={
+                    "bids": [["100.00", "3"]],
+                    "asks": [],
+                    "first_sequence": 106,
+                    "last_sequence": 110,
+                },
+                raw_evidence_ref=DEPTH_EVIDENCE,
+            )
+        )
+        buffer.buffer(foreign_event, foreign_range, generation=25)
+
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+                generation=25,
+            )
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "does not belong to this stream",
+        ):
+            buffer.install_snapshot_and_replay(
+                normalizer,
+                snapshot_event,
+                BinanceSpotDepthCursor.from_snapshot(
+                    symbol="BTCUSDT",
+                    payload=snapshot_payload,
+                ),
+                generation=25,
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                stream="book",
+            )
+
+        self.assertEqual(buffer.buffered_count, 0)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                stream="book",
+            ),
+            "UNINITIALIZED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                stream="book",
+                as_of=NOW + timedelta(seconds=1),
+            )
+
+
+    def test_new_generation_revokes_previously_ready_book_before_new_snapshot(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        first = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=30,
+        )
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+            
+                generation=30,
+            )
+        )
+        range_event = self.depth_event(first=101, final=105)
+        delta_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=30,
+            )
+        )
+        first.buffer(delta_event, range_event, generation=30)
+        first.install_snapshot_and_replay(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=snapshot_payload,
+            ),
+            generation=30,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        normalizer.require_executable_book(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            as_of=NOW + timedelta(seconds=1),
+        )
+
+        with self.assertRaises(BinanceSpotAdapterError):
+            begin_binance_spot_depth_generation(
+                normalizer,
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                generation=True,
+            )
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "max_events",
+        ):
+            begin_binance_spot_depth_generation(
+                normalizer,
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                generation=31,
+                max_events=0,
+            )
+        normalizer.require_executable_book(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            as_of=NOW + timedelta(seconds=1),
+        )
+
+        second = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=31,
+        )
+        self.assertEqual(second.generation, 31)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "UNINITIALIZED",
+        )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.require_executable_book(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                as_of=NOW + timedelta(seconds=1),
+            )
+        with self.assertRaisesRegex(MarketDataError, "cursor is unavailable"):
+            normalizer.provider_book_cursor(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            )
+
+
 class BinanceSpotFoundationTests(unittest.TestCase):
+    def depth_event(self, *, first=101, final=105, symbol="BTCUSDT"):
+        return BinanceSpotDepthRange.from_diff_depth_payload(
+            {
+                "e": "depthUpdate",
+                "E": 1672515782136,
+                "s": symbol,
+                "U": first,
+                "u": final,
+                "b": [["100", "1"]],
+                "a": [["101", "2"]],
+            }
+        )
+
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):
         intent = BinanceSpotOrderIntent.create(
             instrument_version="BTCUSDT:v1",
@@ -768,6 +1558,248 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         ):
             BinanceSpotSymbolRules(**parsed.__dict__)
 
+    def test_depth_policy_admission_binds_exact_range_cursor_and_event(self):
+        cursor = BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=100)
+        event = BinanceSpotDepthRange.from_diff_depth_payload(
+            {
+                "e": "depthUpdate",
+                "s": "BTCUSDT",
+                "U": 101,
+                "u": 105,
+            }
+        )
+        admission = BinanceSpotDepthContinuityPolicy.admission(
+            event_id="11111111-1111-4111-8111-111111111111",
+            cursor=cursor,
+            event=event,
+            bootstrap=True,
+        )
+        self.assertEqual(admission.disposition, "APPLY")
+        self.assertEqual(admission.prior_sequence, 100)
+        self.assertEqual(admission.first_sequence, 101)
+        self.assertEqual(admission.last_sequence, 105)
+        self.assertEqual(admission.next_sequence, 105)
+        self.assertEqual(admission.policy_id, BINANCE_SPOT_DEPTH_POLICY_ID)
+
+    def test_depth_policy_composes_bootstrap_and_apply_with_market_authority(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=40,
+        )
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_cursor = BinanceSpotDepthCursor.from_snapshot(
+            symbol="BTCUSDT",
+            payload=snapshot_payload,
+        )
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+            
+                generation=40,
+            )
+        )
+        register_binance_spot_depth_snapshot(
+            normalizer,
+            snapshot_event,
+            snapshot_cursor,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "BOOTSTRAPPING",
+        )
+
+        provider_delta = {
+            "e": "depthUpdate",
+            "s": "BTCUSDT",
+            "U": 101,
+            "u": 105,
+        }
+        depth_range = BinanceSpotDepthRange.from_diff_depth_payload(provider_delta)
+        delta_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": provider_delta["U"],
+                    "last_sequence": provider_delta["u"],
+                },
+                sequence=provider_delta["u"],
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=40,
+            )
+        )
+        decision = apply_binance_spot_depth_event(
+            normalizer,
+            delta_event,
+            depth_range,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(decision.disposition, "APPLY")
+        self.assertEqual(decision.next_update_id, 105)
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            105,
+        )
+        view = normalizer.executable_book(
+            as_of=NOW + timedelta(seconds=1),
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(view["bids"][0], {"price": "100", "quantity": "2"})
+        self.assertEqual(view["asks"][0], {"price": "100.01", "quantity": "1"})
+
+    def test_depth_policy_exposes_explicit_coordinator_stream_binding(self):
+        binding = binance_spot_depth_stream_policy(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+        )
+        self.assertEqual(binding.provider_id, "BINANCE")
+        self.assertEqual(binding.venue_id, "SPOT")
+        self.assertEqual(binding.stream, "book")
+        self.assertEqual(binding.policy_id, BINANCE_SPOT_DEPTH_POLICY_ID)
+
+    def test_bootstrap_buffer_rejects_cross_generation_normalized_delta_and_snapshot(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=7,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "superseded stream generation",
+        ):
+            normalizer.normalize(
+                depth_raw(
+                    "BOOK_DELTA",
+                    {
+                        "bids": [["100.00", "2"]],
+                        "asks": [],
+                        "first_sequence": 101,
+                        "last_sequence": 105,
+                    },
+                    sequence=105,
+                    generation=6,
+                )
+            )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "superseded stream generation",
+        ):
+            normalizer.normalize(
+                depth_raw(
+                    "BOOK_SNAPSHOT",
+                    {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                    sequence=100,
+                    generation=6,
+                )
+            )
+
+
+    def test_depth_sequence_identity_can_reuse_lower_cursor_after_reconnect_generation(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=1,
+        )
+        first = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "1"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                generation=1,
+            )
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=2,
+        )
+        second = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "1"]],
+                    "asks": [],
+                    "first_sequence": 1,
+                    "last_sequence": 5,
+                },
+                sequence=5,
+                available_ms=300,
+                ingested_ms=400,
+                generation=2,
+            )
+        )
+        self.assertNotEqual(first.event_id, second.event_id)
+        self.assertNotIn("OUT_OF_ORDER", second.quality_flags)
+        self.assertNotIn("SEQUENCE_GAP", second.quality_flags)
+
     def test_ack_is_never_promoted_to_fill(self):
         result = parse_order_ack(
             attempt_id=str(uuid4()),
@@ -784,6 +1816,19 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "NEVER")
         self.assertNotIn("fill", result)
         self.assertNotIn("executed_quantity", result)
+
+    def test_ack_symbol_identity_must_be_canonical_uppercase(self):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-ack-lower-symbol",
+                response={
+                    "symbol": "btcusdt",
+                    "orderId": 42,
+                    "clientOrderId": "at-ack-lower-symbol",
+                    "transactTime": 1790272800123,
+                },
+            )
 
     def test_account_trade_id_is_economic_identity_and_duplicates_are_idempotent(self):
         rows = [
@@ -848,6 +1893,100 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertEqual(fills[0].side, "SELL")
         self.assertIsNone(fills[0].position_side)
+
+    def test_client_order_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be a mapping"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id=[],
+            )
+
+        for bad_map in (
+            {"43": "at-spot-fill"},
+            {True: "at-spot-fill"},
+            {-1: "at-spot-fill"},
+        ):
+            with self.subTest(bad_map=bad_map), self.assertRaisesRegex(
+                BinanceSpotAdapterError,
+                "non-negative integer order ids",
+            ):
+                parse_account_trades(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                    client_ids_by_order_id=bad_map,
+                )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "client_order_id"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={99: "bad client id with spaces"},
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "multiple provider order ids"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={
+                    43: "at-spot-same-client",
+                    44: "at-spot-same-client",
+                },
+            )
+
+    def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ethusdt": "ETHUSDT:v1",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument_version"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ETHUSDT": "",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "duplicate normalized"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    " BTCUSDT ": "BTCUSDT:v2",
+                },
+            )
 
     def test_spot_fill_remains_compatible_with_cash_equity_financial_plan(self):
         row = {
@@ -946,18 +2085,457 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             consistency_horizon_satisfied=True,
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
-        qualified = coverage_evidence(
-            account_id="paper-1",
-            environment="PAPER",
-            surface="ORDER_HISTORY",
-            coverage_start="2026-09-24T17:00:00Z",
-            coverage_end="2026-09-24T19:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        )
-        self.assertTrue(qualified.provider_semantics_exclude_execution)
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                surface="ORDER_HISTORY",
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
+
+
+    def test_exact_diff_depth_replay_at_current_cursor_is_idempotent(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=70,
+        )
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=100,
+            
+                generation=70,
+            )
+        )
+        register_binance_spot_depth_snapshot(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=100),
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        payload = {
+            "bids": [["100.00", "2"]],
+            "asks": [],
+            "first_sequence": 101,
+            "last_sequence": 105,
+        }
+        depth_range = BinanceSpotDepthRange.from_diff_depth_payload(
+            {"e": "depthUpdate", "s": "BTCUSDT", "U": 101, "u": 105}
+        )
+        first = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                payload,
+                sequence=105,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=70,
+            )
+        )
+        apply_binance_spot_depth_event(
+            normalizer,
+            first,
+            depth_range,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        first_view = normalizer.executable_book(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            as_of=NOW + timedelta(seconds=1),
+        )
+
+        replay = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                payload,
+                sequence=105,
+                available_ms=300,
+                ingested_ms=400,
+            
+                generation=70,
+            )
+        )
+        self.assertIn("DUPLICATE", replay.quality_flags)
+        replay_decision = apply_binance_spot_depth_event(
+            normalizer,
+            replay,
+            depth_range,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(replay_decision.disposition, "APPLY")
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            105,
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "READY",
+        )
+        self.assertEqual(
+            normalizer.executable_book(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                as_of=NOW + timedelta(seconds=1),
+            ),
+            first_view,
+        )
+
+
+    def test_stale_generation_malformed_frame_cannot_revoke_current_ready_book(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        first = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=80,
+        )
+        first.reconnect(
+            normalizer,
+            generation=81,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=100,
+                generation=81,
+                available_ms=500,
+                ingested_ms=600,
+            )
+        )
+        register_binance_spot_depth_snapshot(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=100),
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        delta_range = self.depth_event(first=101, final=105)
+        delta_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                generation=81,
+                available_ms=700,
+                ingested_ms=800,
+            )
+        )
+        apply_binance_spot_depth_event(
+            normalizer,
+            delta_event,
+            delta_range,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        before = normalizer.executable_book(
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            as_of=NOW + timedelta(seconds=1),
+        )
+
+        stale = depth_raw(
+            "BOOK_DELTA",
+            {
+                "bids": [["100.02", "1"], ["bad-price", "1"]],
+                "asks": [],
+                "first_sequence": 106,
+                "last_sequence": 110,
+            },
+            sequence=110,
+            generation=80,
+            available_ms=900,
+            ingested_ms=950,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "superseded stream generation",
+        ):
+            normalizer.normalize(stale)
+
+        self.assertEqual(
+            normalizer.provider_book_generation(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            81,
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "READY",
+        )
+        self.assertEqual(
+            normalizer.executable_book(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+                as_of=NOW + timedelta(seconds=1),
+            ),
+            before,
+        )
+
+
+    def test_importable_forged_apply_cannot_override_binance_gap_policy(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=44,
+        )
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+                generation=44,
+            )
+        )
+        register_binance_spot_depth_snapshot(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=snapshot_payload,
+            ),
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        gap_range = self.depth_event(first=102, final=105)
+        gap_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 102,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                generation=44,
+            )
+        )
+        forged_apply = _issue_qualified_book_range_admission(
+            policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+            event_id=gap_event.event_id,
+            disposition="APPLY",
+            prior_sequence=100,
+            first_sequence=102,
+            last_sequence=105,
+            next_sequence=105,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "differs from registered provider policy",
+        ):
+            normalizer.apply_qualified_book_range(
+                gap_event,
+                forged_apply,
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "BOOTSTRAPPING",
+        )
+        decision = apply_binance_spot_depth_event(
+            normalizer,
+            gap_event,
+            gap_range,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(
+            (decision.disposition, decision.next_update_id),
+            ("GAP", None),
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "GAPPED",
+        )
+
+    def test_qualified_range_preview_is_non_mutating_before_commit(self):
+        normalizer = MarketNormalizer(
+            depth_registry(),
+            book_stream_policies=(
+                binance_spot_depth_stream_policy(
+                    provider_id="BINANCE",
+                    venue_id="SPOT",
+                ),
+            ),
+        )
+        buffer = begin_binance_spot_depth_generation(
+            normalizer,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+            generation=21,
+        )
+        snapshot_payload = {
+            "lastUpdateId": 100,
+            "bids": [["99.99", "1"]],
+            "asks": [["100.01", "1"]],
+        }
+        snapshot_event = normalizer.normalize(
+            depth_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": snapshot_payload["bids"],
+                    "asks": snapshot_payload["asks"],
+                },
+                sequence=100,
+                generation=21,
+            )
+        )
+        buffer.install_snapshot_and_replay(
+            normalizer,
+            snapshot_event,
+            BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=snapshot_payload,
+            ),
+            generation=21,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        depth_range = self.depth_event(first=101, final=105)
+        delta = normalizer.normalize(
+            depth_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                available_ms=300,
+                ingested_ms=400,
+                generation=21,
+            )
+        )
+        admission = BinanceSpotDepthContinuityPolicy.admission(
+            event_id=delta.event_id,
+            cursor=BinanceSpotDepthCursor(symbol="BTCUSDT", update_id=100),
+            event=depth_range,
+            bootstrap=True,
+        )
+        candidate = normalizer.preview_qualified_book_range(
+            delta,
+            admission,
+            provider_id="BINANCE",
+            venue_id="SPOT",
+            provider_symbol="BTCUSDT",
+        )
+        self.assertEqual(candidate["bids"][0], {"price": "100", "quantity": "2"})
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            100,
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="BINANCE",
+                venue_id="SPOT",
+                provider_symbol="BTCUSDT",
+            ),
+            "BOOTSTRAPPING",
+        )
 
 if __name__ == "__main__":
     unittest.main()

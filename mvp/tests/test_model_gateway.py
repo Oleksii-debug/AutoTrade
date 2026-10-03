@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext, ROUND_DOWN, ROUND_UP, Inexact, Rounded
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
@@ -521,3 +522,90 @@ class BudgetLedgerTests(unittest.TestCase):
         snap = ledger.snapshot()
         self.assertEqual(Decimal("0.5"), snap.incurred)
         self.assertEqual(Decimal("0.2"), snap.estimated_unbilled)
+
+
+class ExactModelBudgetTests(unittest.TestCase):
+    def test_conservation_and_ceiling_are_context_independent(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        for precision, rounding in ((1, ROUND_DOWN), (2, ROUND_UP), (28, ROUND_DOWN)):
+            with self.subTest(precision=precision, rounding=rounding), localcontext() as ctx:
+                ctx.prec = precision
+                ctx.rounding = rounding
+                ctx.traps[Inexact] = True
+                ctx.traps[Rounded] = True
+                ledger = BudgetLedger("1.11")
+                ledger.reserve("a", "1")
+                ledger.reserve("b", "0.11")
+                self.assertEqual(ledger.snapshot().available, Decimal("0"))
+                with self.assertRaisesRegex(ValueError, "budget exhausted"):
+                    ledger.reserve("over", "0.01")
+                ledger.settle("a", incurred="0.8", estimated_unbilled="0.1")
+                ledger.reconcile_unbilled(billing_id="bill", request_id="a", billed="0.06")
+                snap = ledger.snapshot()
+                self.assertEqual((snap.reserved, snap.incurred, snap.estimated_unbilled, snap.available),
+                                 (Decimal("0.11"), Decimal("0.86"), Decimal("0.04"), Decimal("0.10")))
+
+    def test_sub_precision_over_ceiling_settlement_cannot_round_to_pass(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        with localcontext() as ctx:
+            ctx.prec = 3
+            ctx.rounding = ROUND_DOWN
+            ledger = BudgetLedger("1.001")
+            ledger.reserve("a", "1.001")
+            with self.assertRaisesRegex(ValueError, "exceeds reserved"):
+                ledger.settle("a", incurred="1.001", estimated_unbilled="0.00009")
+            self.assertEqual(ledger.snapshot().reserved, Decimal("1.001"))
+            self.assertEqual(ledger.snapshot().incurred, Decimal("0"))
+
+    def test_arithmetic_fault_preserves_reservation_until_safe_release(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
+        ledger = BudgetLedger("2")
+        ledger.reserve("a", "1")
+        with patch("mvp.autotrade_mvp.model_gateway.exact_add", side_effect=ExactDecimalError("bounded resource failure")):
+            with self.assertRaises(ExactDecimalError):
+                ledger.settle("a", incurred="0.5", estimated_unbilled="0.2")
+        self.assertEqual(ledger.snapshot().reserved, Decimal("1"))
+        self.assertEqual(ledger.release("a"), Decimal("1"))
+
+    def test_unrepresentable_aggregate_reserve_fails_before_mutation(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger("9" * 256)
+        ledger.reserve("large", "1e255")
+        before = ledger.snapshot()
+        with self.assertRaises(ValueError):
+            ledger.reserve("tiny", "1e-256")
+        self.assertEqual(ledger.snapshot(), before)
+        self.assertEqual(ledger.release("tiny"), Decimal("0"))
+
+    def test_billing_resource_failure_preserves_original_cost_and_identity(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        ledger = BudgetLedger("1")
+        ledger.reserve("a", "1")
+        ledger.settle("a", incurred="0", estimated_unbilled="1")
+        ledger.reconcile_unbilled(billing_id="large", request_id="a", billed="9" * 256)
+        before = ledger.snapshot()
+        with self.assertRaises(ValueError):
+            ledger.reconcile_unbilled(billing_id="tiny", request_id="a", billed="0.1")
+        self.assertEqual(ledger.snapshot(), before)
+        # The failed billing ID was not consumed; a representable replacement succeeds.
+        ledger.reconcile_unbilled(billing_id="tiny", request_id="a", billed="0")
+
+    def test_dynamic_quality_order_does_not_use_rounded_unary_negation(self):
+        with localcontext() as ctx:
+            ctx.prec = 3
+            decision = route_model(
+                RoutingPolicy(RoutingMode.DYNAMIC, allowed_model_ids=("a", "b"), maximum_cost="1"),
+                request("a", "b"),
+                [model("a", remote=False, cost="0", quality="0.8008"),
+                 model("b", remote=False, cost="0", quality="0.8009")], now_utc=NOW)
+        self.assertEqual(decision.model_id, "b")
+
+    def test_hostile_decimal_and_oversized_ingress_are_rejected_without_dispatch(self):
+        from mvp.autotrade_mvp.model_gateway import BudgetLedger
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile scalar callback")
+        for value in (HostileDecimal("1"), "1e100000000", "9" * 257, 10 ** 5000, True, 0.1):
+            with self.subTest(kind=type(value).__name__), self.assertRaises(ValueError):
+                BudgetLedger(value)

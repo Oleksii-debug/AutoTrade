@@ -184,7 +184,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_expired_lease_fences_stale_worker_and_requeues(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store)
             first = store.claim("worker-a", now=self.now, lease_seconds=10)
             self.assertEqual(store.requeue_expired(now=self.now + timedelta(seconds=11)), 1)
@@ -211,7 +211,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-b",
                     generation=int(second["generation"]),
                     output_refs=[accepted],
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -342,7 +341,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_waiting_external_can_requeue_only_with_immutable_proof_not_run(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="prove-not-run",
@@ -370,7 +369,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(store.get(job["job_id"])["generation"]),
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence,
-                    artifact_store=artifact_store,
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -399,7 +397,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_waiting_external_proven_success_is_terminal_and_idempotent(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="prove-success",
@@ -436,7 +434,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
-                    artifact_store=artifact_store,
                     output_refs=outputs,
                     now=resolved_at,
                 )
@@ -481,7 +478,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_old_external_resolution_cannot_be_reused_after_new_ambiguous_attempt(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="generation-bound-resolution",
@@ -510,7 +507,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=first_waiting_generation,
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=first_evidence,
-                    artifact_store=first_artifact_store,
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -560,14 +556,16 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=second_waiting_generation,
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=second_evidence,
-                    artifact_store=second_artifact_store,
                     now=self.now + timedelta(seconds=26),
                 )
             )
 
     def test_valid_looking_self_asserted_resolution_ref_cannot_requeue(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(
+                Path(directory) / "jobs.sqlite3",
+                authoritative_artifact_root=Path(directory) / "artifacts",
+            )
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="self-asserted-proof",
@@ -596,7 +594,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_resolution_artifact_must_bind_exact_job_generation_and_verdict(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="wrong-proof-semantics",
@@ -622,14 +620,13 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence_ref,
-                    artifact_store=artifact_store,
                     now=self.now + timedelta(seconds=12),
                 )
             self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
 
     def test_external_success_rejects_nonexistent_output_artifact(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="missing-output-artifact",
@@ -660,7 +657,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence_ref,
-                    artifact_store=artifact_store,
                     output_refs=[nonexistent_output],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -668,7 +664,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_success_proof_cannot_be_rebound_to_different_outputs(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="proof-output-binding",
@@ -712,7 +708,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
-                    artifact_store=artifacts,
                     output_refs=[output_b],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -720,7 +715,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_success_outputs_are_canonicalized_and_duplicates_rejected(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "external-resolution-artifacts")
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="canonical-success-outputs",
@@ -761,7 +756,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
-                    artifact_store=artifacts,
                     output_refs=[output_b, output_a],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -786,7 +780,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(store.get(other["job_id"])["generation"]),
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
-                    artifact_store=artifacts,
                     output_refs=[output_a, output_a],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -852,7 +845,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_checkpoint_enforces_declared_resource_budget(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store)
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -870,7 +863,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                 generation=generation,
                 checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
-                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=1),
             )
             self.assertEqual(updated["checkpoint_ref"], first_ref)
@@ -888,13 +880,12 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     checkpoint_ref=second_ref,
                     resource_usage={"wall_seconds": 61, "memory_bytes": 512},
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
 
     def test_checkpoint_rejects_mutable_reference_before_journal_mutation(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store, "immutable-checkpoint")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             before = store.get(job["job_id"])
@@ -905,7 +896,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(claimed["generation"]),
                     checkpoint_ref="artifact:mutable-checkpoint",
                     resource_usage={"wall_seconds": 1},
-                    artifact_store=ArtifactStore(Path(directory) / "artifacts"),
                     now=self.now + timedelta(seconds=1),
                 )
             after = store.get(job["job_id"])
@@ -914,7 +904,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_checkpoint_rejects_nonexistent_or_wrong_generation_artifact(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store, "checkpoint-binding")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -931,7 +921,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     checkpoint_ref=nonexistent,
                     resource_usage={"wall_seconds": 1},
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
 
@@ -949,7 +938,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     checkpoint_ref=wrong_generation,
                     resource_usage={"wall_seconds": 1},
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
             self.assertNotIn("checkpoint_ref", store.get(job["job_id"]))
@@ -957,7 +945,7 @@ class ResearchJobStoreTests(unittest.TestCase):
     def test_publish_checkpoint_bytes_binds_restart_safe_checkpoint(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "jobs.sqlite3"
-            store = ResearchJobStore(path)
+            store = ResearchJobStore(path, authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store, "checkpoint-publish")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -994,7 +982,7 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertNotEqual(second_manifest["artifact_id"], manifest["artifact_id"])
             self.assertEqual(second_updated["checkpoint_ref"], second_expected)
 
-            reopened = ResearchJobStore(path)
+            reopened = ResearchJobStore(path, authoritative_artifact_root=Path(directory) / "artifacts")
             self.assertEqual(
                 reopened.get(job["job_id"])["checkpoint_ref"],
                 second_expected,
@@ -1010,7 +998,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_checkpoint_resource_usage_is_monotonic_and_sparse_updates_preserve_totals(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store, "monotonic-usage")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -1029,7 +1017,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                 generation=generation,
                 checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
-                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=1),
             )
             self.assertEqual(first["resource_usage"]["wall_seconds"], 20.0)
@@ -1048,7 +1035,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                 generation=generation,
                 checkpoint_ref=second_ref,
                 resource_usage={"memory_bytes": 768},
-                artifact_store=artifacts,
                 now=self.now + timedelta(seconds=2),
             )
             self.assertEqual(second["resource_usage"]["wall_seconds"], 20.0)
@@ -1068,7 +1054,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     checkpoint_ref=regression_ref,
                     resource_usage={"wall_seconds": 19},
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=3),
                 )
             current = store.get(job["job_id"])
@@ -1077,7 +1062,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_only_one_result_is_accepted_for_a_generation(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store)
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -1102,7 +1087,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=[first_result],
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
             )
@@ -1112,7 +1096,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=[first_result],
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
             )
@@ -1122,7 +1105,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=[second_result],
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=3),
                 )
 
@@ -1156,7 +1138,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_direct_succeed_canonicalizes_result_order_for_idempotent_retry(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
             job, _ = self._enqueue(store, "canonical-direct-order")
             claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
             generation = int(claimed["generation"])
@@ -1182,7 +1164,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=[second, first],
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=1),
                 )
             )
@@ -1193,7 +1174,6 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     output_refs=expected,
-                    artifact_store=artifacts,
                     now=self.now + timedelta(seconds=2),
                 )
             )
@@ -1221,7 +1201,7 @@ class ResearchJobStoreTests(unittest.TestCase):
     def test_crash_after_artifact_publish_retries_without_double_acceptance(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            jobs = ResearchJobStore(root / "jobs.sqlite3")
+            jobs = ResearchJobStore(root / "jobs.sqlite3", authoritative_artifact_root=root / "artifacts")
             artifacts = ArtifactStore(root / "artifacts")
             job, _ = self._enqueue(jobs, "artifact-crash")
             claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
@@ -1264,7 +1244,7 @@ class ResearchJobStoreTests(unittest.TestCase):
     def test_different_result_bytes_cannot_replace_crash_published_artifact(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            jobs = ResearchJobStore(root / "jobs.sqlite3")
+            jobs = ResearchJobStore(root / "jobs.sqlite3", authoritative_artifact_root=root / "artifacts")
             artifacts = ArtifactStore(root / "artifacts")
             job, _ = self._enqueue(jobs, "artifact-conflict")
             claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
@@ -1517,6 +1497,350 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertIn(5, versions)
             self.assertIn("submitted_by", columns)
 
+
+    def test_result_acceptance_ignores_poisoned_publication_store_helpers_and_root(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "artifacts")
+            job, _ = self._enqueue(store, "rooted-result-reader")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            authoritative_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(authoritative_root)
+            output_ref = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+            )
+
+            artifacts.root = Path(directory) / "poisoned-public-root"
+            with (
+                patch.object(
+                    artifacts,
+                    "load_manifest",
+                    side_effect=AssertionError("publication load_manifest used"),
+                ),
+                patch.object(
+                    artifacts,
+                    "read_bytes",
+                    side_effect=AssertionError("publication read_bytes used"),
+                ),
+                patch.object(
+                    artifacts,
+                    "read_authenticated_snapshot",
+                    side_effect=AssertionError("publication snapshot helper used"),
+                ),
+            ):
+                self.assertTrue(
+                    store.succeed(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=generation,
+                        output_refs=[output_ref],
+                        now=self.now + timedelta(seconds=1),
+                    )
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "SUCCEEDED")
+
+    def test_foreign_worker_publication_cannot_choose_trust_root(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(
+                Path(directory) / "jobs.sqlite3",
+                authoritative_artifact_root=Path(directory) / "trusted",
+            )
+            job, _ = self._enqueue(store, "foreign-worker")
+            lease = store.claim("worker-a", now=self.now, lease_seconds=30)
+            foreign = ArtifactStore(Path(directory) / "foreign")
+            with patch.object(
+                foreign,
+                "publish_bytes",
+                side_effect=AssertionError("foreign publication callback executed"),
+            ):
+                with self.assertRaisesRegex(
+                    JobConflictError,
+                    "publication target does not match research evidence authority",
+                ):
+                    store.publish_result_bytes(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=int(lease["generation"]),
+                        artifact_store=foreign,
+                        data=b"valid-metadata-but-foreign-root",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                        now=self.now + timedelta(seconds=1),
+                    )
+            self.assertEqual(store.get(job["job_id"])["state"], "RUNNING")
+
+    def test_queue_only_store_cannot_accept_well_formed_result(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "queue-only")
+            lease = store.claim("worker-a", now=self.now, lease_seconds=30)
+            foreign = ArtifactStore(Path(directory) / "foreign")
+            output = result_artifact(
+                foreign,
+                job_id=job["job_id"],
+                generation=int(lease["generation"]),
+                input_hashes=job["input_hashes"],
+            )
+            with self.assertRaisesRegex(JobConflictError, "authority is not configured"):
+                store.succeed(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=int(lease["generation"]),
+                    output_refs=[output],
+                    now=self.now + timedelta(seconds=1),
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "RUNNING")
+
+    def test_checkpoint_foreign_root_fails_before_job_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "foreign-artifacts")
+            job, _ = self._enqueue(store, "foreign-root-checkpoint")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            authoritative_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(authoritative_root)
+            checkpoint = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint",
+            )
+            before = store.get(job["job_id"])
+
+            with self.assertRaisesRegex(JobConflictError, "job-bound immutable"):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    checkpoint_ref=checkpoint,
+                    resource_usage={"wall_seconds": 1},
+                    now=self.now + timedelta(seconds=1),
+                )
+
+            after = store.get(job["job_id"])
+            self.assertEqual(after["state"], "RUNNING")
+            self.assertNotIn("checkpoint_ref", after)
+            self.assertEqual(after["resource_usage"], before["resource_usage"])
+
+    def test_external_resolution_foreign_root_fails_before_transition(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3", authoritative_artifact_root=Path(directory) / "foreign-evidence-root")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="foreign-root-external-resolution",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            generation = int(store.get(job["job_id"])["generation"])
+            artifact_store, evidence = resolution_proof(
+                directory,
+                job_id=job["job_id"],
+                generation=generation,
+                verdict="PROVEN_NOT_RUN",
+            )
+
+            with self.assertRaisesRegex(
+                JobConflictError,
+                "matching immutable artifact evidence",
+            ):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=generation,
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=evidence,
+                    now=self.now + timedelta(seconds=12),
+                )
+
+            after = store.get(job["job_id"])
+            self.assertEqual(after["state"], "WAITING_EXTERNAL")
+            self.assertNotIn("external_resolution", after)
+
+
+
+    def test_evidence_terminal_path_fails_closed_without_composed_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = ResearchJobStore(root / "jobs.sqlite3")
+            job, _ = self._enqueue(jobs, "no-evidence-authority")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            artifacts = ArtifactStore(root / "artifacts")
+            output_ref = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=int(claimed["generation"]),
+                input_hashes=job["input_hashes"],
+            )
+            with self.assertRaisesRegex(JobConflictError, "authority is not configured"):
+                jobs.succeed(
+                    job["job_id"], worker_id="worker-a",
+                    generation=int(claimed["generation"]),
+                    output_refs=[output_ref], now=self.now + timedelta(seconds=1),
+                )
+            self.assertEqual(jobs.get(job["job_id"])["state"], "RUNNING")
+
+    def test_foreign_store_and_instance_attribute_poison_cannot_redirect_bound_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority_root = root / "authority-a"
+            authority_store = ArtifactStore(authority_root)
+            jobs = ResearchJobStore(
+                root / "jobs.sqlite3",
+                authoritative_artifact_root=authority_root,
+                publication_store=authority_store,
+            )
+            job, _ = self._enqueue(jobs, "foreign-result-authority")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            foreign_store = ArtifactStore(root / "authority-b")
+            foreign_ref = result_artifact(
+                foreign_store,
+                job_id=job["job_id"], generation=generation,
+                input_hashes=job["input_hashes"],
+            )
+            # Caller-owned instance attributes are deliberately not authority.
+            jobs._artifact_read_snapshot = foreign_store.read_authenticated_snapshot
+            with self.assertRaisesRegex(JobConflictError, "verified job-bound"):
+                jobs.succeed(
+                    job["job_id"], worker_id="worker-a", generation=generation,
+                    output_refs=[foreign_ref], now=self.now + timedelta(seconds=1),
+                )
+            self.assertEqual(jobs.get(job["job_id"])["state"], "RUNNING")
+
+            authoritative_ref = result_artifact(
+                authority_store,
+                job_id=job["job_id"], generation=generation,
+                input_hashes=job["input_hashes"],
+            )
+            self.assertTrue(jobs.succeed(
+                job["job_id"], worker_id="worker-a", generation=generation,
+                output_refs=[authoritative_ref], now=self.now + timedelta(seconds=2),
+            ))
+
+    def test_foreign_publication_target_cannot_become_acceptance_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority_root = root / "authority-a"
+            authority_store = ArtifactStore(authority_root)
+            jobs = ResearchJobStore(
+                root / "jobs.sqlite3",
+                authoritative_artifact_root=authority_root,
+                publication_store=authority_store,
+            )
+            job, _ = self._enqueue(jobs, "foreign-publication-target")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            foreign_store = ArtifactStore(root / "authority-b")
+            with patch.object(
+                foreign_store,
+                "publish_bytes",
+                side_effect=AssertionError("foreign publication callback executed"),
+            ):
+                with self.assertRaisesRegex(
+                    JobConflictError,
+                    "publication target does not match research evidence authority",
+                ):
+                    jobs.publish_result_bytes(
+                        job["job_id"], worker_id="worker-a",
+                        generation=int(claimed["generation"]),
+                        artifact_store=foreign_store,
+                        data=b"foreign-result", media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                        now=self.now + timedelta(seconds=1),
+                    )
+            self.assertEqual(jobs.get(job["job_id"])["state"], "RUNNING")
+
+    def test_foreign_checkpoint_and_external_resolution_cannot_redirect_bound_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority_root = root / "authority-a"
+            authority_store = ArtifactStore(authority_root)
+            jobs = ResearchJobStore(
+                root / "jobs.sqlite3",
+                authoritative_artifact_root=authority_root,
+                publication_store=authority_store,
+            )
+            job, _ = self._enqueue(jobs, "foreign-checkpoint-authority")
+            claimed = jobs.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            foreign_store = ArtifactStore(root / "authority-b")
+            with patch.object(
+                foreign_store,
+                "publish_bytes",
+                side_effect=AssertionError("foreign checkpoint publication callback executed"),
+            ):
+                with self.assertRaisesRegex(
+                    JobConflictError,
+                    "publication target does not match research evidence authority",
+                ):
+                    jobs.publish_checkpoint_bytes(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=generation,
+                        artifact_store=foreign_store,
+                        data=b"foreign-checkpoint",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                        resource_usage={"wall_seconds": 1},
+                        now=self.now + timedelta(seconds=1),
+                    )
+            self.assertNotIn("checkpoint_ref", jobs.get(job["job_id"]))
+
+            checkpoint = checkpoint_artifact(
+                foreign_store,
+                job_id=job["job_id"], generation=generation,
+                input_hashes=job["input_hashes"], payload="foreign-checkpoint",
+            )
+            with self.assertRaisesRegex(JobConflictError, "job-bound immutable"):
+                jobs.checkpoint(
+                    job["job_id"], worker_id="worker-a", generation=generation,
+                    checkpoint_ref=checkpoint, resource_usage={"wall_seconds": 1},
+                    now=self.now + timedelta(seconds=1),
+                )
+            self.assertNotIn("checkpoint_ref", jobs.get(job["job_id"]))
+
+            external, _ = jobs.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="foreign-resolution-authority",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60}, now=self.now,
+            )
+            jobs.cancel(job["job_id"], now=self.now + timedelta(seconds=2))
+            jobs.claim("worker-b", now=self.now + timedelta(seconds=2), lease_seconds=1)
+            jobs.requeue_expired(now=self.now + timedelta(seconds=4))
+            external_generation = int(jobs.get(external["job_id"])["generation"])
+            proof = {
+                "schema_version": "1.0.0",
+                "artifact_kind": "RESEARCH_JOB_EXTERNAL_RESOLUTION",
+                "job_id": external["job_id"],
+                "generation": external_generation,
+                "verdict": "PROVEN_NOT_RUN",
+            }
+            manifest = foreign_store.publish_bytes(
+                artifact_id=str(uuid4()),
+                data=json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                metadata={
+                    "artifact_kind": proof["artifact_kind"],
+                    "job_id": external["job_id"],
+                    "generation": external_generation,
+                    "verdict": "PROVEN_NOT_RUN",
+                },
+            )
+            evidence = f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
+            with self.assertRaisesRegex(JobConflictError, "matching immutable"):
+                jobs.resolve_waiting_external(
+                    external["job_id"], generation=external_generation,
+                    verdict="PROVEN_NOT_RUN", evidence_ref=evidence,
+                    now=self.now + timedelta(seconds=5),
+                )
+            self.assertEqual(jobs.get(external["job_id"])["state"], "WAITING_EXTERNAL")
 
 
 if __name__ == "__main__":

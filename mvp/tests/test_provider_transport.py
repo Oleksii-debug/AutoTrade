@@ -2,11 +2,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from io import BytesIO
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler
 import subprocess
 import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
+from contextlib import contextmanager
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -46,7 +51,13 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
+    SignedHttpRequest,
+    UrllibJsonWireClient,
+    _exact_trading_response,
+    _binance_exact_trading_response,
+    KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
+    KrakenFuturesSigner,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
     KrakenSpotDurableNonceAllocator,
@@ -58,6 +69,13 @@ from mvp.autotrade_mvp.provider_transport import (
     _DurableProviderNonceAllocator,
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
+from mvp.autotrade_mvp.provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_response_bytes,
+    require_provider_json_depth,
+    MAX_PROVIDER_JSON_DEPTH,
+)
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
@@ -73,6 +91,42 @@ class FakeSecretResolver:
         self.calls = []
         self.on_resolve = on_resolve
         self.credential_plaintext = credential_plaintext
+        self.lease_active = False
+        self.lease_enters = 0
+        self.lease_exits = 0
+
+    @contextmanager
+    def lease_for_execution(
+        self,
+        token,
+        *,
+        origin,
+        handle,
+        execution_identity,
+        account_id,
+        provider,
+        environment,
+        purpose,
+    ):
+        if self.lease_active:
+            raise AssertionError("credential lease must not be re-entered")
+        plaintext = self.resolve_for_execution(
+            token,
+            origin=origin,
+            handle=handle,
+            execution_identity=execution_identity,
+            account_id=account_id,
+            provider=provider,
+            environment=environment,
+            purpose=purpose,
+        )
+        self.lease_active = True
+        self.lease_enters += 1
+        try:
+            yield plaintext
+        finally:
+            self.lease_active = False
+            self.lease_exits += 1
 
     def resolve_for_execution(
         self,
@@ -139,6 +193,19 @@ class RecordingWire:
             http_status=self.http_status,
             body=self.response,
         )
+
+
+
+class LeaseAssertingWire(RecordingWire):
+    def __init__(self, events, resolver, **kwargs):
+        super().__init__(events, **kwargs)
+        self.resolver = resolver
+
+    def send(self, request):
+        if not self.resolver.lease_active:
+            raise AssertionError("wire send escaped credential generation lease")
+        self.events.append("wire-lease-active")
+        return super().send(request)
 
 
 def trade_handle(*, environment="PAPER", account_id="acct-1"):
@@ -230,14 +297,19 @@ def alpaca_prepared_request(client_order_id="at-alpaca-1"):
     )
 
 
-def whitebit_trade_handle(*, account_id="acct-wb"):
+def whitebit_trade_handle(
+    *,
+    account_id="acct-wb",
+    handle_id="cred-whitebit-trade",
+    generation=1,
+):
     return PersistentCredentialHandle(
-        handle_id="cred-whitebit-trade",
+        handle_id=handle_id,
         account_id=account_id,
         provider="WHITEBIT",
         environment="LIVE",
         purpose="TRADE",
-        generation=1,
+        generation=generation,
     )
 
 
@@ -645,6 +717,7 @@ class AlpacaProviderTransportTests(unittest.TestCase):
 class WhiteBitProviderTransportTests(unittest.TestCase):
     def test_durable_nonce_survives_restart_and_clock_regression(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        provider_key = "api-key-SECRET"
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             first = WhiteBitDurableNonceAllocator(
@@ -654,7 +727,10 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(first.allocate(), 1_700_000_000_000)
+            self.assertEqual(
+                first.for_provider_api_key(provider_key).allocate(),
+                1_700_000_000_000,
+            )
 
             reopened = WhiteBitDurableNonceAllocator(
                 journal=JournalStore(path),
@@ -663,14 +739,118 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_699_999_999_000,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
-            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
+            self.assertEqual(
+                reopened.for_provider_api_key(provider_key).allocate(),
+                1_700_000_000_001,
+            )
+            aggregate_id = reopened.aggregate_id_for_provider_api_key(provider_key)
             events = JournalStore(path).load_events(
                 "provider_nonce",
-                reopened.aggregate_id,
+                aggregate_id,
             )
             self.assertEqual(
                 [item["payload"]["nonce"] for item in events],
                 [1_700_000_000_000, 1_700_000_000_001],
+            )
+            fingerprint = reopened.provider_api_key_fingerprint(provider_key)
+            self.assertEqual(
+                {item["payload"]["provider_api_key_fingerprint"] for item in events},
+                {fingerprint},
+            )
+            self.assertNotIn(provider_key, json.dumps(events, sort_keys=True))
+
+    def test_provider_key_nonce_domain_inherits_legacy_account_high_water(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(path)
+            legacy = _DurableProviderNonceAllocator(
+                provider_id="WHITEBIT",
+                display_name="WhiteBIT",
+                journal=journal,
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_100,
+                clock_utc=lambda: fixed,
+            )
+            self.assertEqual(legacy.allocate(), 1_700_000_000_100)
+
+            migrated = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_699_999_000_000,
+                clock_utc=lambda: fixed + timedelta(seconds=1),
+            )
+            keyed = migrated.for_provider_api_key("api-key-SECRET")
+            self.assertEqual(keyed.allocate(), 1_700_000_000_101)
+            self.assertEqual(migrated.legacy_nonce_floor, 1_700_000_000_100)
+
+    def test_provider_key_nonce_domain_rejects_cross_account_aliasing(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        provider_key = "shared-provider-key"
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            first = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb-a",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb-b",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_001,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+            self.assertEqual(
+                first.aggregate_id_for_provider_api_key(provider_key),
+                second.aggregate_id_for_provider_api_key(provider_key),
+            )
+            first.for_provider_api_key(provider_key).allocate()
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "scope does not match allocator",
+            ):
+                second.for_provider_api_key(provider_key).allocate()
+
+    def test_whitebit_live_transport_requires_quota_gate(self):
+        events = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=journal,
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: events.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "quota_gate must be callable for WhiteBIT LIVE transport",
+            ):
+                WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    wire_client=RecordingWire(events),
+                )
+            self.assertEqual(events, [])
+            self.assertEqual(
+                journal.load_events(
+                    "provider_nonce",
+                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+                ),
+                [],
             )
 
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
@@ -709,7 +889,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["quota", "nonce", "resolve", "guard", "wire"],
+                ["quota", "resolve", "nonce", "guard", "wire"],
             )
             self.assertEqual(response.payload, {"orderId": "123"})
             self.assertEqual(len(wire.requests), 1)
@@ -723,6 +903,201 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(body["request"], "/api/v4/order/new")
             self.assertEqual(body["nonce"], 1_700_000_000_000)
             self.assertIn("X-TXC-SIGNATURE", signed.headers)
+
+    def test_whitebit_transport_rejects_self_asserted_credential_boundary(self):
+        calls = []
+        with TemporaryDirectory() as directory:
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: calls.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: datetime(
+                    2026, 9, 25, 12, 0, tzinfo=timezone.utc
+                ),
+            )
+            with self.assertRaisesRegex(TypeError, "credential_boundary"):
+                WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(calls),
+                    credential_handle=whitebit_trade_handle(),
+                    credential_boundary=object(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
+                    wire_client=RecordingWire(calls),
+                )
+            self.assertEqual(calls, [])
+
+    def test_whitebit_same_provider_key_shares_nonce_domain_across_handle_generations(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        events = []
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            wire = RecordingWire(events, response=b'{"orderId":"123"}')
+            first_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+            first = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(
+                    handle_id="cred-whitebit-a",
+                    generation=1,
+                ),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=first_allocator,
+                quota_gate=lambda *_args: None,
+                wire_client=wire,
+            )
+            second = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(
+                    handle_id="cred-whitebit-b",
+                    generation=2,
+                ),
+                session_token="session-2",
+                origin="autotrade://execution",
+                execution_identity="sender-2",
+                nonce_allocator=second_allocator,
+                quota_gate=lambda *_args: None,
+                wire_client=wire,
+            )
+
+            first(
+                "at-whitebit-generation-one",
+                whitebit_prepared_request("at-whitebit-generation-one"),
+                lambda: None,
+            )
+            second(
+                "at-whitebit-generation-two",
+                whitebit_prepared_request("at-whitebit-generation-two"),
+                lambda: None,
+            )
+            nonces = [json.loads(request.body)["nonce"] for request in wire.requests]
+            self.assertEqual(
+                nonces,
+                [1_700_000_000_000, 1_700_000_000_001],
+            )
+            self.assertEqual(
+                first_allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+                second_allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+            )
+
+    def test_whitebit_concurrent_sends_cannot_overtake_nonce_order(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        first_wire_entered = Event()
+        release_first_wire = Event()
+        second_started = Event()
+        second_wire_entered = Event()
+        wire_calls = []
+
+        class BlockingWhiteBitWire(RecordingWire):
+            def send(self, request):
+                self.events.append("wire")
+                self.requests.append(request)
+                wire_calls.append(json.loads(request.body)["nonce"])
+                if len(self.requests) == 1:
+                    first_wire_entered.set()
+                    if not release_first_wire.wait(2):
+                        raise TimeoutError("WhiteBIT test wire release timed out")
+                else:
+                    second_wire_entered.set()
+                return TradingWireResponse(
+                    http_status=200,
+                    body=b'{"orderId":"123"}',
+                )
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            events = []
+            wire = BlockingWhiteBitWire(events)
+            first_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+
+            def make_transport(allocator, sender):
+                return WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                        session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity=sender,
+                    nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
+                    wire_client=wire,
+                )
+
+            first = make_transport(first_allocator, "sender-1")
+            second = make_transport(second_allocator, "sender-2")
+
+            def run_first():
+                return first(
+                    "at-whitebit-first",
+                    whitebit_prepared_request("at-whitebit-first"),
+                    lambda: None,
+                )
+
+            def run_second():
+                second_started.set()
+                return second(
+                    "at-whitebit-second",
+                    whitebit_prepared_request("at-whitebit-second"),
+                    lambda: None,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(run_first)
+                self.assertTrue(first_wire_entered.wait(2))
+                second_future = pool.submit(run_second)
+                self.assertTrue(second_started.wait(2))
+                self.assertFalse(second_wire_entered.wait(0.1))
+                self.assertEqual(wire_calls, [1_700_000_000_000])
+                release_first_wire.set()
+                first_future.result(timeout=2)
+                second_future.result(timeout=2)
+
+            self.assertTrue(second_wire_entered.is_set())
+            self.assertEqual(
+                wire_calls,
+                [1_700_000_000_000, 1_700_000_000_001],
+            )
 
     def test_whitebit_final_guard_failure_never_reaches_wire(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -747,6 +1122,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=wire,
             )
             client_id = "at-whitebit-guard"
@@ -760,7 +1136,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(wire.requests, [])
             nonce_events = journal.load_events(
                 "provider_nonce",
-                allocator.aggregate_id,
+                allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
             )
             self.assertEqual(len(nonce_events), 1)
 
@@ -803,7 +1179,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(
                 JournalStore(f"{directory}/journal.sqlite3").load_events(
                     "provider_nonce",
-                    allocator.aggregate_id,
+                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
                 ),
                 [],
             )
@@ -829,6 +1205,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=RecordingWire(calls),
             )
             request = whitebit_prepared_request("at-whitebit-auth")
@@ -871,6 +1248,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=wire,
             )
             dispatcher = GuardedDispatcher(
@@ -949,9 +1327,217 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(events.count("wire"), 1)
             nonce_events = store.load_events(
                 "provider_nonce",
-                allocator.aggregate_id,
+                allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
             )
             self.assertEqual(len(nonce_events), 1)
+
+
+    def test_whitebit_ambiguous_http_write_status_requires_reconciliation(self):
+        for status, expected_reason in (
+            (408, "whitebit_ambiguous_write_timeout"),
+            (429, "whitebit_ambiguous_write_rate_limit"),
+            (503, "whitebit_ambiguous_write"),
+        ):
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                events = []
+                allocator = WhiteBitDurableNonceAllocator(
+                    journal=JournalStore(f"{directory}/journal.sqlite3"),
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: datetime(
+                        2026, 9, 25, 12, 0, tzinfo=timezone.utc
+                    ),
+                )
+                wire = RecordingWire(
+                    events,
+                    response=json.dumps(
+                        {"code": status, "message": "ambiguous provider response"},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    http_status=status,
+                )
+                transport = WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
+                    wire_client=wire,
+                )
+                response = transport(
+                    "at-whitebit-status",
+                    whitebit_prepared_request("at-whitebit-status"),
+                    lambda: None,
+                )
+                self.assertEqual(response.http_status, status)
+                self.assertTrue(response.requires_reconciliation)
+                self.assertEqual(response.ambiguity_reason, expected_reason)
+                self.assertEqual(len(wire.requests), 1)
+
+    def test_whitebit_ambiguous_http_status_is_durable_unknown_and_never_retried(self):
+        for status, expected_reason in (
+            (408, "whitebit_ambiguous_write_timeout"),
+            (429, "whitebit_ambiguous_write_rate_limit"),
+            (503, "whitebit_ambiguous_write"),
+        ):
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                events = []
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                allocator = WhiteBitDurableNonceAllocator(
+                    journal=store,
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    clock_millis=lambda: events.append("nonce") or 1_700_000_000_000,
+                    clock_utc=lambda: datetime(
+                        2026, 9, 25, 12, 0, tzinfo=timezone.utc
+                    ),
+                )
+                raw = json.dumps(
+                    {"code": status, "message": "ambiguous provider response"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                wire = RecordingWire(
+                    events,
+                    response=raw,
+                    http_status=status,
+                )
+                transport = WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
+                    wire_client=wire,
+                )
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="LIVE",
+                    account_id="acct-wb",
+                    owner_token="owner-wb",
+                )
+                intent_id = f"intent-whitebit-http-{status}"
+                attempt_id = f"attempt-whitebit-http-{status}"
+                client_id = stable_client_order_id(
+                    "WHITEBIT",
+                    intent_id,
+                    environment="LIVE",
+                    account_id="acct-wb",
+                    max_length=32,
+                    client_id_format="TOKEN",
+                )
+                actual = WhiteBitPreparedRequest(
+                    endpoint="/api/v4/order/new",
+                    body={
+                        "market": "BTC_USDT",
+                        "side": "buy",
+                        "amount": "0.001",
+                        "price": "50000",
+                        "clientOrderId": client_id,
+                        "postOnly": False,
+                    },
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    capability_snapshot_id="wb-cap-1",
+                    documentation_refs=(
+                        "https://docs.whitebit.com/api-reference/overview",
+                    ),
+                )
+                kwargs = {
+                    "attempt_id": attempt_id,
+                    "intent_id": intent_id,
+                    "intent_hash": f"intent-hash-whitebit-{status}",
+                    "provider": "WHITEBIT",
+                    "request": actual.to_guarded_dispatch_request(),
+                    "now": "2026-09-25T12:00:00Z",
+                    "authority_check": lambda _hash, _now: (True, "allowed"),
+                    "transport_send": transport,
+                    "sender_check": lambda _owner, _epoch: None,
+                    "final_barrier_clock": lambda: "2026-09-25T12:00:01Z",
+                    "submission_scope": {
+                        "capability_snapshot_id": "wb-cap-1",
+                        "provider": "WHITEBIT",
+                        "account_id": "acct-wb",
+                        "environment": "LIVE",
+                    },
+                }
+                result = dispatcher.dispatch(**kwargs)
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, expected_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+                binding = load_submission_response_binding(
+                    store,
+                    environment="LIVE",
+                    account_id="acct-wb",
+                    attempt_id=attempt_id,
+                )
+                self.assertEqual(binding.response_bytes, raw)
+                terminal = store.load_events(
+                    "submission_attempt",
+                    binding.aggregate_id,
+                )[-1]
+                self.assertEqual(terminal["event_type"], "SubmissionUnknown")
+                self.assertEqual(
+                    terminal["payload"]["retry_disposition"],
+                    "RECONCILE_FIRST",
+                )
+                self.assertEqual(terminal["payload"]["http_status"], status)
+
+                repeated = dispatcher.dispatch(**kwargs)
+                self.assertEqual(repeated.status, "UNKNOWN")
+                self.assertEqual(repeated.reason, expected_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+    def test_whitebit_definitive_client_rejection_does_not_claim_ambiguity(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: datetime(
+                    2026, 9, 25, 12, 0, tzinfo=timezone.utc
+                ),
+            )
+            transport = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
+                wire_client=RecordingWire(
+                    events,
+                    response=b'{"code":400,"message":"validation failed"}',
+                    http_status=400,
+                ),
+            )
+            response = transport(
+                "at-whitebit-400",
+                whitebit_prepared_request("at-whitebit-400"),
+                lambda: None,
+            )
+            self.assertEqual(response.http_status, 400)
+            self.assertFalse(response.requires_reconciliation)
+            self.assertIsNone(response.ambiguity_reason)
 
 
 class KrakenSpotProviderTransportTests(unittest.TestCase):
@@ -2088,6 +2674,52 @@ class ProviderTransportTests(unittest.TestCase):
             wire.requests[0].body,
         )
 
+    def test_trade_credential_generation_lease_covers_final_guard_and_wire(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(events, resolver)
+        transport = BinanceSpotHttpTransport(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id="cap-1",
+            secret_resolver=resolver,
+            credential_handle=trade_handle(),
+            session_token="session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            quota_gate=None,
+            wire_client=wire,
+        )
+        client_id = "at-lease-trade"
+
+        def final_guard():
+            self.assertTrue(
+                resolver.lease_active,
+                "final guard must execute inside exact credential generation lease",
+            )
+            events.append("guard-lease-active")
+
+        response = transport(
+            client_id,
+            prepared_request(client_id),
+            final_guard,
+        )
+
+        self.assertEqual(response.http_status, 200)
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(
+            events,
+            [
+                "resolve",
+                "guard-lease-active",
+                "wire-lease-active",
+                "wire",
+            ],
+        )
+
     def test_capability_mismatch_rejects_before_secret_guard_or_wire(self):
         events = []
         wire = RecordingWire(events)
@@ -2214,6 +2846,104 @@ class ProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1700000000000,
                 wire_client=RecordingWire(events),
             )
+
+    def test_binance_5xx_and_backend_timeout_are_unknown_not_definitive(self):
+        cases = (
+            (503, b'{"code":-1000,"msg":"backend failure"}',
+             "binance_spot_http_5xx_execution_unknown"),
+            (200, b'{"code":-1007,"msg":"Timeout waiting for response"}',
+             "binance_spot_backend_timeout_execution_unknown"),
+        )
+        for status, body, reason in cases:
+            with self.subTest(status=status, body=body):
+                exact = _binance_exact_trading_response(
+                    TradingWireResponse(http_status=status, body=body)
+                )
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
+                self.assertEqual(exact.http_status, status)
+                self.assertEqual(exact.response_bytes, body)
+        definite = _binance_exact_trading_response(
+            TradingWireResponse(http_status=400, body=b'{"code":-1013,"msg":"filter"}')
+        )
+        self.assertFalse(definite.requires_reconciliation)
+        self.assertEqual(definite.http_status, 400)
+        successful = _binance_exact_trading_response(
+            TradingWireResponse(http_status=200, body=b'{"orderId":123}')
+        )
+        self.assertFalse(successful.requires_reconciliation)
+        self.assertEqual(successful.http_status, 200)
+
+    def test_binance_ambiguous_http_after_send_is_durable_unknown_without_retry(self):
+        cases = (
+            (503, b'{"code":-1000,"msg":"server"}',
+             "binance_spot_http_5xx_execution_unknown"),
+            (200, b'{"code":-1007,"msg":"timeout"}',
+             "binance_spot_backend_timeout_execution_unknown"),
+        )
+        for status, body, reason in cases:
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                events = []
+                wire = RecordingWire(events, response=body, http_status=status)
+                transport, _ = self.make_transport(events=events, wire=wire)
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="PAPER",
+                    account_id="acct-1",
+                    owner_token="owner-1",
+                )
+                intent_id = f"intent-binance-ambiguous-{status}"
+                attempt_id = f"attempt-binance-ambiguous-{status}"
+                client_id = stable_client_order_id(
+                    "BINANCE", intent_id,
+                    environment="PAPER", account_id="acct-1",
+                )
+                args = dict(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-binance-ambiguous-hash-{status}",
+                    provider="BINANCE",
+                    request=prepared_request(client_id),
+                    now="2026-09-25T10:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                    submission_scope={
+                        "capability_snapshot_id": "cap-1",
+                        "provider": "BINANCE",
+                        "account_id": "acct-1",
+                        "environment": "PAPER",
+                    },
+                )
+                outcome = dispatcher.dispatch(**args)
+                self.assertEqual(outcome.status, "UNKNOWN")
+                self.assertEqual(outcome.reason, reason)
+                self.assertEqual(len(wire.requests), 1)
+                aggregate_id = dispatcher._aggregate_id(attempt_id)
+                events_saved = store.load_events("submission_attempt", aggregate_id)
+                self.assertEqual(
+                    [event["event_type"] for event in events_saved],
+                    ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+                )
+                terminal = events_saved[-1]["payload"]
+                self.assertEqual(terminal["http_status"], status)
+                self.assertEqual(terminal["response_text"], body.decode("utf-8"))
+                self.assertEqual(terminal["reason"], reason)
+                self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+                self.assertNotIn("response", terminal)
+                restarted = GuardedDispatcher(
+                    JournalStore(f"{directory}/journal.sqlite3"),
+                    environment="PAPER",
+                    account_id="acct-1",
+                    owner_token="owner-1",
+                )
+                repeated = restarted.dispatch(
+                    **{**args, "transport_send": lambda *_: self.fail("blind resend")}
+                )
+                self.assertEqual(repeated.status, "UNKNOWN")
+                self.assertEqual(len(wire.requests), 1)
 
     def test_definitive_http_rejection_is_durable_response_not_unknown(self):
         with TemporaryDirectory() as directory:
@@ -2416,6 +3146,101 @@ class ProviderTransportTests(unittest.TestCase):
             self.assertEqual(wire.requests, [])
 
 
+    def test_oversized_real_http_body_after_send_is_durable_unknown_and_never_resends(self):
+        class OversizeStream:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, size):
+                self.read_sizes.append(size)
+                return b"x" * size
+            def __init__(self):
+                self.read_sizes = []
+
+        class OversizeWire:
+            def __init__(self):
+                self.calls = 0
+                self.streams = []
+            def send(self, request):
+                self.calls += 1
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = OversizeStream()
+                self.streams.append(stream)
+                class FakeOpener:
+                    def open(self, *_args, **_kwargs):
+                        return stream
+                client._opener = FakeOpener()
+                return client.send(request)
+
+        with TemporaryDirectory() as directory:
+            events = []
+            wire = OversizeWire()
+            transport, _resolver = self.make_transport(events=events, wire=wire)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store, environment="PAPER", account_id="acct-1", owner_token="owner-1"
+            )
+            intent_id = "intent-http-byte-budget"
+            client_id = stable_client_order_id(
+                "BINANCE", intent_id, environment="PAPER", account_id="acct-1"
+            )
+            arguments = dict(
+                attempt_id="attempt-http-byte-budget",
+                intent_id=intent_id,
+                intent_hash="intent-http-byte-budget-hash",
+                provider="BINANCE",
+                request=prepared_request(client_id),
+                now="2026-09-25T10:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                submission_scope={
+                    "capability_snapshot_id": "cap-1",
+                    "provider": "BINANCE",
+                    "account_id": "acct-1",
+                    "environment": "PAPER",
+                },
+            )
+            result = dispatcher.dispatch(**arguments)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(wire.calls, 1)
+            self.assertEqual(wire.streams[0].read_sizes, [9])
+            self.assertEqual(
+                [x["event_type"] for x in dispatcher._events("attempt-http-byte-budget")],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            repeated = dispatcher.dispatch(**arguments)
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(wire.calls, 1)
+
+
+
+    def test_trade_transport_rejects_legacy_resolve_only_secret_resolver(self):
+        class ResolveOnlySecretResolver:
+            def resolve_for_execution(self, *_args, **_kwargs):
+                return '{"api_key":"legacy","api_secret":"legacy"}'
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "secret_resolver must implement lease_for_execution",
+        ):
+            BinanceSpotHttpTransport(
+                policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-1",
+                capability_snapshot_id="cap-1",
+                secret_resolver=ResolveOnlySecretResolver(),
+                credential_handle=trade_handle(),
+                session_token="session-token",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                wire_client=RecordingWire([]),
+            )
+
+
 class AuthenticatedReadTransportTests(unittest.TestCase):
     def make_read_transport(
         self,
@@ -2500,6 +3325,72 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
         self.assertNotIn("SECRET", observation.evidence_ref)
+
+    def test_read_credential_generation_lease_covers_final_currentness_and_wire(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(
+            events,
+            resolver,
+            response=b'{"balances":[{"asset":"USD"}]}',
+        )
+        transport, _ = self.make_read_transport(
+            events=events,
+            wire=wire,
+            secret_resolver=resolver,
+        )
+
+        observation = transport(authenticated_read_binding())
+
+        self.assertEqual(observation.provider_id, "BINANCE")
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(
+            events,
+            [
+                "capability",
+                "resolve",
+                "capability",
+                "wire-lease-active",
+                "wire",
+            ],
+        )
+
+    def test_credential_generation_lease_releases_after_wire_failure(self):
+        events = []
+        resolver = FakeSecretResolver(events)
+        wire = LeaseAssertingWire(
+            events,
+            resolver,
+            error=OSError("synthetic post-barrier failure"),
+        )
+        transport = BinanceSpotHttpTransport(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id="cap-1",
+            secret_resolver=resolver,
+            credential_handle=trade_handle(),
+            session_token="session-token",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            quota_gate=None,
+            wire_client=wire,
+        )
+        client_id = "at-lease-failure"
+
+        with self.assertRaisesRegex(OSError, "synthetic post-barrier failure"):
+            transport(
+                client_id,
+                prepared_request(client_id),
+                lambda: None,
+            )
+
+        self.assertFalse(resolver.lease_active)
+        self.assertEqual(resolver.lease_enters, 1)
+        self.assertEqual(resolver.lease_exits, 1)
+        self.assertEqual(events[-1], "wire")
 
     def test_my_trades_activity_transport_flows_into_fill_parser(self):
         events = []
@@ -3366,6 +4257,739 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)
+
+
+class KrakenFuturesSigningPrimitiveTests(unittest.TestCase):
+    def sign(self, **overrides):
+        arguments = dict(
+            policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+            provider_environment="LIVE",
+            endpoint="/derivatives/api/v3/sendorder",
+            body={"orderType": "mkt", "symbol": "PF_XBTUSD", "side": "buy",
+                  "size": "1", "cliOrdId": "client-1"},
+            credential_plaintext=self.credential_plaintext(),
+            nonce=1,
+        )
+        arguments.update(overrides)
+        return KrakenFuturesSigner.sign(**arguments)
+
+    def test_nonce_subclass_is_rejected_without_executing_numeric_callbacks(self):
+        class HostileNonce(int):
+            def __le__(self, other):
+                raise AssertionError("untrusted nonce comparison executed")
+
+            def __str__(self):
+                raise AssertionError("untrusted nonce rendering executed")
+
+        with self.assertRaises(ProviderTransportScopeError):
+            self.sign(nonce=HostileNonce(1))
+
+    def test_policy_subclass_cannot_supply_equality_or_destination(self):
+        class HostilePolicy(ProviderEndpointPolicy):
+            def __eq__(self, other):
+                raise AssertionError("untrusted policy equality executed")
+
+            def absolute_url(self, endpoint):
+                raise AssertionError("untrusted destination callback executed")
+
+        policy = HostilePolicy("KRAKEN", "LIVE", "https://futures.kraken.com",
+                               frozenset({"futures.kraken.com"}))
+        with self.assertRaises(ProviderTransportScopeError):
+            self.sign(policy=policy)
+
+    def test_equal_policy_instance_cannot_retarget_approved_destination(self):
+        policy = ProviderEndpointPolicy("KRAKEN", "LIVE", "https://futures.kraken.com",
+                                        frozenset({"futures.kraken.com"}))
+        object.__setattr__(policy, "absolute_url", lambda endpoint: "https://attacker.test/order")
+        request = self.sign(policy=policy)
+        self.assertTrue(request.url.startswith("https://futures.kraken.com/derivatives/api/v3/sendorder?"))
+
+    def test_unbounded_size_is_rejected_before_provider_decimal_construction(self):
+        body = {"orderType": "mkt", "symbol": "PF_XBTUSD", "side": "buy",
+                "size": "1e999999999", "cliOrdId": "client-1"}
+        with patch("mvp.autotrade_mvp.provider_transport.Decimal",
+                   side_effect=AssertionError("unbounded Decimal construction")):
+            with self.assertRaises(ProviderTransportScopeError):
+                self.sign(body=body)
+
+    def test_noncanonical_base64_pad_bits_are_rejected(self):
+        credential = json.dumps({"api_key": "key", "api_secret": "Zh=="})
+        with self.assertRaises(ProviderTransportScopeError):
+            self.sign(credential_plaintext=credential)
+
+    @staticmethod
+    def credential_plaintext():
+        return json.dumps(
+            {
+                "api_key": "kraken-futures-key",
+                "api_secret": "dGVzdC1mdXR1cmVzLXNlY3JldA==",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def test_signer_matches_url_encoded_derivatives_vector(self):
+        request = KrakenFuturesSigner.sign(
+            policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+            provider_environment="LIVE",
+            endpoint="/derivatives/api/v3/sendorder",
+            body={
+                "orderType": "lmt",
+                "symbol": "PF_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "cliOrdId": "client+id",
+                "limitPrice": "60000",
+                "reduceOnly": "true",
+            },
+            credential_plaintext=self.credential_plaintext(),
+            nonce=1_415_957_147_987,
+        )
+        exact_query = (
+            "cliOrdId=client%2Bid&limitPrice=60000&orderType=lmt&"
+            "reduceOnly=true&side=buy&size=1&symbol=PF_XBTUSD"
+        )
+        self.assertEqual(
+            request.url,
+            "https://futures.kraken.com/derivatives/api/v3/sendorder?"
+            + exact_query,
+        )
+        self.assertEqual(request.body, b"")
+        self.assertEqual(request.headers["APIKey"], "kraken-futures-key")
+        self.assertEqual(request.headers["Nonce"], "1415957147987")
+        self.assertEqual(
+            request.headers["Authent"],
+            "Dx7wkm8YwJNpIwhewi4P97983BAGM3iy5iLzUS1kGNPnWQUH6e21X4NjvXUj1FPNfhvEx39t8ZgzSoK4vj5K2Q==",
+        )
+        self.assertNotIn("Content-Type", request.headers)
+        self.assertNotIn("test-futures-secret", repr(request))
+        self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(request))
+
+    def test_signer_rejects_scope_payload_nonce_and_secret_ambiguity(self):
+        valid_body = {
+            "orderType": "mkt",
+            "symbol": "PF_XBTUSD",
+            "side": "buy",
+            "size": "1",
+            "cliOrdId": "client-1",
+        }
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "policy does not match exact provider environment",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="DEMO",
+                endpoint="/derivatives/api/v3/sendorder",
+                body=valid_body,
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1,
+            )
+        for bad_nonce in (True, 0, -1, (1 << 64), "1"):
+            with self.subTest(nonce=repr(bad_nonce)), self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "unsigned 64-bit positive integer",
+            ):
+                KrakenFuturesSigner.sign(
+                    policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                    provider_environment="LIVE",
+                    endpoint="/derivatives/api/v3/sendorder",
+                    body=valid_body,
+                    credential_plaintext=self.credential_plaintext(),
+                    nonce=bad_nonce,
+                )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "client order id must be canonical text",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="LIVE",
+                endpoint="/derivatives/api/v3/sendorder",
+                body={**valid_body, "cliOrdId": " client-1 "},
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "canonical base64",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="LIVE",
+                endpoint="/derivatives/api/v3/sendorder",
+                body=valid_body,
+                credential_plaintext='{"api_key":"key","api_secret":"not-base64!"}',
+                nonce=1,
+            )
+
+
+class SharedProviderWireResponseBudgetTests(unittest.TestCase):
+    """Network-free bounded I/O tests for the selected shared wire client."""
+
+    @staticmethod
+    def request():
+        return SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=2,
+        )
+
+    def test_production_client_disables_ambient_process_os_proxy_discovery(self):
+        with patch("mvp.autotrade_mvp.provider_transport.build_opener") as factory:
+            UrllibJsonWireClient()
+            handlers = factory.call_args.args
+            selected = [x for x in handlers if type(x) is ProxyHandler]
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0].proxies, {})
+        self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_signed_write_requires_exactly_one_payload_channel(self):
+        body_request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=2,
+        )
+        self.assertEqual(body_request.body, b"{}")
+
+        query_request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order?symbol=PI_XBTUSD&size=1",
+            headers={"APIKey": "synthetic"},
+            body=b"",
+            timeout_seconds=2,
+        )
+        self.assertEqual(query_request.body, b"")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://api.example.test/v1/order?symbol=PI_XBTUSD",
+                headers={"Content-Type": "application/json"},
+                body=b"{}",
+                timeout_seconds=2,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://api.example.test/v1/order",
+                headers={"APIKey": "synthetic"},
+                body=b"",
+                timeout_seconds=2,
+            )
+
+    def test_query_only_signed_write_preserves_exact_url_and_sends_no_body(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"result":"success"}')
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        captured = []
+        stream = Stream()
+
+        class Opener:
+            def open(self, request, *, timeout):
+                captured.append((request, timeout))
+                return stream
+
+        exact_url = (
+            "https://api.example.test/derivatives/api/v3/sendorder?"
+            "orderType=mkt&symbol=PI_XBTUSD&side=buy&size=1"
+        )
+        request = SignedHttpRequest(
+            method="POST",
+            url=exact_url,
+            headers={"APIKey": "synthetic", "Authent": "synthetic-signature"},
+            body=b"",
+            timeout_seconds=2,
+        )
+        client = UrllibJsonWireClient(max_response_bytes=128)
+        client._opener = Opener()
+
+        response = client.send(request)
+
+        self.assertEqual(len(captured), 1)
+        outbound, timeout = captured[0]
+        self.assertEqual(outbound.full_url, exact_url)
+        self.assertEqual(outbound.get_method(), "POST")
+        self.assertIsNone(outbound.data)
+        self.assertEqual(timeout, 2)
+        self.assertEqual(type(response), TradingWireResponse)
+        self.assertEqual(response.http_status, 200)
+        self.assertEqual(response.body, b'{"result":"success"}')
+        self.assertEqual(stream.read_sizes, [129])
+
+    def test_config_exacts_and_shared_nonpolymorphic_byte_limits(self):
+        class NumericSubtype(int):
+            pass
+        for bad in (0, True, "8", NumericSubtype(8), HARD_MAX_PROVIDER_RESPONSE_BYTES + 1):
+            with self.subTest(bad=repr(bad)), self.assertRaises((ValueError, TypeError)):
+                UrllibJsonWireClient(max_response_bytes=bad)
+        with self.assertRaisesRegex(ValueError, "byte budget"):
+            require_provider_response_bytes(b"x" * 9, max_bytes=8)
+        self.assertEqual(require_provider_response_bytes(b"x" * 8, max_bytes=8), b"x" * 8)
+        self.assertEqual(UrllibJsonWireClient(max_response_bytes=8).max_response_bytes, 8)
+
+
+    def test_mutated_response_budget_is_revalidated_before_read_and_snapshotted(self):
+        class Stream:
+            status = 200
+
+            def __init__(self, client, body, mutate_to):
+                self.client = client
+                self.body = body
+                self.mutate_to = mutate_to
+                self.sizes = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, size=-1):
+                self.sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return self.body[:size]
+
+        class Opener:
+            def __init__(self, stream):
+                self.stream = stream
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                return self.stream
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        stream = Stream(client, b"x" * 8, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        client.max_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES + 1
+        with self.assertRaisesRegex(ProviderTransportScopeError, "byte budget"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 0)
+        self.assertEqual(stream.sizes, [])
+
+        # A concurrent field mutation cannot widen the captured four-byte limit.
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        stream = Stream(client, b"x" * 5, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(stream.sizes, [5])
+
+    def test_http_error_uses_same_captured_budget_when_live_field_mutates_during_read(self):
+        class MutatingBytesIO(BytesIO):
+            def __init__(self, client, data, mutate_to):
+                super().__init__(data)
+                self.client = client
+                self.mutate_to = mutate_to
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return super().read(size)
+
+        class FailingOpener:
+            def __init__(self, client):
+                self.stream = MutatingBytesIO(client, b"x" * 5, 8)
+                self.error = HTTPError(
+                    "https://api.example.test/v1/order",
+                    429,
+                    "error",
+                    {},
+                    self.stream,
+                )
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise self.error
+
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        opener = FailingOpener(client)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(opener.stream.read_sizes, [5])
+        self.assertEqual(client.max_response_bytes, 8)
+
+    def test_http_success_reads_at_most_limit_plus_one_and_rejects_overlimit(self):
+        class Stream:
+            def __init__(self, body):
+                self.body = body
+                self.status = 200
+                self.sizes = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, size=-1):
+                self.sizes.append(size)
+                return self.body[:size]
+        class Opener:
+            def __init__(self, stream):
+                self.stream = stream
+                self.calls = 0
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                return self.stream
+        for body, ok in ((b"x" * 8, True), (b"x" * 9, False)):
+            with self.subTest(ok=ok):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = Stream(body)
+                client._opener = Opener(stream)
+                if ok:
+                    result = client.send(self.request())
+                    self.assertEqual(result.body, body)
+                else:
+                    with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+                        client.send(self.request())
+                self.assertEqual(stream.sizes, [9])
+                self.assertEqual(client._opener.calls, 1)
+
+    def test_pure_json_structure_gate_prevents_parser_recursion_before_allocation(self):
+        inside_quoted_string = json.dumps(
+            {"message": "[" * 150 + "\\\"" + "]" * 150},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertIs(require_provider_json_depth(inside_quoted_string), inside_quoted_string)
+        at_limit = b"[" * MAX_PROVIDER_JSON_DEPTH + b"0" + b"]" * MAX_PROVIDER_JSON_DEPTH
+        one_over = b"[" * (MAX_PROVIDER_JSON_DEPTH + 1) + b"0" + b"]" * (MAX_PROVIDER_JSON_DEPTH + 1)
+        self.assertEqual(require_provider_json_depth(at_limit), at_limit)
+        # Preserve the existing provider_core._freeze_json(depth=0) geometry:
+        # 65 *empty* nested containers finish at depth 64, while placing a
+        # primitive inside the deepest one would recurse to forbidden depth 65.
+        empty_65 = b"[" * 65 + b"]" * 65
+        empty_66 = b"[" * 66 + b"]" * 66
+        self.assertEqual(require_provider_json_depth(empty_65), empty_65)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(empty_66)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(one_over)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(at_limit, max_depth=63)
+        with self.assertRaisesRegex(ValueError, "structural depth budget is invalid"):
+            require_provider_json_depth(at_limit, max_depth=True)
+        with self.assertRaisesRegex(ValueError, "invalid structural nesting"):
+            require_provider_json_depth(b"}")
+        with self.assertRaises(ValueError):
+            require_provider_json_depth(b"x" * (HARD_MAX_PROVIDER_RESPONSE_BYTES + 1))
+
+
+    def test_http_error_body_uses_same_limit_and_redirect_never_reads_body(self):
+        class TrackingBytesIO(BytesIO):
+            def __init__(self, data):
+                super().__init__(data)
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+        class FailingOpener:
+            def __init__(self, status, body):
+                self.stream = TrackingBytesIO(body)
+                self.error = HTTPError("https://api.example.test/v1/order", status, "error", {}, self.stream)
+                self.calls = 0
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise self.error
+        for status, body, ok in ((429, b"x" * 8, True), (429, b"x" * 9, False), (302, b"x" * 9, False)):
+            with self.subTest(status=status, ok=ok):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                client._opener = FailingOpener(status, body)
+                if ok:
+                    result = client.send(self.request())
+                    self.assertEqual(result.http_status, 429)
+                    self.assertEqual(result.body, body)
+                else:
+                    with self.assertRaises(ProviderTransportError):
+                        client.send(self.request())
+                self.assertEqual(client._opener.calls, 1)
+                self.assertEqual(client._opener.stream.read_sizes, [] if status == 302 else [9])
+
+    def test_injected_typed_and_raw_wire_values_cannot_exceed_absolute_ceiling(self):
+        too_large = b"x" * (HARD_MAX_PROVIDER_RESPONSE_BYTES + 1)
+        for response in (TradingWireResponse, AuthenticatedReadWireResponse):
+            with self.subTest(contract=response.__name__), self.assertRaises(ProviderTransportError):
+                response(http_status=200, body=too_large)
+        with self.assertRaises(ProviderTransportError):
+            _exact_trading_response(too_large)
+
+
+    def test_bybit_default_urllib_typed_response_is_preserved(self):
+        # Reuse the real Bybit preparation/capability/signer, replacing only
+        # network I/O with deterministic in-memory HTTP status/bytes.
+        from mvp.tests.test_bybit_transport import (
+            BybitV5SharedTransportTests, prepared,
+        )
+        from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection
+
+        class BodyStream(BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.status = 200
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        for status, body in (
+            (200, b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1","orderLinkId":"bybit-order-1"}}'),
+            (429, b'{"retCode":10006,"retMsg":"rate limit","result":{}}'),
+        ):
+            with self.subTest(status=status):
+                events = []
+                stream = BodyStream(body)
+                calls = []
+
+                class FakeOpener:
+                    def open(self, request, *, timeout):
+                        calls.append((request, timeout))
+                        if status == 429:
+                            raise HTTPError(request.full_url, status, "rate limit", {}, stream)
+                        return stream
+
+                client = UrllibJsonWireClient(max_response_bytes=256)
+                client._opener = FakeOpener()
+                capability, prepared_request = prepared()
+                transport, resolver = BybitV5SharedTransportTests().make_transport(
+                    capability=capability, events=events, wire=client,
+                )
+                exact = transport(
+                    "bybit-order-1",
+                    guarded_order_projection(prepared_request),
+                    lambda: events.append("guard"),
+                )
+                self.assertEqual(type(exact.response_bytes), bytes)
+                self.assertEqual(exact.response_bytes, body)
+                self.assertEqual(exact.http_status, status)
+                self.assertEqual(exact.payload["retCode"], 0 if status == 200 else 10006)
+                self.assertEqual(stream.read_sizes, [257])
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(resolver.calls), 1)
+                self.assertEqual(events, [
+                    "capability", "resolve", "capability", "guard",
+                ])
+
+    def test_typed_wire_status_rejects_int_subclasses_before_comparison_callbacks(self):
+        # Exact response CLASS is not enough: a malicious subclass nested
+        # in http_status can override comparisons during construction.
+        callbacks = []
+
+        class SpoofedHttpStatus(int):
+            def __lt__(self, _other):
+                callbacks.append("lt")
+                return False
+
+            def __gt__(self, _other):
+                callbacks.append("gt")
+                return False
+
+        for response_type in (
+            TradingWireResponse,
+            AuthenticatedReadWireResponse,
+        ):
+            with self.subTest(response_type=response_type.__name__):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "HTTP status must be an integer",
+                ):
+                    response_type(http_status=SpoofedHttpStatus(777), body=b"{}")
+                self.assertEqual(callbacks, [])
+                accepted = response_type(http_status=200, body=b"{}")
+                self.assertIs(type(accepted.http_status), int)
+
+    def test_exact_trading_adapter_revalidates_nested_status_after_construction(self):
+        # Even an exact frozen dataclass can be mutated by object.__setattr__.
+        # Never trust a past __post_init__ decision at post-SEND evidence time.
+        callbacks = []
+
+        class MutatedStatus(int):
+            def __lt__(self, _other):
+                callbacks.append("lt")
+                raise AssertionError("hostile comparator executed")
+
+            def __gt__(self, _other):
+                callbacks.append("gt")
+                raise AssertionError("hostile comparator executed")
+
+        typed = TradingWireResponse(http_status=200, body=b"{}")
+        object.__setattr__(typed, "http_status", MutatedStatus(777))
+        with self.assertRaisesRegex(
+            ProviderTransportError, "invalid trading HTTP response status",
+        ):
+            _exact_trading_response(typed)
+        self.assertEqual(callbacks, [])
+
+        for bad in (True, 99, 600, "200"):
+            with self.subTest(bad=repr(bad)):
+                object.__setattr__(typed, "http_status", bad)
+                with self.assertRaisesRegex(
+                    ProviderTransportError, "invalid trading HTTP response status",
+                ):
+                    _exact_trading_response(typed)
+
+        object.__setattr__(typed, "http_status", 503)
+        legitimate = _exact_trading_response(typed)
+        self.assertEqual(legitimate.http_status, 503)
+        self.assertEqual(legitimate.response_bytes, b"{}")
+
+    def test_trading_wire_subclass_cannot_impersonate_post_send_exact_status(self):
+        callbacks = []
+        class HostileTradingWireResponse(TradingWireResponse):
+            def __getattribute__(self, name):
+                if name in ("body", "http_status"):
+                    callbacks.append(name)
+                    raise AssertionError("untrusted virtual getter ran after send")
+                return object.__getattribute__(self, name)
+
+        forged = object.__new__(HostileTradingWireResponse)
+        with self.assertRaisesRegex(ProviderTransportError, "unsupported response contract"):
+            _exact_trading_response(forged)
+        self.assertEqual(callbacks, [])
+
+    def test_signed_http_error_context_is_detached_after_redacted_outcome(self):
+        secret = "SYNTHETIC_SIGNED_QUERY_OR_KEY_NO_LOGGING"
+        sensitive_url = "https://api.example.test/read?signature=" + secret
+        signed_read = AuthenticatedReadHttpRequest(
+            url=sensitive_url,
+            headers={"X-API-KEY": secret},
+            timeout_seconds=2,
+        )
+
+        class SensitiveStream(BytesIO):
+            def __init__(self, body, *, fail=False):
+                super().__init__(body)
+                self.fail = fail
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                if self.fail:
+                    raise OSError(secret)
+                return super().read(size)
+
+        for status, body, read_fail, expected, size_calls in (
+            (302, b"redirect-not-read", False, "redirect is prohibited", []),
+            (429, b"x" * 9, False, "invalid or oversized", [9]),
+            (500, b"x" * 3, True, "error body unavailable", [9]),
+        ):
+            with self.subTest(status=status):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = SensitiveStream(body, fail=read_fail)
+                source_error = HTTPError(
+                    sensitive_url, status, "SECRET-BEARING HTTP ERROR",
+                    {"X-API-KEY": secret}, stream,
+                )
+                class FailingOpener:
+                    def open(self, *_args, **_kwargs):
+                        raise source_error
+                client._opener = FailingOpener()
+                with self.assertRaisesRegex(
+                    ProviderTransportError, expected,
+                ) as caught:
+                    client.send(signed_read)
+                self.assertEqual(stream.read_sizes, size_calls)
+                graph = [caught.exception]
+                visited = set()
+                while graph:
+                    current = graph.pop()
+                    if id(current) in visited:
+                        continue
+                    visited.add(id(current))
+                    self.assertNotIsInstance(current, HTTPError)
+                    self.assertNotIn(secret, str(current))
+                    self.assertNotIn(secret, repr(current))
+                    if current.__cause__ is not None:
+                        graph.append(current.__cause__)
+                    if current.__context__ is not None:
+                        graph.append(current.__context__)
+
+        class BrokenDnsOpener:
+            def open(self, *_args, **_kwargs):
+                raise URLError(secret)
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = BrokenDnsOpener()
+        with self.assertRaisesRegex(
+            ProviderTransportError, "transport response unavailable"
+        ) as caught:
+            client.send(signed_read)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn(secret, repr(caught.exception))
+
+    def test_http_error_hostile_status_cannot_dispatch_comparison_or_leak_context(self):
+        observed = []
+        secret = "SYNTHETIC_HOSTILE_HTTP_STATUS_SECRET"
+        class HostileCode(int):
+            def __int__(self):
+                observed.append("int")
+                raise AssertionError(secret)
+            def __le__(self, _):
+                observed.append("le")
+                raise AssertionError(secret)
+        for status in (True, "503", HostileCode(503)):
+            with self.subTest(status=repr(status)):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                error = HTTPError(
+                    "https://api.example.test/?signature=" + secret,
+                    status, "synthetic", {}, BytesIO(b"ok"),
+                )
+                class FailingOpener:
+                    def open(self, *_args, **_kwargs):
+                        raise error
+                client._opener = FailingOpener()
+                with self.assertRaisesRegex(
+                    ProviderTransportError, "error status invalid",
+                ) as caught:
+                    client.send(self.request())
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertNotIn(secret, repr(caught.exception))
+        self.assertEqual(observed, [])
+
+    def test_authenticated_http_error_keeps_exact_status_and_budget(self):
+        class Body(BytesIO):
+            def __init__(self):
+                super().__init__(b"12345678")
+                self.calls = []
+            def read(self, size=-1):
+                self.calls.append(size)
+                return super().read(size)
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        body = Body()
+        class FailingOpener:
+            def open(self, request, *_args, **_kwargs):
+                raise HTTPError(request.full_url, 429, "rate limit", {}, body)
+        client._opener = FailingOpener()
+        exact = client.send(AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?signature=fake",
+            headers={"X-API-KEY": "synthetic"}, timeout_seconds=2,
+        ))
+        self.assertIs(type(exact), AuthenticatedReadWireResponse)
+        self.assertEqual(exact.http_status, 429)
+        self.assertEqual(exact.body, b"12345678")
+        self.assertEqual(body.calls, [9])
 
 
 if __name__ == "__main__":

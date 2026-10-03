@@ -27,23 +27,30 @@ import json
 import os
 from threading import Lock
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Protocol
-from urllib.error import HTTPError
+from typing import Any, Callable, ContextManager, Mapping, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
+    ProxyHandler,
     build_opener,
 )
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
+from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 from .persistence import JournalStore, payload_digest
+from .kraken_futures import validate_futures_client_order_id
 from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
 )
-from .whitebit import sign_private_request, validate_client_order_id
+from .whitebit import (
+    classify_whitebit_http_retry,
+    sign_private_request,
+    validate_client_order_id,
+)
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -51,6 +58,11 @@ from .provider_core import (
     observe_authenticated_json_response,
 )
 from .windows_secrets import PersistentCredentialHandle
+from .provider_response_limits import (
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_response_bytes,
+)
 
 
 class ProviderTransportError(RuntimeError):
@@ -62,7 +74,7 @@ class ProviderTransportScopeError(ValueError):
 
 
 class ProviderSecretResolver(Protocol):
-    def resolve_for_execution(
+    def lease_for_execution(
         self,
         token: str,
         *,
@@ -73,7 +85,7 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
-    ) -> str: ...
+    ) -> ContextManager[str]: ...
 
 
 class ProviderWireClient(Protocol):
@@ -290,6 +302,26 @@ WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
                 environment="LIVE",
                 base_url="https://whitebit.com",
                 allowed_hosts=frozenset({"whitebit.com"}),
+            ),
+        }
+    )
+)
+
+
+KRAKEN_FUTURES_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="LIVE",
+                base_url="https://futures.kraken.com",
+                allowed_hosts=frozenset({"futures.kraken.com"}),
+            ),
+            "DEMO": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="PAPER",
+                base_url="https://demo-futures.kraken.com",
+                allowed_hosts=frozenset({"demo-futures.kraken.com"}),
             ),
         }
     )
@@ -827,9 +859,15 @@ class SignedHttpRequest:
             or parsed.fragment
         ):
             raise ProviderTransportScopeError("signed request URL is invalid")
-        if type(self.body) is not bytes or not self.body:
+        if type(self.body) is not bytes:
             raise ProviderTransportScopeError(
-                "signed request body must be non-empty exact bytes"
+                "signed request body must be exact bytes"
+            )
+        has_query = bool(parsed.query)
+        has_body = bool(self.body)
+        if has_query == has_body:
+            raise ProviderTransportScopeError(
+                "signed POST requires exactly one payload channel: URL query or body"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -936,16 +974,15 @@ class TradingWireResponse:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        if type(self.body) is not bytes or not self.body:
-            raise ProviderTransportError(
-                "provider returned an empty or non-byte trading response"
-            )
+        try:
+            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
 
 
 @dataclass(frozen=True)
@@ -955,16 +992,15 @@ class AuthenticatedReadWireResponse:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        if type(self.body) is not bytes or not self.body:
-            raise ProviderTransportError(
-                "provider returned an empty or non-byte authenticated-read response"
-            )
+        try:
+            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized authenticated-read response") from error
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -975,8 +1011,31 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
-    def __init__(self) -> None:
-        self._opener = build_opener(_NoRedirectHandler())
+    def __init__(self, *, max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> None:
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
+            raise ProviderTransportScopeError("provider response byte budget is invalid")
+        self.max_response_bytes = max_response_bytes
+        # urllib otherwise discovers process/OS proxies implicitly. The
+        # production shared client is direct-only; proxies require separate
+        # explicit network-policy authority, not ambient environment variables.
+        self._opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
+
+    def _response_budget(self) -> int:
+        budget = self.max_response_bytes
+        if (
+            type(budget) is not int
+            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderTransportScopeError(
+                "provider response byte budget is invalid"
+            )
+        return budget
+
+    def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        try:
+            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
     def send(
         self,
@@ -990,7 +1049,7 @@ class UrllibJsonWireClient:
                 "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
             )
         if isinstance(request, SignedHttpRequest):
-            data = request.body
+            data = request.body or None
             method = request.method
         else:
             data = request.body or None
@@ -1005,34 +1064,68 @@ class UrllibJsonWireClient:
             request,
             AuthenticatedReadHttpRequest,
         )
+        # Capture one exact validated budget before any response-body read.
+        # Mutating the client during I/O cannot widen this send's read envelope.
+        response_budget = self._response_budget()
         http_status: int | None = None
+        http_error_status: int | None = None
+        http_error_invalid_status = False
+        http_error_read_failed = False
+        transport_unavailable = False
         try:
             with self._opener.open(
                 outbound,
                 timeout=request.timeout_seconds,
             ) as response:
                 http_status = int(response.status)
-                raw = response.read()
+                raw = self._bounded_body(
+                    response.read(response_budget + 1),
+                    max_bytes=response_budget,
+                )
         except HTTPError as error:
-            # Redirects are prohibited for both reads and writes. For reads,
-            # preserve non-redirect HTTP status as a typed outcome so an error
-            # body can never be promoted to successful provider state.
-            if 300 <= int(error.code) < 400:
-                raise ProviderTransportError(
-                    "provider redirect is prohibited"
-                ) from error
-            raw = error.read()
-            if type(raw) is not bytes or not raw:
-                raise ProviderTransportError(
-                    "provider returned an empty HTTP error response"
-                ) from error
+            # An HTTPError retains its request URL and sometimes provider
+            # headers, including signed read-query/credential material.
+            # Read at most one bounded body here, but NEVER raise or construct
+            # typed responses while the secret-bearing exception is active:
+            # implicit __context__/explicit __cause__ would expose it later.
+            try:
+                observed_status = error.code
+                if type(observed_status) is int and 100 <= observed_status <= 599:
+                    http_error_status = observed_status
+                else:
+                    http_error_invalid_status = True
+            except Exception:
+                http_error_invalid_status = True
+            if http_error_status is not None and not 300 <= http_error_status < 400:
+                try:
+                    raw = error.read(response_budget + 1)
+                except Exception:
+                    http_error_read_failed = True
+        except URLError:
+            # urllib's transport exception can retain request metadata too.
+            # The guarded caller already handles uncertainty after SEND.
+            transport_unavailable = True
+
+        # Only primitive, detached status/bytes/flags cross the exception
+        # boundary. New failures are generated OUTSIDE urllib exception scope,
+        # so their public context chain cannot contain the signed HTTPError.
+        if transport_unavailable:
+            raise ProviderTransportError("provider HTTP transport response unavailable")
+        if http_error_invalid_status:
+            raise ProviderTransportError("provider HTTP error status invalid")
+        if http_error_status is not None:
+            if 300 <= http_error_status < 400:
+                raise ProviderTransportError("provider redirect is prohibited")
+            if http_error_read_failed:
+                raise ProviderTransportError("provider HTTP error body unavailable")
+            raw = self._bounded_body(raw, max_bytes=response_budget)
             if is_authenticated_read:
                 return AuthenticatedReadWireResponse(
-                    http_status=int(error.code),
+                    http_status=http_error_status,
                     body=raw,
                 )
             return TradingWireResponse(
-                http_status=int(error.code),
+                http_status=http_error_status,
                 body=raw,
             )
         if type(raw) is not bytes or not raw:
@@ -1066,15 +1159,89 @@ def _exact_trading_response(
     Raw bytes remain accepted for injected legacy/test wire clients. Production
     UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
     """
-    if isinstance(value, TradingWireResponse):
+    if type(value) is TradingWireResponse:
+        # Frozen dataclasses can still be built without __init__ or modified
+        # through object.__setattr__. Revalidate the nested HTTP status at
+        # the actual post-SEND authority boundary, before virtual comparisons.
+        status = value.http_status
+        if type(status) is not int or not 100 <= status <= 599:
+            raise ProviderTransportError("invalid trading HTTP response status")
+        try:
+            raw = require_provider_response_bytes(value.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
         return ExactJsonTransportResponse(
-            value.body,
-            http_status=value.http_status,
+            raw,
+            http_status=status,
         )
     if type(value) is bytes:
-        return ExactJsonTransportResponse(value)
+        try:
+            raw = require_provider_response_bytes(value, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
+        return ExactJsonTransportResponse(raw)
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
+    )
+
+
+def _binance_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Conservatively classify Binance Spot order-send execution uncertainty.
+
+    Binance documents that 5xx does NOT mean the matching engine rejected the
+    order. It also identifies -1007 as execution-status-unknown. Preserve the
+    exact status and response bytes for reconciliation; NEVER blindly retry
+    after GuardedDispatcher's irreversible send barrier. Validated ordinary
+    4xx denials and successful responses retain their existing semantics.
+    This classification is no substitute for qualified provider-origin truth.
+    """
+    exact = _exact_trading_response(value)
+    status = exact.http_status
+    parsed = exact.payload
+    if status is not None and 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+        )
+    if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_backend_timeout_execution_unknown",
+        )
+    return exact
+
+
+def _whitebit_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Bind WhiteBIT financial-write HTTP ambiguity to durable dispatch state.
+
+    WhiteBIT 429 and 5xx responses after the send barrier do not prove that the
+    financial write was not accepted. They therefore remain UNKNOWN until
+    reconciliation, rather than becoming a retry-safe SubmissionSent terminal.
+    """
+
+    exact = _exact_trading_response(value)
+    if exact.http_status is None:
+        return exact
+    decision = classify_whitebit_http_retry(
+        status_code=exact.http_status,
+        attempt=1,
+        request_class="WRITE",
+    )
+    if not decision.requires_reconciliation:
+        return exact
+    return ExactJsonTransportResponse(
+        exact.response_bytes,
+        http_status=exact.http_status,
+        requires_reconciliation=True,
+        ambiguity_reason="whitebit_" + decision.classification.lower(),
     )
 
 
@@ -1377,8 +1544,14 @@ class _DurableProviderNonceAllocator:
         return self.allocate()
 
 
-class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
-    """Journal-backed monotonic WhiteBIT nonce authority."""
+class WhiteBitDurableNonceAllocator:
+    """Journal-backed WhiteBIT nonce authority keyed by provider API-key identity.
+
+    WhiteBIT authenticates the nonce together with X-TXC-APIKEY.  Local account
+    labels and credential-handle generations are therefore admission metadata,
+    not independent provider nonce domains.  Only a SHA-256 API-key fingerprint
+    is persisted.
+    """
 
     def __init__(
         self,
@@ -1390,16 +1563,148 @@ class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
     ) -> None:
-        super().__init__(
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be JournalStore")
+        account = _canonical_text(account_id, name="account_id")
+        env = _canonical_environment(environment)
+        if env != "LIVE":
+            raise ProviderTransportScopeError(
+                "WhiteBIT durable nonce allocation is qualified only for LIVE"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if clock_utc is not None and not callable(clock_utc):
+            raise TypeError("clock_utc must be callable or None")
+        if (
+            isinstance(max_contention_retries, bool)
+            or not isinstance(max_contention_retries, int)
+            or max_contention_retries < 1
+            or max_contention_retries > 1024
+        ):
+            raise ProviderTransportScopeError(
+                "max_contention_retries must be an integer from 1 through 1024"
+            )
+
+        self.journal = journal
+        self.account_id = account
+        self.environment = env
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.max_contention_retries = max_contention_retries
+        self.legacy_nonce_floor = self._load_legacy_nonce_floor()
+
+    def _load_legacy_nonce_floor(self) -> int:
+        """Carry integrity-valid pre-API-key WhiteBIT nonce history forward."""
+
+        highest = 0
+        previous_version = 0
+        previous_nonce = 0
+        expected_aggregate_id = (
+            "WHITEBIT:"
+            + sha256(
+                f"{self.account_id}|{self.environment}".encode("utf-8")
+            ).hexdigest()
+        )
+        for event in self.journal.load_events_by_aggregate_type(
+            _DurableProviderNonceAllocator.AGGREGATE_TYPE
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ProviderTransportError(
+                    "provider nonce journal payload is invalid"
+                )
+            if payload.get("provider_id") != "WHITEBIT":
+                continue
+            if (
+                payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                continue
+            scope_keys = set(payload) - {
+                "provider_id",
+                "account_id",
+                "environment",
+                "nonce",
+            }
+            if scope_keys == {"provider_api_key_fingerprint"}:
+                continue
+            if scope_keys:
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal contains an unknown legacy scope"
+                )
+            if (
+                event.get("event_type")
+                != _DurableProviderNonceAllocator.EVENT_TYPE
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal contains an unexpected event type"
+                )
+            if event.get("aggregate_id") != expected_aggregate_id:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce aggregate identity is invalid"
+                )
+            nonce = payload.get("nonce")
+            version = event.get("aggregate_version")
+            if (
+                isinstance(nonce, bool)
+                or not isinstance(nonce, int)
+                or nonce <= 0
+                or isinstance(version, bool)
+                or not isinstance(version, int)
+                or version < 1
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal is invalid"
+                )
+            if version != previous_version + 1:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce aggregate sequence is invalid"
+                )
+            if nonce <= previous_nonce:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal is not strictly monotonic"
+                )
+            previous_version = version
+            previous_nonce = nonce
+            highest = nonce
+        return highest
+
+    @staticmethod
+    def provider_api_key_fingerprint(provider_api_key: object) -> str:
+        api_key = _canonical_text(
+            provider_api_key,
+            name="WhiteBIT provider API key",
+        )
+        return "sha256:" + sha256(api_key.encode("utf-8")).hexdigest()
+
+    def for_provider_api_key(
+        self,
+        provider_api_key: object,
+    ) -> _DurableProviderNonceAllocator:
+        fingerprint = self.provider_api_key_fingerprint(provider_api_key)
+        return _DurableProviderNonceAllocator(
             provider_id="WHITEBIT",
             display_name="WhiteBIT",
-            journal=journal,
-            account_id=account_id,
-            environment=environment,
-            clock_millis=clock_millis,
-            clock_utc=clock_utc,
-            max_contention_retries=max_contention_retries,
+            journal=self.journal,
+            account_id=self.account_id,
+            environment=self.environment,
+            clock_millis=self.clock_millis,
+            clock_utc=self.clock_utc,
+            max_contention_retries=self.max_contention_retries,
+            scope_fields={
+                "provider_api_key_fingerprint": fingerprint,
+            },
+            aggregate_identity_material=(
+                f"WHITEBIT|{self.environment}|provider-api-key|{fingerprint}"
+            ),
+            initial_nonce_floor=self.legacy_nonce_floor,
         )
+
+    def aggregate_id_for_provider_api_key(self, provider_api_key: object) -> str:
+        return self.for_provider_api_key(provider_api_key).aggregate_id
+
+    def send_lock_path_for_provider_api_key(self, provider_api_key: object):
+        return self.for_provider_api_key(provider_api_key)._send_lock_path
 
 
 class KrakenSpotDurableNonceAllocator:
@@ -1670,9 +1975,9 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, WhiteBitDurableNonceAllocator):
             raise TypeError(
@@ -1685,8 +1990,10 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "nonce allocator account/environment mismatch"
             )
-        if quota_gate is not None and not callable(quota_gate):
-            raise TypeError("quota_gate must be callable or None")
+        if not callable(quota_gate):
+            raise TypeError(
+                "quota_gate must be callable for WhiteBIT LIVE transport"
+            )
         if wire_client is not None and not hasattr(wire_client, "send"):
             raise TypeError("wire_client must implement send")
 
@@ -1764,16 +2071,14 @@ class WhiteBitHttpTransport:
                 "prepared request client order identity mismatch"
             )
 
-        if self.quota_gate is not None:
-            self.quota_gate(
-                "WHITEBIT",
-                self.account_id,
-                "LIVE",
-                "ORDER_WRITE",
-            )
+        self.quota_gate(
+            "WHITEBIT",
+            self.account_id,
+            "LIVE",
+            "ORDER_WRITE",
+        )
 
-        nonce = self.nonce_allocator.allocate()
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -1782,30 +2087,233 @@ class WhiteBitHttpTransport:
             provider="WHITEBIT",
             environment="LIVE",
             purpose="TRADE",
-        )
-        try:
-            credential = WhiteBitCredential.parse(credential_plaintext)
-            provider_signed = sign_private_request(
-                endpoint=endpoint,
-                parameters=body,
-                nonce=nonce,
-                api_key=credential.api_key,
-                api_secret=credential.api_secret,
-                nonce_window=False,
-            )
-            signed = SignedHttpRequest(
-                method="POST",
-                url=self.policy.absolute_url(provider_signed.endpoint),
-                headers=provider_signed.headers,
-                body=provider_signed.body,
-                timeout_seconds=self.policy.timeout_seconds,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                credential = WhiteBitCredential.parse(credential_plaintext)
+            finally:
+                credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            provider_nonce = self.nonce_allocator.for_provider_api_key(
+                credential.api_key
+            )
+            with provider_nonce.serialized_send():
+                nonce = provider_nonce.allocate()
+                provider_signed = sign_private_request(
+                    endpoint=endpoint,
+                    parameters=body,
+                    nonce=nonce,
+                    api_key=credential.api_key,
+                    api_secret=credential.api_secret,
+                    nonce_window=False,
+                )
+                signed = SignedHttpRequest(
+                    method="POST",
+                    url=self.policy.absolute_url(provider_signed.endpoint),
+                    headers=provider_signed.headers,
+                    body=provider_signed.body,
+                    timeout_seconds=self.policy.timeout_seconds,
+                )
+
+                final_guard()
+                wire_response = self.wire_client.send(signed)
+                return _whitebit_exact_trading_response(wire_response)
+
+
+@dataclass(frozen=True)
+class KrakenFuturesCredential:
+    """Exact private credential shape used only at the signing boundary."""
+
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "KrakenFuturesCredential":
+        if type(plaintext) is not str or not plaintext:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {"api_key", "api_secret"}:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material must contain exact api_key/api_secret fields"
+            )
+        api_key = _canonical_text(value["api_key"], name="api_key")
+        api_secret = _canonical_text(value["api_secret"], name="api_secret")
+        try:
+            decoded = base64.b64decode(api_secret, validate=True)
+        except (ValueError, binascii.Error, UnicodeEncodeError) as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must be canonical base64"
+            ) from error
+        if not decoded or base64.b64encode(decoded).decode("ascii") != api_secret:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must be canonical base64 of non-empty bytes"
+            )
+        return cls(api_key=api_key, api_secret=api_secret)
+
+
+def _kraken_futures_decimal_text(value: object, *, name: str) -> str:
+    try:
+        number = parse_canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be canonical bounded decimal text"
+        ) from error
+    if number <= 0:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be positive and finite"
+        )
+    return value
+
+
+def _kraken_futures_prepared_body(body: object) -> Mapping[str, str]:
+    if type(body) not in (dict, MappingProxyType):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures request body must be a mapping"
+        )
+    normalized = dict(body)
+    if any(type(key) is not str for key in normalized):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order keys must be exact text"
+        )
+    required = {"orderType", "symbol", "side", "size", "cliOrdId"}
+    optional = {"limitPrice", "reduceOnly"}
+    if not required <= set(normalized) or set(normalized) - required - optional:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order body is not canonical"
+        )
+    if any(type(value) is not str for value in normalized.values()):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order values must be exact text"
+        )
+    order_type = _canonical_text(normalized["orderType"], name="orderType")
+    if order_type not in {"mkt", "lmt"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures orderType must be mkt or lmt"
+        )
+    symbol = _canonical_text(normalized["symbol"], name="symbol")
+    side = _canonical_text(normalized["side"], name="side")
+    if side not in {"buy", "sell"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures side must be buy or sell"
+        )
+    size = _kraken_futures_decimal_text(normalized["size"], name="size")
+    try:
+        client_id = validate_futures_client_order_id(normalized["cliOrdId"])
+    except Exception as error:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id is invalid"
+        ) from error
+    if client_id != normalized["cliOrdId"]:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id must be canonical text"
+        )
+
+    price = normalized.get("limitPrice")
+    if order_type == "mkt":
+        if price is not None:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Futures market order must omit limitPrice"
+            )
+    elif price is None:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures limit order requires limitPrice"
+        )
+    else:
+        normalized["limitPrice"] = _kraken_futures_decimal_text(
+            price,
+            name="limitPrice",
+        )
+    if "reduceOnly" in normalized and normalized["reduceOnly"] != "true":
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures reduceOnly must be literal true when present"
+        )
+    normalized["orderType"] = order_type
+    normalized["symbol"] = symbol
+    normalized["side"] = side
+    normalized["size"] = size
+    normalized["cliOrdId"] = client_id
+    return MappingProxyType(normalized)
+
+
+class KrakenFuturesSigner:
+    """Pure Derivatives v3 signer; this class owns no send authority."""
+
+    PLACE_ORDER_ENDPOINT = "/derivatives/api/v3/sendorder"
+    SIGNING_PATH = "/api/v3/sendorder"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: object,
+        endpoint: object,
+        body: object,
+        credential_plaintext: object,
+        nonce: object,
+    ) -> SignedHttpRequest:
+        if type(provider_environment) is not str or type(policy) is not ProviderEndpointPolicy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        provider_env = provider_environment
+        canonical_policy = KRAKEN_FUTURES_ENDPOINT_POLICIES.get(provider_env)
+        exact_policy_values = (
+            type(policy.provider_id) is str
+            and type(policy.environment) is str
+            and type(policy.base_url) is str
+            and type(policy.allowed_hosts) is frozenset
+            and all(type(host) is str for host in policy.allowed_hosts)
+            and type(policy.timeout_seconds) is int
+        )
+        if canonical_policy is None or not exact_policy_values or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        path = endpoint
+        if type(path) is not str or path != KrakenFuturesSigner.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Kraken Futures signer permits only the canonical sendorder path"
+            )
+        parameters = _kraken_futures_prepared_body(body)
+        if (
+            type(nonce) is not int
+            or nonce <= 0
+            or nonce > _UINT64_MAX
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures nonce must be an unsigned 64-bit positive integer"
+            )
+        credential = KrakenFuturesCredential.parse(credential_plaintext)
+        exact_query = urlencode(sorted(parameters.items()))
+        exact_query_bytes = exact_query.encode("ascii")
+        digest = sha256(
+            exact_query_bytes
+            + str(nonce).encode("ascii")
+            + KrakenFuturesSigner.SIGNING_PATH.encode("ascii")
+        ).digest()
+        secret = base64.b64decode(credential.api_secret, validate=True)
+        signature = base64.b64encode(
+            hmac.new(secret, digest, sha512).digest()
+        ).decode("ascii")
+        return SignedHttpRequest(
+            method="POST",
+            url=ProviderEndpointPolicy.absolute_url(canonical_policy, path) + "?" + exact_query,
+            headers=MappingProxyType(
+                {
+                    "APIKey": credential.api_key,
+                    "Nonce": str(nonce),
+                    "Authent": signature,
+                }
+            ),
+            body=b"",
+            timeout_seconds=canonical_policy.timeout_seconds,
+        )
 
 
 @dataclass(frozen=True)
@@ -2142,9 +2650,9 @@ class KrakenSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, KrakenSpotDurableNonceAllocator):
             raise TypeError(
@@ -2242,7 +2750,7 @@ class KrakenSpotHttpTransport:
                 "ORDER_WRITE",
             )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2251,40 +2759,40 @@ class KrakenSpotHttpTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="TRADE",
-        )
-        provider_api_key = None
-        try:
-            provider_api_key = KrakenSpotCredential.parse(
-                credential_plaintext
-            ).api_key
-            nonce_domain = self.nonce_allocator.for_provider_api_key(
-                provider_api_key
-            )
+        ) as credential_plaintext:
             provider_api_key = None
-            with nonce_domain.serialized_send():
-                nonce = nonce_domain.allocate()
-                signed = KrakenSpotSigner.sign(
-                    policy=self.policy,
-                    endpoint=endpoint,
-                    body=body,
-                    credential_plaintext=credential_plaintext,
-                    nonce=nonce,
+            try:
+                provider_api_key = KrakenSpotCredential.parse(
+                    credential_plaintext
+                ).api_key
+                nonce_domain = self.nonce_allocator.for_provider_api_key(
+                    provider_api_key
                 )
-
-                final_guard()
-                wire_response = self.wire_client.send(signed)
-                exact = _exact_trading_response(wire_response)
-                if spot_submission_requires_reconciliation(exact.payload):
-                    return ExactJsonTransportResponse(
-                        exact.response_bytes,
-                        http_status=exact.http_status,
-                        requires_reconciliation=True,
-                        ambiguity_reason="kraken_spot_deadline_elapsed",
+                provider_api_key = None
+                with nonce_domain.serialized_send():
+                    nonce = nonce_domain.allocate()
+                    signed = KrakenSpotSigner.sign(
+                        policy=self.policy,
+                        endpoint=endpoint,
+                        body=body,
+                        credential_plaintext=credential_plaintext,
+                        nonce=nonce,
                     )
-                return exact
-        finally:
-            provider_api_key = None
-            credential_plaintext = None
+
+                    final_guard()
+                    wire_response = self.wire_client.send(signed)
+                    exact = _exact_trading_response(wire_response)
+                    if spot_submission_requires_reconciliation(exact.payload):
+                        return ExactJsonTransportResponse(
+                            exact.response_bytes,
+                            http_status=exact.http_status,
+                            requires_reconciliation=True,
+                            ambiguity_reason="kraken_spot_deadline_elapsed",
+                        )
+                    return exact
+            finally:
+                provider_api_key = None
+                credential_plaintext = None
 
 
 
@@ -2343,9 +2851,9 @@ class KrakenSpotAuthenticatedReadTransport:
         )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not isinstance(nonce_allocator, KrakenSpotDurableNonceAllocator):
             raise TypeError(
@@ -2466,7 +2974,7 @@ class KrakenSpotAuthenticatedReadTransport:
         # Revalidate after quota delay and before READ credential access.
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2475,52 +2983,52 @@ class KrakenSpotAuthenticatedReadTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="READ",
-        )
-        provider_api_key = None
-        try:
-            provider_api_key = KrakenSpotCredential.parse(
-                credential_plaintext
-            ).api_key
-            nonce_domain = self.nonce_allocator.for_provider_api_key(
-                provider_api_key
-            )
+        ) as credential_plaintext:
             provider_api_key = None
-            with nonce_domain.serialized_send():
-                nonce = nonce_domain.allocate()
-                signed = KrakenSpotAuthenticatedReadSigner.sign(
-                    policy=self.policy,
-                    query_binding=query_binding,
-                    credential_plaintext=credential_plaintext,
-                    nonce=nonce,
+            try:
+                provider_api_key = KrakenSpotCredential.parse(
+                    credential_plaintext
+                ).api_key
+                nonce_domain = self.nonce_allocator.for_provider_api_key(
+                    provider_api_key
                 )
+                provider_api_key = None
+                with nonce_domain.serialized_send():
+                    nonce = nonce_domain.allocate()
+                    signed = KrakenSpotAuthenticatedReadSigner.sign(
+                        policy=self.policy,
+                        query_binding=query_binding,
+                        credential_plaintext=credential_plaintext,
+                        nonce=nonce,
+                    )
 
-                # Resolve authority again immediately before the irreversible read.
-                self._require_current_capability(query_binding, rule)
-                wire_response = self.wire_client.send(signed)
-        finally:
-            provider_api_key = None
-            credential_plaintext = None
+                    # Resolve authority again immediately before the irreversible read.
+                    self._require_current_capability(query_binding, rule)
+                    wire_response = self.wire_client.send(signed)
+            finally:
+                provider_api_key = None
+                credential_plaintext = None
 
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "authenticated-read wire client must preserve HTTP status"
-            )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "authenticated provider read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-                + "; allowed="
-                + ",".join(
-                    str(status) for status in sorted(rule.success_statuses)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "authenticated-read wire client must preserve HTTP status"
                 )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "authenticated provider read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                    + "; allowed="
+                    + ",".join(
+                        str(status) for status in sorted(rule.success_statuses)
+                    )
+                )
+            observed_at = self.clock_utc()
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=observed_at,
             )
-        observed_at = self.clock_utc()
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=observed_at,
-        )
 
 
 @dataclass(frozen=True)
@@ -2613,9 +3121,9 @@ class AlpacaTradingHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if quota_gate is not None and not callable(quota_gate):
             raise TypeError("quota_gate must be callable or None")
@@ -2762,7 +3270,7 @@ class AlpacaTradingHttpTransport:
                 "ORDER_WRITE",
             )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -2771,38 +3279,38 @@ class AlpacaTradingHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            credential = AlpacaTradingCredential.parse(
-                credential_plaintext
-            )
-            exact_body = json.dumps(
-                dict(body),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-            signed = SignedHttpRequest(
-                method="POST",
-                url=self.policy.absolute_url(endpoint),
-                headers=MappingProxyType(
-                    {
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "APCA-API-KEY-ID": credential.api_key,
-                        "APCA-API-SECRET-KEY": credential.api_secret,
-                    }
-                ),
-                body=exact_body,
-                timeout_seconds=self.policy.timeout_seconds,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                credential = AlpacaTradingCredential.parse(
+                    credential_plaintext
+                )
+                exact_body = json.dumps(
+                    dict(body),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                signed = SignedHttpRequest(
+                    method="POST",
+                    url=self.policy.absolute_url(endpoint),
+                    headers=MappingProxyType(
+                        {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                            "APCA-API-KEY-ID": credential.api_key,
+                            "APCA-API-SECRET-KEY": credential.api_secret,
+                        }
+                    ),
+                    body=exact_body,
+                    timeout_seconds=self.policy.timeout_seconds,
+                )
+            finally:
+                credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)
@@ -2972,9 +3480,9 @@ class BybitV5HttpTransport:
             )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis) or not callable(clock_utc):
             raise TypeError("Bybit write clocks must be callable")
@@ -3220,7 +3728,7 @@ class BybitV5HttpTransport:
             instrument_version=instrument_version,
         )
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -3229,30 +3737,28 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            signed = BybitV5Signer.sign(
-                policy=self.policy,
-                endpoint=endpoint,
-                body=body,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BybitV5Signer.sign(
+                    policy=self.policy,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        self._require_current_capability(
-            entity_id=entity_id,
-            instrument_version=instrument_version,
-        )
-        final_guard()
-        raw = self.wire_client.send(signed)
-        if not isinstance(raw, bytes):
-            raise ProviderTransportError(
-                "Bybit order wire client must return exact response bytes"
+            self._require_current_capability(
+                entity_id=entity_id,
+                instrument_version=instrument_version,
             )
-        return ExactJsonTransportResponse(raw)
+            final_guard()
+            # Shared production urllib returns typed status+body, while legacy
+            # injected diagnostic wire clients may return exact raw bytes.
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 class BybitV5AuthenticatedReadSigner:
@@ -3397,9 +3903,9 @@ class BybitV5AuthenticatedReadTransport:
             )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis) or not callable(clock_utc):
             raise TypeError("Bybit read clocks must be callable")
@@ -3514,7 +4020,7 @@ class BybitV5AuthenticatedReadTransport:
 
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -3523,35 +4029,35 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-        )
-        try:
-            signed = BybitV5AuthenticatedReadSigner.sign(
-                policy=self.policy,
-                query_binding=query_binding,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BybitV5AuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        self._require_current_capability(query_binding, rule)
-        wire_response = self.wire_client.send(signed)
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "Bybit authenticated-read wire client must preserve HTTP status"
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(signed)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "Bybit authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "Bybit authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=self.clock_utc(),
             )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "Bybit authenticated read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-            )
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=self.clock_utc(),
-        )
 
 
 @dataclass(frozen=True)
@@ -3717,9 +4223,9 @@ class BinanceSpotHttpTransport:
         capability = _text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis):
             raise TypeError("clock_millis must be callable")
@@ -3822,7 +4328,7 @@ class BinanceSpotHttpTransport:
         # WP-46 owns secret storage and role/session authorization. Plaintext is
         # requested only now, used once for pure signing, and never attached to
         # the durable dispatch request or returned response.
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -3831,29 +4337,29 @@ class BinanceSpotHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-        )
-        try:
-            timestamp_ms = self.clock_millis()
-            signed = BinanceSpotSigner.sign(
-                policy=self.policy,
-                endpoint=endpoint,
-                body=body,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=timestamp_ms,
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            # Python strings cannot be securely zeroized. Drop the only local
-            # transport reference immediately; the canonical vault remains the
-            # sole persistence authority.
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                timestamp_ms = self.clock_millis()
+                signed = BinanceSpotSigner.sign(
+                    policy=self.policy,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=timestamp_ms,
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                # Python strings cannot be securely zeroized. Drop the only local
+                # transport reference immediately; the canonical vault remains the
+                # sole persistence authority.
+                credential_plaintext = None
 
-        # No waits, signing, host selection or mutation may occur after this
-        # point. A wire exception after the guard is intentionally propagated so
-        # GuardedDispatcher records UNKNOWN and requires reconciliation.
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            # No waits, signing, host selection or mutation may occur after this
+            # point. A wire exception after the guard is intentionally propagated so
+            # GuardedDispatcher records UNKNOWN and requires reconciliation.
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _binance_exact_trading_response(wire_response)
 
 
 class BinanceSpotAuthenticatedReadSigner:
@@ -3991,9 +4497,9 @@ class BinanceSpotAuthenticatedReadTransport:
         )
         if not isinstance(capability_registry, CapabilityRegistry):
             raise TypeError("capability_registry must be CapabilityRegistry")
-        if not hasattr(secret_resolver, "resolve_for_execution"):
+        if not hasattr(secret_resolver, "lease_for_execution"):
             raise TypeError(
-                "secret_resolver must implement resolve_for_execution"
+                "secret_resolver must implement lease_for_execution"
             )
         if not callable(clock_millis):
             raise TypeError("clock_millis must be callable")
@@ -4113,7 +4619,7 @@ class BinanceSpotAuthenticatedReadTransport:
         # Revalidate after any quota wait and before touching READ credentials.
         self._require_current_capability(query_binding, rule)
 
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
+        with self.secret_resolver.lease_for_execution(
             self.session_token,
             origin=self.origin,
             handle=self.credential_handle,
@@ -4122,37 +4628,37 @@ class BinanceSpotAuthenticatedReadTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="READ",
-        )
-        try:
-            signed = BinanceSpotAuthenticatedReadSigner.sign(
-                policy=self.policy,
-                query_binding=query_binding,
-                credential_plaintext=credential_plaintext,
-                timestamp_ms=self.clock_millis(),
-                recv_window_ms=self.recv_window_ms,
-            )
-        finally:
-            credential_plaintext = None
+        ) as credential_plaintext:
+            try:
+                signed = BinanceSpotAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
 
-        # Secret access/signing may take time. Re-resolve authority at the
-        # irreversible boundary so revocation/expiry cannot race the wire send.
-        self._require_current_capability(query_binding, rule)
-        wire_response = self.wire_client.send(signed)
-        if not isinstance(wire_response, AuthenticatedReadWireResponse):
-            raise ProviderTransportError(
-                "authenticated-read wire client must preserve HTTP status"
+            # Secret access/signing may take time. Re-resolve authority at the
+            # irreversible boundary so revocation/expiry cannot race the wire send.
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(signed)
+            if not isinstance(wire_response, AuthenticatedReadWireResponse):
+                raise ProviderTransportError(
+                    "authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "authenticated provider read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                    + "; allowed="
+                    + ",".join(str(status) for status in sorted(rule.success_statuses))
+                )
+            observed_at = self.clock_utc()
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=observed_at,
             )
-        if wire_response.http_status not in rule.success_statuses:
-            raise ProviderTransportError(
-                "authenticated provider read returned unexpected HTTP status "
-                + str(wire_response.http_status)
-                + "; allowed="
-                + ",".join(str(status) for status in sorted(rule.success_statuses))
-            )
-        observed_at = self.clock_utc()
-        return observe_authenticated_json_response(
-            query_binding=query_binding,
-            http_status=wire_response.http_status,
-            response_bytes=wire_response.body,
-            observed_at=observed_at,
-        )

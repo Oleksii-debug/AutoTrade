@@ -9,8 +9,8 @@ guarded dispatcher and exact capability evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID
@@ -20,7 +20,17 @@ import hmac
 import json
 import re
 
+from autotrade_numeric import (
+    ExactDecimalError,
+    as_fraction,
+    exact_multiply,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
+
 from .capabilities import CapabilitySnapshot
+from .provider_response_limits import require_provider_json_depth
 from .reconciliation import ProviderFillEvidence
 
 
@@ -34,6 +44,8 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "order_types": "https://docs.whitebit.com/concepts/order-types",
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
         "websocket": "https://docs.whitebit.com/websocket/overview",
+        "rate_limits": "https://docs.whitebit.com/api-reference/rate-limits",
+        "security": "https://docs.whitebit.com/best-practices/security",
     }
 )
 
@@ -44,30 +56,72 @@ _SIDES = frozenset({"BUY", "SELL"})
 
 
 def decode_whitebit_json(raw: str | bytes):
-    """Decode provider JSON while preserving every decimal token exactly."""
-    if isinstance(raw, bytes):
+    """Decode bounded provider JSON while preserving every exact numeric token."""
+    if type(raw) is bytes:
+        raw_bytes = raw
         try:
-            raw = raw.decode("utf-8")
+            raw_text = bytes.decode(raw, "utf-8", errors="strict")
         except UnicodeDecodeError as error:
-            raise WhiteBitAdapterError("provider JSON must be UTF-8") from error
-    if not isinstance(raw, str) or not raw.strip():
+            raise WhiteBitAdapterError(
+                "provider JSON must be exact UTF-8 text"
+            ) from error
+    elif type(raw) is str:
+        raw_text = raw
+        try:
+            raw_bytes = str.encode(raw, "utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise WhiteBitAdapterError(
+                "provider JSON must be exact UTF-8 text"
+            ) from error
+    else:
+        raise WhiteBitAdapterError(
+            "provider JSON must use exact str or bytes"
+        )
+
+    if not str.strip(raw_text):
         raise WhiteBitAdapterError("provider JSON is required")
+
+    resource_failure = False
+    try:
+        require_provider_json_depth(raw_bytes)
+    except ValueError:
+        resource_failure = True
+    if resource_failure:
+        raise WhiteBitAdapterError(
+            "provider JSON exceeds maximum depth or resource budget"
+        )
 
     def reject_constant(value: str):
         raise WhiteBitAdapterError(
             f"provider JSON contains non-finite numeric token: {value}"
         )
 
+    def reject_duplicate_object_pairs(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise WhiteBitAdapterError(
+                    f"provider JSON contains duplicate object key: {key}"
+                )
+            result[key] = value
+        return result
+
     try:
         return json.loads(
-            raw,
-            parse_float=Decimal,
-            parse_int=int,
+            raw_text,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_object_pairs,
         )
+    except ExactDecimalError as error:
+        raise WhiteBitAdapterError(
+            "provider JSON numeric token exceeds the shared exact resource envelope"
+        ) from error
     except json.JSONDecodeError as error:
         raise WhiteBitAdapterError("provider JSON is invalid") from error
-
 
 def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -76,14 +130,12 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise WhiteBitAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise WhiteBitAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise WhiteBitAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise WhiteBitAdapterError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
     if positive and result <= 0:
         raise WhiteBitAdapterError(f"{name} must be positive")
     return result
@@ -1071,18 +1123,25 @@ class WhiteBitAbsenceEvidence:
 
 
 def _unix_instant(value, *, name: str) -> str:
-    """Convert an exact Unix timestamp to UTC without binary-float rounding."""
+    """Convert bounded exact Unix time without ambient Decimal/platform timestamp math."""
     instant = _decimal(value, name=name)
-    if instant < 0:
+    rational = as_fraction(instant)
+    if rational < 0:
         raise WhiteBitAdapterError(f"{name} cannot be negative")
-    whole = int(instant)
-    fractional = instant - Decimal(whole)
-    microseconds = fractional * Decimal("1000000")
-    if microseconds != microseconds.to_integral_value():
+    whole_seconds, remainder = divmod(rational.numerator, rational.denominator)
+    microsecond_numerator = remainder * 1_000_000
+    if microsecond_numerator % rational.denominator:
         raise WhiteBitAdapterError(f"{name} exceeds microsecond precision")
-    parsed = datetime.fromtimestamp(whole, tz=timezone.utc).replace(
-        microsecond=int(microseconds)
-    )
+    microseconds = microsecond_numerator // rational.denominator
+    try:
+        parsed = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+            seconds=whole_seconds,
+            microseconds=microseconds,
+        )
+    except (OverflowError, ValueError) as error:
+        raise WhiteBitAdapterError(
+            f"{name} is outside the supported UTC range"
+        ) from error
     return parsed.isoformat().replace("+00:00", "Z")
 
 
@@ -1134,6 +1193,7 @@ def parse_execution_deal(
     required = (
         "id",
         "orderId",
+        "clientOrderId",
         "time",
         "side",
         "role",
@@ -1149,22 +1209,60 @@ def parse_execution_deal(
             "execution deal missing required fields: " + ", ".join(missing)
         )
 
-    side = _text(str(payload["side"]), name="side").upper()
-    if side not in _SIDES:
-        raise WhiteBitAdapterError("execution side must be BUY or SELL")
+    for name in ("id", "orderId", "role"):
+        if type(payload[name]) is not int:
+            raise WhiteBitAdapterError(
+                f"execution {name} must be an exact JSON integer"
+            )
+        if payload[name] < 0:
+            raise WhiteBitAdapterError(f"execution {name} cannot be negative")
+
+    for name in (
+        "clientOrderId",
+        "side",
+        "amount",
+        "price",
+        "deal",
+        "fee",
+        "feeAsset",
+    ):
+        if type(payload[name]) is not str:
+            raise WhiteBitAdapterError(
+                f"execution {name} must be an exact JSON string"
+            )
+
+    if type(payload["time"]) not in {int, Decimal}:
+        raise WhiteBitAdapterError(
+            "execution time must be an exact JSON number"
+        )
+
+    raw_side = payload["side"]
+    if raw_side not in {"buy", "sell"}:
+        raise WhiteBitAdapterError(
+            "execution side must be exactly buy or sell"
+        )
+    side = raw_side.upper()
 
     raw_role = payload["role"]
-    if raw_role == 1 or raw_role == "1":
+    if raw_role == 1:
         role = "MAKER"
-    elif raw_role == 2 or raw_role == "2":
+    elif raw_role == 2:
         role = "TAKER"
     else:
-        raise WhiteBitAdapterError("execution role must be 1 (maker) or 2 (taker)")
+        raise WhiteBitAdapterError(
+            "execution role must be 1 (maker) or 2 (taker)"
+        )
 
     quantity = _decimal(payload["amount"], name="amount", positive=True)
     price = _decimal(payload["price"], name="price", positive=True)
     deal_value = _decimal(payload["deal"], name="deal", positive=True)
-    if deal_value != quantity * price:
+    try:
+        expected_deal_value = exact_multiply(quantity, price)
+    except ExactDecimalError as error:
+        raise WhiteBitAdapterError(
+            "execution amount multiplied by price exceeds the shared exact resource envelope"
+        ) from error
+    if deal_value != expected_deal_value:
         raise WhiteBitAdapterError(
             "execution deal value must equal exact amount multiplied by price"
         )
@@ -1172,22 +1270,16 @@ def parse_execution_deal(
     if fee < 0:
         raise WhiteBitAdapterError("execution fee cannot be negative")
 
-    raw_client_id = payload.get("clientOrderId")
+    raw_client_id = payload["clientOrderId"]
     client_order_id = (
         None
-        if raw_client_id in {None, ""}
-        else validate_client_order_id(str(raw_client_id))
+        if raw_client_id == ""
+        else validate_client_order_id(raw_client_id)
     )
 
     return WhiteBitExecutionDeal(
-        provider_execution_id=_text(
-            str(payload["id"]),
-            name="execution id",
-        ),
-        provider_order_id=_text(
-            str(payload["orderId"]),
-            name="order id",
-        ),
+        provider_execution_id=str(payload["id"]),
+        provider_order_id=str(payload["orderId"]),
         client_order_id=client_order_id,
         market=_text(market, name="market").upper(),
         side=side,
@@ -1196,10 +1288,9 @@ def parse_execution_deal(
         price=price,
         deal_value=deal_value,
         fee_amount=fee,
-        fee_currency=_text(str(payload["feeAsset"]), name="feeAsset").upper(),
+        fee_currency=_text(payload["feeAsset"], name="feeAsset").upper(),
         trade_time=_unix_instant(payload["time"], name="time"),
     )
-
 
 def parse_execution_history(
     records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
@@ -1584,6 +1675,237 @@ def sign_private_request(
         headers=headers,
         nonce=nonce,
         nonce_window=nonce_window,
+    )
+
+
+@dataclass(frozen=True)
+class WhiteBitCredentialBoundary:
+    """Exact credential evidence admitted for AutoTrade WhiteBIT trading.
+
+    WhiteBIT currently documents Info + Trading as the minimum trading-application
+    permission set and does not offer a public sandbox/testnet. AutoTrade therefore
+    accepts only an IP-restricted LIVE credential binding with exactly those two
+    permissions. Deposit/Withdraw authority is intentionally outside this product.
+    """
+
+    credential_binding_id: str
+    credential_generation: int
+    account_id: str
+    permissions: frozenset[str]
+    ip_whitelist_enabled: bool
+    environment: str
+    observed_at: datetime
+    evidence_ref: str
+
+    def __post_init__(self) -> None:
+        binding = _text(
+            self.credential_binding_id,
+            name="credential_binding_id",
+        )
+        if (
+            isinstance(self.credential_generation, bool)
+            or not isinstance(self.credential_generation, int)
+            or self.credential_generation < 1
+        ):
+            raise WhiteBitAdapterError(
+                "credential_generation must be a positive integer"
+            )
+        account = _text(self.account_id, name="account_id")
+        if not isinstance(self.permissions, frozenset):
+            raise TypeError("permissions must be a frozenset")
+        normalized = frozenset(
+            _text(value, name="permission").upper()
+            for value in self.permissions
+        )
+        known = frozenset({"INFO", "TRADING", "DEPOSIT", "WITHDRAW"})
+        if not normalized or not normalized.issubset(known):
+            raise WhiteBitAdapterError(
+                "credential permissions contain unknown or empty authority"
+            )
+        if type(self.ip_whitelist_enabled) is not bool:
+            raise WhiteBitAdapterError("ip_whitelist_enabled must be boolean")
+        environment = _text(self.environment, name="environment").upper()
+        observed = _instant(self.observed_at, name="observed_at")
+        evidence = _text(self.evidence_ref, name="evidence_ref")
+        object.__setattr__(self, "credential_binding_id", binding)
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "permissions", normalized)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "evidence_ref", evidence)
+
+    def assert_autotrade_safe(self) -> "WhiteBitCredentialBoundary":
+        if self.environment != "LIVE":
+            raise WhiteBitAdapterError(
+                "WhiteBIT credential environment must be LIVE; no public sandbox "
+                "credential environment is qualified"
+            )
+        if self.permissions != frozenset({"INFO", "TRADING"}):
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT credential must have exactly INFO and TRADING "
+                "permissions; deposit/withdraw authority is forbidden"
+            )
+        if not self.ip_whitelist_enabled:
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT LIVE credential requires an IP whitelist"
+            )
+        return self
+
+
+@dataclass(frozen=True)
+class WhiteBitRateLimitBudget:
+    """Partition an evidenced endpoint quota into normal/recovery/cancel capacity.
+
+    No provider-wide quota is assumed because WhiteBIT documents endpoint-specific
+    limits. The caller supplies the currently evidenced window capacity. Normal
+    traffic cannot consume recovery/cancel reserves; recovery cannot consume the
+    cancel reserve; cancellation has highest admission priority.
+    """
+
+    capacity: int
+    used: int = 0
+    reserved_recovery: int = 0
+    reserved_cancel: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("capacity", self.capacity),
+            ("used", self.used),
+            ("reserved_recovery", self.reserved_recovery),
+            ("reserved_cancel", self.reserved_cancel),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise WhiteBitAdapterError(f"{name} must be an integer")
+        if self.capacity <= 0:
+            raise WhiteBitAdapterError("capacity must be positive")
+        if min(self.used, self.reserved_recovery, self.reserved_cancel) < 0:
+            raise WhiteBitAdapterError("rate-limit counters cannot be negative")
+        if self.used > self.capacity:
+            raise WhiteBitAdapterError("used quota cannot exceed capacity")
+        if self.reserved_recovery + self.reserved_cancel >= self.capacity:
+            raise WhiteBitAdapterError(
+                "recovery and cancel reserves must leave normal capacity"
+            )
+
+    @property
+    def remaining(self) -> int:
+        return self.capacity - self.used
+
+    def can_admit(self, request_class: str) -> bool:
+        kind = _text(request_class, name="request_class").upper()
+        if kind not in {"NORMAL", "RECOVERY", "CANCEL"}:
+            raise WhiteBitAdapterError("unsupported rate-limit request class")
+        after = self.remaining - 1
+        if after < 0:
+            return False
+        if kind == "NORMAL":
+            return after >= self.reserved_recovery + self.reserved_cancel
+        if kind == "RECOVERY":
+            return after >= self.reserved_cancel
+        return True
+
+    def consume(self, request_class: str) -> "WhiteBitRateLimitBudget":
+        if not self.can_admit(request_class):
+            raise WhiteBitAdapterError(
+                "request would consume reserved WhiteBIT recovery/cancel quota"
+            )
+        return WhiteBitRateLimitBudget(
+            capacity=self.capacity,
+            used=self.used + 1,
+            reserved_recovery=self.reserved_recovery,
+            reserved_cancel=self.reserved_cancel,
+        )
+
+
+@dataclass(frozen=True)
+class WhiteBitRetryDecision:
+    automatic_retry: bool
+    base_delay_seconds: int | None
+    jitter_required: bool
+    requires_reconciliation: bool
+    classification: str
+
+
+def classify_whitebit_http_retry(
+    *,
+    status_code: int,
+    attempt: int,
+    request_class: str,
+) -> WhiteBitRetryDecision:
+    """Classify HTTP retry without weakening UNKNOWN outbound-write semantics."""
+    if (
+        not isinstance(status_code, int)
+        or isinstance(status_code, bool)
+        or not 100 <= status_code <= 599
+    ):
+        raise WhiteBitAdapterError("status_code must be an HTTP status integer")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+        raise WhiteBitAdapterError("attempt must be a positive integer")
+    kind = _text(request_class, name="request_class").upper()
+    if kind not in {"READ", "WRITE", "RECOVERY", "CANCEL"}:
+        raise WhiteBitAdapterError("unsupported retry request class")
+
+    delay = min(2 ** min(attempt - 1, 5), 30)
+    if status_code == 408:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE_TIMEOUT",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="REQUEST_TIMEOUT",
+        )
+    if status_code == 429:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE_RATE_LIMIT",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="RATE_LIMIT",
+        )
+    if 500 <= status_code <= 599:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="SERVER_TRANSIENT",
+        )
+    if status_code in {401, 403}:
+        classification = "AUTHENTICATION"
+    elif 400 <= status_code <= 499:
+        classification = "CLIENT_OR_VALIDATION"
+    else:
+        classification = "NO_RETRY"
+    return WhiteBitRetryDecision(
+        automatic_retry=False,
+        base_delay_seconds=None,
+        jitter_required=False,
+        requires_reconciliation=False,
+        classification=classification,
     )
 
 

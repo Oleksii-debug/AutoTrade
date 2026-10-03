@@ -1,13 +1,26 @@
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.allocation_valuation import (
     AllocationValuationError,
     normalize_allocation_valuation,
 )
+from mvp.autotrade_mvp.fx_valuation import FxRoundingPolicy
 
 
 class AllocationValuationBoundaryTests(unittest.TestCase):
     DECISION_TIME = "2026-09-25T18:30:00Z"
+
+    def test_numeric_ingress_is_bounded_before_valuation_identity(self):
+        class HostileMoney(Decimal):
+            def is_finite(self):
+                raise AssertionError("caller numeric callback executed")
+
+        for value in ("1e999999999", "9" * 257, Decimal("1e-257")):
+            with self.subTest(value=repr(value)), self.assertRaises(AllocationValuationError):
+                self.normalize(self.market(), self.valuation(), source_price=value)
+        with self.assertRaises(TypeError):
+            self.normalize(self.market(), self.valuation(), source_price=HostileMoney("10"))
 
     def market(
         self,
@@ -41,9 +54,13 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         portfolio_base_currency="USD",
         unit_base_notional="10",
         fx_rate="1",
+        fx_rate_numerator=None,
+        fx_rate_denominator=None,
         fx_source_id="IDENTITY",
         fx_quote=None,
         fx_evidence_sha256=None,
+        fx_rounding_policy_id=None,
+        fx_rounding_quantum=None,
         cost_rate_components=None,
         cost_evidence_refs=None,
     ):
@@ -82,10 +99,18 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
                 "fx": "fx:identity:test:v1",
             },
         }
+        if fx_rate_numerator is not None:
+            payload["fx_rate_numerator"] = fx_rate_numerator
+        if fx_rate_denominator is not None:
+            payload["fx_rate_denominator"] = fx_rate_denominator
         if fx_quote is not None:
             payload["fx_quote"] = fx_quote
         if fx_evidence_sha256 is not None:
             payload["fx_evidence_sha256"] = fx_evidence_sha256
+        if fx_rounding_policy_id is not None:
+            payload["fx_rounding_policy_id"] = fx_rounding_policy_id
+        if fx_rounding_quantum is not None:
+            payload["fx_rounding_quantum"] = fx_rounding_quantum
         return payload
 
     def normalize(self, market, valuation, *, source_price="10", base="USD", cost_rate="0.001"):
@@ -107,8 +132,38 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         result = self.normalize(self.market(), self.valuation())
         self.assertEqual(result.unit_base_notional, 10)
         self.assertEqual(result.fx_rate, 1)
+        self.assertEqual((result.fx_rate_numerator, result.fx_rate_denominator), (1, 1))
         self.assertEqual(result.fx_source_id, "IDENTITY")
         self.assertEqual(result.portfolio_base_currency, "USD")
+
+    def test_high_significance_notional_and_cost_sum_ignore_ambient_context(self):
+        source_price = "12345678901234567890.123456789"
+        cost_components = {
+            "execution": "0.1234567890123456789012345678",
+            "financing": "0.0000000000000000000000000001",
+            "funding": "0",
+            "borrow": "0",
+            "fx": "0",
+        }
+        expected_cost = "0.1234567890123456789012345679"
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = self.normalize(
+                        self.market(),
+                        self.valuation(
+                            source_price=source_price,
+                            unit_base_notional=source_price,
+                            cost_rate_components=cost_components,
+                        ),
+                        source_price=source_price,
+                        cost_rate=expected_cost,
+                    )
+                    observed.append(result.unit_base_notional)
+        self.assertTrue(all(value == Decimal(source_price) for value in observed))
 
     def test_cross_currency_requires_fresh_exact_fx_evidence(self):
         digest = "sha256:" + "a" * 64
@@ -143,6 +198,15 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.unit_base_notional, 11)
+        self.assertEqual(result.unit_base_liability_notional, Decimal("11.1"))
+        self.assertEqual((result.fx_rate_numerator, result.fx_rate_denominator), (11, 10))
+        self.assertEqual(
+            (
+                result.fx_liability_rate_numerator,
+                result.fx_liability_rate_denominator,
+            ),
+            (111, 100),
+        )
         self.assertEqual(result.fx_evidence_sha256, digest)
 
         missing = self.valuation(
@@ -167,6 +231,286 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AllocationValuationError, "not allocatable: STALE"):
             self.normalize(self.market(quote_currency="EUR"), stale)
+
+    def test_inverse_fx_exact_identity_survives_allocation_without_fabricated_decimal_rate(self):
+        digest = "sha256:" + "b" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v8",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        rounding_policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = self.normalize(
+                        self.market(quote_currency="USD"),
+                        self.valuation(
+                            quote_currency="USD",
+                            portfolio_base_currency="EUR",
+                            source_price="110.02",
+                            unit_base_notional="100",
+                            fx_rate=None,
+                            fx_rate_numerator=5000,
+                            fx_rate_denominator=5501,
+                            fx_source_id="fx:eurusd:venue:v8",
+                            fx_quote=quote,
+                            fx_evidence_sha256=digest,
+                            fx_rounding_policy_id=rounding_policy.policy_id,
+                            fx_rounding_quantum=rounding_policy.quantum,
+                            cost_evidence_refs={
+                                "execution": "execution:test:v1",
+                                "financing": "financing:none:test:v1",
+                                "funding": "funding:none:test:v1",
+                                "borrow": "borrow:none:test:v1",
+                                "fx": "fx:eurusd:venue:v8",
+                            },
+                        ),
+                        source_price="110.02",
+                        base="EUR",
+                    )
+                    observed.append(
+                        (
+                            result.unit_base_notional,
+                            result.unit_base_liability_notional,
+                            result.fx_rate,
+                            result.fx_rate_numerator,
+                            result.fx_rate_denominator,
+                            result.fx_liability_rate_numerator,
+                            result.fx_liability_rate_denominator,
+                            result.fx_source_id,
+                            result.fx_evidence_sha256,
+                        )
+                    )
+        expected = (
+            Decimal("100"),
+            Decimal("100.02"),
+            None,
+            5000,
+            5501,
+            10,
+            11,
+            "fx:eurusd:venue:v8",
+            digest,
+        )
+        self.assertTrue(all(value == expected for value in observed))
+
+    def test_inverse_fx_rejects_rounded_unit_price_for_quantity_feasibility(self):
+        digest = "sha256:" + "d" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "3",
+            "ask": "3",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:one-third",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
+        valuation = self.valuation(
+            quote_currency="USD",
+            portfolio_base_currency="EUR",
+            source_price="1",
+            unit_base_notional="0.33",
+            fx_rate=None,
+            fx_rate_numerator=1,
+            fx_rate_denominator=3,
+            fx_source_id="fx:eurusd:venue:one-third",
+            fx_quote=quote,
+            fx_evidence_sha256=digest,
+            cost_evidence_refs={
+                "execution": "execution:test:v1",
+                "financing": "financing:none:test:v1",
+                "funding": "funding:none:test:v1",
+                "borrow": "borrow:none:test:v1",
+                "fx": "fx:eurusd:venue:one-third",
+            },
+        )
+        valuation["fx_rounding_policy_id"] = policy.policy_id
+        valuation["fx_rounding_quantum"] = "0.01"
+
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "unit FX conversion must terminate exactly",
+        ):
+            self.normalize(
+                self.market(quote_currency="USD"),
+                valuation,
+                source_price="1",
+                base="EUR",
+            )
+
+    def test_inverse_fx_can_bind_rounding_policy_even_when_unit_amount_terminates(self):
+        digest = "sha256:" + "b" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v8",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
+        valuation = self.valuation(
+            quote_currency="USD",
+            portfolio_base_currency="EUR",
+            source_price="110.02",
+            unit_base_notional="100",
+            fx_rate=None,
+            fx_rate_numerator=5000,
+            fx_rate_denominator=5501,
+            fx_source_id="fx:eurusd:venue:v8",
+            fx_quote=quote,
+            fx_evidence_sha256=digest,
+            cost_evidence_refs={
+                "execution": "execution:test:v1",
+                "financing": "financing:none:test:v1",
+                "funding": "funding:none:test:v1",
+                "borrow": "borrow:none:test:v1",
+                "fx": "fx:eurusd:venue:v8",
+            },
+        )
+        valuation["fx_rounding_policy_id"] = policy.policy_id
+        valuation["fx_rounding_quantum"] = "0.01"
+
+        result = self.normalize(
+            self.market(quote_currency="USD"),
+            valuation,
+            source_price="110.02",
+            base="EUR",
+        )
+
+        self.assertEqual(result.unit_base_notional, Decimal("100"))
+        self.assertIsNone(result.fx_rate)
+        self.assertEqual(
+            (result.fx_rate_numerator, result.fx_rate_denominator),
+            (5000, 5501),
+        )
+        self.assertEqual(
+            (
+                result.fx_liability_rate_numerator,
+                result.fx_liability_rate_denominator,
+            ),
+            (10, 11),
+        )
+        self.assertEqual(result.fx_rounding_policy_id, policy.policy_id)
+        self.assertEqual(result.fx_rounding_quantum, Decimal("0.01"))
+
+        bad = dict(valuation)
+        bad["fx_rounding_policy_id"] = "fx-rounding:sha256:" + "0" * 64
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "rounding policy identity mismatch",
+        ):
+            self.normalize(
+                self.market(quote_currency="USD"),
+                bad,
+                source_price="110.02",
+                base="EUR",
+            )
+
+    def test_inverse_fx_liability_side_requires_rounding_policy_when_asset_unit_terminates(self):
+        digest = "sha256:" + "c" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.10",
+            "ask": "1.20",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:side-boundary",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "liability FX valuation is not allocatable: ROUNDING_POLICY_REQUIRED",
+        ):
+            self.normalize(
+                self.market(quote_currency="USD"),
+                self.valuation(
+                    quote_currency="USD",
+                    portfolio_base_currency="EUR",
+                    source_price="6",
+                    unit_base_notional="5",
+                    fx_rate=None,
+                    fx_rate_numerator=5,
+                    fx_rate_denominator=6,
+                    fx_source_id="fx:eurusd:venue:side-boundary",
+                    fx_quote=quote,
+                    fx_evidence_sha256=digest,
+                    cost_evidence_refs={
+                        "execution": "execution:test:v1",
+                        "financing": "financing:none:test:v1",
+                        "funding": "funding:none:test:v1",
+                        "borrow": "borrow:none:test:v1",
+                        "fx": "fx:eurusd:venue:side-boundary",
+                    },
+                ),
+                source_price="6",
+                base="EUR",
+            )
+
+    def test_inverse_fx_rejects_caller_fabricated_rational_identity(self):
+        digest = "sha256:" + "b" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v8",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
+        with self.assertRaisesRegex(AllocationValuationError, "exact FX rate identity mismatch"):
+            self.normalize(
+                self.market(quote_currency="USD"),
+                self.valuation(
+                    quote_currency="USD",
+                    portfolio_base_currency="EUR",
+                    source_price="110.02",
+                    unit_base_notional="100",
+                    fx_rate=None,
+                    fx_rate_numerator=1,
+                    fx_rate_denominator=1,
+                    fx_source_id="fx:eurusd:venue:v8",
+                    fx_quote=quote,
+                    fx_evidence_sha256=digest,
+                    fx_rounding_policy_id=policy.policy_id,
+                    fx_rounding_quantum=policy.quantum,
+                ),
+                source_price="110.02",
+                base="EUR",
+            )
 
     def test_linear_future_includes_exact_contract_multiplier(self):
         market = self.market(asset_class="FUTURE", multiplier="50")

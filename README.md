@@ -2,6 +2,21 @@
 
 Universal autonomous multi-agent financial trading platform.
 
+## Run the network-free simulation
+
+From the repository root, Python 3.12 can run one journal-backed BUY/HOLD episode without provider accounts or model calls:
+
+```console
+python -m mvp.autotrade_mvp.cli --canonical-simulation --state-dir simulation-state --episode-id example-1 --prices 100,101,103
+python -m mvp.autotrade_mvp.cli --state-dir simulation-state --accessible-status
+python -m mvp.autotrade_mvp.cli --state-dir simulation-state --economic-report
+python -m mvp.autotrade_mvp.cli --state-dir simulation-state --history --history-limit 20
+```
+
+Repeating the first command resumes the same episode without a new submission. Use a separate directory for a different episode or the legacy multi-episode demo. `--status` returns JSON; `--accessible-status` returns plain, copyable text with units and required recovery actions. All read commands leave financial events, outbox and reservations unchanged. Old journal schemas require an explicit migration rather than an upgrade during status reading.
+
+To exercise a lost response, use a new directory and add `--fault-after-send` to the simulation command. The durable outcome remains UNKNOWN, retains reserved cash and requires reconciliation; reading or restarting never retries the send. A reconciled fill also remains distinct from a confirmed terminal order. Reports show recorded cash, fees and turnover; an open position without a retained market mark has unavailable equity/P&L. These are simulation facts, not profitability or release qualification.
+
 ## Canonical entry points
 
 - `control/INDEX.json` — live repository control entry point.

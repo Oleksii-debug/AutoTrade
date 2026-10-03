@@ -8,6 +8,7 @@ then the in-memory OrderBookProjection is rebuilt from that immutable history.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -18,7 +19,11 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    _decode_exact_json_bytes,
+    _has_exact_response_markers,
+    submission_attempt_aggregate_id,
+)
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
@@ -36,6 +41,7 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
         "CORRECT_FILL",
         "BUST_FILL",
         "CONFIRM_CANCEL",
+        "REJECT_CANCEL",
         "CONFIRM_EXPIRED",
     }
 )
@@ -411,6 +417,11 @@ class DurableOrderBookProjection:
             order.request_cancel(command_id=request.get("command_id"))
         elif operation == "CONFIRM_CANCEL":
             order.confirm_cancel()
+        elif operation == "REJECT_CANCEL":
+            order.reject_cancel(
+                command_id=request.get("command_id"),
+                reason_code=request.get("reason_code"),
+            )
         elif operation == "REQUEST_REPLACE":
             order.request_replace(command_id=request.get("command_id"))
         elif operation == "CONFIRM_EXPIRED":
@@ -810,11 +821,42 @@ class DurableOrderBookProjection:
                     )
                 terminal_seen = True
                 payload = event.get("payload")
-                response = (
-                    payload.get("response")
-                    if isinstance(payload, dict)
-                    else None
-                )
+                # Shared dispatch now stores SHA-bound raw provider bytes,
+                # not a lossy float/Decimal-incompatible JSON response mirror.
+                # Reconstruct the exact typed response at the projection
+                # boundary and check the digest before any ACK state mutation.
+                if isinstance(payload, dict) and _has_exact_response_markers(payload):
+                    if payload.get("response_encoding") != "utf-8-json":
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is invalid"
+                        )
+                    raw_text = payload.get("response_text")
+                    expected_hash = payload.get("response_sha256")
+                    if (
+                        type(raw_text) is not str
+                        or not raw_text
+                        or type(expected_hash) is not str
+                    ):
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is unavailable"
+                        )
+                    try:
+                        raw = raw_text.encode("utf-8", errors="strict")
+                        if "sha256:" + sha256(raw).hexdigest() != expected_hash:
+                            raise ValueError("exact submission response SHA mismatch")
+                        response = _decode_exact_json_bytes(raw)
+                    except (UnicodeError, ValueError, TypeError) as error:
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is invalid"
+                        ) from error
+                else:
+                    # Only a marker-free historical row may use its legacy
+                    # response mirror; partial exact evidence is fail-closed.
+                    response = (
+                        payload.get("response")
+                        if isinstance(payload, dict)
+                        else None
+                    )
                 if not isinstance(response, Mapping):
                     raise OrderProjectionConflict(
                         "submission sent response must be an object"
@@ -1010,6 +1052,31 @@ class DurableOrderBookProjection:
 
     def confirm_cancel(self, **kwargs) -> DurableOrderMutationResult:
         return self._simple(operation="CONFIRM_CANCEL", **kwargs)
+
+    def reject_cancel(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        command_id: str,
+        reason_code: str,
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> DurableOrderMutationResult:
+        return self._commit(
+            event_key=event_key,
+            operation="REJECT_CANCEL",
+            request={
+                "client_order_id": _text(
+                    client_order_id,
+                    name="client_order_id",
+                ),
+                "command_id": _text(command_id, name="command_id"),
+                "reason_code": _text(reason_code, name="reason_code"),
+            },
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
+        )
 
     def request_replace(
         self,

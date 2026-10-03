@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using AutoTrade.Desktop;
+using AutoTrade.Contracts;
 
 namespace DesktopClientContracts;
 
@@ -30,27 +31,40 @@ internal static class Program
             "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
             System.Globalization.CultureInfo.InvariantCulture);
     
-    static object Snapshot(string token, string version = "0") => new
+    static object Snapshot(
+        string token,
+        string version = "0",
+        string hostFreshness = "CURRENT",
+        string? freshnessAsOf = null,
+        string? eventCursor = null)
     {
-        state_version = version,
-        event_cursor = version,
-        server_time = NowUtc(),
-        host_id = "host-local-1",
-        account_id = "paper-account-1",
-        environment = "PAPER",
-        permission_summary = new
+        string serverTime = NowUtc();
+        return new
         {
-            actor = "owner",
-            role = "OWNER",
-            session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
-        },
-        connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
-        portfolio = new { },
-        risk = new { },
-        strategy = new { },
-        jobs = Array.Empty<object>(),
-        reason_codes = Array.Empty<string>(),
-    };
+            state_version = version,
+            event_cursor = eventCursor ?? version,
+            server_time = serverTime,
+            host_id = "host-local-1",
+            account_id = "paper-account-1",
+            environment = "PAPER",
+            permission_summary = new
+            {
+                actor = "owner",
+                role = "OWNER",
+                session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            },
+            connection_freshness = new
+            {
+                host = hostFreshness,
+                as_of = freshnessAsOf ?? serverTime,
+            },
+            portfolio = new { },
+            risk = new { },
+            strategy = new { },
+            jobs = Array.Empty<object>(),
+            reason_codes = Array.Empty<string>(),
+        };
+    }
     
     static void AssertAuth(HttpRequestMessage request, string token)
     {
@@ -66,6 +80,24 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void CanonicalOperationIdentityVectorTest()
+    {
+        Check.True(
+            HostOperationIdentity.Derive(
+                "paper-account-1",
+                "PAPER",
+                "11111111-1111-1111-1111-111111111111")
+                == "2bb8887a-3631-590a-ba0a-4497cb3f5d2a",
+            "C# host operation identity drifted from the canonical Python host contract");
+        Check.True(
+            HostOperationIdentity.Derive(
+                "рахунок-1",
+                "PAPER",
+                "11111111-1111-1111-1111-111111111111")
+                == "af5d4862-0d05-52a7-a58f-2752376b712d",
+            "canonical host operation identity changed for UTF-8 account scope");
+    }
+
     static void CredentialTargetIsOriginBoundTest()
     {
         string target =
@@ -164,6 +196,7 @@ internal static class Program
     
         EmergencyHostStatus status = await client.GetStatusAsync(CancellationToken.None);
         Check.True(status.Connected, "authenticated snapshot must be connected");
+        Check.True(status.IsCurrent, "CURRENT host freshness was not preserved");
         Check.True(status.HostId == "host-local-1", "host identity changed");
         Check.True(status.AccountId == "paper-account-1", "account identity changed");
         Check.True(status.Environment == "PAPER", "environment identity changed");
@@ -181,6 +214,302 @@ internal static class Program
             "operation success must not fabricate provider in-flight absence");
     }
     
+    static void StaleSuccessorMayCarryOlderEvidenceTimeTest()
+    {
+        EmergencyHostStatus current = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "7",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:30:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "current")
+        {
+            IsCurrent = true,
+        };
+        EmergencyHostStatus stale = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "8",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:29:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "stale")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus accepted = stale.ValidateStaleSuccessorOf(current);
+        Check.True(
+            ReferenceEquals(accepted, stale),
+            "stale successor should preserve the validated observation");
+
+        bool normalSuccessorRejected = false;
+        try
+        {
+            stale.ValidateSuccessorOf(current);
+        }
+        catch (InvalidOperationException)
+        {
+            normalSuccessorRejected = true;
+        }
+        Check.True(
+            normalSuccessorRejected,
+            "current-evidence successor validation must still reject evidence-time regression");
+    }
+
+    static void StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest()
+    {
+        DateTimeOffset observed = DateTimeOffset.Parse(
+            "2026-09-25T09:29:00Z",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal
+                | System.Globalization.DateTimeStyles.AdjustToUniversal);
+        EmergencyHostStatus staleNine = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "9",
+            ObservedAtUtc: observed,
+            Message: "stale-nine")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus regressed = staleNine with
+        {
+            StateVersion = "8",
+            ObservedAtUtc = observed.AddMinutes(-1),
+            Message = "stale-eight",
+        };
+        bool versionRejected = false;
+        try
+        {
+            regressed.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            versionRejected = true;
+        }
+        Check.True(
+            versionRejected,
+            "stale-to-stale succession must reject durable state-version regression");
+
+        EmergencyHostStatus changedIdentity = staleNine with
+        {
+            HostId = "host-other",
+            StateVersion = "10",
+            ObservedAtUtc = observed.AddMinutes(-2),
+            Message = "stale-other-host",
+        };
+        bool identityRejected = false;
+        try
+        {
+            changedIdentity.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            identityRejected = true;
+        }
+        Check.True(
+            identityRejected,
+            "stale-to-stale succession must reject silent host authority identity change");
+    }
+
+    static async Task NonCurrentFreshnessRemainsExplicitTest()
+    {
+        const string token = "session-token-stale";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Task.FromResult(
+                    Json(
+                        HttpStatusCode.OK,
+                        Snapshot(
+                            token,
+                            "8",
+                            hostFreshness: "STALE",
+                            freshnessAsOf: freshnessAsOf)));
+            }
+
+            throw new InvalidOperationException(
+                "stale-status test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyHostStatus status =
+            await client.GetStatusAsync(CancellationToken.None);
+        Check.True(status.Connected, "stale authenticated snapshot lost host reachability");
+        Check.True(!status.IsCurrent, "STALE host freshness was fabricated as CURRENT");
+        Check.True(
+            status.StateVersion == "8",
+            "stale snapshot lost its durable state version");
+        Check.True(
+            status.ObservedAtUtc
+                == DateTimeOffset.Parse(
+                    freshnessAsOf,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal
+                        | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            "native last-evidence time did not use connection_freshness.as_of");
+        Check.True(
+            status.Message.Contains("STALE", StringComparison.Ordinal),
+            "non-current host freshness was not surfaced in status text");
+    }
+
+    static async Task SnapshotAuthorityRelationAndFreshnessEnumFailClosedTest()
+    {
+        const string token = "session-token-snapshot-authority";
+        MutableSessionProvider sessions = new(PairedSession(token));
+
+        async Task AssertRejected(object snapshot, string message)
+        {
+            DelegateHandler handler = new((request, _, _) =>
+            {
+                AssertAuth(request, token);
+                return Task.FromResult(Json(HttpStatusCode.OK, snapshot));
+            });
+            AuthenticatedEmergencyHostClient client = new(
+                new HttpClient(handler),
+                HostOrigin,
+                sessions);
+            await Check.ThrowsAsync<InvalidOperationException>(
+                () => client.GetStatusAsync(CancellationToken.None),
+                message);
+        }
+
+        await AssertRejected(
+            Snapshot(token, "9", eventCursor: "8"),
+            "snapshot with event_cursor behind state_version was accepted");
+        await AssertRejected(
+            Snapshot(token, "9", eventCursor: "10"),
+            "snapshot with event_cursor ahead of state_version was accepted");
+        await AssertRejected(
+            Snapshot(token, "9", hostFreshness: "BROKEN"),
+            "unsupported host freshness advanced native authority state");
+        await AssertRejected(
+            Snapshot(token, "9", hostFreshness: "current"),
+            "non-canonical host freshness casing was accepted");
+
+        DelegateHandler validHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            return Task.FromResult(
+                Json(HttpStatusCode.OK, Snapshot(token, "10", eventCursor: "10")));
+        });
+        AuthenticatedEmergencyHostClient validClient = new(
+            new HttpClient(validHandler),
+            HostOrigin,
+            sessions);
+        EmergencyHostStatus status =
+            await validClient.GetStatusAsync(CancellationToken.None);
+        Check.True(
+            status.StateVersion == "10" && status.IsCurrent,
+            "canonical equal state_version/event_cursor snapshot did not survive restart-style advance");
+    }
+
+    static async Task StaleFreshnessDoesNotDisableEmergencyBlockTest()
+    {
+        const string token = "session-token-stale-emergency";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        string? operationId = null;
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        int posts = 0;
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        "0",
+                        hostFreshness: "STALE",
+                        freshnessAsOf: freshnessAsOf));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id = commandId,
+                        status = "ACCEPTED",
+                        state_version = "1",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = operationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && operationId is not null
+                && request.RequestUri!.AbsolutePath
+                    == "/api/v1/operations/" + operationId)
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "SUCCEEDED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = Array.Empty<string>(),
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "stale-emergency test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyCommandResult result =
+            await client.BlockNewExposureAsync(CancellationToken.None);
+        Check.True(
+            result.Accepted && result.DurableBlockConfirmed,
+            "stale display freshness incorrectly disabled the risk-reducing emergency block");
+        Check.True(posts == 1, "emergency block was not submitted exactly once");
+    }
+
     static async Task AmbiguousPostExactRetryTest()
     {
         const string token = "session-token-b";
@@ -188,7 +517,7 @@ internal static class Program
             new(PairedSession(token));
         List<string> commandBodies = [];
         int postCount = 0;
-        const string operationId = "33333333-3333-3333-3333-333333333333";
+        string? operationId = null;
     
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
         {
@@ -213,6 +542,10 @@ internal static class Program
                 using JsonDocument parsed = JsonDocument.Parse(body);
                 string commandId =
                     parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
                 return Json(
                     HttpStatusCode.OK,
                     new
@@ -227,6 +560,7 @@ internal static class Program
             }
     
             if (request.Method == HttpMethod.Get
+                && operationId is not null
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
@@ -292,6 +626,78 @@ internal static class Program
             "command payload leaked the reusable bearer credential");
     }
     
+    static async Task ForeignOperationIdentityFailsClosedTest()
+    {
+        const string token = "session-token-operation-binding";
+        MutableSessionProvider sessions = new(PairedSession(token));
+        int operationReads = 0;
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Json(HttpStatusCode.OK, Snapshot(token, "4"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                string foreignOperationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff");
+                Check.True(
+                    foreignOperationId
+                        != HostOperationIdentity.Derive(
+                            "paper-account-1",
+                            "PAPER",
+                            commandId),
+                    "foreign-operation regression accidentally used the canonical operation");
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id = commandId,
+                        status = "ACCEPTED",
+                        state_version = "5",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = foreignOperationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath.StartsWith(
+                    "/api/v1/operations/",
+                    StringComparison.Ordinal))
+            {
+                operationReads++;
+                throw new InvalidOperationException(
+                    "foreign operation must be rejected before operation lookup");
+            }
+
+            throw new InvalidOperationException(
+                "operation-binding test issued an unexpected request");
+        });
+
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => client.BlockNewExposureAsync(CancellationToken.None),
+            "foreign operation identity was accepted for the emergency command");
+        Check.True(
+            operationReads == 0,
+            "client queried a foreign operation before validating command scope");
+    }
+
     static async Task UncertainCommandCannotRetargetSessionTest()
     {
         const string originalToken = "session-token-c";
@@ -341,7 +747,7 @@ internal static class Program
         int posts = 0;
         int stateReads = 0;
         int operationReads = 0;
-        const string operationId = "44444444-4444-4444-4444-444444444444";
+        string? operationId = null;
 
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
         {
@@ -366,12 +772,17 @@ internal static class Program
                 }
 
                 using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
                 return Json(
                     HttpStatusCode.OK,
                     new
                     {
-                        command_id =
-                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        command_id = commandId,
                         status = "ACCEPTED",
                         state_version = "12",
                         reason_codes = Array.Empty<string>(),
@@ -381,6 +792,7 @@ internal static class Program
             }
 
             if (request.Method == HttpMethod.Get
+                && operationId is not null
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
@@ -698,12 +1110,80 @@ internal static class Program
             "non-canonical sequence must fail closed");
     }
 
+    static void WindowRetainsCurrentEvidenceFloorTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                window = (MainWindow)Activator.CreateInstance(typeof(MainWindow), flags, null,
+                    new object[] { new DisconnectedEmergencyHostClient() }, null)!;
+                var apply = typeof(MainWindow).GetMethod("ApplyHostStatus", flags)!;
+                var latest = typeof(MainWindow).GetField("_lastKnownConnectedStatus", flags)!;
+                var current = typeof(MainWindow).GetField("_lastKnownCurrentStatus", flags)!;
+                DateTimeOffset origin = new(2026, 9, 25, 9, 30, 0, TimeSpan.Zero);
+                EmergencyHostStatus first = new(true, "host-local-1", "paper-account-1", "PAPER",
+                    "7", origin, "Current host evidence") { IsCurrent = true };
+                void Accept(EmergencyHostStatus status) => apply.Invoke(window, new object[] { status, false });
+                void Reject(EmergencyHostStatus status)
+                {
+                    object? priorConnected = latest.GetValue(window);
+                    object? priorCurrent = current.GetValue(window);
+                    bool rejected = false;
+                    try { Accept(status); }
+                    catch (System.Reflection.TargetInvocationException error)
+                        when (error.InnerException is InvalidOperationException) { rejected = true; }
+                    Check.True(rejected, "window accepted regressed or retargeted host evidence");
+                    Check.True(ReferenceEquals(priorConnected, latest.GetValue(window))
+                        && ReferenceEquals(priorCurrent, current.GetValue(window)),
+                        "rejected evidence changed the retained authority/freshness chain");
+                }
+                Accept(first);
+                Accept(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(-10), IsCurrent = false });
+                Reject(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-5) });
+                Accept(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-20), IsCurrent = false });
+                Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
+                Accept(EmergencyHostStatus.Disconnected("Host disconnected"));
+                Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
+                Reject(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(1) });
+                Reject(first with { StateVersion = "10", HostId = "different-host" });
+                Accept(first with { StateVersion = "10" }); // Equality is valid.
+                Accept(first with { StateVersion = "11", ObservedAtUtc = origin.AddMinutes(1) });
+                Check.True(((EmergencyHostStatus)current.GetValue(window)!).ObservedAtUtc == origin.AddMinutes(1),
+                    "new CURRENT evidence did not advance the retained floor");
+                Accept(EmergencyHostStatus.Disconnected("Host disconnected again"));
+                var displayed = (System.Windows.Controls.TextBox)window.FindName("LastEvidenceValue");
+                Check.True(displayed.Text.Contains("stale", StringComparison.Ordinal),
+                    "disconnected display did not label retained evidence stale");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
+        WindowRetainsCurrentEvidenceFloorTest();
+        CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
+        StaleSuccessorMayCarryOlderEvidenceTimeTest();
+        StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();
+        await NonCurrentFreshnessRemainsExplicitTest();
+        await SnapshotAuthorityRelationAndFreshnessEnumFailClosedTest();
+        await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();
+        await ForeignOperationIdentityFailsClosedTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
         await RestartedCommandCannotRetargetSessionTest();

@@ -1,4 +1,5 @@
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -9,10 +10,42 @@ from mvp.autotrade_mvp.authority import (
 )
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
 from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
 class JournalBackedHostApiTests(unittest.TestCase):
+    def test_operator_policy_payload_keeps_exact_high_precision_notional(self):
+        from mvp.autotrade_mvp.operator_authority_commands import (
+            _policy_from_mapping,
+            _policy_payload,
+        )
+
+        values = (
+            "1000.000000000000000000000000000001",
+            "1000.000000000000000000000000000002",
+        )
+        payloads = []
+        for value in values:
+            base = self.authority_policy("exact-notional")
+            policy = AuthorityPolicy.create(
+                policy_id=base.policy_id,
+                account_id=base.account_id,
+                environments=base.environments,
+                instruments=base.instruments,
+                actions=base.actions,
+                max_notional=value,
+                valid_from=base.valid_from,
+                expires_at=base.expires_at,
+                autonomous=base.autonomous,
+                protection_only=base.protection_only,
+                version=base.version,
+            )
+            payload = _policy_payload(policy)
+            self.assertEqual(payload["max_notional"], value)
+            self.assertEqual(_policy_from_mapping(payload).max_notional, policy.max_notional)
+            payloads.append(payload)
+        self.assertNotEqual(payload_digest(payloads[0]), payload_digest(payloads[1]))
+
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -287,6 +320,160 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(restarted.cursor, 1)
         self.assertEqual(len(restarted.events_after(0)), 1)
 
+    def test_exact_retry_after_state_advances_returns_original_accepted_result(self):
+        first = self.store()
+        command = self.command()
+        accepted = first.submit(command)
+        running = first.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        self.assertEqual(running.state_version, "2")
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+
+        restarted = self.store()
+        retried = restarted.submit(command)
+
+        self.assertEqual(retried, accepted)
+        self.assertEqual(retried.state_version, "1")
+        self.assertEqual(restarted.state_version, 2)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
+        self.assertEqual(len(restarted.events_after(0)), 2)
+
+    def test_exact_retry_rejects_resealed_result_inconsistent_with_accepted_event(self):
+        first = self.store()
+        command = self.command()
+        accepted = first.submit(command)
+        forged = first._result_dict(accepted)
+        forged["status"] = "CONFLICT"
+        forged["reason_codes"] = ["forged_result"]
+
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                UPDATE command_dedupe
+                SET result_json = ?, result_hash = ?
+                """,
+                (
+                    canonical_json(forged),
+                    payload_digest(forged),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        restarted = self.store()
+        with self.assertRaisesRegex(
+            ValueError,
+            "result conflicts with durable accepted event",
+        ):
+            restarted.submit(command)
+
+    def test_fresh_submit_concurrent_exact_winner_is_idempotent_without_growth(self):
+        store = self.store()
+        original_commit = store._journal.commit_command
+        raced = False
+
+        def race_then_commit(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                winner = JournalStore(self.path)
+                saved, inserted, _ = winner.commit_command(*args, **kwargs)
+                self.assertTrue(inserted)
+                self.assertEqual(saved, kwargs["result"])
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            store._journal,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            accepted = store.submit(self.command())
+
+        self.assertEqual(accepted.status, "ACCEPTED")
+        self.assertEqual(accepted.state_version, "1")
+        self.assertEqual(store.state_version, 1)
+        self.assertEqual(store.cursor, 1)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            1,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            1,
+        )
+        self.assertEqual(len(store.events_after(0)), 1)
+
+    def test_fresh_submit_rejects_concurrent_domain_inconsistent_saved_result(self):
+        store = self.store()
+        original_commit = store._journal.commit_command
+        raced = False
+
+        def race_then_commit(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                forged_kwargs = dict(kwargs)
+                forged_result = dict(kwargs["result"])
+                forged_result["status"] = "CONFLICT"
+                forged_result["reason_codes"] = ["forged_race_result"]
+                forged_kwargs["result"] = forged_result
+                winner = JournalStore(self.path)
+                _saved, inserted, _ = winner.commit_command(
+                    *args,
+                    **forged_kwargs,
+                )
+                self.assertTrue(inserted)
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            store._journal,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "result conflicts with durable accepted event",
+            ):
+                store.submit(self.command())
+
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            1,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            1,
+        )
+        self.assertEqual(len(store.events_after(0)), 1)
+
+    def test_exact_retry_does_not_lazily_promote_orphan_accepted_event(self):
+        first = self.store()
+        command = self.command()
+        first.submit(command)
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("DELETE FROM command_dedupe")
+            connection.commit()
+        finally:
+            connection.close()
+
+        restarted = self.store()
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+        with self.assertRaisesRegex(ValueError, "event_id already exists"):
+            restarted.submit(command)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
+
     def test_changed_payload_under_same_idempotency_key_conflicts_after_restart(self):
         first = self.store()
         first.submit(self.command(payload={"reason_code": "EMERGENCY_STOP"}))
@@ -296,6 +483,46 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(conflict.status, "CONFLICT")
         self.assertIn("idempotency_key_conflict", conflict.reason_codes)
         self.assertEqual(restarted.state_version, 1)
+
+    def test_changed_action_or_actor_on_accepted_retry_remains_conflict(self):
+        first = self.store()
+        command = self.command()
+        first.submit(command)
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+        before_outbox = JournalStore(self.path).pending_outbox_count()
+
+        restarted = self.store()
+        changed_action = restarted.submit(
+            self.command(
+                action="REVOKE_AUTHORITY",
+            )
+        )
+        self.assertEqual(changed_action.status, "CONFLICT")
+        self.assertIn(
+            "idempotency_key_conflict",
+            changed_action.reason_codes,
+        )
+
+        changed_actor = restarted.submit(
+            self.command(
+                actor="bob",
+                session="session-b",
+            )
+        )
+        self.assertEqual(changed_actor.status, "CONFLICT")
+        self.assertIn(
+            "command_id_conflict",
+            changed_actor.reason_codes,
+        )
+        self.assertEqual(restarted.state_version, 1)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            before_outbox,
+        )
 
     def test_same_command_id_under_new_key_conflicts_after_restart(self):
         first = self.store()

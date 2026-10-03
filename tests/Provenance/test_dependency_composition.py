@@ -6,6 +6,7 @@ import unittest
 
 from tools.check_dependency_composition import (
     _dotnet_dependency_lock_blockers,
+    _python_blockers,
     _rights_blockers,
     audit_composition,
     is_exact_python_requirement,
@@ -44,6 +45,16 @@ class DependencyCompositionGateTests(unittest.TestCase):
             )
         )
 
+    def test_python_development_graph_is_hash_locked(self):
+        self.assertFalse(
+            any(
+                blocker.startswith("MISSING_PYTHON_REQUIREMENT_HASH:")
+                or blocker.startswith("DUPLICATE_PYTHON_REQUIREMENT_HASH:")
+                or blocker == "UNREADABLE_PYTHON_HASH_LOCK"
+                for blocker in self.report.blockers
+            )
+        )
+
     def test_exact_python_pin_rejects_wildcards_markers_and_ranges(self):
         self.assertTrue(is_exact_python_requirement("attrs==26.1.0"))
         for value in (
@@ -67,6 +78,170 @@ class DependencyCompositionGateTests(unittest.TestCase):
             Path(__file__).resolve().parents[2] / "research" / "pyproject.toml"
         ).read_text(encoding="utf-8")
         self.assertIn('requires = ["setuptools==84.0.0"]', pyproject)
+        self.assertNotIn("RESEARCH_BUILD_REQUIREMENTS_DRIFT", self.report.blockers)
+        requirements = (
+            Path(__file__).resolve().parents[2] / "requirements-dev.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("setuptools==84.0.0", requirements)
+        self.assertIn(
+            "--hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+            requirements,
+        )
+
+    def test_research_install_workflow_closes_build_isolation_escape(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (
+            root / ".github" / "workflows" / "research-primitives.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('- "requirements-dev.txt"', workflow)
+        self.assertIn(
+            'run: "python -m pip install --disable-pip-version-check '
+            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+            '-r requirements-dev.txt"',
+            workflow,
+        )
+        self.assertIn(
+            "run: python -m pip install --no-deps --no-build-isolation -e research",
+            workflow,
+        )
+        self.assertNotIn(
+            "run: python -m pip install --no-deps -e research",
+            workflow,
+        )
+        for blocker in (
+            "RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING",
+            "RESEARCH_HASHED_INSTALL_COMMAND_MISSING",
+            "RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING",
+        ):
+            self.assertNotIn(blocker, self.report.blockers)
+
+    def test_research_build_boundary_regression_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / "requirements-dev.txt").write_text(
+                """setuptools==84.0.0 \\
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+jsonschema==4.26.0 \\
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+""",
+                encoding="utf-8",
+            )
+            pyproject = root / "research" / "pyproject.toml"
+            pyproject.write_text(
+                """[build-system]
+requires = ["setuptools==84.0.0"]
+
+[project]
+name = "sample"
+version = "0.0.1"
+
+[project.optional-dependencies]
+test = ["jsonschema==4.26.0"]
+""",
+                encoding="utf-8",
+            )
+            workflow = root / ".github" / "workflows" / "research-primitives.yml"
+            workflow.write_text(
+                """paths:
+  - "requirements-dev.txt"
+steps:
+  - run: "python -m pip install --disable-pip-version-check --force-reinstall --no-deps --only-binary=:all: --require-hashes -r requirements-dev.txt"
+  - run: python -m pip install --no-deps -e research
+""",
+                encoding="utf-8",
+            )
+            blockers, _ = _python_blockers(root)
+            self.assertIn(
+                "RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING",
+                blockers,
+            )
+            self.assertNotIn("UNREADABLE_PYTHON_HASH_LOCK", blockers)
+            self.assertNotIn("UNREADABLE_RESEARCH_PYPROJECT", blockers)
+            self.assertNotIn("RESEARCH_HASHED_INSTALL_COMMAND_MISSING", blockers)
+            self.assertNotIn("RESEARCH_BUILD_REQUIREMENTS_DRIFT", blockers)
+            self.assertNotIn("RESEARCH_TEST_REQUIREMENTS_DRIFT", blockers)
+
+            pyproject.write_text(
+                """[build-system]
+requires = [["setuptools==84.0.0"]]
+
+[project]
+name = "sample"
+version = "0.0.1"
+
+[project.optional-dependencies]
+test = [["jsonschema==4.26.0"]]
+""",
+                encoding="utf-8",
+            )
+            malformed, _ = _python_blockers(root)
+            self.assertIn("MALFORMED_RESEARCH_BUILD_REQUIREMENT", malformed)
+            self.assertIn("MALFORMED_RESEARCH_TEST_REQUIREMENT", malformed)
+
+            pyproject.write_text(
+                """build-system = "not-a-table"
+project = "not-a-table"
+""",
+                encoding="utf-8",
+            )
+            malformed_tables, _ = _python_blockers(root)
+            self.assertIn("MALFORMED_RESEARCH_BUILD_SYSTEM", malformed_tables)
+            self.assertIn("MALFORMED_RESEARCH_PROJECT", malformed_tables)
+            self.assertIn(
+                "MALFORMED_RESEARCH_OPTIONAL_DEPENDENCIES",
+                malformed_tables,
+            )
+            self.assertIn(
+                "MISSING_RESEARCH_BUILD_REQUIREMENTS",
+                malformed_tables,
+            )
+            self.assertIn(
+                "MISSING_RESEARCH_TEST_REQUIREMENTS",
+                malformed_tables,
+            )
+
+    def test_research_test_extra_matches_exact_resolved_graph(self):
+        self.assertFalse(
+            any(
+                blocker.startswith("NON_EXACT_RESEARCH_TEST_REQUIREMENT:")
+                or blocker == "MISSING_RESEARCH_TEST_REQUIREMENTS"
+                or blocker == "RESEARCH_TEST_REQUIREMENTS_DRIFT"
+                for blocker in self.report.blockers
+            )
+        )
+
+    def test_research_test_extra_range_and_graph_drift_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            (root / "requirements-dev.txt").write_text(
+                "jsonschema==4.26.0\nreferencing==0.36.2\n",
+                encoding="utf-8",
+            )
+            (root / "research" / "pyproject.toml").write_text(
+                """[build-system]\nrequires = ["setuptools==84.0.0"]\n\n[project]\nname = "sample"\nversion = "0.0.1"\n\n[project.optional-dependencies]\ntest = ["jsonschema>=4.23,<5"]\n""",
+                encoding="utf-8",
+            )
+            blockers, exact = _python_blockers(root)
+            self.assertEqual(
+                exact,
+                ["jsonschema==4.26.0", "referencing==0.36.2"],
+            )
+            self.assertIn(
+                "NON_EXACT_RESEARCH_TEST_REQUIREMENT:jsonschema>=4.23,<5",
+                blockers,
+            )
+            self.assertIn("RESEARCH_TEST_REQUIREMENTS_DRIFT", blockers)
+            self.assertIn(
+                "MISSING_PYTHON_REQUIREMENT_HASH:jsonschema==4.26.0",
+                blockers,
+            )
+            self.assertIn(
+                "MISSING_PYTHON_REQUIREMENT_HASH:referencing==0.36.2",
+                blockers,
+            )
 
     def test_current_tree_has_no_nuget_lock_protocol_gap(self):
         lock_blockers = {

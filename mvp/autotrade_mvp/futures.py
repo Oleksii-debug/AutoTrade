@@ -8,13 +8,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+)
 from .instruments import InstrumentVersion
 
 
@@ -29,46 +40,81 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
     if isinstance(value, bool) or isinstance(value, float):
         raise FuturesError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FuturesError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FuturesError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FuturesError(
+            f"{name} must be a bounded finite exact decimal"
+        ) from error
     if positive and result <= 0:
         raise FuturesError(f"{name} must be positive")
     return result
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise FuturesError(f"{name} is required")
+    if type(value) is not str or not value.strip():
+        raise FuturesError(f"{name} must be exact non-empty text")
     return value.strip()
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise FuturesError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or value.tzinfo is None:
+        raise FuturesError(f"{name} must be exact timezone-aware datetime")
     return value.astimezone(timezone.utc)
 
 
 def _fraction(value: Decimal) -> Fraction:
-    sign, digits, exponent = value.as_tuple()
-    integer = 0
-    for digit in digits:
-        integer = integer * 10 + digit
-    if sign:
-        integer = -integer
-    if exponent >= 0:
-        return Fraction(integer * (10**exponent), 1)
-    return Fraction(integer, 10 ** (-exponent))
+    try:
+        return as_fraction(value)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _bounded_fraction(value: Fraction) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise FuturesError(
+            "futures exact rational exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_multiply(*values: Decimal) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
 
 
 def _decimal_identity(value: Decimal) -> str:
     normalized = _decimal(value, "decimal identity")
-    if normalized == 0:
-        return "0"
-    text = format(normalized.normalize(), "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    try:
+        return canonical_decimal_text(normalized)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "decimal identity exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -87,8 +133,10 @@ class FuturesContract:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
-        if self.payoff not in {"LINEAR", "INVERSE"}:
+        payoff = _text(self.payoff, "payoff")
+        if payoff not in {"LINEAR", "INVERSE"}:
             raise FuturesError("payoff must be LINEAR or INVERSE")
+        object.__setattr__(self, "payoff", payoff)
         object.__setattr__(self, "multiplier", _decimal(self.multiplier, "multiplier", positive=True))
         object.__setattr__(self, "quote_currency", _text(self.quote_currency, "quote_currency"))
         object.__setattr__(
@@ -102,8 +150,10 @@ class FuturesContract:
             raise FuturesError("last_trade_at cannot be after expiry")
         if not self.delivery_cutoff <= self.expiry:
             raise FuturesError("delivery_cutoff cannot be after expiry")
-        if self.settlement_method not in {"CASH", "PHYSICAL"}:
+        settlement_method = _text(self.settlement_method, "settlement_method")
+        if settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        object.__setattr__(self, "settlement_method", settlement_method)
         if (
             self.settlement_method == "PHYSICAL"
             and self.delivery_cutoff > self.last_trade_at
@@ -129,8 +179,10 @@ class FuturesContract:
 
         if self.canonical_instrument is not None:
             version = self.canonical_instrument
-            if not isinstance(version, InstrumentVersion):
-                raise FuturesError("canonical_instrument must be an InstrumentVersion")
+            if type(version) is not InstrumentVersion:
+                raise FuturesError(
+                    "canonical_instrument must be exact InstrumentVersion"
+                )
             if version.asset_class != "FUTURE":
                 raise FuturesError("canonical instrument must have FUTURE asset_class")
             canonical_key = f"{version.instrument_id}@{version.version}"
@@ -167,8 +219,8 @@ class FuturesContract:
 
     @classmethod
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
-        if not isinstance(version, InstrumentVersion):
-            raise FuturesError("canonical InstrumentVersion is required")
+        if type(version) is not InstrumentVersion:
+            raise FuturesError("exact canonical InstrumentVersion is required")
         if version.asset_class != "FUTURE":
             raise FuturesError("canonical instrument must have FUTURE asset_class")
         if version.payoff not in {"LINEAR", "INVERSE"}:
@@ -262,8 +314,8 @@ class FuturesSettlementEvidence:
             or self.instrument_version < 1
         ):
             raise FuturesError("instrument_version must be a positive integer")
-        if not isinstance(self.scope, FuturesSettlementScope):
-            raise FuturesError("settlement scope is required")
+        if type(self.scope) is not FuturesSettlementScope:
+            raise FuturesError("settlement scope must be exact FuturesSettlementScope")
         object.__setattr__(
             self, "effective_at", _utc(self.effective_at, "effective_at")
         )
@@ -310,7 +362,7 @@ def _require_settlement_contract(
     scope: FuturesSettlementScope,
     evidence: FuturesSettlementEvidence,
 ) -> None:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     version = contract.canonical_instrument
     if version is None:
@@ -340,9 +392,9 @@ def _validate_settlement_history(
     history: tuple[FuturesSettlementEvidence, ...],
     last_price: Decimal,
 ) -> None:
-    if not isinstance(scope, FuturesSettlementScope):
+    if type(scope) is not FuturesSettlementScope:
         raise FuturesError("settlement_scope is required")
-    if not isinstance(history, tuple):
+    if type(history) is not tuple:
         raise FuturesError("settlement_history must be an immutable tuple")
     seen_observations: set[str] = set()
     latest_by_period: dict[str, FuturesSettlementEvidence] = {}
@@ -431,7 +483,7 @@ def _settlement_duplicate_or_require_new(
 
 
 def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     material = {
         "settlement_id": evidence.settlement_id,
@@ -461,6 +513,24 @@ def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _require_contract_quantity(contract: FuturesContract, quantity: Decimal) -> None:
+    """Lifecycle contracts obey their instrument grid, without order-entry limits."""
+    version = contract.canonical_instrument
+    if version is None:
+        # Legacy unbound states remain diagnostic; settlement admission already
+        # rejects them before any economic transition. No grid can be invented.
+        return
+    if type(version) is not InstrumentVersion:
+        raise FuturesError("lifecycle quantity requires canonical InstrumentVersion binding")
+    quantum = _decimal(version.quantity_step, "quantity_step", positive=True)
+    try:
+        aligned = is_exact_decimal_multiple(quantity, quantum)
+    except ExactDecimalError as error:
+        raise FuturesError("lifecycle quantity exceeds exact numeric envelope") from error
+    if not aligned:
+        raise FuturesError("signed_contracts must be an exact multiple of instrument quantity_step")
+
+
 @dataclass(frozen=True)
 class InverseVariationMarginState:
     """Exact inverse-futures state between explicit settlement boundaries."""
@@ -473,19 +543,27 @@ class InverseVariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("inverse variation-margin state requires exact FuturesContract")
         if self.contract.payoff != "INVERSE":
             raise FuturesError("inverse variation-margin state requires INVERSE futures")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,
             "last_settlement_price",
             _decimal(self.last_settlement_price, "last_settlement_price", positive=True),
         )
-        if not isinstance(self.cumulative_variation_margin, Fraction):
+        if type(self.cumulative_variation_margin) is not Fraction:
             raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
+        object.__setattr__(
+            self,
+            "cumulative_variation_margin",
+            _bounded_fraction(self.cumulative_variation_margin),
+        )
         _validate_settlement_history(
             self.contract,
             self.settlement_scope,
@@ -504,9 +582,12 @@ class VariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("linear variation-margin state requires exact FuturesContract")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,
@@ -539,7 +620,8 @@ def linear_futures_pnl(
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return contracts * contract_multiplier * (exit_value - entry)
+    spread = _exact_subtract(exit_value, entry)
+    return _exact_multiply(contracts, contract_multiplier, spread)
 
 
 def inverse_futures_pnl_exact(
@@ -559,11 +641,11 @@ def inverse_futures_pnl_exact(
     face = _decimal(contract_quote_value, "contract_quote_value", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    entry_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    inverse_spread = _bounded_fraction(entry_inverse - exit_inverse)
+    contract_face = _bounded_fraction(_fraction(contracts) * _fraction(face))
+    return _bounded_fraction(contract_face * inverse_spread)
 
 
 def settle_fraction(
@@ -574,13 +656,14 @@ def settle_fraction(
 ) -> Decimal:
     """Round an exact rational to an exact multiple of the settlement quantum."""
 
-    if not isinstance(value, Fraction):
+    if type(value) is not Fraction:
         raise FuturesError("value must be an exact Fraction")
+    exact_value = _bounded_fraction(value)
     step = _decimal(quantum, "quantum", positive=True)
-    if rounding not in {"HALF_EVEN", "DOWN"}:
+    if type(rounding) is not str or rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
-    units = value / _fraction(step)
+    units = _bounded_fraction(exact_value / _fraction(step))
     sign = -1 if units < 0 else 1
     numerator = abs(units.numerator)
     denominator = units.denominator
@@ -592,7 +675,7 @@ def settle_fraction(
             whole += 1
 
     signed_units = whole * sign
-    return step * Decimal(signed_units)
+    return _exact_multiply(step, Decimal(signed_units))
 
 
 def apply_variation_margin(
@@ -601,7 +684,7 @@ def apply_variation_margin(
 ) -> tuple[VariationMarginState, Decimal]:
     """Apply one identity-bound linear settlement exactly once."""
 
-    if not isinstance(state, VariationMarginState):
+    if type(state) is not VariationMarginState:
         raise FuturesError("linear variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -617,11 +700,12 @@ def apply_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _exact_add(state.cumulative_variation_margin, amount)
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -634,7 +718,7 @@ def apply_inverse_variation_margin(
 ) -> tuple[InverseVariationMarginState, Fraction]:
     """Apply one identity-bound inverse settlement without premature rounding."""
 
-    if not isinstance(state, InverseVariationMarginState):
+    if type(state) is not InverseVariationMarginState:
         raise FuturesError("inverse variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -650,11 +734,14 @@ def apply_inverse_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _bounded_fraction(
+        state.cumulative_variation_margin + amount
+    )
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -704,9 +791,9 @@ def settle_and_book_inverse_variation_margin(
     is the provider-facing cash settlement amount.
     """
 
-    if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
+    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
         raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     _require_settlement_contract(contract, settlement.scope, settlement)
     if settlement.price_currency != contract.quote_currency:
@@ -764,7 +851,7 @@ def book_variation_margin(
 ) -> JournalTransaction:
     """Create one deterministic journal identity from accepted settlement evidence."""
 
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     value = _decimal(amount, "amount")
     if value == 0:
@@ -776,7 +863,11 @@ def book_variation_margin(
         cause_event_id=f"FUTURES_SETTLEMENT:{digest}",
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(f"FUTURES_VARIATION_PNL:{currency}", currency, -value),
+            posting(
+                f"FUTURES_VARIATION_PNL:{currency}",
+                currency,
+                _exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)

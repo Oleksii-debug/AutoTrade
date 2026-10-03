@@ -13,13 +13,22 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4, uuid5
+from weakref import WeakKeyDictionary
 
-from .artifacts.store import ArtifactStore
+from .artifacts import ArtifactIntegrityError, ArtifactStore, trusted_authenticated_reader
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+# Process-TCB registry for product-selected research evidence authority.  The
+# caller-owned ResearchJobStore object exposes no root/reader replacement field;
+# lifetime cleanup follows the store object's weak reference.  Installed module
+# code is already inside the product TCB, matching the sealed WP-06 reader model.
+_EVIDENCE_AUTHORITY_LOCK = RLock()
+_EVIDENCE_AUTHORITIES = WeakKeyDictionary()
 
 # Automatic lease retry is code-reviewed capability, never caller authority.
 # Callers may disable retry for a safe kind, but cannot promote an arbitrary
@@ -87,52 +96,96 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
-def _verify_artifact_ref(
-    artifact_store: ArtifactStore,
+def _trusted_reader(
+    authoritative_root: str | Path | None,
+    publication_store: ArtifactStore | None = None,
+):
+    if authoritative_root is None:
+        return None
+    try:
+        return trusted_authenticated_reader(
+            authoritative_root,
+            publication_store=publication_store,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def _bind_evidence_authority(
+    store: object,
+    reader: object,
+    publication_store: ArtifactStore,
+) -> None:
+    with _EVIDENCE_AUTHORITY_LOCK:
+        if store in _EVIDENCE_AUTHORITIES:
+            raise JobError("research evidence authority is already bound")
+        _EVIDENCE_AUTHORITIES[store] = (reader, publication_store)
+
+
+def _bound_evidence_authority(store: object):
+    with _EVIDENCE_AUTHORITY_LOCK:
+        return _EVIDENCE_AUTHORITIES.get(store)
+
+
+def _authenticated_artifact_snapshot(
+    *,
+    read_snapshot,
     reference: str,
-) -> bool:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+) -> tuple[dict[str, Any], bytes] | None:
     normalized = _require_immutable_artifact_ref(reference, "artifact_ref")
     artifact_id, digest = normalized[len("artifact:"):].split("@sha256:", 1)
     expected_hash = "sha256:" + digest
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+        manifest, payload = read_snapshot(artifact_id)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+    ):
+        return None
     manifest_hash = manifest.get("manifest_hash")
-    return (
+    if not (
         manifest.get("sha256") == expected_hash
         and "sha256:" + sha256(payload).hexdigest() == expected_hash
         and isinstance(manifest_hash, str)
         and len(manifest_hash) == 71
         and manifest_hash.startswith("sha256:")
         and all(ch in "0123456789abcdef" for ch in manifest_hash[7:])
-    )
+    ):
+        return None
+    return manifest, payload
 
 
 def _verify_job_output_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     output_ref: str,
     job_id: str,
     generation: int,
     input_hashes: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, output_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=output_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(output_ref, "output_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
         and metadata.get("artifact_kind") == "RESEARCH_JOB_RESULT"
         and metadata.get("job_id") == job_id
+        and type(metadata.get("job_generation")) is int
         and metadata.get("job_generation") == generation
         and manifest.get("source_refs") == input_hashes
     )
@@ -140,7 +193,7 @@ def _verify_job_output_artifact(
 
 def _verify_job_checkpoint_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     checkpoint_ref: str,
     job_id: str,
     generation: int,
@@ -148,22 +201,19 @@ def _verify_job_checkpoint_artifact(
 ) -> bool:
     """Prove a checkpoint is immutable and belongs to this exact job generation."""
 
-    if not _verify_artifact_ref(artifact_store, checkpoint_ref):
-        return False
-    reference = _require_immutable_artifact_ref(
-        checkpoint_ref,
-        "checkpoint_ref",
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=checkpoint_ref,
     )
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+    if snapshot is None:
         return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
         and metadata.get("artifact_kind") == "RESEARCH_JOB_CHECKPOINT"
         and metadata.get("job_id") == job_id
+        and type(metadata.get("job_generation")) is int
         and metadata.get("job_generation") == generation
         and manifest.get("source_refs") == input_hashes
     )
@@ -171,22 +221,23 @@ def _verify_job_checkpoint_artifact(
 
 def _verify_external_resolution_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     evidence_ref: str,
     job_id: str,
     generation: int,
     verdict: str,
     output_refs: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, evidence_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=evidence_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+    manifest, payload = snapshot
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
         proof = json.loads(payload.decode("utf-8"))
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False
     if manifest.get("media_type") != "application/json":
         return False
@@ -208,6 +259,7 @@ def _verify_external_resolution_artifact(
     ):
         return False
     return proof.get("schema_version") == "1.0.0"
+
 
 def _require_research_kind(kind: str) -> str:
     normalized = _require_text(kind, "kind")
@@ -249,10 +301,80 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 class ResearchJobStore:
     SCHEMA_VERSION = 5
 
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authoritative_artifact_root: str | Path | None = None,
+        publication_store: ArtifactStore | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if authoritative_artifact_root is None and publication_store is not None:
+            raise ValueError(
+                "publication_store cannot select research evidence authority"
+            )
+        reader = None
+        private_publication_store = None
+        if authoritative_artifact_root is not None:
+            # Preserve the compatibility check for a caller-supplied store at
+            # trusted composition, but never retain that caller-owned object as
+            # publication authority.
+            if publication_store is not None and _trusted_reader(
+                authoritative_artifact_root,
+                publication_store,
+            ) is None:
+                raise JobError("research evidence authority could not be configured")
+            private_publication_store = ArtifactStore(authoritative_artifact_root)
+            reader = _trusted_reader(
+                authoritative_artifact_root,
+                private_publication_store,
+            )
+            if reader is None:
+                raise JobError("research evidence authority could not be configured")
+            _bind_evidence_authority(
+                self,
+                reader,
+                private_publication_store,
+            )
         self._initialize()
+
+    def _require_artifact_reader(self):
+        authority = _bound_evidence_authority(self)
+        if authority is None:
+            raise JobConflictError(
+                "research job evidence authority is not configured"
+            )
+        return authority[0]
+
+    def _require_publication_store(
+        self,
+        candidate: ArtifactStore,
+    ) -> ArtifactStore:
+        authority = _bound_evidence_authority(self)
+        if authority is None:
+            raise JobConflictError(
+                "research job evidence authority is not configured"
+            )
+        _reader, private_publication_store = authority
+        if type(candidate) is not ArtifactStore:
+            raise JobConflictError(
+                "publication target must be the canonical ArtifactStore"
+            )
+        # Validate the worker-visible convenience store against the same
+        # retained generation before any bytes are written. The validation
+        # reader is temporary; actual publication uses only the module-private
+        # canonical store created from the independently selected root.
+        generation_probe = _trusted_reader(
+            private_publication_store.root,
+            candidate,
+        )
+        if generation_probe is None:
+            raise JobConflictError(
+                "publication target does not match research evidence authority"
+            )
+        del generation_probe
+        return private_publication_store
 
     @contextmanager
     def _connect(self):
@@ -584,7 +706,6 @@ class ResearchJobStore:
         generation: int,
         verdict: str,
         evidence_ref: str,
-        artifact_store: ArtifactStore | None = None,
         output_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> bool:
@@ -667,8 +788,9 @@ class ResearchJobStore:
                     "job is not waiting for the supplied external resolution"
                 )
 
-            if artifact_store is None or not _verify_external_resolution_artifact(
-                artifact_store=artifact_store,
+            read_snapshot = self._require_artifact_reader()
+            if not _verify_external_resolution_artifact(
+                read_snapshot=read_snapshot,
                 evidence_ref=evidence,
                 job_id=identifier,
                 generation=generation,
@@ -682,7 +804,7 @@ class ResearchJobStore:
             input_hashes = json.loads(row["input_hashes_json"])
             if normalized_verdict == "PROVEN_SUCCEEDED" and any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -767,6 +889,8 @@ class ResearchJobStore:
         generation: int,
         now: datetime,
     ) -> None:
+        if type(generation) is not int or generation < 1:
+            raise ValueError("generation must be a positive exact integer")
         if row is None:
             raise KeyError("job")
         if row["state"] != "RUNNING":
@@ -784,7 +908,6 @@ class ResearchJobStore:
         generation: int,
         checkpoint_ref: str,
         resource_usage: dict[str, int | float],
-        artifact_store: ArtifactStore,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -801,8 +924,9 @@ class ResearchJobStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
             input_hashes = json.loads(row["input_hashes_json"])
+            read_snapshot = self._require_artifact_reader()
             if not _verify_job_checkpoint_artifact(
-                artifact_store=artifact_store,
+                read_snapshot=read_snapshot,
                 checkpoint_ref=checkpoint,
                 job_id=identifier,
                 generation=generation,
@@ -871,6 +995,7 @@ class ResearchJobStore:
             kind = row["kind"]
             connection.commit()
 
+        publication_target = self._require_publication_store(artifact_store)
         checkpoint_digest = sha256(data).hexdigest()
         artifact_id = str(
             uuid5(
@@ -881,7 +1006,7 @@ class ResearchJobStore:
                 ),
             )
         )
-        manifest = artifact_store.publish_bytes(
+        manifest = publication_target.publish_bytes(
             artifact_id=artifact_id,
             data=data,
             media_type=media_type,
@@ -902,10 +1027,59 @@ class ResearchJobStore:
             generation=generation,
             checkpoint_ref=checkpoint_ref,
             resource_usage=resource_usage,
-            artifact_store=artifact_store,
             now=now,
         )
         return manifest, record
+
+    def read_checkpoint_bytes(
+        self, job_id: str, *, worker_id: str, generation: int,
+        now: datetime | None = None,
+    ) -> tuple[dict[str, Any], bytes] | None:
+        """Read the enrolled checkpoint for the current leased worker.
+
+        A resumed worker may consume a prior generation's frozen checkpoint.
+        The durable job pointer, exact job identity and immutable input hashes
+        remain authoritative; a future or foreign generation cannot supply state.
+        One authenticated read returns manifest and bytes together, under the
+        same job transaction that validates the live lease/cancellation fence.
+        Consumers must still validate their protocol/build/state payload schema.
+        """
+        if type(self) is not ResearchJobStore:
+            raise TypeError("checkpoint reader requires exact ResearchJobStore")
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        worker = _require_text(worker_id, "worker_id")
+        current = _utc(now or datetime.now(timezone.utc))
+        with ResearchJobStore._connect(self) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
+            ResearchJobStore._require_live_lease(row, worker, generation, current)
+            if bool(row["cancel_requested"]):
+                raise JobLeaseError("job cancellation is requested")
+            reference = row["checkpoint_ref"]
+            if reference is None:
+                connection.commit()
+                return None
+            snapshot = _authenticated_artifact_snapshot(
+                read_snapshot=ResearchJobStore._require_artifact_reader(self), reference=reference,
+            )
+            if snapshot is None:
+                raise JobConflictError("checkpoint bytes are absent or corrupt")
+            manifest, payload = snapshot
+            metadata = manifest.get("metadata")
+            source_generation = metadata.get("job_generation") if type(metadata) is dict else None
+            if (type(metadata) is not dict
+                    or metadata.get("artifact_kind") != "RESEARCH_JOB_CHECKPOINT"
+                    or metadata.get("job_id") != identifier
+                    or type(source_generation) is not int
+                    or not 1 <= source_generation <= generation
+                    or metadata.get("job_kind") not in (None, row["kind"])
+                    or manifest.get("source_refs") != json.loads(row["input_hashes_json"])):
+                raise JobConflictError("checkpoint does not match the enrolled job and inputs")
+            # Return detached data; retained reader state and job authority stay
+            # inside this canonical store, never on the worker-visible manifest.
+            detached_manifest = json.loads(_json(manifest))
+            connection.commit()
+        return detached_manifest, payload
 
     def pause(self, job_id: str, *, now: datetime | None = None) -> bool:
         """Pause retry-safe research work while fencing any live worker generation.
@@ -1055,9 +1229,10 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         output_refs: list[str],
-        artifact_store: ArtifactStore | None = None,
         now: datetime | None = None,
     ) -> bool:
+        if type(generation) is not int or generation < 1:
+            raise ValueError("generation must be a positive exact integer")
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
         if not isinstance(output_refs, list) or not output_refs:
@@ -1097,9 +1272,10 @@ class ResearchJobStore:
                 connection.rollback()
                 raise ValueError("output_refs must not contain duplicates")
             input_hashes = json.loads(row["input_hashes_json"])
-            if artifact_store is None or any(
+            read_snapshot = self._require_artifact_reader()
+            if any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -1161,8 +1337,9 @@ class ResearchJobStore:
             kind = row["kind"]
             connection.commit()
 
+        publication_target = self._require_publication_store(artifact_store)
         artifact_id = str(uuid5(UUID(identifier), f"generation:{generation}:slot:{result_slot}"))
-        manifest = artifact_store.publish_bytes(
+        manifest = publication_target.publish_bytes(
             artifact_id=artifact_id,
             data=data,
             media_type=media_type,
@@ -1182,7 +1359,6 @@ class ResearchJobStore:
             worker_id=worker,
             generation=generation,
             output_refs=[output_ref],
-            artifact_store=artifact_store,
             now=now,
         )
         return manifest, accepted

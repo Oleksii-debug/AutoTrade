@@ -7,13 +7,18 @@ name = "autotrade-research"
 version = "0.0.1"
 description = "Isolated research and evidence utilities for AutoTrade"
 requires-python = ">=3.12"
+dependencies = ["autotrade-exact-numeric==0.0.1"]
 
 [project.optional-dependencies]
 test = [
-    "jsonschema>=4.23,<5",
-    "referencing>=0.35,<1",
+    "attrs==26.1.0",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "referencing==0.36.2",
+    "rpds-py==2026.6.3",
+    "typing-extensions==4.16.0",
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["autotrade_research*"]
+where = [".", ".."]
+include = ["autotrade_research*", "autotrade_foundation*"]

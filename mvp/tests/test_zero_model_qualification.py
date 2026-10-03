@@ -98,7 +98,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertTrue(small["reconciled"])
         self.assertTrue(small["replay_verified"])
         self.assertEqual(small["economics"]["trade_count"], 0)
-        self.assertEqual(small["economics"]["net_pnl"], "0E-8")
+        self.assertEqual(small["economics"]["net_pnl"], "0")
 
         claims = evidence["claims"]
         self.assertFalse(claims["network_or_model_call_performed"])

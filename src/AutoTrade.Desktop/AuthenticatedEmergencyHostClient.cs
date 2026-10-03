@@ -1,3 +1,4 @@
+using AutoTrade.Contracts;
 using System.ComponentModel;
 using System.IO;
 using System.Net;
@@ -298,7 +299,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
             using HttpRequestMessage request = CreateRequest(
                 HttpMethod.Post,
-                "api/v1/commands",
+                HostApiRoutes.SubmitCommand,
                 currentSession);
             request.Content = new StringContent(
                 JsonSerializer.Serialize(
@@ -391,6 +392,19 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     string operationId = CanonicalGuid(
                         RequiredString(result, "operation_id"),
                         "operation_id");
+                    string expectedOperationId = HostOperationIdentity.Derive(
+                        pending.AccountId,
+                        pending.Environment,
+                        pending.CommandId);
+                    if (!string.Equals(
+                            operationId,
+                            expectedOperationId,
+                            StringComparison.Ordinal))
+                    {
+                        throw new EmergencyCommandUncertainException(
+                            pending.CommandId,
+                            "The host response operation identity was not derived from the unresolved command scope.");
+                    }
                     try
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(
@@ -607,7 +621,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         EmergencyHostSession session = GetBoundSession();
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
-            "api/v1/operations/" + Uri.EscapeDataString(canonicalId),
+            HostApiRoutes.GetOperation(canonicalId),
             session);
         using HttpResponseMessage response = await _httpClient.SendAsync(
             request,
@@ -667,7 +681,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         EmergencyHostSession session = GetBoundSession(knownSession);
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
-            "api/v1/state",
+            HostApiRoutes.GetState,
             session);
         using HttpResponseMessage response = await _httpClient.SendAsync(
             request,
@@ -685,7 +699,13 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string eventCursor = CanonicalSequence(
             RequiredString(value, "event_cursor"),
             "event_cursor");
-        DateTimeOffset observed = RequiredUtcInstant(value, "server_time");
+        if (!string.Equals(stateVersion, eventCursor, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot state_version and event_cursor must identify the same canonical host state.");
+        }
+        DateTimeOffset serverObservedAt =
+            RequiredUtcInstant(value, "server_time");
 
         if (ContainsSecret(value, session.Token))
         {
@@ -728,15 +748,40 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "Host snapshot has no connection freshness evidence.");
         }
 
+        string hostFreshness = RequiredString(freshness, "host");
+        if (hostFreshness is not ("CURRENT" or "STALE"))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot connection_freshness.host is not canonical.");
+        }
+        DateTimeOffset freshnessObservedAt =
+            RequiredUtcInstant(freshness, "as_of");
+        bool isCurrent = string.Equals(
+            hostFreshness,
+            "CURRENT",
+            StringComparison.Ordinal);
+        if (freshnessObservedAt > serverObservedAt)
+        {
+            throw new InvalidOperationException(
+                "Host freshness evidence cannot be later than host server time.");
+        }
+
         EmergencyHostStatus status = new EmergencyHostStatus(
             Connected: true,
             HostId: hostId,
             AccountId: accountId,
             Environment: environment,
             StateVersion: stateVersion,
-            ObservedAtUtc: observed,
-            Message: "Authenticated host state was refreshed from canonical version "
-                + stateVersion + ".").Validated();
+            ObservedAtUtc: freshnessObservedAt,
+            Message: isCurrent
+                ? "Authenticated host state was refreshed from canonical version "
+                    + stateVersion + "."
+                : "Authenticated host snapshot was received at canonical version "
+                    + stateVersion + ", but host freshness is "
+                    + hostFreshness + ".")
+        {
+            IsCurrent = isCurrent,
+        }.Validated();
         return new Snapshot(status, eventCursor);
     }
 

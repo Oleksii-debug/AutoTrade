@@ -42,6 +42,8 @@ from mvp.autotrade_mvp.kraken_spot import (
     pagination_page_from_observation,
     prepare_spot_order_request,
     validate_spot_client_order_id,
+    KrakenSpotBookChecksumEvidence,
+    verify_kraken_spot_v2_book_checksum,
 )
 
 
@@ -1417,6 +1419,191 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 account_id="paper-1",
                 environment="PAPER",)
 
+
+
+
+class KrakenSpotBookChecksumTests(unittest.TestCase):
+    EVENT_ID = "11111111-1111-4111-8111-111111111111"
+
+    @staticmethod
+    def candidate(asks, bids):
+        def canonical(value):
+            text = format(Decimal(value), "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return text or "0"
+
+        return {
+            "asks": [
+                {"price": canonical(price), "quantity": canonical(qty)}
+                for price, qty in sorted(asks, key=lambda item: Decimal(item[0]))
+            ],
+            "bids": [
+                {"price": canonical(price), "quantity": canonical(qty)}
+                for price, qty in sorted(
+                    bids,
+                    key=lambda item: Decimal(item[0]),
+                    reverse=True,
+                )
+            ],
+        }
+
+    def test_official_websocket_v2_checksum_example_matches_exact_provider_text(self):
+        asks = (
+            ("45285.2", "0.00100000"),
+            ("45286.4", "1.54571953"),
+            ("45286.6", "1.54571109"),
+            ("45289.6", "1.54560911"),
+            ("45290.2", "0.15890660"),
+            ("45291.8", "1.54553491"),
+            ("45294.7", "0.04454749"),
+            ("45296.1", "0.35380000"),
+            ("45297.5", "0.09945542"),
+            ("45299.5", "0.18772827"),
+        )
+        bids = (
+            ("45283.5", "0.10000000"),
+            ("45283.4", "1.54582015"),
+            ("45282.1", "0.10000000"),
+            ("45281.0", "0.10000000"),
+            ("45280.3", "1.54592586"),
+            ("45279.0", "0.07990000"),
+            ("45277.6", "0.03310103"),
+            ("45277.5", "0.30000000"),
+            ("45277.3", "1.54602737"),
+            ("45276.6", "0.15445238"),
+        )
+        evidence = verify_kraken_spot_v2_book_checksum(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=3310070434,
+        )
+        self.assertEqual(evidence.expected_checksum, 3310070434)
+        self.assertEqual(evidence.computed_checksum, 3310070434)
+        self.assertEqual(evidence.top_ask_count, 10)
+        self.assertEqual(evidence.top_bid_count, 10)
+        self.assertTrue(evidence.checksum_input_sha256.startswith("sha256:"))
+
+    def test_checksum_sorts_top_ten_by_provider_price_semantics(self):
+        asks = tuple(
+            (f"{45290 - index}.0", "1.00000000")
+            for index in range(12)
+        )
+        bids = tuple(
+            (f"{45270 + index}.0", "2.00000000")
+            for index in range(12)
+        )
+        # Obtain the expected value from the exact same provider text but with
+        # the semantically irrelevant tail levels removed explicitly.
+        top_asks = tuple(sorted(asks, key=lambda item: Decimal(item[0]))[:10])
+        top_bids = tuple(
+            sorted(bids, key=lambda item: Decimal(item[0]), reverse=True)[:10]
+        )
+        import zlib
+        def component(value):
+            return value.replace(".", "").lstrip("0")
+        checksum_input = "".join(
+            component(price) + component(qty)
+            for price, qty in (*top_asks, *top_bids)
+        )
+        expected = zlib.crc32(checksum_input.encode("ascii")) & 0xFFFFFFFF
+        evidence = verify_kraken_spot_v2_book_checksum(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=expected,
+        )
+        self.assertEqual(evidence.top_ask_count, 10)
+        self.assertEqual(evidence.top_bid_count, 10)
+
+    def test_checksum_preserves_trailing_zero_representation(self):
+        exact = verify_kraken_spot_v2_book_checksum
+        import zlib
+        preserved_input = "500010000000"
+        expected = zlib.crc32(preserved_input.encode("ascii")) & 0xFFFFFFFF
+        asks = (("0.05000", "0.10000000"),)
+        bids = ()
+        evidence = exact(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=expected,
+        )
+        self.assertEqual(evidence.computed_checksum, expected)
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "checksum mismatch"):
+            exact(
+                event_id=self.EVENT_ID,
+                candidate_book=self.candidate((("0.05", "0.1"),), ()),
+                asks=(("0.05", "0.1"),),
+                bids=(),
+                expected_checksum=expected,
+            )
+
+    def test_checksum_rejects_noncanonical_or_unsafe_inputs(self):
+        bad_cases = (
+            (((("1e2", "1.0"),), (), 0), "plain exact decimal"),
+            (((("1.0", "1.0"), ("1.00", "2.0")), (), 0), "duplicate prices"),
+            (((("1.0", "0"),), (), 0), "positive"),
+            (((("1.0", "1.0"),), (), True), "unsigned 32-bit"),
+        )
+        for args, message in bad_cases:
+            asks, bids, checksum = args
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                message,
+            ):
+                verify_kraken_spot_v2_book_checksum(
+                    event_id=self.EVENT_ID,
+                    candidate_book=self.candidate(asks, bids),
+                    asks=asks,
+                    bids=bids,
+                    expected_checksum=checksum,
+                )
+
+    def test_checksum_rejects_provider_representation_that_does_not_match_candidate(self):
+        asks = (("100.00", "1.00000000"),)
+        bids = (("99.00", "2.00000000"),)
+        import zlib
+        def component(value):
+            return value.replace(".", "").lstrip("0")
+        checksum_input = "".join(
+            component(price) + component(qty)
+            for price, qty in (*asks, *bids)
+        )
+        expected = zlib.crc32(checksum_input.encode("ascii")) & 0xFFFFFFFF
+        wrong_candidate = self.candidate(
+            (("100.00", "1.50000000"),),
+            bids,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "do not match the coordinator candidate book",
+        ):
+            verify_kraken_spot_v2_book_checksum(
+                event_id=self.EVENT_ID,
+                candidate_book=wrong_candidate,
+                asks=asks,
+                bids=bids,
+                expected_checksum=expected,
+            )
+
+    def test_checksum_evidence_cannot_be_self_constructed(self):
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "canonical verification"):
+            KrakenSpotBookChecksumEvidence(
+                policy_id="KRAKEN_SPOT_WS_V2_BOOK_CRC32_TOP10_V1",
+                expected_checksum=1,
+                computed_checksum=1,
+                checksum_input_sha256="sha256:" + "0" * 64,
+                provider_book_sha256="sha256:" + "0" * 64,
+                candidate_book_sha256="sha256:" + "0" * 64,
+                event_id=self.EVENT_ID,
+                top_ask_count=1,
+                top_bid_count=1,
+            )
 
 
 if __name__ == "__main__":

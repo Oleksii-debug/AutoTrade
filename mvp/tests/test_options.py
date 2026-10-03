@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from tempfile import TemporaryDirectory
 import unittest
@@ -418,6 +418,39 @@ class OptionRiskEvidenceTests(unittest.TestCase):
                     maximum_market_age=timedelta(hours=2),
                     artifact_store=ArtifactStore(directory),
                 )
+
+    def test_option_risk_payload_decimal_identity_is_context_independent(self):
+        evidence = replace(
+            self._risk(),
+            delta=Decimal("0.12345678901234567890123456789"),
+            gamma=Decimal("0.000000000000000000123456789"),
+            scenarios=(
+                OptionScenarioResult(
+                    scenario_id="high-significance",
+                    underlying_price="12345678901234567890.123456789",
+                    implied_volatility="0.12345678901234567890123456789",
+                    pnl="-9876543210987654321.123456789",
+                ),
+            ),
+        )
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        observed.append(option_risk_evidence_payload(evidence))
+
+        self.assertTrue(all(payload == observed[0] for payload in observed))
+        self.assertEqual(
+            observed[0]["greeks"]["delta"],
+            "0.12345678901234567890123456789",
+        )
+        self.assertEqual(
+            observed[0]["scenarios"][0]["underlying_price"],
+            "12345678901234567890.123456789",
+        )
 
     def test_greeks_are_versioned_estimates_and_stress_is_explicit(self):
         evidence = self._risk()

@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext, ROUND_DOWN, Inexact, Rounded
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+import subprocess
+import sys
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_call import (
@@ -262,7 +265,589 @@ def observation(
     )
 
 
+def prepare_only(orchestrator, budget, call_spec, request, route_descriptor=None):
+    route_descriptor = route_descriptor or descriptor()
+    pricing = _pricing_evidence(call_spec, (route_descriptor,))
+    decision = budget.admit_route(
+        fixed_policy(model_id=route_descriptor.model_id),
+        request,
+        [route_descriptor],
+        now_utc=NOW,
+        reservation_context=orchestrator._reservation_context(
+            call_spec,
+            pricing,
+        ),
+    )
+    prepared = orchestrator._prepared_payload(
+        attempt_id=orchestrator.attempt_id(call_spec),
+        spec=call_spec,
+        decision=decision,
+        descriptor=route_descriptor,
+        pricing=pricing,
+        request=request,
+    )
+    orchestrator._append(
+        attempt_id=orchestrator.attempt_id(call_spec),
+        event_type="ModelCallPrepared",
+        version=1,
+        payload=prepared,
+    )
+    return decision, pricing
+
 class ModelCallLifecycleTests(unittest.TestCase):
+    def test_schema_invalid_parent_remains_fallback_eligible_after_billing_evidence(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent_request = request_for(orchestrator, parent_spec)
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=fixed_policy(),
+                request=parent_request,
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.3",
+                    unbilled="0.4",
+                    billing_id="invoice-invalid-fallback",
+                    output={"unexpected": True},
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+            self.assertTrue(
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=parent.attempt_id,
+                    billing_id="invoice-invalid-fallback",
+                    billed="0.2",
+                )
+            )
+            self.assertEqual(
+                orchestrator._events(parent.attempt_id)[-1]["event_type"],
+                "ModelBillingEvidenceObserved",
+            )
+
+            fallback_spec = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            fallback_request = request_for(orchestrator, fallback_spec)
+            calls = []
+            fallback = orchestrator.execute(
+                spec=fallback_spec,
+                policy=fixed_policy(),
+                request=fallback_request,
+                descriptors=[descriptor()],
+                call=lambda *_args: (
+                    calls.append("fallback-call") or observation(
+                        incurred="0.1",
+                        unbilled="0",
+                        billing_id="invoice-fallback-child",
+                    )
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(fallback.status, "OBSERVED_VALID")
+            self.assertEqual(calls, ["fallback-call"])
+
+    def test_billing_evidence_does_not_hide_observed_terminal_on_retry(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            calls = []
+
+            def observed_call(_binding, _cancelled):
+                calls.append("provider-call")
+                return observation(
+                    incurred="0.3",
+                    unbilled="0.4",
+                    billing_id="invoice-retry-safe",
+                )
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=observed_call,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertTrue(
+                orchestrator.reconcile_observed_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-retry-safe",
+                    billed="0.2",
+                )
+            )
+
+            retry = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            ).execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append("retry-call"),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(retry.status, "OBSERVED_VALID")
+            self.assertEqual(calls, ["provider-call"])
+            snapshot = budget.snapshot()
+            self.assertEqual(snapshot.incurred, Decimal("0.5"))
+            self.assertEqual(snapshot.estimated_unbilled, Decimal("0.2"))
+
+    def test_unknown_billing_reconciliation_rejects_untrusted_evidence(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+
+            def reject_billing(_attempt, _billing, _billed, _scope):
+                raise ValueError("invoice line is not issuer-authenticated")
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                billing_evidence_resolver=reject_billing,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: (_ for _ in ()).throw(
+                    TimeoutError("provider response lost")
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            before = budget.snapshot()
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "billing evidence could not be authenticated",
+            ):
+                orchestrator.reconcile_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="untrusted-invoice",
+                    billed="0.4",
+                )
+            self.assertEqual(budget.snapshot(), before)
+
+    def test_unknown_billing_reconciliation_is_authenticated_and_restart_safe(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            calls = []
+
+            def ambiguous_call(_binding, _cancelled):
+                calls.append("provider-call")
+                raise TimeoutError("provider response lost")
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=ambiguous_call,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
+            )
+
+            restarted = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            self.assertTrue(
+                restarted.reconcile_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="late-invoice-line",
+                    billed="0.4",
+                )
+            )
+            reconciled = budget.snapshot()
+            self.assertEqual(reconciled.incurred, Decimal("0.4"))
+            self.assertEqual(
+                reconciled.estimated_unbilled,
+                Decimal("0.8"),
+            )
+
+            retry = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append("retry-call"),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(retry.status, "UNKNOWN")
+            self.assertEqual(calls, ["provider-call"])
+            after_retry = budget.snapshot()
+            self.assertEqual(after_retry.incurred, Decimal("0.4"))
+            self.assertEqual(
+                after_retry.estimated_unbilled,
+                Decimal("0.8"),
+            )
+
+    def test_prepared_restart_rejects_changed_routing_policy(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            original_request = request_for(first, call_spec)
+            prepare_only(first, budget, call_spec, original_request)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+
+            changed_policies = (
+                RoutingPolicy(
+                    mode=RoutingMode.ZERO,
+                    maximum_cost=Decimal("0"),
+                ),
+                fixed_policy(allow_remote=False),
+                fixed_policy(maximum_cost="1"),
+            )
+            for changed_policy in changed_policies:
+                with self.subTest(policy=changed_policy):
+                    with self.assertRaisesRegex(
+                        ModelCallError,
+                        "routing policy conflicts with durable prepared authority",
+                    ):
+                        restarted.execute(
+                            spec=call_spec,
+                            policy=changed_policy,
+                            request=original_request,
+                            descriptors=[descriptor()],
+                            call=lambda *_args: self.fail("must not call"),
+                            validate_result=lambda _value: True,
+                            now_utc=clock.value,
+                        )
+
+            self.assertEqual(
+                budget.active_reservation(restarted.attempt_id(call_spec)),
+                Decimal("1.2"),
+            )
+
+    def test_prepared_restart_rejects_changed_request_authority(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            original = request_for(first, call_spec)
+            prepare_only(first, budget, call_spec, original)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+
+            changed_requests = (
+                ModelRequest(
+                    request_id=original.request_id,
+                    allowed_model_ids=("model-a", "model-b"),
+                    privacy_remote_allowed=original.privacy_remote_allowed,
+                    budget_remaining=original.budget_remaining,
+                    deadline_utc=original.deadline_utc,
+                    cancelled=False,
+                ),
+                ModelRequest(
+                    request_id=original.request_id,
+                    allowed_model_ids=original.allowed_model_ids,
+                    privacy_remote_allowed=False,
+                    budget_remaining=original.budget_remaining,
+                    deadline_utc=original.deadline_utc,
+                    cancelled=False,
+                ),
+                ModelRequest(
+                    request_id=original.request_id,
+                    allowed_model_ids=original.allowed_model_ids,
+                    privacy_remote_allowed=original.privacy_remote_allowed,
+                    budget_remaining=Decimal("1.5"),
+                    deadline_utc=original.deadline_utc,
+                    cancelled=False,
+                ),
+            )
+            for changed in changed_requests:
+                with self.subTest(changed=changed):
+                    with self.assertRaisesRegex(
+                        ModelCallError,
+                        "identity conflicts with durable prepared attempt",
+                    ):
+                        restarted.execute(
+                            spec=call_spec,
+                            policy=fixed_policy(),
+                            request=changed,
+                            descriptors=[descriptor()],
+                            call=lambda *_args: self.fail("must not call"),
+                            validate_result=lambda _value: True,
+                            now_utc=NOW,
+                        )
+            self.assertEqual(
+                budget.active_reservation(restarted.attempt_id(call_spec)),
+                Decimal("1.2"),
+            )
+
+    def test_prepared_restart_cannot_extend_original_request_deadline(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            default_request = request_for(first, call_spec)
+            original_request = ModelRequest(
+                request_id=default_request.request_id,
+                allowed_model_ids=default_request.allowed_model_ids,
+                privacy_remote_allowed=default_request.privacy_remote_allowed,
+                budget_remaining=default_request.budget_remaining,
+                deadline_utc=NOW + timedelta(minutes=30),
+                cancelled=False,
+            )
+            prepare_only(first, budget, call_spec, original_request)
+
+            clock.advance(1801)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+            extended_request = ModelRequest(
+                request_id=original_request.request_id,
+                allowed_model_ids=original_request.allowed_model_ids,
+                privacy_remote_allowed=original_request.privacy_remote_allowed,
+                budget_remaining=original_request.budget_remaining,
+                deadline_utc=NOW + timedelta(hours=2),
+                cancelled=False,
+            )
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "identity conflicts with durable prepared attempt",
+            ):
+                restarted.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=extended_request,
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=clock.value,
+                )
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                budget.active_reservation(restarted.attempt_id(call_spec)),
+                Decimal("1.2"),
+            )
+
+            outcome = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=original_request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=clock.value,
+            )
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "request_deadline_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(restarted.attempt_id(call_spec))
+            )
+
+    def test_prepared_restart_rejects_expired_request_deadline_before_call_boundary(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            default_request = request_for(first, call_spec)
+            request = ModelRequest(
+                request_id=default_request.request_id,
+                allowed_model_ids=default_request.allowed_model_ids,
+                privacy_remote_allowed=default_request.privacy_remote_allowed,
+                budget_remaining=default_request.budget_remaining,
+                deadline_utc=NOW + timedelta(minutes=30),
+                cancelled=False,
+            )
+            prepare_only(first, budget, call_spec, request)
+
+            clock.advance(1801)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+            calls = []
+            outcome = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=clock.value,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "request_deadline_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(restarted.attempt_id(call_spec))
+            )
+
+    def test_prepared_restart_rejects_expired_pricing_before_call_boundary(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            request = request_for(first, call_spec)
+            prepare_only(first, budget, call_spec, request)
+
+            clock.advance(3601)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+            calls = []
+            outcome = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=clock.value,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "pricing_evidence_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(restarted.attempt_id(call_spec))
+            )
+            self.assertEqual(
+                [event["event_type"] for event in restarted._events(outcome.attempt_id)],
+                ["ModelCallPrepared", "ModelCallNotSent"],
+            )
+
+    def test_call_boundary_rechecks_expiry_after_cancellation_probe(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            calls = []
+
+            def slow_cancellation_probe():
+                clock.advance(3601)
+                return False
+
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=slow_cancellation_probe,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "pricing_evidence_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(orchestrator.attempt_id(call_spec))
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in orchestrator._events(outcome.attempt_id)
+                ],
+                [
+                    "ModelCallPrepared",
+                    "ModelCallNotSent",
+                ],
+            )
+
+    def test_fresh_prepared_call_revalidates_expiry_at_inference_boundary(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            ticks = iter(
+                (
+                    NOW,
+                    NOW,
+                    NOW + timedelta(seconds=3601),
+                    NOW + timedelta(seconds=3601),
+                )
+            )
+
+            def boundary_clock():
+                try:
+                    value = next(ticks)
+                except StopIteration:
+                    value = NOW + timedelta(seconds=3601)
+                return value.isoformat().replace("+00:00", "Z")
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=boundary_clock,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            calls = []
+
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "pricing_evidence_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(orchestrator.attempt_id(call_spec))
+            )
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(outcome.attempt_id)],
+                ["ModelCallPrepared", "ModelCallNotSent"],
+            )
+
     def test_zero_mode_never_calls_and_creates_no_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
@@ -534,6 +1119,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 decision=decision,
                 descriptor=descriptor(),
                 pricing=pricing,
+                request=request,
             )
             orchestrator._append(
                 attempt_id=attempt_id,
@@ -717,6 +1303,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 decision=decision,
                 descriptor=route_descriptor,
                 pricing=pricing_p1,
+                request=request,
             )
             first._append(
                 attempt_id=first.attempt_id(call_spec),
@@ -784,6 +1371,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 decision=decision,
                 descriptor=route_descriptor,
                 pricing=pricing_p1,
+                request=request,
             )
             first._append(
                 attempt_id=first.attempt_id(call_spec),
@@ -1464,3 +2052,192 @@ class ModelCallLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelCallIntegrityTests(unittest.TestCase):
+    def _run(self, directory, *, call, validator=lambda _: True, **kwargs):
+        journal, budget = open_budget(directory)
+        clock = MutableClock()
+        orchestrator = orchestrator_for(budget=budget, clock=clock, **kwargs)
+        call_spec = spec()
+        result = orchestrator.execute(spec=call_spec, policy=fixed_policy(),
+            request=request_for(orchestrator, call_spec), descriptors=[descriptor()],
+            call=call, validate_result=validator, now_utc=NOW)
+        return journal, budget, orchestrator, result
+
+    def test_validator_cannot_rewrite_authenticated_result(self):
+        response = observation()
+        def mutate(value):
+            value["answer"] = 999
+            response.output["answer"] = 123
+            object.__setattr__(response, "incurred_cost", Decimal("0"))
+            return True
+        with TemporaryDirectory() as directory:
+            _, budget, orchestrator, result = self._run(directory, call=lambda *_: response, validator=mutate)
+            self.assertEqual(result.output, {"answer": 7})
+            self.assertEqual(result.result_digest, payload_digest({"answer": 7}))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            event = orchestrator._events(result.attempt_id)[-1]["payload"]
+            self.assertEqual(event["result_digest"], payload_digest({"answer": 7}))
+            self.assertEqual(event["observation_digest"], _observation_evidence(observation(),
+                orchestrator._binding(attempt_id=result.attempt_id, spec=spec(), decision=result.route,
+                    descriptor=descriptor(), pricing_evidence_digest=event["pricing_evidence_digest"])).observation_digest)
+
+    def test_resolver_cannot_mutate_response_then_self_bind_new_evidence(self):
+        def mutating_resolver(value, binding):
+            value.output["answer"] = 999
+            return _observation_evidence(value, binding)
+        with TemporaryDirectory() as directory:
+            _, budget, _, result = self._run(directory, call=lambda *_: observation(),
+                observation_evidence_resolver=mutating_resolver)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_subclass_observation_cannot_grant_cost_authority(self):
+        class HostileObservation(ModelCallObservation):
+            def __getattribute__(self, name):
+                raise AssertionError("subclass must not be dispatched")
+        value = object.__new__(HostileObservation)
+        with TemporaryDirectory() as directory:
+            _, budget, _, result = self._run(directory, call=lambda *_: value)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_tampered_scalar_graph_is_unknown_before_evidence_callback(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("scalar callback must not execute")
+        response = observation()
+        object.__setattr__(response, "incurred_cost", HostileDecimal("0.4"))
+        with TemporaryDirectory() as directory:
+            _, budget, _, result = self._run(directory, call=lambda *_: response,
+                observation_evidence_resolver=lambda *_: self.fail("invalid scalar reached evidence resolver"))
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_observed_settlement_crash_repairs_without_second_call(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(budget=budget, clock=MutableClock())
+            call_spec = spec()
+            args = dict(spec=call_spec, policy=fixed_policy(), request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()], validate_result=lambda _: False, now_utc=NOW)
+            with patch.object(budget, "settle", side_effect=OSError("disk failure")):
+                with self.assertRaises(OSError):
+                    orchestrator.execute(**args, call=lambda *_: observation())
+            self.assertEqual(orchestrator._events(orchestrator.attempt_id(call_spec))[-1]["event_type"], "ModelCallObserved")
+            self.assertEqual(budget.snapshot().reserved, Decimal("1.2"))
+            _, restarted_budget = open_budget(directory)
+            restarted = orchestrator_for(budget=restarted_budget, clock=MutableClock())
+            result = restarted.execute(**args, call=lambda *_: self.fail("durable observed retry crossed call boundary"))
+            self.assertEqual(result.status, "OBSERVED_INVALID")
+            self.assertEqual(restarted_budget.snapshot().incurred, Decimal("0.4"))
+            self.assertEqual(restarted_budget.snapshot().reserved, Decimal("0"))
+
+    def test_not_sent_release_crash_repairs_without_call(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory)
+            orchestrator = orchestrator_for(budget=budget, clock=MutableClock())
+            call_spec = spec()
+            args = dict(spec=call_spec, policy=fixed_policy(), request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()], validate_result=lambda _: True, now_utc=NOW)
+            with patch.object(budget, "release", side_effect=OSError("disk failure")):
+                with self.assertRaises(OSError):
+                    orchestrator.execute(**args, call=lambda *_: self.fail("cancelled call"), cancel_requested=lambda: True)
+            self.assertEqual(budget.snapshot().reserved, Decimal("1.2"))
+            result = orchestrator.execute(**args, call=lambda *_: self.fail("NOT_SENT retry called"))
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertEqual(budget.snapshot().available, Decimal("5"))
+
+    def test_not_sent_error_text_cannot_enter_journal(self):
+        def not_sent(*_):
+            raise ModelCallNotSent("TEST_SECRET_DO_NOT_PERSIST")
+        with TemporaryDirectory() as directory:
+            _, _, orchestrator, result = self._run(directory, call=not_sent)
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertNotIn("TEST_SECRET_DO_NOT_PERSIST", str(orchestrator._events(result.attempt_id)))
+
+    def test_callback_cannot_extend_original_request_deadline(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            original = request_for(orchestrator, call_spec)
+            object.__setattr__(original, "deadline_utc", NOW + timedelta(seconds=30))
+            def mutate_request():
+                object.__setattr__(original, "deadline_utc", NOW + timedelta(hours=5))
+                clock.advance(31)
+                return False
+            result = orchestrator.execute(spec=call_spec, policy=fixed_policy(), request=original,
+                descriptors=[descriptor()], call=lambda *_: self.fail("deadline was extended"),
+                validate_result=lambda _: True, now_utc=NOW, cancel_requested=mutate_request)
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertEqual(result.reason, "request_deadline_expired_before_call_boundary")
+
+    def test_sub_precision_observed_overrun_stays_unknown(self):
+        with TemporaryDirectory() as directory, localcontext() as ctx:
+            ctx.prec = 3
+            ctx.rounding = ROUND_DOWN
+            _, budget, _, result = self._run(directory, call=lambda *_: observation(incurred="1.2", unbilled="0.00009"))
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+
+    def test_process_exit_after_started_recovers_unknown_with_zero_calls(self):
+        with TemporaryDirectory() as directory:
+            script = """
+import sys
+from mvp.tests.test_model_call import open_budget, orchestrator_for, MutableClock, spec, request_for, fixed_policy, descriptor, NOW
+_, budget = open_budget(sys.argv[1])
+owner = orchestrator_for(budget=budget, clock=MutableClock())
+call_spec = spec()
+def process_exit(*_):
+    raise SystemExit(44)
+owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, call_spec),
+              descriptors=[descriptor()], call=process_exit, validate_result=lambda _: True, now_utc=NOW)
+"""
+            completed = subprocess.run([sys.executable, "-c", script, directory],
+                cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=15)
+            self.assertEqual(completed.returncode, 44, completed.stderr)
+            _, budget = open_budget(directory)
+            clock = MutableClock()
+            clock.advance(61)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            result = restarted.execute(spec=call_spec, policy=fixed_policy(),
+                request=request_for(restarted, call_spec), descriptors=[descriptor()],
+                call=lambda *_: self.fail("process restart resent uncertain call"),
+                validate_result=lambda _: True, now_utc=NOW)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+            self.assertTrue(restarted.reconcile_billing(attempt_id=result.attempt_id,
+                billing_id="bill-after-process-exit", billed="0.6"))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.6"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.6"))
+            second = restarted.execute(spec=call_spec, policy=fixed_policy(),
+                request=request_for(restarted, call_spec), descriptors=[descriptor()],
+                call=lambda *_: self.fail("billing evidence reopened UNKNOWN"),
+                validate_result=lambda _: True, now_utc=NOW)
+            self.assertEqual(second.status, "UNKNOWN")
+
+
+    def test_validator_cannot_rewrite_resolver_retained_observation(self):
+        retained = []
+        def resolver(value, binding):
+            retained.append(value)
+            return _observation_evidence(value, binding)
+        def validator(_):
+            object.__setattr__(retained[0], "incurred_cost", Decimal("0"))
+            object.__setattr__(retained[0], "revision", "unqualified-revision")
+            retained[0].output["answer"] = 999
+            return True
+        with TemporaryDirectory() as directory:
+            _, budget, orchestrator, result = self._run(directory, call=lambda *_: observation(),
+                validator=validator, observation_evidence_resolver=resolver)
+            self.assertEqual(result.output, {"answer": 7})
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            payload = orchestrator._events(result.attempt_id)[-1]["payload"]
+            self.assertEqual(payload["revision"], "r1")
+            self.assertEqual(payload["incurred_cost"], "0.4")

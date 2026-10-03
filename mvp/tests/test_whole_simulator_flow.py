@@ -158,12 +158,14 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
 
             authority = authority_service(journal)
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
             reservations = DurableReservationBook(
                 journal,
                 environment="SIMULATION",
                 account_id="sim-account",
                 resolution_artifact_store=artifacts,
+                resolution_artifact_root=artifact_root,
             )
             initial_snapshot = provider.account_snapshot(now=NOW)
             availability_result = reconcile_account(
@@ -560,7 +562,10 @@ class WholeSimulatorFlowTests(unittest.TestCase):
         )
         self.assertEqual(queried["time_window"]["start"], "2026-09-24T17:00:00Z")
         self.assertEqual(queried["time_window"]["end"], "2026-09-24T19:00:00Z")
-        self.assertEqual(queried["consistency_horizon"], "2026-09-24T19:00:00Z")
+        self.assertEqual(queried["verdict"], "FOUND")
+        self.assertEqual(queried["order"]["status"], "WORKING")
+        self.assertEqual(queried["consistency_horizon"], LATER)
+        self.assertNotIn("reason_codes", queried)
         self.assertEqual(provider.health(now="2026-09-24T20:01:00+02:00")["as_of"], LATER)
 
     def test_timeout_after_send_keeps_unknown_reservation_and_never_blindly_retries(self):

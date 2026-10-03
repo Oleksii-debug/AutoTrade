@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import parse_bounded_exact_decimal
 
 
 _AGGREGATE_TYPE = "model_budget"
@@ -95,6 +96,28 @@ def _command_id(aggregate_id: str, idempotency_key: str) -> str:
     )
 
 
+def _rehydrate_committed_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore the exact canonical envelope accepted by commit_command.
+
+    Journal reads expose aggregate_version as an integer and add the derived
+    journal_sequence.  Neither representation is part of the immutable event
+    envelope hashed into an EVENT_BATCH effect.
+    """
+
+    if not isinstance(event, Mapping):
+        raise TypeError("durable event must be a mapping")
+    version = event.get("aggregate_version")
+    if type(version) is not int or version <= 0:
+        raise ValueError("durable event aggregate_version must be positive")
+    envelope = {
+        key: value
+        for key, value in event.items()
+        if key != "journal_sequence"
+    }
+    envelope["aggregate_version"] = str(version)
+    return envelope
+
+
 def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
     return "model-budget:" + action + ":" + _identity_digest(
         "idempotency",
@@ -145,11 +168,6 @@ class DurableModelBudget:
             try:
                 self.journal.append_event(envelope)
             except ValueError:
-                # A concurrent process may have won the deterministic
-                # initialization event_id after our empty read. Only suppress
-                # the error when durable truth proves that exact initialization
-                # payload already exists. Contract/malformed-envelope errors
-                # must propagate instead of being misreported as a missing init.
                 concurrent = self.journal.get_event(envelope["event_id"])
                 if (
                     concurrent is None
@@ -218,7 +236,9 @@ class DurableModelBudget:
         raise ValueError(f"unsupported durable model budget event: {event_type}")
 
     def _replay(self) -> BudgetLedger:
-        events = self._events()
+        return self._replay_events(self._events())
+
+    def _replay_events(self, events: list[dict[str, Any]]) -> BudgetLedger:
         if not events or events[0]["event_type"] != "ModelBudgetInitialized":
             raise ValueError("durable model budget initialization is missing")
         initialization = events[0].get("payload")
@@ -245,12 +265,6 @@ class DurableModelBudget:
         return self._replay().snapshot()
 
     def active_reservation(self, request_id: str) -> Decimal | None:
-        """Return the exact currently active reservation for one request identity.
-
-        This query is journal-derived rather than inferred from aggregate totals.
-        Production call boundaries use it to prove that their exact request still
-        owns the reservation returned by admit_route before any inference I/O.
-        """
         request = _text(request_id, name="request_id")
         active: Decimal | None = None
         for event in self._events():
@@ -260,7 +274,7 @@ class DurableModelBudget:
             event_type = event.get("event_type")
             if event_type in {"ModelCostReserved", "ModelRouteReserved"}:
                 try:
-                    amount = Decimal(payload["amount"])
+                    amount = parse_bounded_exact_decimal(payload["amount"])
                 except (KeyError, ValueError, TypeError) as error:
                     raise ValueError(
                         "durable model reservation amount is invalid"
@@ -294,9 +308,6 @@ class DurableModelBudget:
         command_id = _command_id(self.budget_id, idempotency_key)
         event_id = _event_id(self.budget_id, idempotency_key)
 
-        # Resolve idempotency before re-applying a mutation to the projection.
-        # This matters after restart: a settled reservation is no longer active,
-        # but replaying the exact same settlement must remain a safe no-op.
         existing = self.journal.get_event(event_id)
         if existing is not None:
             if (
@@ -308,11 +319,8 @@ class DurableModelBudget:
                 raise ValueError(
                     "model budget idempotency identity conflicts with durable event"
                 )
-            # Do not let the event-id fast path bypass canonical command scope.
-            # Exact retries must still prove the same actor/environment/key. For
-            # pre-scoped event history this also creates the command dedupe row
-            # lazily after the exact event payload has been verified.
-            self.journal.record_command(
+            original_envelope = _rehydrate_committed_event(existing)
+            saved_result, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -320,14 +328,25 @@ class DurableModelBudget:
                 request=request,
                 result=result,
                 state_version=int(existing["aggregate_version"]),
+                events=[(original_envelope, None)],
             )
+            if inserted:
+                raise ValueError(
+                    "existing model budget event unexpectedly inserted on replay"
+                )
+            if saved_result != result:
+                raise ValueError(
+                    "model budget command result conflicts with durable event"
+                )
             return False
 
-        # Validate on a fresh durable projection so rejected operations never
-        # create events or mutate process-only state.
-        ledger = self._replay()
+        frozen_events = self._events()
+        ledger = self._replay_events(frozen_events)
         validate(ledger)
-        version = len(self._events()) + 1
+        # Validation and aggregate CAS must describe one immutable journal cut.
+        # Rereading the version after validation could accept a stale budget
+        # projection under a newer version and permanently overbook the ceiling.
+        version = len(frozen_events) + 1
         envelope = self._envelope(
             event_type=event_type,
             version=version,
@@ -335,7 +354,7 @@ class DurableModelBudget:
             event_id=event_id,
         )
         try:
-            _, inserted, _ = self.journal.commit_command(
+            saved_result, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -345,23 +364,25 @@ class DurableModelBudget:
                 state_version=version,
                 events=[(envelope, None)],
             )
+            if not inserted and saved_result != result:
+                raise ValueError(
+                    "model budget command result conflicts with durable event"
+                )
             return inserted
         except ValueError as error:
-            # A concurrent writer can advance aggregate_version between replay
-            # and commit. Re-evaluate once from durable truth. We do not loop or
-            # invent success; a repeated conflict remains fail-closed.
             if "aggregate_version must be" not in str(error):
                 raise
-            ledger = self._replay()
+            frozen_events = self._events()
+            ledger = self._replay_events(frozen_events)
             validate(ledger)
-            version = len(self._events()) + 1
+            version = len(frozen_events) + 1
             envelope = self._envelope(
                 event_type=event_type,
                 version=version,
                 payload=payload,
                 event_id=event_id,
             )
-            _, inserted, _ = self.journal.commit_command(
+            saved_result, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -371,6 +392,10 @@ class DurableModelBudget:
                 state_version=version,
                 events=[(envelope, None)],
             )
+            if not inserted and saved_result != result:
+                raise ValueError(
+                    "model budget command result conflicts with durable event"
+                )
             return inserted
 
     @staticmethod
@@ -425,7 +450,7 @@ class DurableModelBudget:
     def _decision_from_route_payload(payload: dict[str, Any]) -> RouteDecision:
         try:
             status = RouteStatus(payload["route_status"])
-            amount = Decimal(payload["amount"])
+            amount = parse_bounded_exact_decimal(payload["amount"])
         except (KeyError, ValueError, TypeError) as error:
             raise ValueError("durable model route payload is invalid") from error
         if status is not RouteStatus.ADMITTED:
@@ -452,13 +477,6 @@ class DurableModelBudget:
         now_utc: datetime | None = None,
         reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
-        """Route and durably reserve worst-case model cost before call authority.
-
-        The caller budget is only an optional tighter request cap. It can never
-        enlarge the durable budget. The reservation commit revalidates the
-        latest journal state before this method returns ADMITTED.
-        """
-
         materialized = tuple(descriptors)
         routing_input = self._routing_input(
             policy,
@@ -612,11 +630,56 @@ class DurableModelBudget:
 
     def release(self, request_id: str) -> bool:
         request_id = _text(request_id, name="request_id")
+        request = {"request_id": request_id}
+        idempotency_key = _idempotency_key(
+            budget_id=self.budget_id,
+            action="release",
+            identity=request_id,
+        )
+        existing = self.journal.get_event(
+            _event_id(self.budget_id, idempotency_key)
+        )
+        if existing is not None:
+            payload = existing.get("payload")
+            if (
+                existing.get("event_type") != "ModelCostReleased"
+                or existing.get("aggregate_type") != _AGGREGATE_TYPE
+                or existing.get("aggregate_id") != self.budget_id
+                or not isinstance(payload, dict)
+                or payload.get("request_id") != request_id
+            ):
+                raise ValueError(
+                    "model budget release identity conflicts with durable event"
+                )
+            released_text = payload.get("released")
+            try:
+                released = parse_bounded_exact_decimal(released_text)
+            except (ValueError, TypeError) as error:
+                raise ValueError(
+                    "durable model budget release evidence is inconsistent"
+                ) from error
+            if (
+                not released.is_finite()
+                or released <= 0
+                or str(released) != released_text
+            ):
+                raise ValueError(
+                    "durable model budget release evidence is inconsistent"
+                )
+            return self._commit(
+                action="release",
+                identity=request_id,
+                request=request,
+                event_type="ModelCostReleased",
+                payload=payload,
+                result={"released": released_text},
+                validate=lambda _ledger: None,
+            )
+
         ledger = self._replay()
         released = ledger.release(request_id)
         if released == 0:
             return False
-        request = {"request_id": request_id}
 
         def validate(candidate: BudgetLedger) -> None:
             candidate_released = candidate.release(request_id)
@@ -637,7 +700,6 @@ class DurableModelBudget:
 
     def settle(self, request_id: str, *, incurred, estimated_unbilled="0") -> bool:
         request_id = _text(request_id, name="request_id")
-        # Reuse the canonical ledger parser without mutating durable state.
         normalized_incurred = BudgetLedger(incurred).snapshot().ceiling
         normalized_unbilled = BudgetLedger(estimated_unbilled).snapshot().ceiling
         request = {
@@ -672,8 +734,6 @@ class DurableModelBudget:
     ) -> bool:
         billing_id = _text(billing_id, name="billing_id")
         request_id = _text(request_id, name="request_id")
-        # The ceiling parser enforces the same exact, finite, non-negative
-        # Decimal boundary as the canonical ledger.
         normalized = BudgetLedger(billed).snapshot().ceiling
         request = {
             "billing_id": billing_id,

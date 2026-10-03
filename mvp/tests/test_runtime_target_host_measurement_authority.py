@@ -1,4 +1,5 @@
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
@@ -209,6 +210,83 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
         self.assertEqual(kwargs["measurement"], value)
         self.assertIsNot(kwargs["measurement"], value)
         self.assertEqual(kwargs["max_events"], 123)
+
+
+    def test_post_issuance_executable_sample_fails_before_mechanics(self):
+        temporary, journal, current_spec, current_plan, cut = self._context()
+        self.addCleanup(temporary.cleanup)
+        value = artifact(current_plan, cut)
+        executed = []
+
+        class ExecutableSample:
+            def canonical_payload(self):
+                executed.append("canonical_payload")
+                raise AssertionError("caller sample code executed")
+
+        object.__setattr__(value, "financial_samples", (ExecutableSample(),))
+
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_measurement_authority."
+            "collect_runtime_campaign_evidence_from_measurement_artifact"
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostMeasurementError,
+            "financial_samples must contain exact FinancialTargetHostSample",
+        ):
+            collect_release_bound_target_host_evidence(
+                journal=journal,
+                spec=current_spec,
+                plan=current_plan,
+                cut=cut,
+                measurement=value,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+        mechanics.assert_not_called()
+        self.assertEqual(executed, [])
+
+    def test_post_issuance_executable_resource_metrics_fail_before_iteration(self):
+        temporary, journal, current_spec, current_plan, cut = self._context()
+        self.addCleanup(temporary.cleanup)
+        value = artifact(current_plan, cut)
+        executed = []
+
+        class ExecutableMetrics(dict):
+            def __iter__(self):
+                executed.append("__iter__")
+                raise AssertionError("caller metrics iteration executed")
+
+            def items(self):
+                executed.append("items")
+                raise AssertionError("caller metrics items executed")
+
+        hostile_metrics = ExecutableMetrics({"memory_rss_bytes": 4096})
+        object.__setattr__(
+            value.resource_samples[0],
+            "metrics",
+            MappingProxyType(hostile_metrics),
+        )
+
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_measurement_authority."
+            "collect_runtime_campaign_evidence_from_measurement_artifact"
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostMeasurementError,
+            "resource sample metrics must remain canonical exact-dict mappingproxy",
+        ):
+            collect_release_bound_target_host_evidence(
+                journal=journal,
+                spec=current_spec,
+                plan=current_plan,
+                cut=cut,
+                measurement=value,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+
+        mechanics.assert_not_called()
+        self.assertEqual(executed, [])
+        self.assertFalse(hostile_metrics.__class__ is dict)
 
 
 if __name__ == "__main__":

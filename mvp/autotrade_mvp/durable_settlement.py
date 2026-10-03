@@ -146,7 +146,20 @@ def _verify_artifact(
     return canonical_ref
 
 
+def _scope_identity_parts(scope: SettlementAccountScope) -> list[str]:
+    parts = [scope.provider_id, scope.account_id, scope.environment]
+    if scope.provider_environment != scope.environment:
+        parts.append(scope.provider_environment)
+    return parts
+
+
 def _scope_id(scope: SettlementAccountScope) -> str:
+    material = canonical_json([*_scope_identity_parts(scope), "settlement-book"])
+    return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
+
+
+def _legacy_runtime_only_scope_id(scope: SettlementAccountScope) -> str:
+    """Historical aggregate identity before exact provider-domain binding."""
     material = canonical_json(
         [scope.provider_id, scope.account_id, scope.environment, "settlement-book"]
     )
@@ -154,18 +167,19 @@ def _scope_id(scope: SettlementAccountScope) -> str:
 
 
 def _event_id(scope: SettlementAccountScope, kind: str, identity: object) -> str:
-    material = canonical_json(
-        [scope.provider_id, scope.account_id, scope.environment, kind, identity]
-    )
+    material = canonical_json([*_scope_identity_parts(scope), kind, identity])
     return str(uuid5(NAMESPACE_URL, "settlement-event:" + material))
 
 
 def _scope_payload(scope: SettlementAccountScope) -> dict[str, str]:
-    return {
+    payload = {
         "provider_id": scope.provider_id,
         "account_id": scope.account_id,
         "environment": scope.environment,
     }
+    if scope.provider_environment != scope.environment:
+        payload["provider_environment"] = scope.provider_environment
+    return payload
 
 
 def _rule_payload(rule: SettlementRuleBinding) -> dict[str, object]:
@@ -201,9 +215,7 @@ def settlement_rule_evidence_receipt(
         "observation": {
             "rule_id": rule.rule_id,
             "rule_version": rule.rule_version,
-            "provider_id": rule.scope.provider_id,
-            "account_id": rule.scope.account_id,
-            "environment": rule.scope.environment,
+            **_scope_payload(rule.scope),
             "instrument_version": rule.instrument_version,
             "settlement_currency": rule.settlement_currency,
             "effective_from": rule.effective_from.isoformat(),
@@ -227,9 +239,7 @@ def settlement_rule_evidence_metadata(
         "observation_kind": "SETTLEMENT_RULE",
         "rule_id": rule.rule_id,
         "rule_version": rule.rule_version,
-        "provider_id": rule.scope.provider_id,
-        "account_id": rule.scope.account_id,
-        "environment": rule.scope.environment,
+        **_scope_payload(rule.scope),
         "instrument_version": rule.instrument_version,
         "settlement_currency": rule.settlement_currency,
         "trade_date": trade_date.isoformat(),
@@ -296,6 +306,7 @@ def _rule_from_payload(value: Mapping[str, object]) -> SettlementRuleBinding:
             provider_id=raw_scope.get("provider_id"),
             account_id=raw_scope.get("account_id"),
             environment=raw_scope.get("environment"),
+            provider_environment=raw_scope.get("provider_environment"),
         ),
         instrument_version=value.get("instrument_version"),
         settlement_currency=value.get("settlement_currency"),
@@ -367,9 +378,7 @@ def settlement_completion_evidence_receipt(
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
         "observation_kind": "SETTLEMENT_COMPLETION",
         "observation": {
-            "provider_id": scope.provider_id,
-            "account_id": scope.account_id,
-            "environment": scope.environment,
+            **_scope_payload(scope),
             "obligation_id": obligation.obligation_id,
             "cause_event_id": obligation.cause_event_id,
             "source_transaction_id": obligation.source_transaction_id,
@@ -392,9 +401,7 @@ def settlement_completion_evidence_metadata(
     return {
         "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
         "observation_kind": "SETTLEMENT_COMPLETION",
-        "provider_id": scope.provider_id,
-        "account_id": scope.account_id,
-        "environment": scope.environment,
+        **_scope_payload(scope),
         "obligation_id": obligation.obligation_id,
         "cause_event_id": obligation.cause_event_id,
         "source_transaction_id": obligation.source_transaction_id,
@@ -475,6 +482,7 @@ class DurableSettlementBook:
         account_id: str,
         environment: str,
         evidence_artifact_store: ArtifactStore,
+        provider_environment: str | None = None,
     ) -> None:
         store_identity = require_exact_journal_store_authority(
             store,
@@ -491,8 +499,25 @@ class DurableSettlementBook:
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
         self.scope_id = _scope_id(self.scope)
+        if (
+            self.scope.provider_id == "BYBIT"
+            and self.scope.environment == "PAPER"
+            and self.scope.provider_environment != self.scope.environment
+        ):
+            legacy_scope_id = _legacy_runtime_only_scope_id(self.scope)
+            if (
+                legacy_scope_id != self.scope_id
+                and self._journal_operation(
+                    JournalStore.load_events, _AGGREGATE_TYPE, legacy_scope_id
+                )
+            ):
+                raise SettlementConflict(
+                    "legacy BYBIT/PAPER settlement history lacks "
+                    "provider_environment; migration/reconciliation is required"
+                )
         self._book = SettlementBook()
         self._reload()
 

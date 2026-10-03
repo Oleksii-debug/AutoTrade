@@ -1,6 +1,6 @@
 from hashlib import sha256
 import json
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -10,8 +10,6 @@ from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
     _read_accepted_raw_payload,
     _require_signed_campaign_match,
-    _snapshot_financial_sample,
-    _snapshot_measurement,
     target_host_measurement_projection_bytes,
     target_host_measurement_projection_digests,
     verify_composed_runtime_target_host_qualification,
@@ -678,108 +676,55 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         self.assertNotEqual(current_plan.declared_duration_ms, original_duration)
 
 
-    def test_measurement_outer_scalar_mutation_during_nested_snapshot_is_detached(self):
+    def test_post_issuance_executable_measurement_sample_is_rejected_without_execution(self):
         current = measurement()
-        original_configuration = current.configuration_hash
-
-        def mutate_during_nested_snapshot(value):
-            object.__setattr__(current, "configuration_hash", OTHER)
-            return _snapshot_financial_sample(value)
-
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
-            "_snapshot_financial_sample",
-            side_effect=mutate_during_nested_snapshot,
-        ):
-            detached = _snapshot_measurement(current)
-
-        self.assertEqual(detached.configuration_hash, original_configuration)
-        self.assertEqual(current.configuration_hash, OTHER)
-
-    def test_hostile_replacement_sample_is_rejected_without_execution(self):
-        current = measurement()
+        executed = []
 
         class ExecutableSample:
-            invoked = False
-
             def canonical_payload(self):
-                self.invoked = True
-                raise AssertionError("hostile replacement sample executed")
+                executed.append("canonical_payload")
+                raise AssertionError("caller sample code executed")
 
-        hostile = ExecutableSample()
-        object.__setattr__(current, "financial_samples", (hostile,))
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
-            "bind_release_bound_durable_financial_latency_to_target_host_measurement",
-        ) as durable, self.assertRaisesRegex(
+        object.__setattr__(
+            current,
+            "financial_samples",
+            (ExecutableSample(),),
+        )
+
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "financial_samples must contain exact FinancialTargetHostSample",
         ):
-            verify_composed_runtime_target_host_qualification(
-                object(),
-                evidence_store=object(),
-                evidence_root="unused",
-                journal_store=object(),
-                spec=budget_spec(),
-                campaign_plan=runtime_campaign_plan(budget_spec()),
-                campaign_cut=object(),
-                declared_plan_id="plan-1",
-                measurement=current,
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-            )
-        self.assertFalse(hostile.invoked)
-        durable.assert_not_called()
+            target_host_measurement_projection_digests(current)
 
-    def test_hostile_resource_metrics_proxy_is_rejected_without_iteration(self):
+        self.assertEqual(executed, [])
+
+    def test_post_issuance_executable_resource_metrics_are_rejected_without_iteration(self):
         current = measurement()
-        sample = current.resource_samples[0]
+        executed = []
 
-        class ExecutableMapping(dict):
-            invoked = False
-
-            def _fail(self):
-                self.invoked = True
-                raise AssertionError("hostile resource mapping executed")
-
+        class ExecutableMetrics(dict):
             def __iter__(self):
-                self._fail()
+                executed.append("__iter__")
+                raise AssertionError("caller mapping iteration executed")
 
             def items(self):
-                self._fail()
+                executed.append("items")
+                raise AssertionError("caller mapping items executed")
 
-            def keys(self):
-                self._fail()
-
-            def __getitem__(self, key):
-                self._fail()
-
-        backing = ExecutableMapping(
-            {"memory_rss_bytes": 4096, "thread_count": 3}
+        object.__setattr__(
+            current.resource_samples[0],
+            "metrics",
+            ExecutableMetrics({"memory_rss_bytes": 4096, "thread_count": 3}),
         )
-        object.__setattr__(sample, "metrics", MappingProxyType(backing))
-        with patch(
-            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
-            "bind_release_bound_durable_financial_latency_to_target_host_measurement",
-        ) as durable, self.assertRaisesRegex(
+
+        with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
-            "resource sample metrics must retain canonical exact-dict mappingproxy",
+            "resource sample metrics must remain canonical mappingproxy",
         ):
-            verify_composed_runtime_target_host_qualification(
-                object(),
-                evidence_store=object(),
-                evidence_root="unused",
-                journal_store=object(),
-                spec=budget_spec(),
-                campaign_plan=runtime_campaign_plan(budget_spec()),
-                campaign_cut=object(),
-                declared_plan_id="plan-1",
-                measurement=current,
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-            )
-        self.assertFalse(backing.invoked)
-        durable.assert_not_called()
+            target_host_measurement_projection_digests(current)
+
+        self.assertEqual(executed, [])
 
 
 if __name__ == "__main__":

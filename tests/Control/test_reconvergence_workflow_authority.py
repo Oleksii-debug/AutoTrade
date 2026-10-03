@@ -376,6 +376,22 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, (unlisted,))
 
+    def test_trust_root_approval_is_not_full_candidate_mutation_scope(self):
+        protected = ".github/workflows/verify.yml"
+        ordinary = "owned/change.py"
+        result = assess_reconvergence(
+            base_paths=[protected, ordinary],
+            changes=[
+                Change(status="M", path=protected),
+                Change(status="M", path=ordinary),
+            ],
+            trusted_root_approvals=(protected,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, ())
+
     def test_trusted_workflow_resolves_only_owner_exact_head_comment_scopes(self):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "reconvergence-integrity.yml"
@@ -394,7 +410,8 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertIn("parse_trusted_scope_approval", resolver)
         self.assertIn("expected_head_sha=head_sha", resolver)
         self.assertIn("/issues/{pr_number}/comments", resolver)
-        self.assertIn('args+=(--allowed-scope "${scope}")', guard)
+        self.assertIn('args+=(--trusted-root-approval "${scope}")', guard)
+        self.assertNotIn('args+=(--allowed-scope "${scope}")', guard)
         approval_recheck = workflow.split(
             "- name: Reverify trusted exact-path scope approval is unchanged",
             1,

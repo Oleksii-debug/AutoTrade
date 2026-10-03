@@ -156,6 +156,23 @@ class ModelPricingEvidenceAuthorityTests(unittest.TestCase):
             self.assertEqual(resolved.evidence_digest, manifest["sha256"])
             self.assertEqual(resolved.quotes[0].estimated_cost, Decimal("1.2"))
 
+    def test_zero_length_pricing_validity_window_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "pricing")
+            value = body()
+            value["valid_until"] = value["as_of"]
+            artifact_id, manifest, _raw = publish(store, value)
+            authority = ModelPricingEvidenceAuthority(
+                evidence_root=store.root,
+                publication_store=store,
+                trusted_receipts=(receipt(artifact_id, manifest),),
+            )
+            with self.assertRaisesRegex(
+                ModelPricingEvidenceError,
+                "valid_until must follow as_of",
+            ):
+                authority(spec(artifact_id), (descriptor(),))
+
     def test_instance_split_reads_are_not_pricing_authority(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "pricing")

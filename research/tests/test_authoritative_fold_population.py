@@ -5,9 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from autotrade_research.artifacts import ArtifactStore
 from autotrade_research.data.vintages import (
     HistoricalConflict,
+    HistoricalDataError,
     HistoricalVintageRegistry,
+    canonical_market_event_population_bytes,
     explicit_missingness,
     market_event_population_digest,
 )
@@ -78,7 +81,9 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.registry = HistoricalVintageRegistry(Path(self.directory.name))
+        root = Path(self.directory.name)
+        self.registry = HistoricalVintageRegistry(root / "vintages")
+        self.artifacts = ArtifactStore(root / "artifacts")
         self.dataset_id = _uuid(10, 1)
         self.spec = HistoricalFeatureInputSpec(
             spec_id="bar-close-return:v1",
@@ -95,8 +100,8 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             purge_seconds=0,
         )
 
-    def _manifest(self, content_hashes, *, version=1):
-        return {
+    def _manifest(self, content_hashes, *, content_refs=None, version=1):
+        manifest = {
             "dataset_id": self.dataset_id,
             "version": str(version),
             "content_hashes": list(content_hashes),
@@ -141,23 +146,55 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             ],
             "created_at": _iso(BASE + timedelta(days=8, seconds=1)),
         }
+        if content_refs is not None:
+            manifest["content_refs"] = list(content_refs)
+        return manifest
 
     @staticmethod
     def _base_events(*, through=6):
         values = ("100", "102", "105", "103", "107", "109", "111")
         return [event(day, values[day]) for day in range(through + 1)]
 
-    def _register(self, populations):
-        digests = [market_event_population_digest(rows) for rows in populations]
-        manifest_digest = self.registry.commit(self._manifest(digests))
-        return manifest_digest
+    def _register(self, rows, *, version=1):
+        artifact_id = _uuid(30, version)
+        artifact_manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=canonical_market_event_population_bytes(rows),
+            media_type="application/vnd.autotrade.market-event-population+json",
+            rights={
+                "storage": True,
+                "export": False,
+                "rights_id": "research-fixture",
+            },
+            source_refs=[f"dataset:{self.dataset_id}:v{version}"],
+            metadata={
+                "role": "market_event_population",
+                "dataset_id": self.dataset_id,
+                "dataset_version": version,
+            },
+        )
+        content_ref = {
+            "ordinal": 1,
+            "role": "market_event_population",
+            "artifact_id": artifact_id,
+            "sha256": artifact_manifest["sha256"],
+            "rights_id": "research-fixture",
+        }
+        return self.registry.commit(
+            self._manifest(
+                [artifact_manifest["sha256"]],
+                content_refs=[content_ref],
+                version=version,
+            )
+        )
 
-    def _validation_point(self, rows, manifest_digest):
+    def _validation_point(self, rows, manifest_digest, *, version=1):
         points = resolve_authoritative_feature_points(
             registry=self.registry,
             dataset_id=self.dataset_id,
-            dataset_version=1,
+            dataset_version=version,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             cutoff=BASE + timedelta(days=4, minutes=2),
             spec=self.spec,
@@ -174,12 +211,13 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_exact_registered_population_fits_and_validates(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         fitted = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             fold=self.fold,
             spec=self.spec,
@@ -190,6 +228,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             point,
             fold=self.fold,
             registry=self.registry,
+            artifact_store=self.artifacts,
             events=rows,
             spec=self.spec,
             replay_common_cut_fingerprint="a" * 64,
@@ -200,7 +239,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_same_ids_and_revisions_with_altered_value_are_not_authority(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         forged = [dict(row) for row in rows]
         forged[2] = {
             **forged[2],
@@ -208,13 +247,14 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             HistoricalConflict,
-            "population digest is not registered",
+            "caller market event cache differs",
         ):
             fit_authoritative_fold_normalizer(
                 registry=self.registry,
                 dataset_id=self.dataset_id,
                 dataset_version=1,
                 manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
                 events=forged,
                 fold=self.fold,
                 spec=self.spec,
@@ -222,7 +262,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_manifest_digest_mismatch_fails_before_fit(self):
         rows = self._base_events()
-        self._register([rows])
+        self._register(rows)
         with self.assertRaisesRegex(
             HistoricalConflict,
             "manifest digest differs",
@@ -232,19 +272,58 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 dataset_id=self.dataset_id,
                 dataset_version=1,
                 manifest_digest="sha256:" + "0" * 64,
+                artifact_store=self.artifacts,
                 events=rows,
                 fold=self.fold,
                 spec=self.spec,
             )
 
+    def test_authoritative_resolver_rejects_legacy_unbound_content_hash(self):
+        rows = self._base_events()
+        dangling_digest = market_event_population_digest(rows)
+        manifest_digest = self.registry.commit(self._manifest([dangling_digest]))
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "lacks authoritative content references",
+        ):
+            fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+
+    def test_manifest_rejects_content_ref_digest_different_from_hash_list(self):
+        rows = self._base_events()
+        digest = market_event_population_digest(rows)
+        content_ref = {
+            "ordinal": 1,
+            "role": "market_event_population",
+            "artifact_id": _uuid(30, 1),
+            "sha256": "sha256:" + "0" * 64,
+            "rights_id": "research-fixture",
+        }
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "exactly match ordered content_refs",
+        ):
+            self.registry.commit(
+                self._manifest([digest], content_refs=[content_ref])
+            )
+
     def test_caller_forged_validation_feature_is_rejected(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         fitted = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             fold=self.fold,
             spec=self.spec,
@@ -266,6 +345,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 forged,
                 fold=self.fold,
                 registry=self.registry,
+                artifact_store=self.artifacts,
                 events=rows,
                 spec=self.spec,
             )
@@ -276,13 +356,15 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         full[4] = event(4, "999999999")
         full[5] = event(5, "-999999999")
         full[6] = event(6, "777777777")
-        manifest_digest = self._register([training_only, full])
+        first_manifest = self._register(training_only, version=1)
+        second_manifest = self._register(full, version=2)
 
         first = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
-            manifest_digest=manifest_digest,
+            manifest_digest=first_manifest,
+            artifact_store=self.artifacts,
             events=training_only,
             fold=self.fold,
             spec=self.spec,
@@ -290,20 +372,20 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         second = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
-            dataset_version=1,
-            manifest_digest=manifest_digest,
+            dataset_version=2,
+            manifest_digest=second_manifest,
+            artifact_store=self.artifacts,
             events=full,
             fold=self.fold,
             spec=self.spec,
         )
-        self.assertEqual(
+        self.assertEqual(first.fold_normalizer, second.fold_normalizer)
+        self.assertNotEqual(
             first.training_population_fingerprint,
             second.training_population_fingerprint,
         )
-        self.assertEqual(first.fold_normalizer, second.fold_normalizer)
-        self.assertEqual(first.fingerprint, second.fingerprint)
 
-    def test_late_correction_is_invisible_to_training_identity(self):
+    def test_late_correction_is_invisible_to_training_fit(self):
         baseline = self._base_events(through=3)
         original = baseline[2]
         late = event(
@@ -314,13 +396,15 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             known_at=BASE + timedelta(days=5),
         )
         with_late = baseline + [late]
-        manifest_digest = self._register([baseline, with_late])
+        first_manifest = self._register(baseline, version=1)
+        second_manifest = self._register(with_late, version=2)
 
         first = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
-            manifest_digest=manifest_digest,
+            manifest_digest=first_manifest,
+            artifact_store=self.artifacts,
             events=baseline,
             fold=self.fold,
             spec=self.spec,
@@ -328,20 +412,20 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         second = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
-            dataset_version=1,
-            manifest_digest=manifest_digest,
+            dataset_version=2,
+            manifest_digest=second_manifest,
+            artifact_store=self.artifacts,
             events=with_late,
             fold=self.fold,
             spec=self.spec,
         )
-        self.assertEqual(
+        self.assertEqual(first.fold_normalizer, second.fold_normalizer)
+        self.assertNotEqual(
             first.training_population_fingerprint,
             second.training_population_fingerprint,
         )
-        self.assertEqual(first.fold_normalizer, second.fold_normalizer)
-        self.assertEqual(first.fingerprint, second.fingerprint)
 
-    def test_correction_known_before_cutoff_changes_training_identity(self):
+    def test_correction_known_before_cutoff_changes_training_fit(self):
         baseline = self._base_events(through=3)
         original = baseline[2]
         early = event(
@@ -352,13 +436,15 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             known_at=BASE + timedelta(days=3, hours=1),
         )
         with_early = baseline + [early]
-        manifest_digest = self._register([baseline, with_early])
+        first_manifest = self._register(baseline, version=1)
+        second_manifest = self._register(with_early, version=2)
 
         first = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
-            manifest_digest=manifest_digest,
+            manifest_digest=first_manifest,
+            artifact_store=self.artifacts,
             events=baseline,
             fold=self.fold,
             spec=self.spec,
@@ -366,18 +452,18 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         second = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
-            dataset_version=1,
-            manifest_digest=manifest_digest,
+            dataset_version=2,
+            manifest_digest=second_manifest,
+            artifact_store=self.artifacts,
             events=with_early,
             fold=self.fold,
             spec=self.spec,
         )
+        self.assertNotEqual(first.fold_normalizer, second.fold_normalizer)
         self.assertNotEqual(
             first.training_population_fingerprint,
             second.training_population_fingerprint,
         )
-        self.assertNotEqual(first.fold_normalizer, second.fold_normalizer)
-        self.assertNotEqual(first.fingerprint, second.fingerprint)
 
     def test_pre_cut_correction_preserves_what_was_known_before_correction(self):
         baseline = self._base_events(through=3)
@@ -391,12 +477,13 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             known_at=correction_known_at,
         )
         rows = baseline + [correction]
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         points = resolve_authoritative_feature_points(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             cutoff=self.fold.training_information_cutoff,
             spec=self.spec,
@@ -420,12 +507,13 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_full_dataset_fitted_normalizer_cannot_masquerade_as_fold_fit(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         legitimate = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             fold=self.fold,
             spec=self.spec,
@@ -435,6 +523,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             cutoff=BASE + timedelta(days=6, minutes=2),
             spec=self.spec,
@@ -454,6 +543,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             dataset_id=legitimate.dataset_id,
             dataset_version=legitimate.dataset_version,
             manifest_digest=legitimate.manifest_digest,
+            artifact_store=self.artifacts,
             training_population_fingerprint=legitimate.training_population_fingerprint,
             feature_spec_fingerprint=legitimate.feature_spec_fingerprint,
             replay_common_cut_fingerprint=None,
@@ -468,18 +558,20 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 point,
                 fold=self.fold,
                 registry=self.registry,
+                artifact_store=self.artifacts,
                 events=rows,
                 spec=self.spec,
             )
 
     def test_replay_common_cut_must_match_at_validation(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         fitted = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             fold=self.fold,
             spec=self.spec,
@@ -491,6 +583,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 point,
                 fold=self.fold,
                 registry=self.registry,
+                artifact_store=self.artifacts,
                 events=rows,
                 spec=self.spec,
                 replay_common_cut_fingerprint="b" * 64,
@@ -498,7 +591,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_authoritative_fit_and_transform_ignore_ambient_decimal_context(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         with localcontext() as context:
             context.prec = 6
             context.rounding = ROUND_FLOOR
@@ -507,6 +600,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 dataset_id=self.dataset_id,
                 dataset_version=1,
                 manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
                 events=rows,
                 fold=self.fold,
                 spec=self.spec,
@@ -516,6 +610,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 point,
                 fold=self.fold,
                 registry=self.registry,
+                artifact_store=self.artifacts,
                 events=rows,
                 spec=self.spec,
             )
@@ -528,6 +623,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 dataset_id=self.dataset_id,
                 dataset_version=1,
                 manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
                 events=rows,
                 fold=self.fold,
                 spec=self.spec,
@@ -536,6 +632,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 point,
                 fold=self.fold,
                 registry=self.registry,
+                artifact_store=self.artifacts,
                 events=rows,
                 spec=self.spec,
             )
@@ -546,12 +643,13 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
     def test_identical_authority_reproduces_exact_fit_identity(self):
         rows = self._base_events()
-        manifest_digest = self._register([rows])
+        manifest_digest = self._register(rows)
         first = fit_authoritative_fold_normalizer(
             registry=self.registry,
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=rows,
             fold=self.fold,
             spec=self.spec,
@@ -562,6 +660,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             dataset_id=self.dataset_id,
             dataset_version=1,
             manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
             events=list(reversed(rows)),
             fold=self.fold,
             spec=self.spec,

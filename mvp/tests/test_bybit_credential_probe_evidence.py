@@ -10,6 +10,8 @@ from mvp.autotrade_mvp.bybit_credential_nonacceptance import (
 )
 from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeEvidence,
+    BybitCredentialProbeHttpRequest,
+    BybitCredentialProbeRawHttpResponse,
     BybitCredentialProbeWireResponse,
     bybit_credential_probe_receipt_metadata,
     capture_bybit_credential_probe_evidence,
@@ -18,10 +20,6 @@ from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     probe_bybit_credential_with_vault,
 )
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
-from mvp.autotrade_mvp.provider_transport import (
-    AuthenticatedReadHttpRequest,
-    AuthenticatedReadWireResponse,
-)
 from mvp.autotrade_mvp.windows_secrets import (
     PersistentCredentialHandle,
     ProtectedCredentialVault,
@@ -50,7 +48,7 @@ class _PassthroughProtector:
         return ciphertext
 
 
-class _FakeReadWireClient:
+class _FakeProbeWireClient:
     def __init__(self, response):
         self.response = response
         self.requests = []
@@ -314,7 +312,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             ):
                 _capture(**overrides)
 
-    def test_response_must_be_exact_json_object_with_exact_integer_retcode(self):
+    def test_response_must_be_exact_finite_json_with_integer_retcode(self):
         bad_responses = (
             _DictSubclass(retCode=10003),
             {},
@@ -327,6 +325,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             {"retCode": 10003, "bad": {"nested": _IntSubclass(1)}},
             {"retCode": 10003, "bad": {1: "non-text-key"}},
             {"retCode": 10003, "bad": math.nan},
+            {"retCode": 10003, "bad": math.inf},
+            {"retCode": 10003, "bad": -math.inf},
         )
         for response in bad_responses:
             with self.subTest(response=response), self.assertRaises(
@@ -334,7 +334,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             ):
                 _capture(response=response)
 
-    def test_exact_json_lists_and_scalars_remain_digestible(self):
+    def test_exact_json_lists_and_finite_scalars_remain_digestible(self):
         evidence = _capture(
             response={
                 "retCode": 10003,
@@ -774,6 +774,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             (600, {"retCode": 0}),
             (200, _DictSubclass(retCode=0)),
             (200, {"retCode": 0, "bad": (1, 2)}),
+            (200, {"retCode": 0, "bad": math.inf}),
         )
         for http_status, response in bad:
             with self.subTest(
@@ -785,11 +786,11 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     response=response,
                 )
 
-    def test_shared_wire_probe_builds_exact_read_request(self):
+    def test_shared_wire_probe_builds_exact_empty_query_get_request(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
-            client = _FakeReadWireClient(
-                AuthenticatedReadWireResponse(
+            client = _FakeProbeWireClient(
+                BybitCredentialProbeRawHttpResponse(
                     http_status=200,
                     body=b'{"retCode":10003,"retMsg":"API key is invalid"}',
                 )
@@ -815,13 +816,12 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
 
             self.assertEqual(len(client.requests), 1)
             request = client.requests[0]
-            self.assertIs(type(request), AuthenticatedReadHttpRequest)
-            self.assertEqual(request.method, "GET")
-            self.assertEqual(request.body, b"")
+            self.assertIs(type(request), BybitCredentialProbeHttpRequest)
             self.assertEqual(
                 request.url,
                 "https://api.bybit.com/v5/user/query-api",
             )
+            self.assertNotIn("?", request.url)
             self.assertEqual(request.headers["X-BAPI-API-KEY"], "probe-key")
             self.assertNotIn("probe-secret", repr(request.headers))
             self.assertIs(
@@ -830,8 +830,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             )
 
     def test_shared_wire_adapter_rejects_origin_escape_before_send(self):
-        client = _FakeReadWireClient(
-            AuthenticatedReadWireResponse(
+        client = _FakeProbeWireClient(
+            BybitCredentialProbeRawHttpResponse(
                 http_status=200,
                 body=b'{"retCode":0}',
             )
@@ -855,8 +855,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertEqual(client.requests, [])
 
     def test_shared_wire_adapter_rejects_header_shape_before_send(self):
-        client = _FakeReadWireClient(
-            AuthenticatedReadWireResponse(
+        client = _FakeProbeWireClient(
+            BybitCredentialProbeRawHttpResponse(
                 http_status=200,
                 body=b'{"retCode":0}',
             )
@@ -874,6 +874,9 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         bad_window = _wire_headers()
         bad_window["X-BAPI-RECV-WINDOW"] = "05000"
         bad_headers.append(bad_window)
+        newline = _wire_headers()
+        newline["X-BAPI-API-KEY"] = "key\r\nInjected: yes"
+        bad_headers.append(newline)
 
         for headers in bad_headers:
             with self.subTest(headers=headers), self.assertRaises(
@@ -887,18 +890,19 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 )
         self.assertEqual(client.requests, [])
 
-    def test_shared_wire_json_parser_rejects_ambiguous_or_non_object_payload(self):
+    def test_shared_wire_json_parser_rejects_ambiguous_nonfinite_or_non_object_payload(self):
         bodies = (
             b'{"retCode":0,"retCode":10003}',
             b'[]',
             b'{"retCode":NaN}',
+            b'{"retCode":0,"ratio":1e9999}',
             b'not-json',
             b'\xff',
         )
         for body in bodies:
             with self.subTest(body=body):
-                client = _FakeReadWireClient(
-                    AuthenticatedReadWireResponse(
+                client = _FakeProbeWireClient(
+                    BybitCredentialProbeRawHttpResponse(
                         http_status=200,
                         body=body,
                     )
@@ -918,7 +922,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 del request
                 return b'{"retCode":0}'
 
-        with self.assertRaisesRegex(TypeError, "AuthenticatedReadWireResponse"):
+        with self.assertRaisesRegex(TypeError, "RawHttpResponse"):
             execute_bybit_credential_probe_wire_query(
                 source_uri="https://api.bybit.com/v5/user/query-api",
                 headers=_wire_headers(),
@@ -929,8 +933,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
     def test_shared_wire_non_200_stays_unknown(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
-            client = _FakeReadWireClient(
-                AuthenticatedReadWireResponse(
+            client = _FakeProbeWireClient(
+                BybitCredentialProbeRawHttpResponse(
                     http_status=401,
                     body=b'{"retCode":10003,"retMsg":"invalid"}',
                 )

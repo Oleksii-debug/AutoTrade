@@ -122,7 +122,14 @@ class OmsExactLifecycleTests(unittest.TestCase):
             self.assertEqual(store.current_journal_sequence(), cut)
             with self.assertRaises(OrderProjectionConflict):
                 restored.reject_replace(**{**args, "reason_code": "CHANGED"})
+            with self.assertRaisesRegex(OrderProjectionConflict, "cannot be reused"):
+                restored.request_replace(event_key="replace-reused", client_order_id="c", command_id="amend", committed_at=NOW)
+            self.assertEqual(store.current_journal_sequence(), cut)
             restored.request_replace(event_key="replace-next", client_order_id="c", command_id="amend-next", committed_at=NOW)
+            self.assertEqual(book().order("c").replace_command_id, "amend-next")
+            with self.assertRaisesRegex(OrderProjectionConflict, "does not match"):
+                restored.reject_replace(event_key="late-rejection", client_order_id="c", command_id="amend",
+                    reason_code="REJECTED", committed_at=NOW)
             self.assertEqual(book().order("c").replace_command_id, "amend-next")
 
 

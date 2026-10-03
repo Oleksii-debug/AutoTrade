@@ -130,6 +130,7 @@ class OrderProjection:
         self.cancel_command_id: str | None = None
         self.replace_requested = False
         self.replace_command_id: str | None = None
+        self._resolved_replace_commands: set[str] = set()
         self.expired = False
         self.rejected = False
         self._fills: dict[str, FillRecord] = {}
@@ -394,6 +395,8 @@ class OrderProjection:
     def request_replace(self, *, command_id: str) -> None:
         """Record one pending replace command without inventing completion."""
         command = _text(command_id, name="command_id")
+        if command in self._resolved_replace_commands:
+            raise OrderProjectionConflict("resolved replace command_id cannot be reused")
         if self.replace_command_id is not None:
             if self.replace_command_id == command:
                 return
@@ -430,6 +433,7 @@ class OrderProjection:
             raise OrderProjectionConflict(
                 "replace rejection command_id does not match pending request"
             )
+        self._resolved_replace_commands.add(command)
         self.replace_requested = False
         self.replace_command_id = None
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-import hmac
 import json
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -156,9 +155,10 @@ def _component_bindings(
 class RuntimeStateSnapshot:
     """One composition-authority-issued whole-runtime cut.
 
-    authority_seal is an HMAC over the exact replay cut, common-cut identity
-    and component digests. The secret is owned by the composition authority and
-    is deliberately not persisted in replay checkpoints.
+    authority_seal is the legacy field name for a bounded signer-produced
+    signature over the exact replay cut, verifier identity and component
+    digests. Verification is performed by a separately provisioned composition
+    trust anchor; the signing capability is not accepted as its own verifier.
     """
 
     cut_id: str

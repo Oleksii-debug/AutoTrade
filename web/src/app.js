@@ -28,8 +28,10 @@
   });
 
   const TABLE_TOOLS = Object.freeze([
+    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", statusId: "permissions-filter-status", label: "permission and capability"}),
     Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", statusId: "strategy-filter-status", label: "strategy and decision"}),
     Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", statusId: "operations-filter-status", label: "current host operation"}),
     Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", statusId: "risk-filter-status", label: "risk and authority"}),
     Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", statusId: "jobs-filter-status", label: "research and replay jobs"}),
     Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", statusId: "event-history-filter-status", label: "received host events"})
@@ -41,6 +43,10 @@
     sessionIdentity: null,
     accountId: null,
     environment: null,
+    renderedHostId: null,
+    renderedAccountId: null,
+    renderedEnvironment: null,
+    scopeEpoch: 0,
     snapshotReady: false,
     polling: false,
     stopped: false,
@@ -49,16 +55,21 @@
     urgentAnnouncementTimer: null,
     pendingUrgentAnnouncements: [],
     restoreFocusId: null,
-    pendingCommand: null
+    pendingCommand: null,
+    pendingCommandHostId: null
   };
 
   const byId = (id) => document.getElementById(id);
   const RESTORABLE_FOCUS_IDS = new Set([
     "main",
     "permissions-region",
+    "permissions-filter",
+    "permissions-copy",
     "strategy-region",
     "portfolio-region",
     "operations-region",
+    "operations-filter",
+    "operations-copy",
     "risk-region",
     "jobs-region",
     "event-history-region",
@@ -168,6 +179,28 @@
     return token;
   }
 
+  function compareCanonicalUtcInstants(left, right, leftName, rightName) {
+    const leftToken = utcInstant(left, leftName);
+    const rightToken = utcInstant(right, rightName);
+    const parts = (token) => {
+      const withoutZ = token.slice(0, -1);
+      const dot = withoutZ.indexOf(".");
+      return dot === -1
+        ? [withoutZ, ""]
+        : [withoutZ.slice(0, dot), withoutZ.slice(dot + 1)];
+    };
+    const [leftBase, leftFraction] = parts(leftToken);
+    const [rightBase, rightFraction] = parts(rightToken);
+    if (leftBase < rightBase) return -1;
+    if (leftBase > rightBase) return 1;
+    const width = Math.max(leftFraction.length, rightFraction.length);
+    const normalizedLeft = leftFraction.padEnd(width, "0");
+    const normalizedRight = rightFraction.padEnd(width, "0");
+    if (normalizedLeft < normalizedRight) return -1;
+    if (normalizedLeft > normalizedRight) return 1;
+    return 0;
+  }
+
   function requiredStringArray(value, name) {
     if (!Array.isArray(value) ||
         value.some((item) => typeof item !== "string" || item.length === 0)) {
@@ -222,6 +255,17 @@
     return allowedRoles instanceof Set && allowedRoles.has(role);
   }
 
+  function pendingCommandMatchesCurrentContext() {
+    return state.pendingCommand === null || (
+      state.pendingCommandHostId === state.renderedHostId &&
+      state.sessionIdentity !== null &&
+      state.pendingCommand.actor === state.sessionIdentity.actor &&
+      state.pendingCommand.session === state.sessionIdentity.session &&
+      state.pendingCommand.account_id === state.accountId &&
+      state.pendingCommand.environment === state.environment
+    );
+  }
+
   function syncHostActionOptions(role) {
     const select = byId("host-action");
     if (!select) return false;
@@ -231,8 +275,14 @@
       option.disabled = !allowed;
       if (allowed && firstAllowed === null) firstAllowed = option.value;
     }
-    if (!roleCanSubmitAction(role, select.value) && firstAllowed !== null) {
-      select.value = firstAllowed;
+    if (state.pendingCommand !== null) {
+      select.value = state.pendingCommand.action;
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      if (!roleCanSubmitAction(role, select.value) && firstAllowed !== null) {
+        select.value = firstAllowed;
+      }
     }
     return firstAllowed !== null;
   }
@@ -351,7 +401,11 @@
     }
     const startedAt = utcInstant(result.started_at, "started_at");
     const updatedAt = utcInstant(result.updated_at, "updated_at");
-    if (Date.parse(updatedAt) < Date.parse(startedAt)) {
+    if (compareCanonicalUtcInstants(
+        updatedAt,
+        startedAt,
+        "updated_at",
+        "started_at") < 0) {
       throw new Error("OperationResult updated_at cannot precede started_at");
     }
     return {
@@ -375,7 +429,10 @@
     const roleAllowed = state.sessionIdentity !== null &&
       effectiveAction !== null &&
       roleCanSubmitAction(state.sessionIdentity.role, effectiveAction);
-    if (button) button.disabled = !enabled || !roleAllowed;
+    const pendingContextMatches = pendingCommandMatchesCurrentContext();
+    if (button) {
+      button.disabled = !enabled || !roleAllowed || !pendingContextMatches;
+    }
   }
 
   function freshnessText(parsed) {
@@ -462,6 +519,11 @@
     if (stateName === "unavailable") {
       appendMessage(
         "Field-specific validation details are unavailable because the command response could not be confirmed.");
+      return;
+    }
+    if (stateName === "scope_changed") {
+      appendMessage(
+        "Field-validation details from the previous account/environment scope are not shown in this scope.");
       return;
     }
     if (stateName !== "confirmed" || !Array.isArray(fieldErrors)) {
@@ -553,12 +615,14 @@
     if (permissionSummary.capabilities.length === 0) {
       appendProjectionRow(
         body, "Capabilities", "No capabilities reported by the host snapshot.");
+      reapplyTableFilter("permissions-body");
       return;
     }
     permissionSummary.capabilities.forEach((capability, index) => {
       appendProjectionRow(
         body, "Capability " + String(index + 1), capability);
     });
+    reapplyTableFilter("permissions-body");
   }
 
   function renderJobs(jobs) {
@@ -660,6 +724,7 @@
   }
 
   async function copyVisibleTableRows(tool) {
+    const scopeEpoch = state.scopeEpoch;
     const rows = visibleTableRows(tool);
     if (rows.length === 0) {
       const message = "No visible " + tool.label + " rows are available to copy.";
@@ -676,10 +741,16 @@
     const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
     try {
       await navigator.clipboard.writeText(payload);
+      if (scopeEpoch !== state.scopeEpoch) {
+        return;
+      }
       const message = String(rows.length) + " visible " + tool.label + " rows copied.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
     } catch {
+      if (scopeEpoch !== state.scopeEpoch) {
+        return;
+      }
       const message = "Clipboard copy was not permitted. Use normal text selection and copy.";
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
@@ -786,24 +857,54 @@
       }
       row = document.createElement("tr");
       row.dataset.operationId = operation.operationId;
-      for (let index = 0; index < 4; index += 1) {
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) {
         row.appendChild(document.createElement("td"));
       }
       body.appendChild(row);
     }
 
+    row.dataset.filterableRow = "true";
     row.children[0].textContent = operation.operationId;
     row.children[1].textContent = operation.phase;
     row.children[2].textContent = operation.updatedAt;
     row.children[3].textContent = operation.remainingUncertainty.length > 0
       ? operation.remainingUncertainty.join(", ")
       : "None reported";
+    reapplyTableFilter("operations-body");
   }
 
   async function refreshOperation(operationId) {
-    const raw = await jsonFetch(
-      HOST_API.route("getOperation", {operation_id: operationId}));
+    const scopeEpoch = state.scopeEpoch;
+    const renderedHostId = state.renderedHostId;
+    const renderedAccountId = state.renderedAccountId;
+    const renderedEnvironment = state.renderedEnvironment;
+    let raw;
+    try {
+      raw = await jsonFetch(
+        HOST_API.route("getOperation", {operation_id: operationId}));
+    } catch (error) {
+      if (
+        scopeEpoch !== state.scopeEpoch ||
+        renderedHostId !== state.renderedHostId ||
+        renderedAccountId !== state.renderedAccountId ||
+        renderedEnvironment !== state.renderedEnvironment
+      ) {
+        return null;
+      }
+      throw error;
+    }
     const operation = parseOperationResult(raw, operationId);
+    if (
+      scopeEpoch !== state.scopeEpoch ||
+      renderedHostId !== state.renderedHostId ||
+      renderedAccountId !== state.renderedAccountId ||
+      renderedEnvironment !== state.renderedEnvironment
+    ) {
+      return null;
+    }
     renderOperation(operation);
     return operation;
   }
@@ -824,7 +925,10 @@
     const row = document.createElement("tr");
     row.dataset.hostEventCursor = cursor.toString();
     row.dataset.filterableRow = "true";
-    for (let index = 0; index < 4; index += 1) {
+    const rowHeader = document.createElement("th");
+    rowHeader.scope = "row";
+    row.appendChild(rowHeader);
+    for (let index = 1; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
     row.children[0].textContent = cursor.toString();
@@ -839,14 +943,82 @@
     reapplyTableFilter("event-history-body");
   }
 
-  function resetEventHistoryForScope() {
+  function resetNotificationsForScope(
+    emptyMessage = "No material notifications recorded in this account/environment session."
+  ) {
+    if (state.announcementTimer !== null) {
+      window.clearTimeout(state.announcementTimer);
+      state.announcementTimer = null;
+    }
+    if (state.urgentAnnouncementTimer !== null) {
+      window.clearTimeout(state.urgentAnnouncementTimer);
+      state.urgentAnnouncementTimer = null;
+    }
+    state.pendingAnnouncements = [];
+    state.pendingUrgentAnnouncements = [];
+    text("polite-status", "", "");
+    text("urgent-status", "", "");
+
+    const history = byId("notification-history");
+    if (!history) return;
+    history.replaceChildren();
+    const item = document.createElement("li");
+    item.textContent = emptyMessage;
+    history.appendChild(item);
+  }
+
+  function resetCommandFeedbackForContext(
+    hostId,
+    accountId,
+    environment,
+    sessionIdentity
+  ) {
+    if (state.pendingCommand !== null) {
+      const belongsToNewContext =
+        state.pendingCommandHostId === hostId &&
+        sessionIdentity !== null &&
+        state.pendingCommand.actor === sessionIdentity.actor &&
+        state.pendingCommand.session === sessionIdentity.session &&
+        state.pendingCommand.account_id === accountId &&
+        state.pendingCommand.environment === environment;
+      text(
+        "command-result",
+        belongsToNewContext
+          ? "An unresolved command for this exact authenticated host/account/environment context is retained with its original identity. Review current host state before exact retry."
+          : "An unresolved command from a different host/session/account/environment context is retained with its original identity and will not be retargeted.");
+    } else {
+      text(
+        "command-result",
+        "No host command has been submitted for this host/account/environment session.");
+    }
+    renderCommandValidationDetails([], "scope_changed");
+  }
+
+  function resetOperationsForScope(
+    emptyMessage = "No host operations loaded for this account/environment session."
+  ) {
+    const body = byId("operations-body");
+    if (!body) return;
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = emptyMessage;
+    row.appendChild(cell);
+    body.appendChild(row);
+    reapplyTableFilter("operations-body");
+  }
+
+  function resetEventHistoryForScope(
+    emptyMessage = "No canonical host events received in this account/environment session."
+  ) {
     const body = byId("event-history-body");
     if (!body) return;
     body.replaceChildren();
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 4;
-    cell.textContent = "No canonical host events received in this account/environment session.";
+    cell.textContent = emptyMessage;
     row.appendChild(cell);
     body.appendChild(row);
     reapplyTableFilter("event-history-body");
@@ -854,17 +1026,53 @@
 
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
-    const scopeChanged = state.accountId !== null && (
-      parsed.accountId !== state.accountId ||
-      parsed.environment !== state.environment);
-    if (scopeChanged) {
+    // Command authority is intentionally cleared on trust loss, but the last
+    // successfully rendered scope is retained only to prevent stale read-only
+    // evidence from crossing into a later account/environment view.
+    const hostChanged =
+      state.renderedHostId !== null &&
+      parsed.hostId !== state.renderedHostId;
+    const scopeChanged = state.renderedAccountId !== null && (
+      parsed.accountId !== state.renderedAccountId ||
+      parsed.environment !== state.renderedEnvironment);
+    const displayContextChanged = hostChanged || scopeChanged;
+    const priorCursor = state.cursor;
+    const skippedSameScopeEvents =
+      !displayContextChanged &&
+      state.renderedHostId !== null &&
+      parsed.cursor > priorCursor;
+    if (displayContextChanged) {
+      state.scopeEpoch += 1;
       state.cursor = 0n;
       state.version = 0n;
+      resetNotificationsForScope();
       resetTableFiltersForScopeChange();
+      resetOperationsForScope();
       resetEventHistoryForScope();
+      resetCommandFeedbackForContext(
+        parsed.hostId,
+        parsed.accountId,
+        parsed.environment,
+        parsed.sessionIdentity);
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
+    }
+    if (skippedSameScopeEvents) {
+      const gap =
+        "Canonical snapshot advanced from event cursor " + priorCursor.toString() +
+        " to " + parsed.cursor.toString() +
+        " before those host events were received by this page.";
+      resetNotificationsForScope(
+        "Notification history was cleared because " + gap);
+      resetOperationsForScope(
+        "Current host operations were cleared because " + gap);
+      resetEventHistoryForScope(
+        "Received host-event history was cleared because " + gap);
+      announce(
+        gap +
+          " Event-derived operation, notification, and received-event views were cleared rather than shown as current.",
+        true);
     }
 
     state.version = parsed.version;
@@ -902,6 +1110,17 @@
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.");
     renderJobs(parsed.jobs);
+    state.renderedHostId = parsed.hostId;
+    state.renderedAccountId = parsed.accountId;
+    state.renderedEnvironment = parsed.environment;
+    if (displayContextChanged) {
+      announce(
+        "Host display context changed to host " + parsed.hostId +
+          ", account " + parsed.accountId +
+          " in " + parsed.environment +
+          ". Old-context operation, event, notification, and command-validation evidence was cleared.",
+        parsed.environment === "LIVE" || hostChanged);
+    }
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);
@@ -921,8 +1140,22 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const snapshot = await jsonFetch(HOST_API.route("getState"));
+    state.scopeEpoch += 1;
+    const refreshEpoch = state.scopeEpoch;
+    let snapshot;
+    try {
+      snapshot = await jsonFetch(HOST_API.route("getState"));
+    } catch (error) {
+      if (refreshEpoch !== state.scopeEpoch) {
+        return false;
+      }
+      throw error;
+    }
+    if (refreshEpoch !== state.scopeEpoch) {
+      return false;
+    }
     renderSnapshot(snapshot, options);
+    return true;
   }
 
   function eventMessage(event) {
@@ -954,18 +1187,40 @@
   async function pollEvents() {
     if (state.polling || state.stopped) return;
     state.polling = true;
+    let pollEpoch = null;
+    let pollRenderedHostId = null;
+    let pollRenderedAccountId = null;
+    let pollRenderedEnvironment = null;
     try {
       // A failed post-event snapshot refresh disables commands but must not
       // require a new event or manual action to recover. Re-establish the
       // canonical snapshot before the next event request whenever local state
       // is marked unready.
       if (!state.snapshotReady) {
-        await refreshSnapshot();
+        const recovered = await refreshSnapshot();
+        if (!recovered) {
+          return;
+        }
       }
+      pollEpoch = state.scopeEpoch;
+      pollRenderedHostId = state.renderedHostId;
+      pollRenderedAccountId = state.renderedAccountId;
+      pollRenderedEnvironment = state.renderedEnvironment;
       const response = await jsonFetch(
         HOST_API.route("streamEvents") + "?after=" +
           encodeURIComponent(state.cursor.toString()));
-      const events = Array.isArray(response) ? response : (response.events || []);
+      if (
+        pollEpoch !== state.scopeEpoch ||
+        pollRenderedHostId !== state.renderedHostId ||
+        pollRenderedAccountId !== state.renderedAccountId ||
+        pollRenderedEnvironment !== state.renderedEnvironment
+      ) {
+        return;
+      }
+      if (!Array.isArray(response)) {
+        throw new Error("Host event response must be a canonical JSON array");
+      }
+      const events = response;
       let expectedCursor = state.cursor + 1n;
       for (const event of events) {
         const cursor = exactCounter(event.cursor, "event.cursor");
@@ -981,10 +1236,13 @@
         const kind = String(event.kind ?? event.event_type ?? "");
         if (kind === "OPERATION_UPDATED") {
           const payload = requiredObject(event.payload, "event.payload");
-          const operationId = requiredText(
+          const operationId = canonicalId(
             payload.operation_id,
             "event.payload.operation_id");
-          await refreshOperation(operationId);
+          const operation = await refreshOperation(operationId);
+          if (operation === null) {
+            return;
+          }
         }
         if (MATERIAL_EVENTS.has(kind)) {
           announce(eventMessage(event), URGENT_EVENTS.has(kind));
@@ -1007,10 +1265,22 @@
         await refreshSnapshot();
       }
     } catch (error) {
+      if (
+        pollEpoch !== null &&
+        (
+          pollEpoch !== state.scopeEpoch ||
+          pollRenderedHostId !== state.renderedHostId ||
+          pollRenderedAccountId !== state.renderedAccountId ||
+          pollRenderedEnvironment !== state.renderedEnvironment
+        )
+      ) {
+        return;
+      }
       if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});
         } catch {
+          state.scopeEpoch += 1;
           state.snapshotReady = false;
           state.sessionIdentity = null;
           state.accountId = null;
@@ -1024,6 +1294,7 @@
             true);
         }
       } else {
+        state.scopeEpoch += 1;
         state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
@@ -1058,13 +1329,25 @@
     }
     const payload = newCommandPayload(action);
     state.pendingCommand = payload;
+    state.pendingCommandHostId = state.renderedHostId;
     return payload;
   }
 
   function clearConfirmedCommand(payload) {
     if (state.pendingCommand === payload) {
       state.pendingCommand = null;
+      state.pendingCommandHostId = null;
     }
+  }
+
+  function commandContextMatchesCurrentSnapshot(payload, submittedHostId) {
+    return state.snapshotReady &&
+      state.sessionIdentity !== null &&
+      submittedHostId === state.renderedHostId &&
+      payload.actor === state.sessionIdentity.actor &&
+      payload.session === state.sessionIdentity.session &&
+      payload.account_id === state.accountId &&
+      payload.environment === state.environment;
   }
 
   async function submitCommand(event) {
@@ -1085,6 +1368,7 @@
     const action = byId("host-action").value;
     const recovering = state.pendingCommand !== null;
     if (recovering && (
+        state.pendingCommandHostId !== state.renderedHostId ||
         state.pendingCommand.actor !== state.sessionIdentity.actor ||
         state.pendingCommand.session !== state.sessionIdentity.session ||
         state.pendingCommand.account_id !== state.accountId ||
@@ -1109,6 +1393,8 @@
       return;
     }
     const payload = commandForSubmission(action);
+    const submittedHostId = state.pendingCommandHostId;
+    syncHostActionOptions(state.sessionIdentity.role);
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
@@ -1123,7 +1409,24 @@
         : "Submitting host command " + commandId + ".");
     try {
       const result = await submitCanonicalCommand(payload);
+      const responseScopeCurrent = commandContextMatchesCurrentSnapshot(payload, submittedHostId);
       clearConfirmedCommand(payload);
+      if (!responseScopeCurrent) {
+        renderCommandValidationDetails([], "unavailable");
+        const acceptanceCaveat = result.status === "ACCEPTED"
+          ? " Acceptance is not a completed financial outcome."
+          : "";
+        text(
+          "command-result",
+          "Confirmed host response " + result.status + " for command " + commandId +
+            " belongs to the original account/environment scope " +
+            payload.account_id + " / " + payload.environment +
+            ", but the authenticated host scope changed before the response was displayed." +
+            acceptanceCaveat +
+            " Operation and field-validation details from the original scope were not rendered into the current scope.");
+        byId("command-result").focus();
+        return;
+      }
       renderCommandValidationDetails(result.fieldErrors, "confirmed");
       if (result.status === "ACCEPTED") {
         let acceptedMessage =
@@ -1132,12 +1435,23 @@
         if (result.operationId !== null) {
           try {
             const operation = await refreshOperation(result.operationId);
-            const uncertainty = operation.remainingUncertainty.length > 0
-              ? " Remaining uncertainty: " +
-                operation.remainingUncertainty.join(", ") + "."
-              : "";
-            acceptedMessage +=
-              " Operation phase is " + operation.phase + "." + uncertainty;
+            if (operation === null) {
+              text(
+                "command-result",
+                acceptedMessage +
+                  " Operation status was not rendered because the account/environment scope changed while it was loading. " +
+                  "This accepted response belongs to the original scope " +
+                  payload.account_id + " / " + payload.environment + ".");
+              byId("command-result").focus();
+              return;
+            } else {
+              const uncertainty = operation.remainingUncertainty.length > 0
+                ? " Remaining uncertainty: " +
+                  operation.remainingUncertainty.join(", ") + "."
+                : "";
+              acceptedMessage +=
+                " Operation phase is " + operation.phase + "." + uncertainty;
+            }
           } catch {
             acceptedMessage +=
               " Current operation status could not be loaded; the accepted command response remains unchanged.";
@@ -1161,6 +1475,7 @@
       try {
         await refreshSnapshot();
       } catch {
+        state.scopeEpoch += 1;
         state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
@@ -1171,15 +1486,26 @@
           true);
       }
     } catch {
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text(
-        "command-result",
-        "Command " + commandId +
-          " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      if (commandContextMatchesCurrentSnapshot(payload, submittedHostId)) {
+        state.scopeEpoch += 1;
+        state.snapshotReady = false;
+        state.sessionIdentity = null;
+        state.accountId = null;
+        state.environment = null;
+        setCommandAvailability(false);
+        text(
+          "command-result",
+          "Command " + commandId +
+            " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      } else {
+        text(
+          "command-result",
+          "Command " + commandId + " from original scope " +
+            payload.account_id + " / " + payload.environment +
+            " could not be confirmed after the authenticated host scope changed. " +
+            "Its original command_id and idempotency_key are retained and will not be retargeted. " +
+            "The current scope snapshot is not invalidated by this older request.");
+      }
       renderCommandValidationDetails([], "unavailable");
       byId("command-result").focus();
     } finally {
@@ -1191,9 +1517,12 @@
     const button = byId("refresh-state");
     if (button) button.disabled = true;
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed from the canonical snapshot.");
+      const refreshed = await refreshSnapshot();
+      if (refreshed) {
+        announce("Host state refreshed from the canonical snapshot.");
+      }
     } catch {
+      state.scopeEpoch += 1;
       state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
@@ -1217,6 +1546,7 @@
     try {
       await refreshSnapshot();
     } catch {
+      state.scopeEpoch += 1;
       state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
@@ -1231,6 +1561,7 @@
   window.addEventListener("pagehide", () => {
     captureFocusForRestoration();
     state.stopped = true;
+    state.scopeEpoch += 1;
     state.snapshotReady = false;
     state.sessionIdentity = null;
     state.accountId = null;
@@ -1241,15 +1572,19 @@
   window.addEventListener("pageshow", async (event) => {
     if (!event.persisted) return;
     state.stopped = false;
+    state.scopeEpoch += 1;
     state.snapshotReady = false;
     state.sessionIdentity = null;
     state.accountId = null;
     state.environment = null;
     setCommandAvailability(false);
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed after page restoration.");
+      const restored = await refreshSnapshot();
+      if (restored) {
+        announce("Host state refreshed after page restoration.");
+      }
     } catch {
+      state.scopeEpoch += 1;
       state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;

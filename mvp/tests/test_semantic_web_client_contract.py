@@ -76,6 +76,24 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(f'id="{region}" class="table-scroll" role="region"', html)
             self.assertIn(f'"{region}"', js)
 
+    def test_dynamic_operation_and_event_tables_use_row_headers(self):
+        js = APP.read_text(encoding="utf-8")
+        operation = js[
+            js.index("function renderOperation(operation)"):
+            js.index("async function refreshOperation")
+        ]
+        event = js[
+            js.index("function renderHostEvent(event, cursor, stateVersion)"):
+            js.index("function resetOperationsForScope(")
+        ]
+        for scope in (operation, event):
+            self.assertIn('const rowHeader = document.createElement("th")', scope)
+            self.assertIn('rowHeader.scope = "row"', scope)
+            self.assertIn("row.appendChild(rowHeader)", scope)
+            self.assertIn("for (let index = 1; index < 4; index += 1)", scope)
+        self.assertIn("row.children[0].textContent = operation.operationId", operation)
+        self.assertIn("row.children[0].textContent = cursor.toString()", event)
+
     def test_received_host_events_are_exposed_as_read_only_semantic_history(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
@@ -103,14 +121,18 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function resetEventHistoryForScope()", js)
-        self.assertIn("const scopeChanged = state.accountId !== null", js)
-        self.assertIn("parsed.accountId !== state.accountId", js)
-        self.assertIn("parsed.environment !== state.environment", js)
-        scope = js.index("if (scopeChanged)")
+        self.assertIn("function resetEventHistoryForScope(", js)
+        self.assertIn("renderedAccountId: null", js)
+        self.assertIn("renderedEnvironment: null", js)
+        self.assertIn("const scopeChanged = state.renderedAccountId !== null", js)
+        self.assertIn("parsed.accountId !== state.renderedAccountId", js)
+        self.assertIn("parsed.environment !== state.renderedEnvironment", js)
+        self.assertIn("state.renderedAccountId = parsed.accountId", js)
+        self.assertIn("state.renderedEnvironment = parsed.environment", js)
+        scope = js.index("if (displayContextChanged)")
         cursor_reset = js.index("state.cursor = 0n", scope)
         version_reset = js.index("state.version = 0n", scope)
-        history_reset = js.index("resetEventHistoryForScope()", scope)
+        history_reset = js.index("resetEventHistoryForScope();", scope)
         regression_check = js.index("host snapshot counters regressed", scope)
         self.assertLess(cursor_reset, regression_check)
         self.assertLess(version_reset, regression_check)
@@ -295,6 +317,20 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(required, js[fence:build])
         self.assertIn("setCommandAvailability(false)", js[fence:build])
 
+    def test_display_scope_marker_survives_authority_trust_invalidation(self):
+        js = APP.read_text(encoding="utf-8")
+        pagehide = js.index('window.addEventListener("pagehide"')
+        pageshow = js.index('window.addEventListener("pageshow"')
+        invalidation = js[pagehide:pageshow]
+        self.assertIn("state.accountId = null", invalidation)
+        self.assertIn("state.environment = null", invalidation)
+        self.assertNotIn("state.renderedAccountId = null", invalidation)
+        self.assertNotIn("state.renderedEnvironment = null", invalidation)
+        self.assertIn(
+            "successfully rendered scope is retained only to prevent stale read-only",
+            js,
+        )
+
     def test_snapshot_trust_invalidation_clears_account_and_environment_scope(self):
         js = APP.read_text(encoding="utf-8")
         self.assertGreaterEqual(js.count("state.accountId = null"), 4)
@@ -468,14 +504,39 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_operation_timestamps_cannot_move_backwards(self):
         js = APP.read_text(encoding="utf-8")
+        self.assertIn("function compareCanonicalUtcInstants(", js)
+        self.assertIn('leftFraction.padEnd(width, "0")', js)
+        self.assertIn('rightFraction.padEnd(width, "0")', js)
+        operation = js[
+            js.index("function parseOperationResult(value, expectedOperationId)"):
+            js.index("function setCommandAvailability")
+        ]
         self.assertIn(
-            "if (Date.parse(updatedAt) < Date.parse(startedAt))",
-            js,
+            "if (compareCanonicalUtcInstants(",
+            operation,
+        )
+        self.assertNotIn("Date.parse(", operation)
+        self.assertIn(
+            '"updated_at",\n        "started_at") < 0',
+            operation,
         )
         self.assertIn(
             "OperationResult updated_at cannot precede started_at",
-            js,
+            operation,
         )
+
+    def test_exact_utc_comparator_preserves_submillisecond_ordering(self):
+        js = APP.read_text(encoding="utf-8")
+        compare = js[
+            js.index("function compareCanonicalUtcInstants("):
+            js.index("function requiredStringArray")
+        ]
+        self.assertIn("if (leftBase < rightBase) return -1", compare)
+        self.assertIn("if (leftBase > rightBase) return 1", compare)
+        self.assertIn('leftFraction.padEnd(width, "0")', compare)
+        self.assertIn('rightFraction.padEnd(width, "0")', compare)
+        self.assertIn("if (normalizedLeft < normalizedRight) return -1", compare)
+        self.assertIn("if (normalizedLeft > normalizedRight) return 1", compare)
 
     def test_accepted_command_tracks_canonical_operation_without_claiming_fill(self):
         html = INDEX.read_text(encoding="utf-8")
@@ -807,12 +868,474 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn('reapplyTableFilter("permissions-body")', js)
+
+
+    def test_permission_and_operation_tables_share_keyboard_filter_copy_workflow(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in ("permissions", "operations"):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-filter-status"', html)
+        self.assertIn(
+            'Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter"',
+            js,
+        )
+        self.assertIn(
+            'Object.freeze({bodyId: "operations-body", filterId: "operations-filter"',
+            js,
+        )
+        render_operation = js[
+            js.index("function renderOperation(operation)"):
+            js.index("async function refreshOperation")
+        ]
+        self.assertIn('row.dataset.filterableRow = "true"', render_operation)
+        self.assertIn('reapplyTableFilter("operations-body")', render_operation)
+
+    def test_account_or_environment_scope_change_clears_operation_evidence(self):
+        js = APP.read_text(encoding="utf-8")
+        reset = js[
+            js.index("function resetOperationsForScope("):
+            js.index("function resetEventHistoryForScope(")
+        ]
+        self.assertIn('const body = byId("operations-body")', reset)
+        self.assertIn("body.replaceChildren()", reset)
+        self.assertIn("cell.colSpan = 4", reset)
+        self.assertIn(
+            "No host operations loaded for this account/environment session.",
+            reset,
+        )
+        self.assertIn('reapplyTableFilter("operations-body")', reset)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        filters = snapshot.index("resetTableFiltersForScopeChange();")
+        operations = snapshot.index("resetOperationsForScope();")
+        history = snapshot.index("resetEventHistoryForScope();")
+        portfolio = snapshot.index('renderProjection(\n      "portfolio-body"')
+        self.assertLess(filters, operations)
+        self.assertLess(operations, history)
+        self.assertLess(operations, portfolio)
+
+    def test_stale_operation_failure_is_suppressed_after_scope_change(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshOperation(operationId)"):
+            js.index("function renderHostEvent")
+        ]
+        request = refresh.index("await jsonFetch(")
+        catch = refresh.index("} catch (error) {", request)
+        null_return = refresh.index("return null;", catch)
+        rethrow = refresh.index("throw error;", null_return)
+        self.assertLess(request, catch)
+        self.assertLess(catch, null_return)
+        self.assertLess(null_return, rethrow)
+        self.assertIn("scopeEpoch !== state.scopeEpoch", refresh[catch:rethrow])
+        self.assertIn(
+            "renderedAccountId !== state.renderedAccountId",
+            refresh[catch:rethrow],
+        )
+        self.assertIn(
+            "renderedEnvironment !== state.renderedEnvironment",
+            refresh[catch:rethrow],
+        )
+
+    def test_superseded_snapshot_failure_does_not_poison_newer_refresh(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshSnapshot(options = {})"):
+            js.index("function eventMessage")
+        ]
+        request = refresh.index("await jsonFetch(")
+        catch = refresh.index("} catch (error) {", request)
+        stale = refresh.index("if (refreshEpoch !== state.scopeEpoch)", catch)
+        false_return = refresh.index("return false;", stale)
+        rethrow = refresh.index("throw error;", false_return)
+        self.assertLess(request, catch)
+        self.assertLess(catch, stale)
+        self.assertLess(stale, false_return)
+        self.assertLess(false_return, rethrow)
+
+    def test_event_poll_failure_cannot_invalidate_newer_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("let pollEpoch = null", poll)
+        self.assertIn("let pollRenderedAccountId = null", poll)
+        self.assertIn("let pollRenderedEnvironment = null", poll)
+        catch = poll.rindex("} catch (error) {")
+        stale = poll.index("pollEpoch !== state.scopeEpoch", catch)
+        early_return = poll.index("return;", stale)
+        invalidation = poll.index("state.snapshotReady = false", early_return)
+        self.assertLess(catch, stale)
+        self.assertLess(stale, early_return)
+        self.assertLess(early_return, invalidation)
+
+    def test_event_operation_id_is_canonical_uuid_before_route_use(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        canonical = poll.index(
+            'const operationId = canonicalId(\n            payload.operation_id'
+        )
+        refresh = poll.index("await refreshOperation(operationId)", canonical)
+        self.assertLess(canonical, refresh)
+        self.assertNotIn(
+            'const operationId = requiredText(\n            payload.operation_id',
+            poll,
+        )
+
+    def test_event_batch_must_be_canonical_json_array(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("if (!Array.isArray(response))", poll)
+        self.assertIn(
+            "Host event response must be a canonical JSON array",
+            poll,
+        )
+        self.assertNotIn("response.events || []", poll)
+
+    def test_async_operation_reads_cannot_repopulate_a_changed_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshOperation(operationId)"):
+            js.index("function renderHostEvent")
+        ]
+        self.assertIn("const scopeEpoch = state.scopeEpoch", refresh)
+        self.assertIn("const renderedHostId = state.renderedHostId", refresh)
+        self.assertIn("const renderedAccountId = state.renderedAccountId", refresh)
+        self.assertIn("const renderedEnvironment = state.renderedEnvironment", refresh)
+        self.assertIn("scopeEpoch !== state.scopeEpoch", refresh)
+        self.assertIn("renderedHostId !== state.renderedHostId", refresh)
+        self.assertIn("renderedAccountId !== state.renderedAccountId", refresh)
+        self.assertIn("renderedEnvironment !== state.renderedEnvironment", refresh)
+        fence = refresh.index("scopeEpoch !== state.scopeEpoch")
+        render = refresh.index("renderOperation(operation)")
+        self.assertLess(fence, render)
+        self.assertIn("return null", refresh)
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("const operation = await refreshOperation(operationId)", poll)
+        self.assertIn("if (operation === null)", poll)
+        self.assertLess(
+            poll.index("if (operation === null)"),
+            poll.index("renderHostEvent(event, cursor, version)"),
+        )
+
+    def test_confirmed_command_response_is_scope_fenced_before_operation_rendering(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function commandContextMatchesCurrentSnapshot(payload, submittedHostId)", js)
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        response = submit.index("const result = await submitCanonicalCommand(payload)")
+        fence = submit.index("if (!responseScopeCurrent)", response)
+        details = submit.index(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            response,
+        )
+        operation = submit.index("await refreshOperation(result.operationId)", response)
+        self.assertLess(fence, details)
+        self.assertLess(fence, operation)
+        self.assertIn(
+            "Operation and field-validation details from the original scope were not rendered into the current scope.",
+            submit,
+        )
+        self.assertIn("Acceptance is not a completed financial outcome.", submit)
+
+    def test_trust_invalidation_advances_async_scope_epoch(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("scopeEpoch: 0", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("state.scopeEpoch += 1", snapshot)
+        pagehide = js[
+            js.index('window.addEventListener("pagehide"'):
+            js.index('window.addEventListener("pageshow"')
+        ]
+        self.assertIn("state.scopeEpoch += 1", pagehide)
+
+    def test_superseded_snapshot_does_not_announce_false_refresh_success(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh_user = js[
+            js.index("async function refreshStateFromUser()"):
+            js.index("async function start()")
+        ]
+        self.assertIn("const refreshed = await refreshSnapshot()", refresh_user)
+        self.assertIn("if (refreshed)", refresh_user)
+        self.assertLess(
+            refresh_user.index("if (refreshed)"),
+            refresh_user.index("Host state refreshed from the canonical snapshot."),
+        )
+
+        pageshow = js[js.index('window.addEventListener("pageshow"'):]
+        self.assertIn("const restored = await refreshSnapshot()", pageshow)
+        self.assertIn("if (restored)", pageshow)
+        self.assertLess(
+            pageshow.index("if (restored)"),
+            pageshow.index("Host state refreshed after page restoration."),
+        )
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("const recovered = await refreshSnapshot()", poll)
+        self.assertIn("if (!recovered)", poll)
+        self.assertLess(
+            poll.index("if (!recovered)"),
+            poll.index("pollEpoch = state.scopeEpoch"),
+        )
+
+    def test_display_context_change_is_announced_with_host_account_and_environment(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("Host display context changed to host ", snapshot)
+        self.assertIn('", account " + parsed.accountId', snapshot)
+        self.assertIn('" in " + parsed.environment', snapshot)
+        self.assertIn(
+            "Old-context operation, event, notification, and command-validation evidence was cleared.",
+            snapshot,
+        )
+        self.assertIn('parsed.environment === "LIVE" || hostChanged', snapshot)
+        markers = snapshot.index("state.renderedHostId = parsed.hostId")
+        announcement = snapshot.index("Host display context changed to host ")
+        self.assertLess(markers, announcement)
+
+    def test_host_identity_change_resets_local_event_context_and_counters(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("renderedHostId: null", js)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const hostChanged =", snapshot)
+        self.assertIn("parsed.hostId !== state.renderedHostId", snapshot)
+        self.assertIn("const displayContextChanged = hostChanged || scopeChanged", snapshot)
+        changed = snapshot.index("if (displayContextChanged)")
+        cursor = snapshot.index("state.cursor = 0n", changed)
+        version = snapshot.index("state.version = 0n", changed)
+        operations = snapshot.index("resetOperationsForScope();", changed)
+        self.assertLess(changed, cursor)
+        self.assertLess(cursor, version)
+        self.assertLess(version, operations)
+
+    def test_unresolved_command_is_bound_to_exact_rendered_host_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("pendingCommandHostId: null", js)
+        self.assertIn(
+            "state.pendingCommandHostId = state.renderedHostId",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommandHostId === state.renderedHostId",
+            js,
+        )
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        self.assertIn(
+            "state.pendingCommandHostId !== state.renderedHostId",
+            submit,
+        )
+        self.assertIn("const submittedHostId = state.pendingCommandHostId", submit)
+        self.assertIn(
+            "commandContextMatchesCurrentSnapshot(payload, submittedHostId)",
+            submit,
+        )
+
+    def test_same_scope_snapshot_cursor_jump_clears_event_derived_views(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("const priorCursor = state.cursor", snapshot)
+        self.assertIn("const skippedSameScopeEvents =", snapshot)
+        self.assertIn("parsed.cursor > priorCursor", snapshot)
+        self.assertIn(
+            '"Canonical snapshot advanced from event cursor " + priorCursor.toString()',
+            snapshot,
+        )
+        self.assertIn(
+            '" to " + parsed.cursor.toString()',
+            snapshot,
+        )
+        for reset in (
+            "resetNotificationsForScope(",
+            "resetOperationsForScope(",
+            "resetEventHistoryForScope(",
+        ):
+            self.assertGreaterEqual(snapshot.count(reset), 2)
+        self.assertIn(
+            "Event-derived operation, notification, and received-event views were cleared rather than shown as current.",
+            snapshot,
+        )
+        gap = snapshot.index("if (skippedSameScopeEvents)")
+        cursor_commit = snapshot.index("state.cursor = parsed.cursor")
+        self.assertLess(gap, cursor_commit)
+        self.assertIn("true);", snapshot[gap:cursor_commit])
+
+    def test_same_scope_snapshot_without_cursor_jump_preserves_event_derived_views(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        condition = snapshot[
+            snapshot.index("const skippedSameScopeEvents ="):
+            snapshot.index("if (displayContextChanged)")
+        ]
+        self.assertIn("!displayContextChanged", condition)
+        self.assertIn("state.renderedHostId !== null", condition)
+        self.assertIn("parsed.cursor > priorCursor", condition)
+        self.assertNotIn("parsed.cursor >= priorCursor", condition)
+
+    def test_snapshot_and_event_stream_responses_are_generation_fenced(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshSnapshot(options = {})"):
+            js.index("function eventMessage")
+        ]
+        self.assertIn("state.scopeEpoch += 1", refresh)
+        self.assertIn("const refreshEpoch = state.scopeEpoch", refresh)
+        self.assertIn("if (refreshEpoch !== state.scopeEpoch)", refresh)
+        self.assertLess(
+            refresh.index("if (refreshEpoch !== state.scopeEpoch)"),
+            refresh.index("renderSnapshot(snapshot, options)"),
+        )
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("let pollEpoch = null", poll)
+        self.assertIn("let pollRenderedHostId = null", poll)
+        self.assertIn("pollEpoch = state.scopeEpoch", poll)
+        self.assertIn("pollRenderedHostId = state.renderedHostId", poll)
+        self.assertIn("pollRenderedAccountId = state.renderedAccountId", poll)
+        self.assertIn("pollRenderedEnvironment = state.renderedEnvironment", poll)
+        self.assertIn("pollEpoch !== state.scopeEpoch", poll)
+        response = poll.index("const response = await jsonFetch(")
+        fence = poll.index("pollEpoch !== state.scopeEpoch", response)
+        event_render = poll.index("renderHostEvent(event, cursor, version)", fence)
+        self.assertLess(response, fence)
+        self.assertLess(fence, event_render)
+
+    def test_old_command_failure_cannot_invalidate_new_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        catch_start = submit.rindex("    } catch {")
+        catch_block = submit[catch_start:]
+        self.assertIn("if (commandContextMatchesCurrentSnapshot(payload, submittedHostId))", catch_block)
+        self.assertIn("state.snapshotReady = false", catch_block)
+        self.assertIn(
+            "The current scope snapshot is not invalidated by this older request.",
+            catch_block,
+        )
+        self.assertIn(
+            "Its original command_id and idempotency_key are retained and will not be retargeted.",
+            catch_block,
+        )
+
+    def test_accepted_operation_scope_change_stops_old_submit_flow(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        null_fence = submit.index("if (operation === null)")
+        post_refresh = submit.index("await refreshSnapshot();", null_fence)
+        self.assertIn("This accepted response belongs to the original scope", submit)
+        self.assertIn('byId("command-result").focus();', submit[null_fence:post_refresh])
+        self.assertIn("return;", submit[null_fence:post_refresh])
+
+    def test_clipboard_completion_feedback_is_scope_fenced(self):
+        js = APP.read_text(encoding="utf-8")
+        copy = js[
+            js.index("async function copyVisibleTableRows(tool)"):
+            js.index("function bindTableTools()")
+        ]
+        self.assertIn("const scopeEpoch = state.scopeEpoch", copy)
+        self.assertGreaterEqual(copy.count("if (scopeEpoch !== state.scopeEpoch)"), 2)
+        write = copy.index("await navigator.clipboard.writeText(payload)")
+        success_fence = copy.index("if (scopeEpoch !== state.scopeEpoch)", write)
+        success_message = copy.index('" visible " + tool.label + " rows copied."', success_fence)
+        self.assertLess(write, success_fence)
+        self.assertLess(success_fence, success_message)
+
+    def test_scope_change_clears_unscoped_command_and_notification_feedback(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetNotificationsForScope(", js)
+        self.assertIn("window.clearTimeout(state.announcementTimer)", js)
+        self.assertIn("window.clearTimeout(state.urgentAnnouncementTimer)", js)
+        self.assertIn("state.pendingAnnouncements = []", js)
+        self.assertIn("state.pendingUrgentAnnouncements = []", js)
+        self.assertIn(
+            "No material notifications recorded in this account/environment session.",
+            js,
+        )
+        self.assertIn(
+            "function resetCommandFeedbackForContext(",
+            js,
+        )
+        self.assertIn(
+            "An unresolved command from a different host/session/account/environment context is retained with its original identity and will not be retargeted.",
+            js,
+        )
+        self.assertIn(
+            "No host command has been submitted for this host/account/environment session.",
+            js,
+        )
+        self.assertIn('renderCommandValidationDetails([], "scope_changed")', js)
+        self.assertIn(
+            "Field-validation details from the previous account/environment scope are not shown in this scope.",
+            js,
+        )
+
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        notifications = snapshot.index("resetNotificationsForScope();")
+        filters = snapshot.index("resetTableFiltersForScopeChange();")
+        operations = snapshot.index("resetOperationsForScope();")
+        history = snapshot.index("resetEventHistoryForScope();")
+        command = snapshot.index(
+            "resetCommandFeedbackForContext("
+        )
+        self.assertLess(notifications, filters)
+        self.assertLess(filters, operations)
+        self.assertLess(operations, history)
+        self.assertLess(history, command)
 
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
@@ -873,7 +1396,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         parser = _ElementParser()
         parser.feed(html)
         by_id = {attrs["id"]: (tag, attrs) for tag, attrs in parser.elements if "id" in attrs}
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             status_id = f"{prefix}-filter-status"
             tag, attrs = by_id[status_id]
             self.assertEqual(tag, "p", status_id)
@@ -896,7 +1419,9 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_table_tool_focus_targets_survive_browser_page_restore(self):
         js = APP.read_text(encoding="utf-8")
         for target in (
+            "permissions-filter", "permissions-copy",
             "strategy-filter", "strategy-copy", "portfolio-filter", "portfolio-copy",
+            "operations-filter", "operations-copy",
             "risk-filter", "risk-copy", "jobs-filter", "jobs-copy",
             "event-history-filter", "event-history-copy",
         ):

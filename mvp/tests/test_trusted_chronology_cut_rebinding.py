@@ -15,6 +15,7 @@ import mvp.autotrade_mvp.trusted_chronology_cut as chronology
 class TrustedChronologyRebindingTests(unittest.TestCase):
     """Falsify post-callback module-global authority retargeting."""
 
+    DummySecurityBoundary = _cases.TrustedChronologyCutTests.DummySecurityBoundary
     _state = _cases.TrustedChronologyCutTests._state
     _runtime = _cases.TrustedChronologyCutTests._runtime
     _measurement = staticmethod(_cases.TrustedChronologyCutTests._measurement)

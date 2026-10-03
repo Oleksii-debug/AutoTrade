@@ -348,6 +348,86 @@ def _class_authority_state(
     )
 
 
+def _class_resolution_authority_state(
+    value: type,
+    names: tuple[str, ...],
+) -> tuple[
+    tuple[
+        str,
+        type,
+        object,
+        tuple[tuple[FunctionType, tuple], ...],
+    ],
+    ...,
+]:
+    """Snapshot raw class-member resolution without invoking descriptors."""
+
+    if type(value) is not type:
+        raise TypeError("class-resolution authority must be an exact class")
+    if type(names) is not tuple or any(type(name) is not str or not name for name in names):
+        raise TypeError("class-resolution authority names must be exact text tuple")
+    result = []
+    for member_name in names:
+        owner = None
+        member = None
+        for candidate in value.__mro__:
+            namespace = vars(candidate)
+            if member_name in namespace:
+                owner = candidate
+                member = namespace[member_name]
+                break
+        if owner is None:
+            raise TypeError(f"class-resolution member is unavailable: {member_name}")
+        result.append(
+            (
+                member_name,
+                owner,
+                member,
+                tuple(
+                    (function, _callable_authority_state(function))
+                    for function in _class_member_executables(member)
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _require_class_resolution_authority(
+    value: type,
+    state: tuple,
+    *,
+    name: str,
+) -> None:
+    """Require the same MRO owner, raw descriptor and executable state."""
+
+    if type(value) is not type:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} class-resolution authority changed during campaign callback"
+        )
+    missing = object()
+    for member_name, expected_owner, expected_member, executables in state:
+        current_owner = None
+        for candidate in value.__mro__:
+            if member_name in vars(candidate):
+                current_owner = candidate
+                break
+        if current_owner is not expected_owner:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{member_name} resolution authority changed during campaign callback"
+            )
+        namespace = vars(expected_owner)
+        if namespace.get(member_name, missing) is not expected_member:
+            raise RuntimeTargetHostRunnerError(
+                f"{name}.{member_name} class member changed during campaign callback"
+            )
+        for function, function_state in executables:
+            _require_callable_authority(
+                function,
+                function_state,
+                name=f"{name}.{member_name}",
+            )
+
+
 def _require_class_authority(
     value: type,
     state: tuple,
@@ -582,6 +662,25 @@ def run_declared_target_host_campaign(
     active_count = threading.active_count
     financial_clock = _runtime_load_measurement.perf_counter_ns
     journal_store_type = JournalStore
+    journal_store_mro = JournalStore.__mro__
+    journal_store_resolution_state = _class_resolution_authority_state(
+        JournalStore,
+        (
+            "SCHEMA_VERSION",
+            "_connect",
+            "_connect_windows",
+            "_require_text",
+            "_now",
+            "_aggregate_version_value",
+            "_journal_sequence_value",
+            "_decode_event_row",
+            "get_event",
+            "append_event",
+            "current_journal_sequence",
+            "pending_outbox_count",
+            "load_events_after_journal_sequence",
+        ),
+    )
     current_journal_sequence = JournalStore.current_journal_sequence
     pending_outbox_count = JournalStore.pending_outbox_count
     measure_financial = measure_declared_financial_operation
@@ -613,8 +712,12 @@ def run_declared_target_host_campaign(
 
     require_callable_authority_helper = _require_callable_authority
     require_class_authority_helper = _require_class_authority
+    require_class_resolution_authority_helper = _require_class_resolution_authority
     require_callable_kwdefaults = require_callable_authority_helper.__kwdefaults__
     require_class_kwdefaults = require_class_authority_helper.__kwdefaults__
+    require_class_resolution_kwdefaults = (
+        require_class_resolution_authority_helper.__kwdefaults__
+    )
     require_callable_helper_state = (
         require_callable_authority_helper.__code__,
         require_callable_authority_helper.__defaults__,
@@ -630,6 +733,14 @@ def run_declared_target_host_campaign(
         None
         if require_class_kwdefaults is None
         else tuple(sorted(require_class_kwdefaults.items())),
+    )
+    require_class_resolution_helper_state = (
+        require_class_resolution_authority_helper.__code__,
+        require_class_resolution_authority_helper.__defaults__,
+        require_class_resolution_kwdefaults,
+        None
+        if require_class_resolution_kwdefaults is None
+        else tuple(sorted(require_class_resolution_kwdefaults.items())),
     )
 
     class_states = tuple(
@@ -686,6 +797,12 @@ def run_declared_target_host_campaign(
                 require_class_authority_helper,
                 require_class_helper_state,
             ),
+            (
+                "_require_class_resolution_authority",
+                _require_class_resolution_authority,
+                require_class_resolution_authority_helper,
+                require_class_resolution_helper_state,
+            ),
         )
         for name, current, expected, state in helper_checks:
             if current is not expected:
@@ -741,6 +858,15 @@ def run_declared_target_host_campaign(
             raise error_type(
                 "JournalStore authority changed during campaign callback"
             )
+        if JournalStore.__mro__ != journal_store_mro:
+            raise error_type(
+                "JournalStore MRO authority changed during campaign callback"
+            )
+        require_class_resolution_authority_helper(
+            JournalStore,
+            journal_store_resolution_state,
+            name="JournalStore",
+        )
         if MONOTONIC_CLOCK_ID is not monotonic_clock_id:
             raise error_type(
                 "monotonic clock identity changed during campaign callback"

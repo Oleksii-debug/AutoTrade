@@ -18,16 +18,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
+import hmac
 import json
 import re
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 from .bybit_credential_nonacceptance import (
     BybitCredentialNonAcceptance,
     classify_bybit_credential_nonacceptance,
 )
 from .provider_core import ProviderCoreError
-from .windows_secrets import PersistentCredentialHandle
+from .provider_transport import (
+    BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5Credential,
+    ProviderTransportScopeError,
+)
+from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
 _BYBIT_QUERY_API_PATH = "/v5/user/query-api"
@@ -63,6 +70,14 @@ def _utc_text(value: object, *, name: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ProviderCoreError(f"{name} must include timezone")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _clock_utc_text(value: object) -> str:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ProviderCoreError(
+            "Bybit credential probe clock_utc must return exact timezone-aware datetime"
+        )
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _require_exact_json_data(value: object, *, path: str = "$") -> None:
@@ -115,6 +130,30 @@ def _response_digest(response: object) -> tuple[int, str]:
             "Bybit credential probe response must be canonical JSON data"
         ) from error
     return ret_code, "sha256:" + sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BybitCredentialProbeWireResponse:
+    """Exact HTTP+JSON result returned by the probe's injected wire boundary."""
+
+    http_status: int
+    response: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP status must be an exact three-digit integer"
+            )
+        if type(self.response) is not dict:
+            raise ProviderCoreError(
+                "Bybit credential probe wire response must contain an exact JSON object"
+            )
+        _require_exact_json_data(self.response)
+
+
+BybitCredentialProbeWireQuery = Callable[
+    ..., BybitCredentialProbeWireResponse
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,3 +331,174 @@ def capture_bybit_credential_probe_evidence(
         response_sha256=response_sha256,
         observed_at=observed_at,
     )
+
+
+def _probe_headers(
+    *,
+    credential_plaintext: str,
+    timestamp_ms: object,
+    recv_window_ms: object,
+) -> Mapping[str, str]:
+    if type(timestamp_ms) is not int or timestamp_ms < 0:
+        raise ProviderCoreError(
+            "Bybit credential probe timestamp must be an exact non-negative integer"
+        )
+    if (
+        type(recv_window_ms) is not int
+        or recv_window_ms < 1
+        or recv_window_ms > 60000
+    ):
+        raise ProviderCoreError(
+            "Bybit credential probe recv_window_ms must be exact integer 1..60000"
+        )
+    try:
+        credential = BybitV5Credential.parse(credential_plaintext)
+    except ProviderTransportScopeError as error:
+        raise ProviderCoreError(
+            "Bybit credential probe TRADE credential material is invalid"
+        ) from error
+    signing_material = (
+        str(timestamp_ms)
+        + credential.api_key
+        + str(recv_window_ms)
+    ).encode("utf-8")
+    signature = hmac.new(
+        credential.api_secret.encode("utf-8"),
+        signing_material,
+        sha256,
+    ).hexdigest()
+    return MappingProxyType(
+        {
+            "Accept": "application/json",
+            "X-BAPI-API-KEY": credential.api_key,
+            "X-BAPI-TIMESTAMP": str(timestamp_ms),
+            "X-BAPI-RECV-WINDOW": str(recv_window_ms),
+            "X-BAPI-SIGN": signature,
+        }
+    )
+
+
+def probe_bybit_credential_with_vault(
+    *,
+    vault: ProtectedCredentialVault,
+    credential_handle: PersistentCredentialHandle,
+    execution_identity: str,
+    product_family: str,
+    wire_query: BybitCredentialProbeWireQuery,
+    clock_millis: Callable[[], int],
+    clock_utc: Callable[[], datetime],
+    recv_window_ms: int = 5000,
+) -> BybitCredentialProbeEvidence:
+    """Perform one generation-locked authenticated credential probe.
+
+    The source URI and provider domain are derived from the leased credential
+    handle; callers cannot supply or retarget either. The vault generation lock
+    remains held through signing, wire I/O, response validation and evidence
+    capture, so rotate/revoke cannot interleave after the handle check and
+    before the response digest is bound to that generation.
+
+    ``wire_query`` receives only the exact URL, authentication headers and
+    timeout. It never receives the API secret plaintext. It must perform one
+    HTTPS GET without redirects and return the exact HTTP status plus decoded
+    JSON object. Only an HTTP 200 provider envelope is admitted as credential
+    acceptance/non-acceptance evidence; network/proxy/HTTP failures remain
+    unknown rather than being misclassified as credential rejection.
+    """
+
+    if type(vault) is not ProtectedCredentialVault:
+        raise TypeError("vault must be exact ProtectedCredentialVault")
+    if type(credential_handle) is not PersistentCredentialHandle:
+        raise TypeError(
+            "credential_handle must be an exact PersistentCredentialHandle"
+        )
+    if credential_handle.provider != "BYBIT":
+        raise ProviderCoreError("Bybit probe requires a BYBIT credential")
+    if credential_handle.purpose != "TRADE":
+        raise ProviderCoreError("Bybit probe requires a TRADE credential")
+    provider_environment = credential_handle.provider_environment
+    if (
+        type(provider_environment) is not str
+        or provider_environment not in _REST_BASE_BY_PROVIDER_ENVIRONMENT
+    ):
+        raise ProviderCoreError(
+            "Bybit credential provider environment must be MAINNET, TESTNET or DEMO"
+        )
+    product_family = _exact_text(product_family, name="product_family")
+    if product_family not in _SUPPORTED_FAMILIES:
+        raise ProviderCoreError(
+            "Bybit credential probe product_family must be canonical and supported"
+        )
+    execution_identity = _exact_text(
+        execution_identity,
+        name="execution_identity",
+    )
+    if not callable(wire_query):
+        raise TypeError("wire_query must be callable")
+    if not callable(clock_millis) or not callable(clock_utc):
+        raise TypeError("probe clocks must be callable")
+    if (
+        type(recv_window_ms) is not int
+        or recv_window_ms < 1
+        or recv_window_ms > 60000
+    ):
+        raise ProviderCoreError(
+            "Bybit credential probe recv_window_ms must be exact integer 1..60000"
+        )
+
+    policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
+    if policy is None or policy.environment != credential_handle.environment:
+        raise ProviderCoreError(
+            "Bybit credential runtime environment does not match provider domain"
+        )
+    source_uri = policy.absolute_url(_BYBIT_QUERY_API_PATH)
+    expected_source_uri = (
+        _REST_BASE_BY_PROVIDER_ENVIRONMENT[provider_environment]
+        + _BYBIT_QUERY_API_PATH
+    )
+    if source_uri != expected_source_uri:
+        raise ProviderCoreError(
+            "Bybit canonical endpoint policy drifted from credential probe origin"
+        )
+
+    with vault.lease(
+        credential_handle,
+        execution_identity=execution_identity,
+        account_id=credential_handle.account_id,
+        provider="BYBIT",
+        environment=credential_handle.environment,
+        provider_environment=provider_environment,
+        purpose="TRADE",
+    ) as credential_plaintext:
+        try:
+            timestamp_ms = clock_millis()
+            headers = _probe_headers(
+                credential_plaintext=credential_plaintext,
+                timestamp_ms=timestamp_ms,
+                recv_window_ms=recv_window_ms,
+            )
+        finally:
+            credential_plaintext = None
+
+        wire_response = wire_query(
+            source_uri=source_uri,
+            headers=headers,
+            timeout_seconds=policy.timeout_seconds,
+        )
+        if type(wire_response) is not BybitCredentialProbeWireResponse:
+            raise TypeError(
+                "wire_query must return exact BybitCredentialProbeWireResponse"
+            )
+        if wire_response.http_status != 200:
+            raise ProviderCoreError(
+                "Bybit credential probe non-200 HTTP result is not rejection evidence"
+            )
+        observed_at = _clock_utc_text(clock_utc())
+        return capture_bybit_credential_probe_evidence(
+            credential_handle=credential_handle,
+            provider_environment=provider_environment,
+            source_uri=source_uri,
+            product_family=product_family,
+            response_surface="V5_UTA_REST",
+            response=wire_response.response,
+            observed_at=observed_at,
+        )

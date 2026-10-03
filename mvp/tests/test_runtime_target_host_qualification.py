@@ -62,14 +62,21 @@ _KIND_IDS = {
     RESOURCE_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000005",
     HOST_INVENTORY_EVIDENCE_KIND: "00000000-0000-4000-8000-000000000006",
 }
-_PAYLOAD_DIGEST = {
-    kind: "sha256:" + hex(index + 1)[2:] * 64
-    for index, kind in enumerate(KINDS)
+_PAYLOAD_IDS = {
+    kind: f"30000000-0000-4000-8000-{index:012d}"
+    for index, kind in enumerate(KINDS, start=1)
+}
+_RAW_PAYLOAD = {
+    kind: f"retained-raw-evidence:{kind}".encode("utf-8")
+    for kind in KINDS
 }
 
 
 def _sha(raw: bytes) -> str:
     return "sha256:" + sha256(raw).hexdigest()
+
+
+_PAYLOAD_DIGEST = {kind: _sha(raw) for kind, raw in _RAW_PAYLOAD.items()}
 
 
 def provenance(kind: str, **overrides) -> RuntimeTargetHostProvenance:
@@ -86,6 +93,7 @@ def provenance(kind: str, **overrides) -> RuntimeTargetHostProvenance:
         "release_artifact_sha256": RELEASE_SHA,
         "collector_id": f"collector-{kind.lower()}",
         "collector_version": "1.0.0",
+        "payload_artifact_id": _PAYLOAD_IDS[kind],
         "payload_sha256": _PAYLOAD_DIGEST[kind],
     }
     values.update(overrides)
@@ -108,7 +116,9 @@ def material(*, provenance_overrides=None, binding_overrides=None):
     evidence_refs = []
     digest_by_kind = {}
     for kind in KINDS:
-        raw = provenance(kind, **provenance_overrides.get(kind, {})).canonical_bytes()
+        envelope = provenance(kind, **provenance_overrides.get(kind, {}))
+        raw_by_id[envelope.payload_artifact_id] = _RAW_PAYLOAD[kind]
+        raw = envelope.canonical_bytes()
         digest = _sha(raw)
         digest_by_kind[kind] = digest
         raw_by_id[_KIND_IDS[kind]] = raw
@@ -223,6 +233,8 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
             store = ArtifactStore(f"{directory}/store")
 
             def reader(artifact_id):
+                if artifact_id not in raw_by_id:
+                    raise FileNotFoundError(artifact_id)
                 return {}, raw_by_id[artifact_id]
 
             with patch(
@@ -285,7 +297,7 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
                 raw_by_id[_KIND_IDS[CAMPAIGN_EVIDENCE_KIND]] + b"\n"
             )
 
-    def test_terminal_profile_cross_binds_all_authenticated_artifacts_and_release(self):
+    def test_terminal_profile_cross_binds_artifacts_release_and_retained_payloads(self):
         raw_by_id, evidence_refs, _binding = material()
         result = self._verify(raw_by_id, evidence_refs)
         self.assertEqual(result.source_sha, SOURCE)
@@ -293,6 +305,14 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
         self.assertEqual(result.spec_digest, SPEC)
         self.assertEqual(result.release_artifact_id, RELEASE_ID)
         self.assertEqual(result.release_artifact_sha256, RELEASE_SHA)
+        self.assertEqual(
+            result.payload_artifact_id_by_kind[RESOURCE_EVIDENCE_KIND],
+            _PAYLOAD_IDS[RESOURCE_EVIDENCE_KIND],
+        )
+        self.assertEqual(
+            result.payload_sha256_by_kind[RESOURCE_EVIDENCE_KIND],
+            _PAYLOAD_DIGEST[RESOURCE_EVIDENCE_KIND],
+        )
         self.assertIn(RESOURCE_EVIDENCE_KIND, result.collector_by_kind)
 
     def test_signed_binding_cannot_hide_resource_artifact_from_another_host(self):
@@ -391,6 +411,38 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeTargetHostQualificationError,
             "provenance identity conflicts.*RESOURCES",
+        ):
+            self._verify(raw_by_id, evidence_refs)
+
+    def test_missing_retained_raw_payload_is_rejected(self):
+        raw_by_id, evidence_refs, _binding = material()
+        del raw_by_id[_PAYLOAD_IDS[RESOURCE_EVIDENCE_KIND]]
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "retained raw payload is unavailable.*RESOURCES",
+        ):
+            self._verify(raw_by_id, evidence_refs)
+
+    def test_tampered_retained_raw_payload_is_rejected(self):
+        raw_by_id, evidence_refs, _binding = material()
+        raw_by_id[_PAYLOAD_IDS[RESOURCE_EVIDENCE_KIND]] = b"tampered-resource-payload"
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "retained raw payload digest mismatch.*RESOURCES",
+        ):
+            self._verify(raw_by_id, evidence_refs)
+
+    def test_retained_raw_payload_cannot_alias_signed_envelope(self):
+        raw_by_id, evidence_refs, _binding = material(
+            provenance_overrides={
+                RESOURCE_EVIDENCE_KIND: {
+                    "payload_artifact_id": _KIND_IDS[BINDING_EVIDENCE_KIND],
+                }
+            }
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "raw payload artifact aliases signed envelope.*RESOURCES",
         ):
             self._verify(raw_by_id, evidence_refs)
 

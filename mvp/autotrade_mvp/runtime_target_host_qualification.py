@@ -28,6 +28,10 @@ from .qualification_attestation import (
     SignedQualificationAttestation,
     verify_canonical_qualification_attestation,
 )
+from .runtime_target_host_campaign import (
+    ParsedRuntimeTargetHostCampaign,
+    RuntimeTargetHostCampaignError,
+)
 from .runtime_target_host_inventory import (
     RuntimeTargetHostInventory,
     RuntimeTargetHostInventoryError,
@@ -550,6 +554,42 @@ def _provenance_identity(value: RuntimeTargetHostProvenance) -> tuple[str, ...]:
     )
 
 
+def _verify_campaign_payload(
+    raw_payload: bytes,
+    provenance: RuntimeTargetHostProvenance,
+    *,
+    expected_source_sha: str,
+    expected_scenario_id: str,
+    expected_spec_digest: str,
+    expected_configuration_hash: str,
+    expected_host_fingerprint: str,
+) -> None:
+    try:
+        campaign = ParsedRuntimeTargetHostCampaign.parse(raw_payload)
+    except RuntimeTargetHostCampaignError as error:
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host campaign payload is not canonical"
+        ) from error
+    observation = campaign.evidence.observation
+    if (
+        observation.release_sha != expected_source_sha
+        or observation.scenario_id != expected_scenario_id
+        or observation.spec_digest != expected_spec_digest
+        or observation.configuration_hash != expected_configuration_hash
+        or observation.host_fingerprint != expected_host_fingerprint
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "retained target-host campaign observation identity conflicts"
+        )
+    if (
+        provenance.collector_id != campaign.collector_id
+        or provenance.collector_version != campaign.collector_version
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "target-host campaign provenance collector conflicts with raw payload"
+        )
+
+
 def _verify_host_inventory_payload(
     raw_payload: bytes,
     provenance: RuntimeTargetHostProvenance,
@@ -745,7 +785,17 @@ def verify_runtime_target_host_qualification(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
         )
-        if kind == HOST_INVENTORY_EVIDENCE_KIND:
+        if kind == CAMPAIGN_EVIDENCE_KIND:
+            _verify_campaign_payload(
+                raw_payload,
+                provenance,
+                expected_source_sha=source_sha,
+                expected_scenario_id=scenario_id,
+                expected_spec_digest=spec_digest,
+                expected_configuration_hash=configuration_hash,
+                expected_host_fingerprint=host_fingerprint,
+            )
+        elif kind == HOST_INVENTORY_EVIDENCE_KIND:
             _verify_host_inventory_payload(
                 raw_payload,
                 provenance,

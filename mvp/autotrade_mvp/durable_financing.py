@@ -972,6 +972,10 @@ class DurableFinancingBook:
         )
         if self.provider_id != "BYBIT":
             raise FinancingError("Bybit financing observation requires BYBIT authority")
+        if self.environment in {"PAPER", "LIVE"}:
+            raise FinancingError(
+                "PAPER/LIVE Bybit financing requires journal-derived provider-origin authority"
+            )
         query = dict(observation.query_binding.query)
         allowed_query_keys = {
             "accountType",

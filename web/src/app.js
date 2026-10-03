@@ -1006,6 +1006,13 @@
     renderJobs(parsed.jobs);
     state.renderedAccountId = parsed.accountId;
     state.renderedEnvironment = parsed.environment;
+    if (scopeChanged) {
+      announce(
+        "Host scope changed to account " + parsed.accountId +
+          " in " + parsed.environment +
+          ". Old-scope operation, event, notification, and command-validation evidence was cleared.",
+        parsed.environment === "LIVE");
+    }
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);
@@ -1070,7 +1077,10 @@
       // canonical snapshot before the next event request whenever local state
       // is marked unready.
       if (!state.snapshotReady) {
-        await refreshSnapshot();
+        const recovered = await refreshSnapshot();
+        if (!recovered) {
+          return;
+        }
       }
       const pollEpoch = state.scopeEpoch;
       const renderedAccountId = state.renderedAccountId;
@@ -1365,8 +1375,10 @@
     const button = byId("refresh-state");
     if (button) button.disabled = true;
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed from the canonical snapshot.");
+      const refreshed = await refreshSnapshot();
+      if (refreshed) {
+        announce("Host state refreshed from the canonical snapshot.");
+      }
     } catch {
       state.scopeEpoch += 1;
       state.snapshotReady = false;
@@ -1425,8 +1437,10 @@
     state.environment = null;
     setCommandAvailability(false);
     try {
-      await refreshSnapshot();
-      announce("Host state refreshed after page restoration.");
+      const restored = await refreshSnapshot();
+      if (restored) {
+        announce("Host state refreshed after page restoration.");
+      }
     } catch {
       state.scopeEpoch += 1;
       state.snapshotReady = false;

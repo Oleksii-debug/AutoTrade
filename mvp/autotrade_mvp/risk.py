@@ -71,6 +71,53 @@ def _risk_negate(value: Decimal) -> Decimal:
         raise _risk_arithmetic_error("negation", error) from error
 
 
+def _risk_fraction(value: Fraction, *, operation: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise _risk_arithmetic_error(operation, error) from error
+
+
+def _risk_ratio(
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    operation: str,
+) -> Fraction:
+    try:
+        denominator_fraction = as_fraction(denominator)
+        if denominator_fraction == 0:
+            raise ValueError(f"risk {operation} denominator must be non-zero")
+        return bounded_fraction(as_fraction(numerator) / denominator_fraction)
+    except ValueError:
+        raise
+    except (ExactDecimalError, TypeError, ZeroDivisionError) as error:
+        raise _risk_arithmetic_error(operation, error) from error
+
+
+def _risk_fraction_report(value: Fraction, *, operation: str) -> Decimal:
+    try:
+        return round_fraction_to_quantum(
+            bounded_fraction(value),
+            _RISK_RATIO_REPORT_QUANTUM,
+            mode="HALF_EVEN",
+        )
+    except (ExactDecimalError, TypeError) as error:
+        raise _risk_arithmetic_error(f"{operation} reporting", error) from error
+
+
+def _risk_fraction_leq(value: Fraction, limit: Decimal) -> bool:
+    try:
+        return bounded_fraction(value) <= as_fraction(limit)
+    except (ExactDecimalError, TypeError) as error:
+        raise _risk_arithmetic_error("ratio comparison", error) from error
+
+
+def _risk_fraction_ceiling(value: Fraction, *, operation: str) -> int:
+    exact = _risk_fraction(value, operation=operation)
+    return -((-exact.numerator) // exact.denominator)
+
+
 RISK_ACTIONS = frozenset({"TRADE", "REDUCE", "HEDGE", "FLATTEN", "EXERCISE"})
 RISK_INSTRUMENT_TYPES = frozenset(
     {"GENERIC", "SPOT", "EQUITY", "FUTURE", "PERPETUAL", "OPTION"}
@@ -1225,6 +1272,7 @@ def _risk_input_fingerprint(
     policy: RiskPolicy,
 ) -> str:
     payload = {
+        "arithmetic_policy": RISK_ARITHMETIC_POLICY_ID,
         "intent": _fingerprint_value(vars(intent)),
         "context": _fingerprint_value(vars(context)),
         "policy": _fingerprint_value(vars(policy)),
@@ -1656,8 +1704,24 @@ def evaluate_risk(
     base_net = _risk_abs(_risk_sum(base_notionals.values()))
     gross = _risk_sum(_risk_abs(value) for value in notionals.values())
     net = _risk_abs(_risk_sum(notionals.values()))
-    gross_leverage = gross / context.equity
-    net_leverage = net / context.equity
+    gross_leverage_fraction = _risk_ratio(
+        gross,
+        context.equity,
+        operation="gross leverage",
+    )
+    net_leverage_fraction = _risk_ratio(
+        net,
+        context.equity,
+        operation="net leverage",
+    )
+    gross_leverage = _risk_fraction_report(
+        gross_leverage_fraction,
+        operation="gross leverage",
+    )
+    net_leverage = _risk_fraction_report(
+        net_leverage_fraction,
+        operation="net leverage",
+    )
     mark_notional = _risk_abs(
         _risk_product(resulting, exposure_per_unit(intent.symbol))
     )
@@ -1673,6 +1737,7 @@ def evaluate_risk(
     single_notional = max(mark_notional, intent_notional)
 
     asset_concentration = Decimal("0")
+    asset_concentration_fraction = Fraction(0, 1)
     asset_concentration_complete = True
     missing_asset_buckets: set[str] = set()
     if policy.max_asset_concentration_fraction is not None and gross > 0:
@@ -1689,9 +1754,18 @@ def evaluate_risk(
             )
         asset_concentration_complete = not missing_asset_buckets
         if asset_concentration_complete and asset_groups:
-            asset_concentration = max(asset_groups.values()) / gross
+            asset_concentration_fraction = _risk_ratio(
+                max(asset_groups.values()),
+                gross,
+                operation="asset concentration",
+            )
+            asset_concentration = _risk_fraction_report(
+                asset_concentration_fraction,
+                operation="asset concentration",
+            )
 
     venue_concentration = Decimal("0")
+    venue_concentration_fraction = Fraction(0, 1)
     venue_concentration_complete = True
     missing_venues: set[str] = set()
     if policy.max_venue_concentration_fraction is not None and gross > 0:
@@ -1708,9 +1782,18 @@ def evaluate_risk(
             )
         venue_concentration_complete = not missing_venues
         if venue_concentration_complete and venue_groups:
-            venue_concentration = max(venue_groups.values()) / gross
+            venue_concentration_fraction = _risk_ratio(
+                max(venue_groups.values()),
+                gross,
+                operation="venue concentration",
+            )
+            venue_concentration = _risk_fraction_report(
+                venue_concentration_fraction,
+                operation="venue concentration",
+            )
 
     participation = Decimal("0")
+    participation_fraction = Fraction(0, 1)
     participation_evidenced = True
     if policy.max_order_participation_fraction is not None:
         liquidity_map = context.liquidity_capacity or {}
@@ -1718,7 +1801,15 @@ def evaluate_risk(
         if capacity is None or capacity <= 0:
             participation_evidenced = False
         else:
-            participation = intent.quantity / capacity
+            participation_fraction = _risk_ratio(
+                intent.quantity,
+                capacity,
+                operation="liquidity participation",
+            )
+            participation = _risk_fraction_report(
+                participation_fraction,
+                operation="liquidity participation",
+            )
 
     spread_observation = (context.spread_fraction or {}).get(intent.symbol)
     slippage_observation = (context.slippage_fraction or {}).get(intent.symbol)
@@ -1837,7 +1928,9 @@ def evaluate_risk(
     missing_tail_symbols: set[str] = set()
     missing_base_tail_symbols: set[str] = set()
     expected_shortfall: Decimal | None = None
+    expected_shortfall_fraction: Fraction | None = None
     base_expected_shortfall: Decimal | None = None
+    base_expected_shortfall_fraction: Fraction | None = None
     if policy.max_expected_shortfall is not None:
         if stress_symbols:
             tail_distribution_matches = (
@@ -1865,17 +1958,23 @@ def evaluate_risk(
         )
         tail_fraction = policy.expected_shortfall_tail_fraction
         assert tail_fraction is not None
-        tail_count = (
-            max(
+        if context.tail_scenarios:
+            try:
+                selected_tail_mass = bounded_fraction(
+                    Fraction(len(context.tail_scenarios), 1)
+                    * as_fraction(tail_fraction)
+                )
+            except (ExactDecimalError, TypeError) as error:
+                raise _risk_arithmetic_error("tail-count selection", error) from error
+            tail_count = max(
                 1,
-                int(
-                    (Decimal(len(context.tail_scenarios)) * tail_fraction)
-                    .to_integral_value(rounding=ROUND_CEILING)
+                _risk_fraction_ceiling(
+                    selected_tail_mass,
+                    operation="tail-count selection",
                 ),
             )
-            if context.tail_scenarios
-            else 0
-        )
+        else:
+            tail_count = 0
         if tail_coverage_complete and stress_symbols:
             projected_losses = []
             for scenario in context.tail_scenarios:
@@ -1887,13 +1986,21 @@ def evaluate_risk(
                     max(_risk_negate(projected_pnl), Decimal("0"))
                 )
             projected_tail = sorted(projected_losses, reverse=True)[:tail_count]
-            expected_shortfall = sum(projected_tail, Decimal("0")) / Decimal(
-                len(projected_tail)
+            expected_shortfall_fraction = _risk_ratio(
+                _risk_sum(projected_tail),
+                Decimal(len(projected_tail)),
+                operation="expected shortfall",
+            )
+            expected_shortfall = _risk_fraction_report(
+                expected_shortfall_fraction,
+                operation="expected shortfall",
             )
         elif tail_coverage_complete:
+            expected_shortfall_fraction = Fraction(0, 1)
             expected_shortfall = Decimal("0")
 
         if not base_stress_symbols:
+            base_expected_shortfall_fraction = Fraction(0, 1)
             base_expected_shortfall = Decimal("0")
         elif base_tail_comparison_complete and context.tail_scenarios:
             base_losses: list[Decimal] = []
@@ -1906,8 +2013,14 @@ def evaluate_risk(
                     max(_risk_negate(base_pnl), Decimal("0"))
                 )
             base_tail = sorted(base_losses, reverse=True)[:tail_count]
-            base_expected_shortfall = sum(base_tail, Decimal("0")) / Decimal(
-                len(base_tail)
+            base_expected_shortfall_fraction = _risk_ratio(
+                _risk_sum(base_tail),
+                Decimal(len(base_tail)),
+                operation="base expected shortfall",
+            )
+            base_expected_shortfall = _risk_fraction_report(
+                base_expected_shortfall_fraction,
+                operation="base expected shortfall",
             )
 
     reduces_absolute_exposure = (
@@ -1933,9 +2046,9 @@ def evaluate_risk(
         or (
             tail_coverage_complete
             and base_tail_comparison_complete
-            and expected_shortfall is not None
-            and base_expected_shortfall is not None
-            and expected_shortfall <= base_expected_shortfall
+            and expected_shortfall_fraction is not None
+            and base_expected_shortfall_fraction is not None
+            and expected_shortfall_fraction <= base_expected_shortfall_fraction
         )
     )
     protective_reduction = (
@@ -2110,14 +2223,22 @@ def evaluate_risk(
     )
     add(
         "gross_leverage",
-        gross_leverage <= policy.max_gross_leverage or protective_reduction,
+        _risk_fraction_leq(
+            gross_leverage_fraction,
+            policy.max_gross_leverage,
+        )
+        or protective_reduction,
         gross_leverage,
         policy.max_gross_leverage,
         "gross leverage must stay within policy",
     )
     add(
         "net_leverage",
-        net_leverage <= policy.max_net_leverage or protective_reduction,
+        _risk_fraction_leq(
+            net_leverage_fraction,
+            policy.max_net_leverage,
+        )
+        or protective_reduction,
         net_leverage,
         policy.max_net_leverage,
         "net leverage must stay within policy",
@@ -2126,7 +2247,10 @@ def evaluate_risk(
         add(
             "asset_concentration",
             asset_concentration_complete
-            and asset_concentration <= policy.max_asset_concentration_fraction,
+            and _risk_fraction_leq(
+                asset_concentration_fraction,
+                policy.max_asset_concentration_fraction,
+            ),
             (
                 asset_concentration
                 if asset_concentration_complete
@@ -2139,7 +2263,10 @@ def evaluate_risk(
         add(
             "venue_concentration",
             venue_concentration_complete
-            and venue_concentration <= policy.max_venue_concentration_fraction,
+            and _risk_fraction_leq(
+                venue_concentration_fraction,
+                policy.max_venue_concentration_fraction,
+            ),
             (
                 venue_concentration
                 if venue_concentration_complete
@@ -2152,7 +2279,10 @@ def evaluate_risk(
         add(
             "liquidity_participation",
             participation_evidenced
-            and participation <= policy.max_order_participation_fraction,
+            and _risk_fraction_leq(
+                participation_fraction,
+                policy.max_order_participation_fraction,
+            ),
             participation if participation_evidenced else "UNKNOWN",
             policy.max_order_participation_fraction,
             "order quantity must stay within evidenced liquidity participation policy",
@@ -2270,9 +2400,12 @@ def evaluate_risk(
         add(
             "expected_shortfall",
             tail_coverage_complete
-            and expected_shortfall is not None
+            and expected_shortfall_fraction is not None
             and (
-                expected_shortfall <= policy.max_expected_shortfall
+                _risk_fraction_leq(
+                    expected_shortfall_fraction,
+                    policy.max_expected_shortfall,
+                )
                 or protective_reduction
             ),
             expected_shortfall if expected_shortfall is not None else "UNKNOWN",

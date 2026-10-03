@@ -18,6 +18,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
     DECISION_TIME = "2026-09-25T18:30:00Z"
     OBSERVED_AT = "2026-09-25T18:00:00Z"
     VALID_UNTIL = "2026-09-25T19:00:00Z"
+    FORECAST_HORIZON_END = "2026-09-26T18:30:00Z"
 
     def policy(self, *, cash_available="1000"):
         return AllocationPolicy.create(
@@ -74,6 +75,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "protocol_digest": "1" * 64,
                 "input_snapshot_digest": "2" * 64,
                 "information_cutoff": "2026-09-25T18:20:00Z",
+                "forecast_horizon_end": self.FORECAST_HORIZON_END,
                 "desired_notional": "500",
                 "desired_notional_currency": "USD",
                 "expected_return_rate": objective_rate,
@@ -135,6 +137,7 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 "fee_floor_base": "0",
                 "max_executable_notional_base": "500",
                 "payoff_identity": "linear:cash-equity:v1",
+                "holding_cost_horizon_end": self.FORECAST_HORIZON_END,
                 "cost_rate_components": {
                     "execution": "0.001", "financing": "0", "funding": "0", "borrow": "0", "fx": "0"
                 },
@@ -201,6 +204,116 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             policy_version="risk-policy:12",
         )
 
+
+    def test_objective_forecast_horizon_must_extend_beyond_decision_time(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind=objective.kind,
+            payload={
+                **objective.payload,
+                "forecast_horizon_end": self.DECISION_TIME,
+            },
+        )
+        resolved = {
+            **resolved,
+            objective.evidence_id: objective,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "forecast_horizon_end must be after decision_time",
+        ):
+            self.allocate(
+                bundle=(objective, market, capital, stress, resolved),
+            )
+
+    def test_holding_cost_horizon_must_match_objective_forecast_horizon(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind=valuation.kind,
+            payload={
+                **valuation.payload,
+                "holding_cost_horizon_end": "2026-09-27T18:30:00Z",
+            },
+        )
+        resolved = {
+            **resolved,
+            valuation.evidence_id: valuation,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "holding-cost horizon does not match objective forecast horizon",
+        ):
+            self.allocate(
+                bundle=(objective, market, capital, stress, resolved),
+            )
+
+    def test_matched_horizon_financing_cost_is_charged_to_net_utility(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        market = self.evidence(
+            evidence_id=market.evidence_id,
+            kind=market.kind,
+            payload={
+                **market.payload,
+                "cost_rate": "0.011",
+            },
+        )
+        valuation = resolved["valuation:aaa:v1"]
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind=valuation.kind,
+            payload={
+                **valuation.payload,
+                "cost_rate_components": {
+                    "execution": "0.001",
+                    "financing": "0.01",
+                    "funding": "0",
+                    "borrow": "0",
+                    "fx": "0",
+                },
+                "cost_evidence_refs": {
+                    "execution": "execution-cost:aaa:v1",
+                    "financing": "financing:aaa:24h:v1",
+                    "funding": "funding:none:aaa:v1",
+                    "borrow": "borrow:none:aaa:v1",
+                    "fx": "fx:identity:usd:v1",
+                },
+            },
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        candidate = self.candidate()
+        candidate = ObjectiveCandidate.create(
+            symbol=candidate.candidate.symbol,
+            desired_notional=candidate.candidate.desired_notional,
+            price=candidate.candidate.price,
+            lot_size=candidate.candidate.lot_size,
+            expected_return_rate=candidate.expected_return_rate,
+            risk_penalty_rate=candidate.risk_penalty_rate,
+            cost_rate="0.011",
+            capital_requirement_rate=candidate.candidate.capital_requirement_rate,
+            min_notional=candidate.candidate.min_notional,
+            fee_floor=candidate.candidate.fee_floor,
+            max_executable_notional=candidate.candidate.max_executable_notional,
+        )
+
+        result = self.allocate(
+            candidate=candidate,
+            bundle=(objective, market, capital, stress, resolved),
+        )
+
+        target = result.objective.allocation.targets[0]
+        self.assertEqual(target.estimated_cost, Decimal("5.500"))
+        self.assertEqual(result.objective.expected_net_utility, Decimal("39.500"))
 
     def cross_currency_bundle(self, *, omit_desired_currency=False):
         objective, market, capital, stress, resolved = self.bundle()
@@ -866,6 +979,19 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                         baseline = values
                     self.assertEqual(values, baseline)
 
+    def test_horizon_binding_algorithm_is_bound_into_policy_identity(self):
+        bundle = self.bundle()
+        original = self.allocate(bundle=bundle)
+        with patch.object(
+            allocation_module,
+            "_OBJECTIVE_HORIZON_BINDING_ALGORITHM",
+            "test-future-horizon-binding-v2",
+            create=True,
+        ):
+            changed = self.allocate(bundle=bundle)
+        self.assertNotEqual(original.policy_config_digest, changed.policy_config_digest)
+        self.assertNotEqual(original.decision_digest, changed.decision_digest)
+
     def test_fx_projection_algorithm_is_bound_into_policy_identity(self):
         candidate, bundle = self.inverse_fx_bundle()
         original = self.allocate(candidate=candidate, bundle=bundle)
@@ -1000,6 +1126,59 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         )
         repeated = self.allocate(bundle=bundle)
         self.assertEqual(result.decision_digest, repeated.decision_digest)
+
+    def test_revalidation_rejects_forecast_after_its_economic_horizon(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        horizon_end = "2026-09-25T18:45:00Z"
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind=objective.kind,
+            payload={
+                **objective.payload,
+                "forecast_horizon_end": horizon_end,
+            },
+        )
+        valuation = resolved["valuation:aaa:v1"]
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind=valuation.kind,
+            payload={
+                **valuation.payload,
+                "holding_cost_horizon_end": horizon_end,
+            },
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        bundle = (objective, market, capital, stress, resolved)
+        result = self.allocate(bundle=bundle)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "forecast horizon expired before admission",
+        ):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                as_of="2026-09-25T18:50:00Z",
+                current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
 
     def test_same_evidence_identity_cannot_hide_changed_expected_return(self):
         bundle = self.bundle(objective_rate="0.10")
@@ -1169,6 +1348,105 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_policy_version="risk-policy:12",
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_reservation_state_digest="4" * 64,
+            )
+
+    def test_portfolio_candidates_must_share_one_forecast_horizon(self):
+        objective_a, market_a, capital, stress, resolved = self.bundle()
+        valuation_a = resolved["valuation:aaa:v1"]
+        horizon_b = "2026-09-27T18:30:00Z"
+
+        objective_b = self.evidence(
+            evidence_id="objective:bbb:v1",
+            kind="OBJECTIVE",
+            payload={
+                **objective_a.payload,
+                "symbol": "BBB",
+                "candidate_id": "candidate:bbb:v1",
+                "proposal_id": "proposal:bbb:v1",
+                "forecast_horizon_end": horizon_b,
+            },
+        )
+        market_b = self.evidence(
+            evidence_id="market:bbb:v1",
+            kind="MARKET_CONSTRAINT",
+            payload={
+                **market_a.payload,
+                "symbol": "BBB",
+                "instrument_version": "instrument:bbb:v1",
+                "capability_snapshot_id": "capability:2",
+            },
+        )
+        valuation_b = self.evidence(
+            evidence_id="valuation:bbb:v1",
+            kind="VALUATION",
+            payload={
+                **valuation_a.payload,
+                "symbol": "BBB",
+                "instrument_version": "instrument:bbb:v1",
+                "capability_snapshot_id": "capability:2",
+                "holding_cost_horizon_end": horizon_b,
+            },
+        )
+        capital = self.evidence(
+            evidence_id=capital.evidence_id,
+            kind="CAPITAL_STATE",
+            payload={
+                **capital.payload,
+                "position_quantities": {"AAA": "0", "BBB": "0"},
+            },
+        )
+        stress = self.evidence(
+            evidence_id=stress.evidence_id,
+            kind="STRESS_SCENARIO",
+            payload={
+                **stress.payload,
+                "shocks": {"AAA": "-0.20", "BBB": "-0.20"},
+                "instrument_versions": {
+                    "AAA": "instrument:aaa:v3",
+                    "BBB": "instrument:bbb:v1",
+                },
+            },
+        )
+        resolved = {
+            objective_a.evidence_id: objective_a,
+            market_a.evidence_id: market_a,
+            valuation_a.evidence_id: valuation_a,
+            objective_b.evidence_id: objective_b,
+            market_b.evidence_id: market_b,
+            valuation_b.evidence_id: valuation_b,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        candidate_b = ObjectiveCandidate.create(
+            symbol="BBB",
+            desired_notional="500",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="0",
+            max_executable_notional="500",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "objective candidates must share one forecast horizon",
+        ):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(), candidate_b),
+                self.policy(),
+                objective_evidence={"AAA": objective_a, "BBB": objective_b},
+                market_evidence={"AAA": market_a, "BBB": market_b},
+                valuation_evidence={"AAA": valuation_a, "BBB": valuation_b},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
             )
 
     def test_evidence_bound_stress_coverage_ignores_only_zero_unchanged_symbols(self):

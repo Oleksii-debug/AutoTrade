@@ -46,6 +46,7 @@ _RECEIPT_FIELDS = {
     "owner_identity_sha256",
     "vault_authority_sha256",
     "record_state_sha256",
+    "previous_receipt_id",
     "transition_sequence",
     "completed_time_ns",
 }
@@ -97,6 +98,7 @@ class CredentialTransitionReceipt:
     owner_identity_sha256: str
     vault_authority_sha256: str
     record_state_sha256: str
+    previous_receipt_id: str | None
     transition_sequence: int
     completed_time_ns: int
 
@@ -149,6 +151,29 @@ class CredentialTransitionReceipt:
             raise CredentialTransitionReceiptError(
                 "credential transition sequence is invalid"
             )
+        if self.transition_sequence == 1:
+            if self.previous_receipt_id is not None:
+                raise CredentialTransitionReceiptError(
+                    "first credential transition cannot name a predecessor receipt"
+                )
+        else:
+            if (
+                type(self.previous_receipt_id) is not str
+                or not self.previous_receipt_id.startswith(
+                    "credential-transition/sha256:"
+                )
+                or len(self.previous_receipt_id)
+                != len("credential-transition/sha256:") + 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in self.previous_receipt_id[
+                        len("credential-transition/sha256:"):
+                    ]
+                )
+            ):
+                raise CredentialTransitionReceiptError(
+                    "credential transition predecessor receipt id is invalid"
+                )
         if type(self.completed_time_ns) is not int or self.completed_time_ns < 1:
             raise CredentialTransitionReceiptError(
                 "credential transition completion time is invalid"
@@ -159,7 +184,12 @@ class CredentialTransitionReceipt:
             "record_state_sha256",
         ):
             value = getattr(self, name)
-            if type(value) is not str or not value.startswith("sha256:") or len(value) != 71:
+            if (
+                type(value) is not str
+                or not value.startswith("sha256:")
+                or len(value) != 71
+                or any(character not in "0123456789abcdef" for character in value[7:])
+            ):
                 raise CredentialTransitionReceiptError(
                     f"credential transition receipt {name} is invalid"
                 )
@@ -167,6 +197,10 @@ class CredentialTransitionReceipt:
             type(self.receipt_id) is not str
             or not self.receipt_id.startswith("credential-transition/sha256:")
             or len(self.receipt_id) != len("credential-transition/sha256:") + 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.receipt_id[len("credential-transition/sha256:"):]
+            )
         ):
             raise CredentialTransitionReceiptError(
                 "credential transition receipt id is invalid"
@@ -317,12 +351,45 @@ def _seal_entropy(receipt: CredentialTransitionReceipt) -> bytes:
     ).digest()
 
 
-def _next_sequence(section: dict[str, object], *, handle_id: str) -> int:
+def _next_sequence(
+    vault: ProtectedCredentialVault,
+    section: dict[str, object],
+    *,
+    handle_id: str,
+) -> tuple[int, str | None]:
     previous = section["latest_by_handle"].get(handle_id)
     if previous is None:
-        return 1
+        return 1, None
+
     parsed = _parse_receipt(previous["receipt"])
-    return parsed.transition_sequence + 1
+    expected_id = _receipt_id_from_subject(_receipt_subject(parsed))
+    if parsed.receipt_id != expected_id:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt content identity is invalid"
+        )
+    expected_authority = _vault_authority_digest(
+        vault,
+        instance_id=section["instance_id"],
+    )
+    if parsed.vault_authority_sha256 != expected_authority:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt vault authority is invalid"
+        )
+    try:
+        sealed = b64decode(previous["seal_b64"], validate=True)
+        unsealed = vault._protector.unprotect(
+            sealed,
+            entropy=_seal_entropy(parsed),
+        )
+    except Exception as error:
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt issuer seal is invalid"
+        ) from error
+    if unsealed != parsed.receipt_id.encode("utf-8"):
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt issuer seal payload mismatch"
+        )
+    return parsed.transition_sequence + 1, parsed.receipt_id
 
 
 def _issue_locked(
@@ -348,7 +415,11 @@ def _issue_locked(
         vault,
         instance_id=section["instance_id"],
     )
-    sequence = _next_sequence(section, handle_id=current_handle.handle_id)
+    sequence, previous_receipt_id = _next_sequence(
+        vault,
+        section,
+        handle_id=current_handle.handle_id,
+    )
     subject = {
         "schema_version": _SCHEMA_VERSION,
         "operation": operation,
@@ -365,6 +436,7 @@ def _issue_locked(
         "owner_identity_sha256": _text_digest(owner_identity),
         "vault_authority_sha256": authority_digest,
         "record_state_sha256": _record_state_digest(record),
+        "previous_receipt_id": previous_receipt_id,
         "transition_sequence": sequence,
         "completed_time_ns": time_ns(),
     }

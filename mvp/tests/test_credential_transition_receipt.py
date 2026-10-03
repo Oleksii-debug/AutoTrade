@@ -76,6 +76,7 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
 
         self.assertEqual(verified, receipt)
         self.assertEqual(receipt.operation, "ROTATED")
+        self.assertIsNone(receipt.previous_receipt_id)
         self.assertEqual(receipt.prior_generation, old.generation)
         self.assertEqual(receipt.successor_generation, current.generation)
         self.assertTrue(receipt.active_after)
@@ -142,6 +143,31 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
         self.assertNotIn("windows-user-1", public)
         self.assertNotIn("ciphertext", public.lower())
         self.assertEqual(receipt.handle_id, current.handle_id)
+
+    def test_receipt_digest_fields_require_canonical_lowercase_hex(self) -> None:
+        handle = self._register()
+        _, receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            handle,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+
+        for field_name in (
+            "owner_identity_sha256",
+            "vault_authority_sha256",
+            "record_state_sha256",
+        ):
+            with self.subTest(field_name=field_name), self.assertRaises(
+                CredentialTransitionReceiptError
+            ):
+                replace(receipt, **{field_name: "sha256:" + "g" * 64})
+
+        with self.assertRaises(CredentialTransitionReceiptError):
+            replace(
+                receipt,
+                receipt_id="credential-transition/sha256:" + "G" * 64,
+            )
 
     def test_self_authored_rehashed_receipt_is_not_vault_issued(self) -> None:
         handle = self._register()
@@ -234,7 +260,109 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
             second_receipt,
         )
         self.assertEqual(second_receipt.transition_sequence, 2)
+        self.assertEqual(second_receipt.previous_receipt_id, first_receipt.receipt_id)
         self.assertEqual(second_receipt.successor_generation, third.generation)
+
+    def test_transition_lineage_is_content_linked_to_exact_prior_receipt(self) -> None:
+        first = self._register()
+        second, first_receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        _third, second_receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            second,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v3",
+        )
+
+        self.assertIsNone(first_receipt.previous_receipt_id)
+        self.assertEqual(
+            second_receipt.previous_receipt_id,
+            first_receipt.receipt_id,
+        )
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "predecessor receipt id",
+        ):
+            replace(
+                second_receipt,
+                previous_receipt_id="credential-transition/sha256:" + "g" * 64,
+            )
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "first credential transition",
+        ):
+            replace(
+                first_receipt,
+                previous_receipt_id=second_receipt.receipt_id,
+            )
+
+    def test_tampered_prior_receipt_cannot_be_laundered_by_next_rotation(self) -> None:
+        first = self._register()
+        second, _receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        stored = state["credential_transition_authority"]["latest_by_handle"][first.handle_id]
+        stored["receipt"]["transition_sequence"] += 7
+        self.path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "prior credential transition receipt content identity",
+        ):
+            rotate_trade_credential_with_receipt(
+                self.vault,
+                second,
+                execution_identity="windows-user-1",
+                new_secret_value="secret-v3",
+            )
+
+        self.assertEqual(
+            self.vault.resolve(
+                second,
+                execution_identity="windows-user-1",
+                account_id=second.account_id,
+                provider=second.provider,
+                environment=second.environment,
+                purpose=second.purpose,
+            ),
+            "secret-v2",
+        )
+
+    def test_tampered_vault_instance_cannot_be_laundered_by_next_transition(self) -> None:
+        first = self._register()
+        second, _receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        state["credential_transition_authority"]["instance_id"] = "f" * 32
+        self.path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "prior credential transition receipt vault authority",
+        ):
+            revoke_trade_credential_with_receipt(
+                self.vault,
+                second,
+                execution_identity="windows-user-1",
+            )
 
     def test_later_legacy_mutation_invalidates_prior_receipt(self) -> None:
         first = self._register()

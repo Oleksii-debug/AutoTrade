@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -61,22 +62,80 @@ def _require_source_sha(value: str) -> str:
     return value
 
 
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
+
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable() -> str:
+    """Resolve Git independently of caller PATH and source-checkout content."""
+
+    source_root = _SOURCE_ROOT.resolve(strict=True)
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise RuntimeError("trusted Git executable must not originate from source checkout")
+    raise RuntimeError("trusted Git executable is unavailable at an OS-managed location")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Drop caller-selected Git repository/config/PATH authority."""
+
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    executable = _trusted_git_executable()
     try:
         return subprocess.run(
-            ["git", *args],
+            [executable, *args],
             cwd=_SOURCE_ROOT,
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
         )
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("cannot inspect qualification Git checkout") from error
 
 
 def _observed_source_sha() -> str:
-    """Read source identity from the checkout that owns this qualifier."""
+    """Read source identity from the exact checkout that owns this qualifier."""
 
+    try:
+        top_level = Path(
+            _git("rev-parse", "--show-toplevel").stdout.strip()
+        ).resolve(strict=True)
+        source_root = _SOURCE_ROOT.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("cannot verify qualification Git source root") from error
+    if top_level != source_root:
+        raise RuntimeError("qualification source root is not the exact Git top-level")
     return _require_source_sha(_git("rev-parse", "HEAD").stdout.strip())
 
 

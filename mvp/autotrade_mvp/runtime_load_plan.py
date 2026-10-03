@@ -1,11 +1,11 @@
 """Durable pre-run workload declarations for WP-65 runtime qualification.
 
 A performance campaign cannot prove financial-event conservation when the set of
-"expected" event identities may be chosen after outcomes are visible.  This
-module freezes that set in the canonical JournalStore before the workload runs,
-then reloads the declaration by durable identity during evaluation.
+"expected" events may be chosen after outcomes are visible. This module freezes
+an ordered sequence of exact journal bindings in the canonical JournalStore
+before the workload runs, then reloads that declaration during evaluation.
 
-The declaration is causal evidence only.  It does not create a load generator,
+The declaration is causal evidence only. It does not create a load generator,
 trusted clock, release attestation, provider authority, or performance claim.
 """
 
@@ -23,15 +23,17 @@ from .persistence import (
     require_exact_journal_store_authority,
 )
 from .runtime_load_evidence import (
+    ExpectedJournalEvent,
     JournalConservationEvidence,
     evaluate_journal_backed_runtime_budget,
+    snapshot_expected_journal_events,
 )
 from .store_identity import JournalStoreIdentity
 
 
 _PLAN_EVENT_TYPE = "RuntimeQualificationPlanDeclared"
 _PLAN_AGGREGATE_TYPE = "runtime_qualification_plan"
-_PLAN_SCHEMA_VERSION = "1.0.0"
+_PLAN_SCHEMA_VERSION = "1.1.0"
 
 
 class RuntimeLoadPlanError(ValueError):
@@ -48,17 +50,6 @@ def _positive_int(value: object, *, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise RuntimeLoadPlanError(f"{name} must be a positive integer")
     return value
-
-
-def _event_ids(values: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise RuntimeLoadPlanError("expected_event_ids must be a sequence")
-    result = tuple(_text(value, name="expected_event_id") for value in values)
-    if not result:
-        raise RuntimeLoadPlanError("expected_event_ids cannot be empty")
-    if len(result) != len(set(result)):
-        raise RuntimeLoadPlanError("expected_event_ids must be unique")
-    return tuple(sorted(result))
 
 
 def _validated_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
@@ -103,7 +94,7 @@ def _plan_payload(
     *,
     plan_id: str,
     spec: RuntimeBudgetSpec,
-    expected_event_ids: tuple[str, ...],
+    expected_events: tuple[ExpectedJournalEvent, ...],
     max_journal_events: int,
     store_identity_digest: str,
 ) -> dict[str, object]:
@@ -115,7 +106,7 @@ def _plan_payload(
         "release_sha": spec.release_sha,
         "configuration_hash": spec.configuration_hash,
         "host_fingerprint": spec.host_fingerprint,
-        "expected_event_ids": list(expected_event_ids),
+        "expected_events": [value.payload for value in expected_events],
         "max_journal_events": max_journal_events,
         "store_identity_digest": store_identity_digest,
     }
@@ -129,11 +120,15 @@ class DeclaredRuntimeEventPlan:
     event_id: str
     scenario_id: str
     spec_digest: str
-    expected_event_ids: tuple[str, ...]
+    expected_events: tuple[ExpectedJournalEvent, ...]
     max_journal_events: int
     store_identity_digest: str
     declared_journal_sequence: int
     payload_hash: str
+
+    @property
+    def expected_event_ids(self) -> tuple[str, ...]:
+        return tuple(value.event_id for value in self.expected_events)
 
     @property
     def digest(self) -> str:
@@ -144,7 +139,7 @@ class DeclaredRuntimeEventPlan:
                 "event_id": self.event_id,
                 "scenario_id": self.scenario_id,
                 "spec_digest": self.spec_digest,
-                "expected_event_ids": list(self.expected_event_ids),
+                "expected_events": [value.payload for value in self.expected_events],
                 "max_journal_events": self.max_journal_events,
                 "store_identity_digest": self.store_identity_digest,
                 "declared_journal_sequence": self.declared_journal_sequence,
@@ -189,7 +184,7 @@ def _read_plan(
         "release_sha",
         "configuration_hash",
         "host_fingerprint",
-        "expected_event_ids",
+        "expected_events",
         "max_journal_events",
         "store_identity_digest",
     }
@@ -210,12 +205,21 @@ def _read_plan(
     if payload.get("host_fingerprint") != spec.host_fingerprint:
         raise RuntimeLoadPlanError("runtime qualification plan host conflicts")
 
-    expected_ids = payload.get("expected_event_ids")
-    if type(expected_ids) is not list:
-        raise RuntimeLoadPlanError("runtime qualification plan event set is invalid")
-    canonical_ids = _event_ids(expected_ids)
-    if list(canonical_ids) != expected_ids:
-        raise RuntimeLoadPlanError("runtime qualification plan event set is non-canonical")
+    raw_events = payload.get("expected_events")
+    if type(raw_events) is not list:
+        raise RuntimeLoadPlanError("runtime qualification plan event bindings are invalid")
+    try:
+        canonical_events = snapshot_expected_journal_events(
+            tuple(ExpectedJournalEvent.from_payload(value) for value in raw_events)
+        )
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise RuntimeLoadPlanError(
+            "runtime qualification plan event bindings are invalid"
+        ) from error
+    if [value.payload for value in canonical_events] != raw_events:
+        raise RuntimeLoadPlanError(
+            "runtime qualification plan event bindings are non-canonical"
+        )
     max_events = _positive_int(
         payload.get("max_journal_events"),
         name="max_journal_events",
@@ -236,7 +240,7 @@ def _read_plan(
         event_id=event_id,
         scenario_id=spec.scenario_id,
         spec_digest=spec.digest,
-        expected_event_ids=canonical_ids,
+        expected_events=canonical_events,
         max_journal_events=max_events,
         store_identity_digest=actual_store_digest,
         declared_journal_sequence=sequence,
@@ -249,18 +253,18 @@ def declare_runtime_event_plan(
     *,
     plan_id: str,
     spec: RuntimeBudgetSpec,
-    expected_event_ids: Sequence[str],
+    expected_events: Sequence[ExpectedJournalEvent],
     max_journal_events: int = 100_000,
 ) -> DeclaredRuntimeEventPlan:
-    """Durably freeze expected financial event identities before a campaign.
+    """Durably freeze exact ordered financial-event bindings before a campaign.
 
-    Exact re-declaration of an existing plan is idempotent.  Reusing the same
+    Exact re-declaration of an existing plan is idempotent. Reusing the same
     plan identity with different event/spec/store semantics fails closed.
     """
 
     spec = _validated_spec(spec)
     pid = _text(plan_id, name="plan_id")
-    ids = _event_ids(expected_event_ids)
+    events = snapshot_expected_journal_events(expected_events)
     limit = _positive_int(max_journal_events, name="max_journal_events")
     identity = require_exact_journal_store_authority(
         store,
@@ -270,7 +274,7 @@ def declare_runtime_event_plan(
     payload = _plan_payload(
         plan_id=pid,
         spec=spec,
-        expected_event_ids=ids,
+        expected_events=events,
         max_journal_events=limit,
         store_identity_digest=store_digest,
     )
@@ -280,7 +284,7 @@ def declare_runtime_event_plan(
     if existing is not None:
         loaded = _read_plan(store, spec=spec, plan_id=pid)
         if (
-            loaded.expected_event_ids != ids
+            loaded.expected_events != events
             or loaded.max_journal_events != limit
             or loaded.store_identity_digest != store_digest
         ):
@@ -303,11 +307,11 @@ def declare_runtime_event_plan(
     try:
         JournalStore.append_event(store, envelope)
     except ValueError:
-        # A concurrent identical declaration may have won.  Re-read and require
+        # A concurrent identical declaration may have won. Re-read and require
         # exact durable semantics; any genuinely conflicting winner still fails.
         loaded = _read_plan(store, spec=spec, plan_id=pid)
         if (
-            loaded.expected_event_ids != ids
+            loaded.expected_events != events
             or loaded.max_journal_events != limit
             or loaded.store_identity_digest != store_digest
         ):
@@ -347,8 +351,8 @@ def evaluate_declared_runtime_budget(
 ]:
     """Evaluate event conservation from a pre-run durable plan and journal tail.
 
-    This API intentionally accepts neither an expected-event count/set nor a
-    start cut.  Both are reloaded from the immutable declaration issued before
+    This API intentionally accepts neither expected event bindings/counts nor a
+    start cut. All are reloaded from the immutable declaration issued before
     campaign events, eliminating post-outcome caller selection of those facts.
     """
 
@@ -358,7 +362,7 @@ def evaluate_declared_runtime_budget(
         spec,
         store,
         start_journal_sequence=plan.declared_journal_sequence,
-        expected_event_ids=plan.expected_event_ids,
+        expected_events=plan.expected_events,
         financial_latency_us=financial_latency_us,
         financial_staleness_us=financial_staleness_us,
         research_interference_us=research_interference_us,

@@ -204,6 +204,21 @@ def _exact_git_blob(
     return raw, object_id
 
 
+def _unique_release_evidence_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate release-evidence JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _reject_release_evidence_constant(value: str) -> None:
+    raise ValueError(f"non-standard release-evidence JSON constant: {value}")
+
+
 def release_evidence_snapshot(
     path: Path,
     *,
@@ -219,8 +234,12 @@ def release_evidence_snapshot(
     except OSError:
         return False, "invalid_json", None
     try:
-        value = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_unique_release_evidence_object,
+            parse_constant=_reject_release_evidence_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return False, "invalid_json", None
     if type(value) is not dict:
         return False, "not_object", None

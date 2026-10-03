@@ -9,21 +9,21 @@ import mvp.autotrade_mvp.trusted_chronology_cut as chronology
 
 class TrustedChronologyExternalParserAuthorityTests(unittest.TestCase):
     def test_transitive_same_module_helper_rebinding_is_rejected_before_execution(self) -> None:
-        forged_calls = 0
-
-        def helper(value):
-            return value
-
-        def root(value):
-            return helper(value)
-
-        namespace = root.__globals__
-        original = namespace.get("helper")
-        namespace["helper"] = helper
+        namespace: dict[str, object] = {"__name__": "synthetic_parser_module"}
+        exec(
+            "def helper(value):\n"
+            "    return value\n\n"
+            "def root(value):\n"
+            "    return helper(value)\n",
+            namespace,
+        )
+        helper = namespace["helper"]
+        root = namespace["root"]
         guard = chronology._build_external_function_graph_guard(
             root=root,
             label="synthetic parser",
         )
+        forged_calls = 0
 
         def forged(value):
             nonlocal forged_calls
@@ -38,12 +38,11 @@ class TrustedChronologyExternalParserAuthorityTests(unittest.TestCase):
                 "synthetic parser dependency changed: helper",
             ):
                 guard()
-            self.assertEqual(forged_calls, 0)
         finally:
-            if original is None:
-                namespace.pop("helper", None)
-            else:
-                namespace["helper"] = original
+            namespace["helper"] = helper
+
+        self.assertEqual(forged_calls, 0)
+        guard()
 
     def test_production_measurement_parser_rejects_helper_rebinding_before_parse(self) -> None:
         original = chronology_parser_module._strict_json_object

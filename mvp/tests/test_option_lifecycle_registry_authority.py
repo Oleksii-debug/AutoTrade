@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentVersion,
 )
 from mvp.autotrade_mvp.option_lifecycle import (
+    OptionLifecycleError,
     OptionLifecycleObservation,
     _bind_version,
 )
@@ -87,6 +88,29 @@ class OptionLifecycleRegistryAuthorityTests(unittest.TestCase):
         registry = HostileRegistry(versions=(canonical,))
 
         with self.assertRaises(TypeError):
+            _bind_version(registry, observation())
+
+        self.assertEqual(calls, [])
+
+    def test_exact_registry_instance_shadow_cannot_manufacture_lifecycle_grid(self):
+        canonical = option_version(quantity_step="1")
+        forged = option_version(quantity_step="0.5")
+        registry = InstrumentRegistry(versions=(canonical,))
+        calls = []
+
+        registry.exact = (
+            lambda instrument_version: calls.append(("exact", instrument_version))
+            or forged
+        )
+        registry.at = (
+            lambda instrument_id, instant: calls.append(("at", instrument_id, instant))
+            or forged
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity_step",
+        ):
             _bind_version(registry, observation())
 
         self.assertEqual(calls, [])

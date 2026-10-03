@@ -1,6 +1,6 @@
 from hashlib import sha256
 import json
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -674,6 +674,92 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         )
         self.assertNotEqual(current.configuration_hash, original_configuration)
         self.assertNotEqual(current_plan.declared_duration_ms, original_duration)
+
+
+    def test_hostile_replacement_sample_is_rejected_without_execution(self):
+        current = measurement()
+
+        class ExecutableSample:
+            invoked = False
+
+            def canonical_payload(self):
+                self.invoked = True
+                raise AssertionError("hostile replacement sample executed")
+
+        hostile = ExecutableSample()
+        object.__setattr__(current, "financial_samples", (hostile,))
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
+            "bind_release_bound_durable_financial_latency_to_target_host_measurement",
+        ) as durable, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "financial_samples must contain exact FinancialTargetHostSample",
+        ):
+            verify_composed_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root="unused",
+                journal_store=object(),
+                spec=budget_spec(),
+                campaign_plan=runtime_campaign_plan(budget_spec()),
+                campaign_cut=object(),
+                declared_plan_id="plan-1",
+                measurement=current,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        self.assertFalse(hostile.invoked)
+        durable.assert_not_called()
+
+    def test_hostile_resource_metrics_proxy_is_rejected_without_iteration(self):
+        current = measurement()
+        sample = current.resource_samples[0]
+
+        class ExecutableMapping(dict):
+            invoked = False
+
+            def _fail(self):
+                self.invoked = True
+                raise AssertionError("hostile resource mapping executed")
+
+            def __iter__(self):
+                self._fail()
+
+            def items(self):
+                self._fail()
+
+            def keys(self):
+                self._fail()
+
+            def __getitem__(self, key):
+                self._fail()
+
+        backing = ExecutableMapping(
+            {"memory_rss_bytes": 4096, "thread_count": 3}
+        )
+        object.__setattr__(sample, "metrics", MappingProxyType(backing))
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
+            "bind_release_bound_durable_financial_latency_to_target_host_measurement",
+        ) as durable, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "resource sample metrics must retain canonical exact-dict mappingproxy",
+        ):
+            verify_composed_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root="unused",
+                journal_store=object(),
+                spec=budget_spec(),
+                campaign_plan=runtime_campaign_plan(budget_spec()),
+                campaign_cut=object(),
+                declared_plan_id="plan-1",
+                measurement=current,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        self.assertFalse(backing.invoked)
+        durable.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass, replace
+from gc import get_referents
 from hashlib import sha256
 import json
 from types import MappingProxyType
@@ -59,7 +60,12 @@ from .runtime_target_host_durable_financial import (
     DurableTargetHostFinancialBinding,
     bind_release_bound_durable_financial_latency_to_target_host_measurement,
 )
-from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+from .runtime_target_host_measurement import (
+    FinancialTargetHostSample,
+    ResearchInterferenceSample,
+    ResourceTargetHostSample,
+    TargetHostMeasurementArtifact,
+)
 from .runtime_target_host_qualification import (
     AcceptedRuntimeTargetHostQualification,
     CAMPAIGN_EVIDENCE_KIND,
@@ -98,12 +104,206 @@ def _sha256(raw: bytes) -> str:
     return "sha256:" + sha256(raw).hexdigest()
 
 
+def _require_exact_scalar_type(
+    value: object,
+    *,
+    expected_type: type,
+    name: str,
+) -> object:
+    if type(value) is not expected_type:
+        raise RuntimeTargetHostCompositionError(
+            f"{name} must remain exact {expected_type.__name__}"
+        )
+    return value
+
+
+def _snapshot_financial_sample(
+    value: object,
+) -> FinancialTargetHostSample:
+    if type(value) is not FinancialTargetHostSample:
+        raise RuntimeTargetHostCompositionError(
+            "financial_samples must contain exact FinancialTargetHostSample"
+        )
+    for field in ("sample_id", "event_id"):
+        _require_exact_scalar_type(
+            getattr(value, field),
+            expected_type=str,
+            name=f"financial sample {field}",
+        )
+    for field in (
+        "journal_sequence",
+        "latency_start_monotonic_ns",
+        "latency_end_monotonic_ns",
+        "staleness_source_monotonic_ns",
+        "staleness_observed_monotonic_ns",
+    ):
+        _require_exact_scalar_type(
+            getattr(value, field),
+            expected_type=int,
+            name=f"financial sample {field}",
+        )
+    return FinancialTargetHostSample(
+        sample_id=value.sample_id,
+        event_id=value.event_id,
+        journal_sequence=value.journal_sequence,
+        latency_start_monotonic_ns=value.latency_start_monotonic_ns,
+        latency_end_monotonic_ns=value.latency_end_monotonic_ns,
+        staleness_source_monotonic_ns=value.staleness_source_monotonic_ns,
+        staleness_observed_monotonic_ns=value.staleness_observed_monotonic_ns,
+    )
+
+
+def _snapshot_research_sample(
+    value: object,
+) -> ResearchInterferenceSample:
+    if type(value) is not ResearchInterferenceSample:
+        raise RuntimeTargetHostCompositionError(
+            "research_samples must contain exact ResearchInterferenceSample"
+        )
+    for field in ("sample_id", "phase"):
+        _require_exact_scalar_type(
+            getattr(value, field),
+            expected_type=str,
+            name=f"research sample {field}",
+        )
+    for field in ("start_monotonic_ns", "end_monotonic_ns"):
+        _require_exact_scalar_type(
+            getattr(value, field),
+            expected_type=int,
+            name=f"research sample {field}",
+        )
+    return ResearchInterferenceSample(
+        sample_id=value.sample_id,
+        phase=value.phase,
+        start_monotonic_ns=value.start_monotonic_ns,
+        end_monotonic_ns=value.end_monotonic_ns,
+    )
+
+
+def _snapshot_resource_metrics(value: object) -> dict[str, int]:
+    if type(value) is not MappingProxyType:
+        raise RuntimeTargetHostCompositionError(
+            "resource sample metrics must retain canonical exact-dict mappingproxy"
+        )
+    referents = get_referents(value)
+    if len(referents) != 1 or type(referents[0]) is not dict:
+        raise RuntimeTargetHostCompositionError(
+            "resource sample metrics must retain canonical exact-dict mappingproxy"
+        )
+    detached = dict(referents[0])
+    if not detached:
+        raise RuntimeTargetHostCompositionError(
+            "resource sample metrics must remain non-empty"
+        )
+    for key, metric_value in detached.items():
+        if type(key) is not str or type(metric_value) is not int:
+            raise RuntimeTargetHostCompositionError(
+                "resource sample metrics must contain exact string/integer entries"
+            )
+    return detached
+
+
+def _snapshot_resource_sample(
+    value: object,
+) -> ResourceTargetHostSample:
+    if type(value) is not ResourceTargetHostSample:
+        raise RuntimeTargetHostCompositionError(
+            "resource_samples must contain exact ResourceTargetHostSample"
+        )
+    for field in ("sample_id", "phase"):
+        _require_exact_scalar_type(
+            getattr(value, field),
+            expected_type=str,
+            name=f"resource sample {field}",
+        )
+    _require_exact_scalar_type(
+        value.monotonic_ns,
+        expected_type=int,
+        name="resource sample monotonic_ns",
+    )
+    metrics = _snapshot_resource_metrics(value.metrics)
+    return ResourceTargetHostSample(
+        sample_id=value.sample_id,
+        monotonic_ns=value.monotonic_ns,
+        phase=value.phase,
+        metrics=metrics,
+    )
+
+
 def _snapshot_measurement(
     measurement: TargetHostMeasurementArtifact,
 ) -> TargetHostMeasurementArtifact:
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
-    return TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+
+    for field in (
+        "source_sha",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "scenario_id",
+        "spec_digest",
+        "configuration_hash",
+        "host_fingerprint",
+        "workload_profile_hash",
+        "plan_digest",
+        "journal_taxonomy_digest",
+        "journal_store_identity_digest",
+        "monotonic_clock_id",
+        "staleness_basis",
+        "research_interference_basis",
+        "measurement_method_id",
+        "measurement_method_version",
+        "schema_version",
+    ):
+        _require_exact_scalar_type(
+            getattr(measurement, field),
+            expected_type=str,
+            name=f"measurement {field}",
+        )
+    for field in ("start_journal_sequence", "end_journal_sequence"):
+        _require_exact_scalar_type(
+            getattr(measurement, field),
+            expected_type=int,
+            name=f"measurement {field}",
+        )
+
+    for field in ("financial_samples", "research_samples", "resource_samples"):
+        if type(getattr(measurement, field)) is not tuple:
+            raise RuntimeTargetHostCompositionError(
+                f"measurement {field} must remain an exact tuple"
+            )
+
+    detached = TargetHostMeasurementArtifact(
+        source_sha=measurement.source_sha,
+        release_artifact_id=measurement.release_artifact_id,
+        release_artifact_sha256=measurement.release_artifact_sha256,
+        scenario_id=measurement.scenario_id,
+        spec_digest=measurement.spec_digest,
+        configuration_hash=measurement.configuration_hash,
+        host_fingerprint=measurement.host_fingerprint,
+        workload_profile_hash=measurement.workload_profile_hash,
+        plan_digest=measurement.plan_digest,
+        journal_taxonomy_digest=measurement.journal_taxonomy_digest,
+        journal_store_identity_digest=measurement.journal_store_identity_digest,
+        start_journal_sequence=measurement.start_journal_sequence,
+        end_journal_sequence=measurement.end_journal_sequence,
+        monotonic_clock_id=measurement.monotonic_clock_id,
+        staleness_basis=measurement.staleness_basis,
+        research_interference_basis=measurement.research_interference_basis,
+        financial_samples=tuple(
+            _snapshot_financial_sample(value) for value in measurement.financial_samples
+        ),
+        research_samples=tuple(
+            _snapshot_research_sample(value) for value in measurement.research_samples
+        ),
+        resource_samples=tuple(
+            _snapshot_resource_sample(value) for value in measurement.resource_samples
+        ),
+        measurement_method_id=measurement.measurement_method_id,
+        measurement_method_version=measurement.measurement_method_version,
+        schema_version=measurement.schema_version,
+    )
+    return TargetHostMeasurementArtifact.parse(detached.canonical_bytes())
 
 
 def _snapshot_spec(spec: RuntimeBudgetSpec) -> RuntimeBudgetSpec:

@@ -165,6 +165,10 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
         padded_instant["source_event_at"] += " "
         cases.append((padded_instant, "canonical UTC text"))
 
+        basic_instant = _event(1, available_minutes=1, ingested_minutes=3)
+        basic_instant["source_event_at"] = "20260101T000000Z"
+        cases.append((basic_instant, "canonical UTC text"))
+
         invalid_payload = _event(1, available_minutes=1, ingested_minutes=3)
         invalid_payload["payload"] = []
         cases.append((invalid_payload, "payload must be an object"))

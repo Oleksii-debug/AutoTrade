@@ -87,6 +87,24 @@ def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable
     return _safe_text(mapping.get(key), default)
 
 
+def _canonical_economic_report_is_readable(report: dict[str, Any]) -> bool:
+    valuation_status = _safe_text(report.get("valuation_status"), "")
+    required = ("total_fees", "turnover")
+    if valuation_status == "CASH_ONLY":
+        required += ("final_equity", "net_pnl")
+    elif valuation_status == "MARK_UNAVAILABLE":
+        if report.get("final_equity") is not None or report.get("net_pnl") is not None:
+            return False
+    else:
+        return False
+    for key in required:
+        try:
+            parse_canonical_decimal_text(report.get(key))
+        except ExactDecimalError:
+            return False
+    return True
+
+
 def _replay_verification_text(value: Any) -> str:
     if value is True:
         return "passed"
@@ -239,10 +257,19 @@ def format_accessible_status(
         if type(economic_report) is not dict:
             lines.append("Economic report: unavailable; malformed state")
         else:
+            canonical_report_readable = (
+                _canonical_economic_report_is_readable(economic_report)
+                if state_format == "canonical_journal"
+                else True
+            )
             report_value = (
                 _canonical_decimal_value
                 if state_format == "canonical_journal"
                 else _value
+            )
+            reconciliation_passed = (
+                economic_report.get("reconciled") is True
+                and canonical_report_readable
             )
             lines.extend(
                 [
@@ -251,9 +278,13 @@ def format_accessible_status(
                     f"Total fees: {report_value(economic_report, 'total_fees')}",
                     f"Turnover: {report_value(economic_report, 'turnover')}",
                     f"Maximum drawdown: {report_value(economic_report, 'max_drawdown')}",
-                    f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
+                    f"Economic reconciliation: {'passed' if reconciliation_passed else 'not confirmed'}",
                 ]
             )
+            if not canonical_report_readable:
+                lines.append(
+                    "Economic report validation: unavailable; malformed or incomplete canonical state"
+                )
             valuation_status = _safe_text(
                 economic_report.get("valuation_status"),
                 "",

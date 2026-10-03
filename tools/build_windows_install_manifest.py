@@ -295,7 +295,13 @@ def _open_stable_regular_file(path: Path, *, name: str):
             )
             _assert_open_file_identity(candidate, stream, name=name)
         except (OSError, RuntimeError, TypeError) as error:
-            authority_stack.close()
+            try:
+                authority_stack.close()
+            except BaseException as cleanup_failure:
+                error.add_note(
+                    "retained Windows namespace cleanup also failed: "
+                    f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                )
             raise InstallerManifestError(
                 f"{name} retained Windows namespace authority failed"
             ) from error

@@ -504,9 +504,6 @@ class AblationEvaluation:
     reason: str
     decision_exact: ExactAblationDecision | None = None
     reporting_status: str = _REPORTING_NOT_APPLICABLE
-    qualification_population_digest: str | None = None
-    qualification_trial_log_digest: str | None = None
-    qualification_stopping_rule_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.reporting_status not in {
@@ -548,27 +545,6 @@ class AblationEvaluation:
                 )
         else:
             raise ValueError("ablation evaluation status is not canonical")
-        qualification_digests = (
-            self.qualification_population_digest,
-            self.qualification_trial_log_digest,
-            self.qualification_stopping_rule_digest,
-        )
-        if any(value is not None for value in qualification_digests):
-            if any(value is None for value in qualification_digests):
-                raise ValueError(
-                    "qualification evidence digests must be supplied together"
-                )
-            for name in (
-                "qualification_population_digest",
-                "qualification_trial_log_digest",
-                "qualification_stopping_rule_digest",
-            ):
-                object.__setattr__(
-                    self,
-                    name,
-                    _digest(getattr(self, name), name),
-                )
-
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
     if not isinstance(target_component, str) or not target_component.strip():
@@ -1090,9 +1066,6 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
             item.mean_net_incremental_value
         ),
         "pair_count": item.pair_count,
-        "qualification_population_digest": item.qualification_population_digest,
-        "qualification_stopping_rule_digest": item.qualification_stopping_rule_digest,
-        "qualification_trial_log_digest": item.qualification_trial_log_digest,
         "reason": item.reason,
         "reporting_status": item.reporting_status,
         "required_lower_bound": _canonical_decimal_text(item.required_lower_bound),

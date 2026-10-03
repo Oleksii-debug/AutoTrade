@@ -117,12 +117,12 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             real_deliver = simulation_session._deliver_event
             calls = 0
 
-            def crash_second(store, event_id, *, topic):
+            def crash_second(store, event_id, *, topic, expected_cut):
                 nonlocal calls
                 calls += 1
                 if calls == 2:
                     raise RuntimeError("crash-before-checkpoint-delivery")
-                return real_deliver(store, event_id, topic=topic)
+                return real_deliver(store, event_id, topic=topic, expected_cut=expected_cut)
 
             with patch.object(
                 simulation_session, "_deliver_event", side_effect=crash_second

@@ -298,6 +298,7 @@ class SimulationZeroWireTerminalTests(unittest.TestCase):
                 "reconciliation_event_id": checkpoint["event_id"],
                 "new_outbound_requests": 0,
             }
+            fake.update(simulation_session._started_identity(store, episode_id=episode_id))
             simulation_session._event(
                 store,
                 "SimulationSessionCompleted",
@@ -470,6 +471,7 @@ class SimulationZeroWireTerminalTests(unittest.TestCase):
                 "reconciliation_event_id": checkpoint["event_id"],
                 "new_outbound_requests": 0,
             }
+            fake.update(simulation_session._started_identity(store, episode_id=episode_id))
             simulation_session._event(
                 store,
                 "SimulationSessionCompleted",

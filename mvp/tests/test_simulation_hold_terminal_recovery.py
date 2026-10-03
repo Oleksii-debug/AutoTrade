@@ -21,10 +21,10 @@ class SimulationHoldTerminalRecoveryTests(unittest.TestCase):
     def _crash_before_completed(self):
         real_event = simulation_session._event
 
-        def crash(store, kind, episode_id, payload, now):
+        def crash(store, kind, episode_id, payload, now, **kwargs):
             if kind == "SimulationSessionCompleted":
                 raise RuntimeError("crash-before-hold-completed")
-            return real_event(store, kind, episode_id, payload, now)
+            return real_event(store, kind, episode_id, payload, now, **kwargs)
 
         return patch.object(simulation_session, "_event", new=crash)
 
@@ -123,6 +123,7 @@ class SimulationHoldTerminalRecoveryTests(unittest.TestCase):
                 "reconciliation_event_id": "forged-reconciliation-event",
                 "new_outbound_requests": 0,
             }
+            fake.update(simulation_session._started_identity(store, episode_id=episode_id))
             simulation_session._event(
                 store,
                 "SimulationSessionCompleted",

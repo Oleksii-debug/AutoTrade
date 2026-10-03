@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.simulation_session as simulation_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
@@ -86,16 +87,32 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 )
             self.assertFalse(state_dir.exists())
 
-    def test_user_price_presentation_keeps_existing_lexical_input_hash(self):
+    def test_user_price_presentation_uses_canonical_decimal_session_identity(self):
         with TemporaryDirectory() as directory:
             prices = [" +00100.00 ", "1.0100e2"]
-            result = run_canonical_simulation(prices, directory, episode_id="presentation", now=NOW)
+            result = run_canonical_simulation(
+                prices, directory, episode_id="presentation", now=NOW
+            )
             self.assertEqual(result["status"], "HOLD")
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            started = store.load_events("canonical_simulation_session", "single-episode")[0]
-            self.assertEqual(started["payload"]["input_hash"], payload_digest({
-                "episode_id": "presentation", "prices": ["100.00", "101.00"],
-            }))
+            started = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )[0]
+            self.assertEqual(
+                started["payload"]["input_hash"],
+                payload_digest({
+                    "episode_id": "presentation",
+                    "prices": ["100", "101"],
+                    "protocol_identity": started["payload"]["protocol_identity"],
+                }),
+            )
+            self.assertEqual(
+                result["protocol_identity"], started["payload"]["protocol_identity"]
+            )
+            self.assertEqual(
+                result["source_build_identity"],
+                started["payload"]["source_build_identity"],
+            )
 
     def test_orphaned_bootstrap_state_cannot_start_another_send(self):
         with TemporaryDirectory() as directory:
@@ -209,7 +226,9 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(len(reservations.active()), 1)
             self.assertEqual(reservations.active()[0].state, "WORKING")
 
-            again = run_canonical_simulation(BUY, directory, episode_id="ambiguous")
+            again = run_canonical_simulation(
+                BUY, directory, episode_id="ambiguous", fault_after_send=True
+            )
             self.assertEqual(again["status"], "UNKNOWN")
             self.assertTrue(again["resumed"])
             self.assertEqual(again["new_outbound_requests"], 0)
@@ -218,6 +237,137 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 reopened.load_events_by_aggregate_type("submission_attempt"),
                 submission,
             )
+
+    def test_completed_event_repeats_exact_protocol_and_input_identity(self):
+        with TemporaryDirectory() as directory:
+            result = run_canonical_simulation(
+                HOLD, directory, episode_id="identity", now=NOW
+            )
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            started, completed = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )
+            for key in ("protocol_identity", "input_hash", "source_build_identity"):
+                self.assertEqual(started["payload"][key], completed["payload"][key])
+                self.assertEqual(result[key], completed["payload"][key])
+            self.assertEqual(
+                started["payload"]["protocol_version"],
+                "canonical-simulation@2",
+            )
+
+    def test_changed_fee_configuration_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="fee-config", now=NOW
+            )
+            with patch.object(
+                simulation_module, "FEE_RATE", Decimal("0.002")
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="fee-config"
+                    )
+
+    def test_changed_strategy_configuration_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="strategy-config", now=NOW
+            )
+            with patch.object(simulation_module, "_STRATEGY_FAST", 1):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="strategy-config"
+                    )
+
+    def test_changed_risk_policy_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="risk-config", now=NOW
+            )
+            changed_policy = tuple(
+                (
+                    name,
+                    "9" if name == "max_abs_position" else value,
+                )
+                for name, value in simulation_module._RISK_POLICY_SPEC
+            )
+            with patch.object(
+                simulation_module, "_RISK_POLICY_SPEC", changed_policy
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="risk-config"
+                    )
+
+    def test_changed_source_build_identity_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="build-config", now=NOW
+            )
+            with patch.object(
+                simulation_module,
+                "_simulation_build_identity",
+                return_value="sha256:" + "f" * 64,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="build-config"
+                    )
+
+    def test_fault_mode_is_part_of_protocol_identity(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="fault-config", now=NOW,
+                fault_after_send=False,
+            )
+            with self.assertRaisesRegex(
+                ValueError, "incompatible simulation protocol/configuration"
+            ):
+                run_canonical_simulation(
+                    HOLD, directory, episode_id="fault-config",
+                    fault_after_send=True,
+                )
+
+    def test_unknown_session_rejects_changed_protocol_without_resend(self):
+        with TemporaryDirectory() as directory:
+            first = run_canonical_simulation(
+                BUY, directory, episode_id="unknown-config", now=NOW,
+                fault_after_send=True,
+            )
+            self.assertEqual(first["status"], "UNKNOWN")
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            before = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertTrue(before)
+            self.assertEqual(before[-1]["event_type"], "SubmissionUnknown")
+            with self.assertRaisesRegex(
+                ValueError, "incompatible simulation protocol/configuration"
+            ):
+                run_canonical_simulation(
+                    BUY, directory, episode_id="unknown-config",
+                    fault_after_send=False,
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"),
+                before,
+            )
+
+    def test_source_tree_identity_is_stable_across_lf_and_crlf_checkouts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "component.py"
+            source.write_bytes(b"value = 1\n")
+            lf_identity = simulation_module._python_source_tree_digest(root)
+            source.write_bytes(b"value = 1\r\n")
+            crlf_identity = simulation_module._python_source_tree_digest(root)
+            self.assertEqual(lf_identity, crlf_identity)
 
     def test_strategy_exact_boundary_precedes_every_result_path(self):
         strategy = MovingAverageStrategy()
@@ -267,33 +417,38 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 Decimal("1"),
             )
 
-    def test_canonical_session_preserves_pre_protocol_input_hash_spelling(self):
-        episode_id = "legacy-spelling"
+    def test_canonical_decimal_aliases_resume_the_same_session(self):
+        episode_id = "canonical-spelling"
         with TemporaryDirectory() as directory:
             first = run_canonical_simulation(
-                ["100.0", "101.0"], directory,
+                ["100.0", "1.0100e2"], directory,
                 episode_id=episode_id, now=NOW,
             )
             self.assertEqual(first["status"], "HOLD")
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            started = store.load_events(
+            started_before = store.load_events(
                 "canonical_simulation_session", "single-episode"
-            )[0]
+            )
+            started = started_before[0]
             self.assertEqual(
                 started["payload"]["input_hash"],
                 payload_digest({
                     "episode_id": episode_id,
-                    "prices": ["100.0", "101.0"],
+                    "prices": ["100", "101"],
+                    "protocol_identity": started["payload"]["protocol_identity"],
                 }),
             )
             again = run_canonical_simulation(
-                ["100.0", "101.0"], directory, episode_id=episode_id
+                ["100", "101.0000"], directory, episode_id=episode_id
             )
             self.assertTrue(again["resumed"])
-            with self.assertRaisesRegex(ValueError, "another simulation input"):
-                run_canonical_simulation(
-                    ["100", "101"], directory, episode_id=episode_id
-                )
+            self.assertEqual(
+                again["protocol_identity"], first["protocol_identity"]
+            )
+            self.assertEqual(
+                store.load_events("canonical_simulation_session", "single-episode"),
+                started_before,
+            )
 
     def test_strategy_decisions_are_identical_across_hostile_decimal_contexts(self):
         cases = (

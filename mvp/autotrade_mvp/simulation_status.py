@@ -279,6 +279,9 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 _decimal(posting.get("signed_amount"))
                 if (posting.get("ledger_account"), posting.get("asset_or_currency")) not in _ECONOMIC_UNITS:
                     raise ValueError("single-episode simulation economic units differ")
+    if any(event.get("event_type") == "AccountReconciled" and
+           event.get("aggregate_type") != "account_reconciliation" for event in events):
+        raise ValueError("simulation reconciliation has an invalid aggregate owner")
     sessions = [event for event in events
                 if event["aggregate_type"] == "canonical_simulation_session"]
     if sessions:

@@ -117,16 +117,16 @@ class JournalStore(_JournalStoreImpl):
             raise TypeError("envelope must be an exact object")
 
         event_id = JournalStore._require_text(
-            self, envelope.get("event_id"), "event_id"
+            envelope.get("event_id"), "event_id"
         )
         event_type = JournalStore._require_text(
-            self, envelope.get("event_type"), "event_type"
+            envelope.get("event_type"), "event_type"
         )
         aggregate_type = JournalStore._require_text(
-            self, envelope.get("aggregate_type"), "aggregate_type"
+            envelope.get("aggregate_type"), "aggregate_type"
         )
         aggregate_id = JournalStore._require_text(
-            self, envelope.get("aggregate_id"), "aggregate_id"
+            envelope.get("aggregate_id"), "aggregate_id"
         )
         try:
             raw_aggregate_version = envelope["aggregate_version"]
@@ -150,14 +150,14 @@ class JournalStore(_JournalStoreImpl):
         envelope_json = _impl.canonical_json(envelope)
         envelope_hash = _impl._event_envelope_digest(envelope_json)
         committed_at = JournalStore._require_text(
-            self, envelope.get("committed_at"), "committed_at"
+            envelope.get("committed_at"), "committed_at"
         )
 
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
-                    if JournalStore._journal_sequence_value(self, connection) != 0:
+                    if JournalStore._journal_sequence_value(connection) != 0:
                         raise ValueError(
                             "journal store already contains durable business state"
                         )
@@ -179,7 +179,7 @@ class JournalStore(_JournalStoreImpl):
                                 "journal store already contains durable business state"
                             )
                     if JournalStore._aggregate_version_value(
-                        self, connection, aggregate_type, aggregate_id
+                        connection, aggregate_type, aggregate_id
                     ) != 0:
                         raise ValueError(
                             "journal store already contains durable business state"
@@ -258,8 +258,8 @@ class JournalStore(_JournalStoreImpl):
             self,
             subject="outbox delivery-state store",
         )
-        event_id = JournalStore._require_text(self, event_id, "event_id")
-        topic = JournalStore._require_text(self, topic, "topic")
+        event_id = JournalStore._require_text(event_id, "event_id")
+        topic = JournalStore._require_text(topic, "topic")
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN")

@@ -321,95 +321,77 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
-def _fresh_windows_entry_stat(
-    directory: Path,
-    *,
-    target_name: str,
-    path: Path,
-) -> os.stat_result:
-    """Re-read one exact staged leaf through the directory-enumeration domain."""
-
-    try:
-        entries = list(os.scandir(directory))
-    except OSError as error:
-        raise BundleError(
-            f"staging directory cannot be enumerated: {directory}"
-        ) from error
-    matches = [entry for entry in entries if entry.name == target_name]
-    if len(matches) != 1:
-        raise BundleError(f"staged file changed during collection: {path}")
-    entry = matches[0]
-    try:
-        observed = entry.stat(follow_symlinks=False)
-    except OSError as error:
-        raise BundleError(
-            f"staged entry identity cannot be verified: {path}"
-        ) from error
-    if entry.is_symlink():
-        raise BundleError(f"symlinks are forbidden in bundles: {path}")
-    _reject_windows_reparse(path, observed)
-    if not stat.S_ISREG(observed.st_mode):
-        raise BundleError(f"staged file changed during collection: {path}")
-    if observed.st_nlink > 1:
-        raise BundleError(f"hardlinked staged files are forbidden: {path}")
-    if observed.st_nlink != 1:
-        raise BundleError(f"staged file changed during collection: {path}")
-    return observed
-
-
 def _read_retained_windows_regular_file(
     authority,
     *,
     target_name: str,
     path: Path,
-    expected_identity: tuple[int, int],
 ) -> bytes:
-    """Read one staged Windows file through the retained parent HANDLE.
+    """Read one staged Windows file through one CRT identity domain.
 
-    The generation fence stays inside stable metadata domains.  The initial and
-    retained-open identities are both DirEntry.stat() observations, while byte
-    mutation checks compare CRT fstat() only with CRT fstat().  The retained NT
-    handle denies WRITE/DELETE before the second enumeration and through the
-    descriptor read, so a swap between enumeration and retained open is still
-    detected without comparing CPython's distinct Windows stat representations.
+    A pathname descriptor establishes the admitted generation. The canonical
+    retained relative NT open is then acquired while the admission descriptor
+    is still held; both identities are compared only through os.fstat.
+    Once the retained descriptor exists its no-WRITE/no-DELETE sharing fence
+    keeps that exact generation stable through the byte read.
     """
 
     try:
-        with retain_windows_regular_file(
-            authority,
-            target_name=target_name,
-            subject="Windows bundle staged file",
-        ) as descriptor:
-            current_before = _fresh_windows_entry_stat(
-                path.parent,
-                target_name=target_name,
-                path=path,
-            )
-            if (current_before.st_dev, current_before.st_ino) != expected_identity:
-                raise BundleError(f"staged file changed during collection: {path}")
-
-            before = os.fstat(descriptor)
-            if not stat.S_ISREG(before.st_mode):
+        try:
+            admission_stream = path.open("rb")
+        except OSError as error:
+            raise BundleError(
+                f"staged Windows file authority cannot be admitted: {path}"
+            ) from error
+        with admission_stream:
+            admitted = os.fstat(admission_stream.fileno())
+            if not stat.S_ISREG(admitted.st_mode):
                 raise BundleError(f"staged entry must remain a regular file: {path}")
-            chunks = bytearray()
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                chunks.extend(chunk)
-            after = os.fstat(descriptor)
-
-            current_after = _fresh_windows_entry_stat(
-                path.parent,
-                target_name=target_name,
-                path=path,
-            )
-            if (
-                (current_after.st_dev, current_after.st_ino) != expected_identity
-                or (current_before.st_dev, current_before.st_ino)
-                != (current_after.st_dev, current_after.st_ino)
-            ):
+            if admitted.st_nlink > 1:
+                raise BundleError(f"hardlinked staged files are forbidden: {path}")
+            if admitted.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
+
+            with retain_windows_regular_file(
+                authority,
+                target_name=target_name,
+                subject="Windows bundle staged file",
+            ) as descriptor:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise BundleError(
+                        f"staged entry must remain a regular file: {path}"
+                    )
+                if before.st_nlink > 1:
+                    raise BundleError(f"hardlinked staged files are forbidden: {path}")
+                if before.st_nlink != 1:
+                    raise BundleError(f"staged file changed during collection: {path}")
+                if (
+                    (admitted.st_dev, admitted.st_ino)
+                    != (before.st_dev, before.st_ino)
+                    or admitted.st_size != before.st_size
+                    or admitted.st_mtime_ns != before.st_mtime_ns
+                    or admitted.st_ctime_ns != before.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
+
+                chunks = bytearray()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                after = os.fstat(descriptor)
+
+                admitted_after = os.fstat(admission_stream.fileno())
+                if (
+                    (admitted_after.st_dev, admitted_after.st_ino)
+                    != (before.st_dev, before.st_ino)
+                    or admitted_after.st_size != before.st_size
+                    or admitted_after.st_mtime_ns != before.st_mtime_ns
+                    or admitted_after.st_ctime_ns != before.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
     except BundleError:
         raise
     except RuntimeError as error:
@@ -426,14 +408,11 @@ def _read_retained_windows_regular_file(
         ) from error
 
     if (
-        before.st_size != after.st_size
+        (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or before.st_ctime_ns != after.st_ctime_ns
-        or current_before.st_size != current_after.st_size
-        or current_before.st_mtime_ns != current_after.st_mtime_ns
-        or current_before.st_ctime_ns != current_after.st_ctime_ns
         or len(chunks) != after.st_size
-        or len(chunks) != current_after.st_size
     ):
         raise BundleError(f"staged file changed while being read: {path}")
     return bytes(chunks)
@@ -487,11 +466,10 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
             if observed.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
 
-            # Keep the generation fence in the directory-enumeration metadata
-            # domain.  _read_retained_windows_regular_file() re-enumerates the
-            # exact leaf only after its retained no-WRITE/no-DELETE handle is
-            # open, so a concurrent replacement remains fail-closed without
-            # comparing DirEntry.stat() identity to os.stat()/CRT identity.
+            # Entry metadata admits only type/reparse/link shape. Exact
+            # generation identity is established by two descriptors in the
+            # same CRT/fstat domain, with the second descriptor held by the
+            # canonical retained no-WRITE/no-DELETE Windows authority.
             snapshots.append(
                 (
                     path,
@@ -499,7 +477,6 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                         authority,
                         target_name=entry.name,
                         path=path,
-                        expected_identity=(observed.st_dev, observed.st_ino),
                     ),
                 )
             )

@@ -1,11 +1,10 @@
 """Authority-free Bybit credential probe evidence for WP-49.
 
-This boundary binds one already-authenticated Bybit V5 credential probe to the
-exact historical TRADE credential generation that was used for the request and
-to the exact Bybit provider environment contacted. It deliberately retains
-only a canonical response digest plus non-secret scope metadata; the response
-body (including an API-key value returned by ``/v5/user/query-api`` on success)
-is never retained here.
+This boundary binds one authenticated Bybit V5 credential probe to the exact
+historical TRADE credential generation used for the request and to the exact
+Bybit provider environment contacted. It retains only canonical non-secret
+request/response metadata plus a response digest; raw provider payloads and
+credential material are never retained as evidence.
 
 The resulting value is observation evidence only. It cannot retire a vault
 credential generation, prove that an old process stopped, grant send authority,
@@ -20,22 +19,27 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 import json
+import math
 import re
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .bybit_credential_nonacceptance import (
     BybitCredentialNonAcceptance,
     classify_bybit_credential_nonacceptance,
 )
 from .provider_core import ProviderCoreError
+from .provider_response_limits import (
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_response_bytes,
+)
 from .provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
-    AuthenticatedReadHttpRequest,
-    AuthenticatedReadWireResponse,
     BybitV5Credential,
     ProviderTransportScopeError,
-    UrllibJsonWireClient,
 )
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
@@ -118,9 +122,15 @@ def _exact_recv_window(value: object) -> int:
 
 
 def _require_exact_json_data(value: object, *, path: str = "$") -> None:
-    """Reject Python-only or polymorphic values before hashing provider JSON."""
+    """Reject Python-only, polymorphic and non-finite values before hashing."""
 
-    if value is None or type(value) in {str, int, float, bool}:
+    if value is None or type(value) in {str, int, bool}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ProviderCoreError(
+                f"Bybit credential probe response value at {path} must be finite"
+            )
         return
     if type(value) is list:
         for index, item in enumerate(value):
@@ -447,12 +457,20 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
     normalized: dict[str, str] = {}
     for key in _PROBE_HEADER_NAMES:
         value = _exact_text(headers[key], name=f"header {key}")
+        if "\r" in value or "\n" in value:
+            raise ProviderCoreError(
+                "Bybit credential probe header values must not contain line breaks"
+            )
         normalized[key] = value
     if normalized["Accept"] != "application/json":
         raise ProviderCoreError("Bybit credential probe Accept header is not canonical")
     timestamp = normalized["X-BAPI-TIMESTAMP"]
     recv_window = normalized["X-BAPI-RECV-WINDOW"]
-    if not timestamp.isascii() or not timestamp.isdigit() or str(int(timestamp)) != timestamp:
+    if (
+        not timestamp.isascii()
+        or not timestamp.isdigit()
+        or str(int(timestamp)) != timestamp
+    ):
         raise ProviderCoreError("Bybit credential probe timestamp header is not canonical")
     if (
         not recv_window.isascii()
@@ -467,6 +485,169 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
     return MappingProxyType(normalized)
 
 
+@dataclass(frozen=True, slots=True)
+class BybitCredentialProbeHttpRequest:
+    """One endpoint-closed authenticated GET with intentionally empty query."""
+
+    url: str
+    headers: Mapping[str, str]
+    timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        url = _exact_text(self.url, name="url")
+        if url not in _ALLOWED_PROBE_SOURCE_URIS:
+            raise ProviderCoreError(
+                "Bybit credential probe request URL is outside exact query-api origins"
+            )
+        headers = _validate_probe_wire_headers(self.headers)
+        if (
+            type(self.timeout_seconds) is not int
+            or self.timeout_seconds < 1
+            or self.timeout_seconds > 120
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe timeout must be exact integer 1..120"
+            )
+        object.__setattr__(self, "url", url)
+        object.__setattr__(self, "headers", headers)
+
+
+@dataclass(frozen=True, slots=True)
+class BybitCredentialProbeRawHttpResponse:
+    """Status-preserving bounded bytes returned by the probe HTTP seam."""
+
+    http_status: int
+    body: bytes
+
+    def __post_init__(self) -> None:
+        if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP status must be exact integer 100..599"
+            )
+        try:
+            require_provider_response_bytes(
+                self.body,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+            )
+        except (TypeError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit credential probe raw response body is invalid or oversized"
+            ) from error
+
+
+class _NoProbeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+class BybitCredentialProbeUrllibClient:
+    """Direct one-shot TLS GET with redirects/retries/proxies disabled."""
+
+    def __init__(
+        self,
+        *,
+        max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    ) -> None:
+        if (
+            type(max_response_bytes) is not int
+            or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe response byte budget is invalid"
+            )
+        self.max_response_bytes = max_response_bytes
+        self._opener = build_opener(ProxyHandler({}), _NoProbeRedirectHandler())
+
+    def send(
+        self,
+        request: BybitCredentialProbeHttpRequest,
+    ) -> BybitCredentialProbeRawHttpResponse:
+        if type(request) is not BybitCredentialProbeHttpRequest:
+            raise TypeError(
+                "request must be exact BybitCredentialProbeHttpRequest"
+            )
+        budget = self.max_response_bytes
+        if (
+            type(budget) is not int
+            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe response byte budget is invalid"
+            )
+
+        outbound = Request(
+            request.url,
+            data=None,
+            headers=dict(request.headers),
+            method="GET",
+        )
+        http_status: int | None = None
+        http_error_status: int | None = None
+        raw: bytes | None = None
+        redirect = False
+        transport_unavailable = False
+        read_failed = False
+        try:
+            with self._opener.open(
+                outbound,
+                timeout=request.timeout_seconds,
+            ) as response:
+                observed_status = response.status
+                if type(observed_status) is int and 100 <= observed_status <= 599:
+                    http_status = observed_status
+                raw = response.read(budget + 1)
+        except HTTPError as error:
+            observed_status = error.code
+            if type(observed_status) is int and 100 <= observed_status <= 599:
+                http_error_status = observed_status
+                if 300 <= observed_status < 400:
+                    redirect = True
+                else:
+                    try:
+                        raw = error.read(budget + 1)
+                    except Exception:
+                        read_failed = True
+            else:
+                read_failed = True
+        except URLError:
+            transport_unavailable = True
+
+        # Errors are generated only after urllib's request-bearing exception
+        # object has left scope; no API-key/signature-bearing HTTPError is chained.
+        if transport_unavailable:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP transport unavailable"
+            ) from None
+        if redirect:
+            raise ProviderCoreError(
+                "Bybit credential probe redirect is prohibited"
+            ) from None
+        if read_failed:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP error response unavailable"
+            ) from None
+        final_status = http_error_status if http_error_status is not None else http_status
+        if final_status is None:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP status is unavailable"
+            )
+        if type(raw) is not bytes or not raw:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP response body is unavailable"
+            )
+        try:
+            bounded = require_provider_response_bytes(raw, max_bytes=budget)
+        except (TypeError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP response is invalid or oversized"
+            ) from error
+        return BybitCredentialProbeRawHttpResponse(
+            http_status=final_status,
+            body=bounded,
+        )
+
+
 def execute_bybit_credential_probe_wire_query(
     *,
     source_uri: str,
@@ -474,12 +655,7 @@ def execute_bybit_credential_probe_wire_query(
     timeout_seconds: int,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeWireResponse:
-    """Execute one redirect-safe query-api GET through the shared wire client.
-
-    This adapter is deliberately endpoint-closed: even a direct caller cannot
-    reuse probe authentication headers for an arbitrary URL. The shared urllib
-    client supplies the existing bounded-response/no-redirect/no-retry policy.
-    """
+    """Execute one endpoint-closed empty-query credential-information GET."""
 
     source_uri = _exact_text(source_uri, name="source_uri")
     if source_uri not in _ALLOWED_PROBE_SOURCE_URIS:
@@ -491,18 +667,18 @@ def execute_bybit_credential_probe_wire_query(
         raise ProviderCoreError(
             "Bybit credential probe timeout must be exact integer 1..120"
         )
-    client = wire_client if wire_client is not None else UrllibJsonWireClient()
+    client = wire_client if wire_client is not None else BybitCredentialProbeUrllibClient()
     if not hasattr(client, "send"):
         raise TypeError("wire_client must implement send")
-    request = AuthenticatedReadHttpRequest(
+    request = BybitCredentialProbeHttpRequest(
         url=source_uri,
         headers=headers,
         timeout_seconds=timeout_seconds,
     )
     raw_response = client.send(request)
-    if type(raw_response) is not AuthenticatedReadWireResponse:
+    if type(raw_response) is not BybitCredentialProbeRawHttpResponse:
         raise TypeError(
-            "Bybit credential probe wire client must return exact AuthenticatedReadWireResponse"
+            "Bybit credential probe wire client must return exact BybitCredentialProbeRawHttpResponse"
         )
     return BybitCredentialProbeWireResponse(
         http_status=raw_response.http_status,
@@ -629,13 +805,18 @@ def probe_bybit_credential_with_shared_wire(
     recv_window_ms: int = 5000,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeEvidence:
-    """Production-capable probe using the repository's redirect-safe wire seam."""
+    """Production-capable probe using the endpoint-closed direct wire seam."""
 
-    def wire_query(**kwargs: object) -> BybitCredentialProbeWireResponse:
+    def wire_query(
+        *,
+        source_uri: str,
+        headers: Mapping[str, str],
+        timeout_seconds: int,
+    ) -> BybitCredentialProbeWireResponse:
         return execute_bybit_credential_probe_wire_query(
-            source_uri=kwargs["source_uri"],
-            headers=kwargs["headers"],
-            timeout_seconds=kwargs["timeout_seconds"],
+            source_uri=source_uri,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
             wire_client=wire_client,
         )
 

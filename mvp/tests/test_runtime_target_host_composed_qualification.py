@@ -10,6 +10,8 @@ from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
     _read_accepted_raw_payload,
     _require_signed_campaign_match,
+    _snapshot_financial_sample,
+    _snapshot_measurement,
     target_host_measurement_projection_bytes,
     target_host_measurement_projection_digests,
     verify_composed_runtime_target_host_qualification,
@@ -675,6 +677,24 @@ class RuntimeTargetHostComposedQualificationTests(unittest.TestCase):
         self.assertNotEqual(current.configuration_hash, original_configuration)
         self.assertNotEqual(current_plan.declared_duration_ms, original_duration)
 
+
+    def test_measurement_outer_scalar_mutation_during_nested_snapshot_is_detached(self):
+        current = measurement()
+        original_configuration = current.configuration_hash
+
+        def mutate_during_nested_snapshot(value):
+            object.__setattr__(current, "configuration_hash", OTHER)
+            return _snapshot_financial_sample(value)
+
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_composed_qualification."
+            "_snapshot_financial_sample",
+            side_effect=mutate_during_nested_snapshot,
+        ):
+            detached = _snapshot_measurement(current)
+
+        self.assertEqual(detached.configuration_hash, original_configuration)
+        self.assertEqual(current.configuration_hash, OTHER)
 
     def test_hostile_replacement_sample_is_rejected_without_execution(self):
         current = measurement()

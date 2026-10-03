@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.risk import (
     RiskPolicy,
     evaluate_risk,
     risk_decision_fingerprint,
+    tail_scenario_set_digest,
 )
 
 
@@ -111,6 +112,186 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 capability_allowed=True,
                 borrow_available=True,
             )
+
+    def test_nonterminating_leverage_verdict_uses_exact_ratio(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        configured = policy(
+            max_gross_leverage="0.3333331",
+            max_net_leverage="0.3333331",
+        )
+        fingerprints = set()
+        observed = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            RiskContext.create(
+                                state_version=7,
+                                equity="3",
+                                positions={},
+                                marks={"ABC": "1"},
+                                reserved_position_delta={},
+                                daily_pnl="0",
+                                drawdown_fraction="0",
+                                market_data_age_seconds="0",
+                                fx_age_seconds={},
+                                margin_headroom="1",
+                                capability_allowed=True,
+                                borrow_available=True,
+                                stress_scenarios=({"ABC": "-1"},),
+                            ),
+                            configured,
+                        )
+                    gross_rule = next(
+                        rule
+                        for rule in decision.rules
+                        if rule.rule == "gross_leverage"
+                    )
+                    net_rule = next(
+                        rule
+                        for rule in decision.rules
+                        if rule.rule == "net_leverage"
+                    )
+                    self.assertFalse(gross_rule.passed)
+                    self.assertFalse(net_rule.passed)
+                    self.assertFalse(decision.admitted)
+                    fingerprints.add(risk_decision_fingerprint(decision))
+                    observed.add(
+                        (
+                            decision.gross_leverage,
+                            gross_rule.observed,
+                            gross_rule.limit,
+                        )
+                    )
+        self.assertEqual(len(fingerprints), 1)
+        self.assertEqual(len(observed), 1)
+
+    def test_expected_shortfall_one_third_rejects_exactly(self):
+        tail = (
+            {"ABC": "-1"},
+            {"ABC": "0"},
+            {"ABC": "0"},
+        )
+        configured = policy(
+            max_expected_shortfall="0.3333331",
+            expected_shortfall_tail_fraction="1",
+            required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
+        )
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        results = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as decimal_context:
+                    decimal_context.prec = precision
+                    decimal_context.rounding = rounding
+                    decision = evaluate_risk(
+                        intent,
+                        RiskContext.create(
+                            state_version=7,
+                            equity="10",
+                            positions={},
+                            marks={"ABC": "1"},
+                            reserved_position_delta={},
+                            daily_pnl="0",
+                            drawdown_fraction="0",
+                            market_data_age_seconds="0",
+                            fx_age_seconds={},
+                            margin_headroom="1",
+                            capability_allowed=True,
+                            borrow_available=True,
+                            stress_scenarios=({"ABC": "-1"},),
+                            tail_scenarios=tail,
+                        ),
+                        configured,
+                    )
+                rule = next(
+                    item
+                    for item in decision.rules
+                    if item.rule == "expected_shortfall"
+                )
+                self.assertFalse(rule.passed)
+                self.assertFalse(decision.admitted)
+                results.add(
+                    (
+                        rule.observed,
+                        rule.limit,
+                        risk_decision_fingerprint(decision),
+                    )
+                )
+        self.assertEqual(len(results), 1)
+
+    def test_tail_count_exact_ceiling_does_not_round_to_wrong_sample(self):
+        tail = (
+            {"ABC": "-9"},
+            {"ABC": "-6"},
+            {"ABC": "0"},
+        )
+        configured = policy(
+            max_expected_shortfall="8",
+            expected_shortfall_tail_fraction=(
+                "0.3333333333333333333333333334"
+            ),
+            required_tail_scenario_set_digest=tail_scenario_set_digest(tail),
+        )
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+        )
+        outcomes = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as decimal_context:
+                    decimal_context.prec = precision
+                    decimal_context.rounding = rounding
+                    decision = evaluate_risk(
+                        intent,
+                        RiskContext.create(
+                            state_version=7,
+                            equity="10",
+                            positions={},
+                            marks={"ABC": "1"},
+                            reserved_position_delta={},
+                            daily_pnl="0",
+                            drawdown_fraction="0",
+                            market_data_age_seconds="0",
+                            fx_age_seconds={},
+                            margin_headroom="1",
+                            capability_allowed=True,
+                            borrow_available=True,
+                            stress_scenarios=({"ABC": "-9"},),
+                            tail_scenarios=tail,
+                        ),
+                        configured,
+                    )
+                rule = next(
+                    item
+                    for item in decision.rules
+                    if item.rule == "expected_shortfall"
+                )
+                self.assertTrue(rule.passed)
+                self.assertEqual(rule.observed, "7.5")
+                self.assertTrue(decision.admitted)
+                outcomes.add(risk_decision_fingerprint(decision))
+        self.assertEqual(len(outcomes), 1)
 
 
 if __name__ == "__main__":

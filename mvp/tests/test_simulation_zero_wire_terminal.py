@@ -98,6 +98,74 @@ class SimulationZeroWireTerminalTests(unittest.TestCase):
                 sessions,
             )
 
+    def test_command_only_writer_before_terminal_commit_is_rejected_atomically(self):
+        episode_id = "blocked-terminal-whole-store-race"
+        terminal_command = simulation_session._uuid(
+            "blocked-terminal-command",
+            episode_id,
+        )
+        real_commit = JournalStore.commit_command
+        injected = False
+
+        def race_terminal(store, **kwargs):
+            nonlocal injected
+            if (
+                not injected
+                and kwargs.get("command_id") == terminal_command
+            ):
+                injected = True
+                store.record_command(
+                    command_id="foreign-zero-wire-command",
+                    actor="foreign-zero-wire-writer",
+                    environment=ENVIRONMENT,
+                    idempotency_key="foreign-zero-wire-key",
+                    request={"foreign": True},
+                    result={"foreign": True},
+                    state_version=0,
+                )
+            return real_commit(store, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            with self._block_dispatch(), patch.object(
+                JournalStore,
+                "commit_command",
+                new=race_terminal,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "whole-store state changed after financial evidence validation",
+                ):
+                    run_canonical_simulation(
+                        BUY,
+                        directory,
+                        episode_id=episode_id,
+                        now=NOW,
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events(
+                        "canonical_simulation_session",
+                        "single-episode",
+                    )
+                ],
+                ["SimulationSessionStarted"],
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            reservations = self._reservations(directory)
+            self.assertEqual(len(reservations.active()), 1)
+            self.assertEqual(reservations.active()[0].state, "WORKING")
+
     def test_crash_before_atomic_terminal_leaves_both_sides_nonterminal_then_recovers(self):
         episode_id = "blocked-crash"
         terminal_command = simulation_session._uuid(

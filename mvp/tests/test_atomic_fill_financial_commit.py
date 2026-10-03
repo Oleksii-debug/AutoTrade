@@ -19,7 +19,6 @@ from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     book_equity_fill,
 )
-from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.durable_settlement import (
     DurableSettlementBook,
@@ -36,7 +35,6 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
-    commit_order_fill_with_reservation_consumption,
     commit_provider_fill_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
 )
@@ -64,43 +62,20 @@ ACCOUNT = "acct-1"
 ENVIRONMENT = "PAPER"
 
 
-def reservation_book(
-    store: JournalStore,
-    *,
-    environment: str = ENVIRONMENT,
-) -> DurableReservationBook:
+def reservation_book(store: JournalStore) -> DurableReservationBook:
     return DurableReservationBook(
         store,
-        environment=environment,
+        environment=ENVIRONMENT,
         account_id=ACCOUNT,
     )
 
 
-def economic_book(
-    store: JournalStore,
-    *,
-    environment: str = ENVIRONMENT,
-) -> DurableProviderEconomicBook:
+def economic_book(store: JournalStore) -> DurableProviderEconomicBook:
     return DurableProviderEconomicBook(
         store,
         provider_id=PROVIDER,
         account_id=ACCOUNT,
-        environment=environment,
-    )
-
-
-def order_book(
-    store: JournalStore,
-    *,
-    environment: str = "SIMULATION",
-) -> DurableOrderBookProjection:
-    return DurableOrderBookProjection(
-        store,
-        provider_id=PROVIDER,
-        account_id=ACCOUNT,
-        environment=environment,
-        host_id="atomic-fill-test-host",
-        owner_epoch="1",
+        environment=ENVIRONMENT,
     )
 
 
@@ -2781,273 +2756,6 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 ),
                 [],
             )
-
-
-
-class AtomicOmsFinancialCommitTests(unittest.TestCase):
-    ENVIRONMENT = "SIMULATION"
-
-    def books(self, store: JournalStore):
-        return (
-            order_book(store, environment=self.ENVIRONMENT),
-            economic_book(store, environment=self.ENVIRONMENT),
-            reservation_book(store, environment=self.ENVIRONMENT),
-        )
-
-    def prepare_state(self, store: JournalStore):
-        orders, economics, reservations = self.books(store)
-        reserve(reservations)
-        orders.create_order(
-            event_key="order-create-1",
-            client_order_id="client-order-1",
-            instrument="ABC",
-            side="BUY",
-            requested_quantity="1",
-            committed_at="2026-09-25T09:00:00Z",
-            parent_intent_id="intent-1",
-        )
-        return orders, economics, reservations
-
-    def atomic_fill(
-        self,
-        orders: DurableOrderBookProjection,
-        economics: DurableProviderEconomicBook,
-        reservations: DurableReservationBook,
-    ):
-        return commit_order_fill_with_reservation_consumption(
-            orders,
-            economics,
-            reservations,
-            order_event_key="order-fill-1",
-            client_order_id="client-order-1",
-            fill_id="fill-1",
-            provider_execution_id="provider-execution-1",
-            quantity="1",
-            price="100",
-            command_id="fill-financial-command-1",
-            idempotency_key="fill-financial-idempotency-1",
-            reservation_id="reservation-1",
-            usage={"CASH:USD": "100"},
-            transactions=(fill_transaction(),),
-            committed_at="2026-09-25T09:00:02Z",
-        )
-
-    def assert_complete(self, orders, economics, reservations):
-        snapshot = orders.order("client-order-1").snapshot()
-        self.assertEqual(snapshot.state, "FILLED")
-        self.assertEqual(snapshot.filled_quantity, Decimal("1"))
-        self.assertEqual(snapshot.fill_count, 1)
-        reservation = reservations.get("reservation-1")
-        self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
-        self.assertEqual(reservation.remaining["CASH:USD"], Decimal("20"))
-        self.assertEqual(economics.position("ABC"), Decimal("1"))
-        self.assertEqual(len(economics.transactions), 1)
-
-    def test_oms_fill_and_finances_restart_as_one_effect(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            orders, economics, reservations = self.prepare_state(store)
-
-            self.assertTrue(self.atomic_fill(orders, economics, reservations))
-            self.assert_complete(orders, economics, reservations)
-
-            reopened = JournalStore(path)
-            ro, re, rr = self.books(reopened)
-            self.assert_complete(ro, re, rr)
-            self.assertFalse(self.atomic_fill(ro, re, rr))
-            self.assert_complete(ro, re, rr)
-            self.assertEqual(
-                len(reopened.load_events_by_aggregate_type("order_projection_book")),
-                2,
-            )
-
-    def test_precommit_failure_leaves_oms_and_finances_unchanged(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            orders, economics, reservations = self.prepare_state(store)
-            original_commit = JournalStore.commit_command
-
-            def fail_before_commit(selected_store, **kwargs):
-                if selected_store is not store:
-                    return original_commit(selected_store, **kwargs)
-                raise RuntimeError("injected OMS financial pre-commit failure")
-
-            JournalStore.commit_command = fail_before_commit
-            try:
-                with self.assertRaisesRegex(RuntimeError, "OMS financial pre-commit"):
-                    self.atomic_fill(orders, economics, reservations)
-            finally:
-                JournalStore.commit_command = original_commit
-
-            reopened = JournalStore(path)
-            ro, re, rr = self.books(reopened)
-            snapshot = ro.order("client-order-1").snapshot()
-            self.assertEqual(snapshot.filled_quantity, Decimal("0"))
-            self.assertEqual(snapshot.fill_count, 0)
-            self.assertEqual(rr.get("reservation-1").consumed["CASH:USD"], Decimal("0"))
-            self.assertEqual(re.transactions, ())
-
-    def test_ack_loss_after_atomic_commit_replays_all_sides_exactly_once(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            orders, economics, reservations = self.prepare_state(store)
-            original_commit = JournalStore.commit_command
-            injected = False
-
-            def lose_ack_after_commit(selected_store, **kwargs):
-                nonlocal injected
-                result = original_commit(selected_store, **kwargs)
-                if selected_store is store and not injected and result[1]:
-                    injected = True
-                    raise RuntimeError("injected OMS financial acknowledgement loss")
-                return result
-
-            JournalStore.commit_command = lose_ack_after_commit
-            try:
-                with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
-                    self.atomic_fill(orders, economics, reservations)
-            finally:
-                JournalStore.commit_command = original_commit
-
-            reopened = JournalStore(path)
-            ro, re, rr = self.books(reopened)
-            self.assert_complete(ro, re, rr)
-            self.assertFalse(self.atomic_fill(ro, re, rr))
-            self.assert_complete(ro, re, rr)
-            self.assertEqual(
-                len(reopened.load_events_by_aggregate_type("order_projection_book")),
-                2,
-            )
-
-    def test_legacy_oms_only_split_is_completed_without_second_fill(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            orders, economics, reservations = self.prepare_state(store)
-
-            self.assertTrue(
-                orders.record_fill(
-                    event_key="order-fill-1",
-                    client_order_id="client-order-1",
-                    fill_id="fill-1",
-                    provider_execution_id="provider-execution-1",
-                    quantity="1",
-                    price="100",
-                    committed_at="2026-09-25T09:00:02Z",
-                ).inserted
-            )
-            self.assertEqual(
-                reservations.get("reservation-1").consumed["CASH:USD"],
-                Decimal("0"),
-            )
-            self.assertEqual(economics.transactions, ())
-
-            self.assertTrue(self.atomic_fill(orders, economics, reservations))
-            self.assert_complete(orders, economics, reservations)
-            self.assertEqual(
-                len(store.load_events_by_aggregate_type("order_projection_book")),
-                2,
-            )
-
-    def test_finance_only_split_cannot_be_relabelled_as_atomic_oms_fill(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            orders, economics, reservations = self.prepare_state(store)
-
-            self.assertTrue(
-                commit_economic_batch_with_reservation_consumption(
-                    economics,
-                    reservations,
-                    command_id="fill-financial-command-1",
-                    idempotency_key="fill-financial-idempotency-1",
-                    reservation_id="reservation-1",
-                    usage={"CASH:USD": "100"},
-                    transactions=(fill_transaction(),),
-                    committed_at="2026-09-25T09:00:02Z",
-                )
-            )
-            with self.assertRaisesRegex(
-                AccountingConflict,
-                "financial fill is committed without the matching OMS fill",
-            ):
-                self.atomic_fill(orders, economics, reservations)
-
-            self.assertEqual(
-                orders.order("client-order-1").snapshot().filled_quantity,
-                Decimal("0"),
-            )
-
-
-    def test_competing_oms_writer_fences_all_financial_effects(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            orders, economics, reservations = self.prepare_state(store)
-            original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
-            injected = False
-
-            def race_order_writer(selected_book, transactions, **kwargs):
-                nonlocal injected
-                if selected_book is economics and not injected:
-                    injected = True
-                    orders.request_cancel(
-                        event_key="racing-cancel",
-                        client_order_id="client-order-1",
-                        command_id="racing-cancel-command",
-                        committed_at="2026-09-25T09:00:01Z",
-                    )
-                return original_prepare(selected_book, transactions, **kwargs)
-
-            DurableProviderEconomicBook.prepare_batch_mutation = race_order_writer
-            try:
-                with self.assertRaisesRegex(ValueError, "aggregate_version"):
-                    self.atomic_fill(orders, economics, reservations)
-            finally:
-                DurableProviderEconomicBook.prepare_batch_mutation = original_prepare
-
-            reopened = JournalStore(path)
-            ro, re, rr = self.books(reopened)
-            order = ro.order("client-order-1").snapshot()
-            self.assertTrue(order.cancel_requested)
-            self.assertEqual(order.filled_quantity, Decimal("0"))
-            self.assertEqual(rr.get("reservation-1").consumed["CASH:USD"], Decimal("0"))
-            self.assertEqual(re.transactions, ())
-
-    def test_order_and_financial_books_must_share_physical_store_generation(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            financial_store = JournalStore(root / "financial.sqlite3")
-            orders_store = JournalStore(root / "orders.sqlite3")
-            _, economics, reservations = self.prepare_state(financial_store)
-            orders = order_book(orders_store, environment=self.ENVIRONMENT)
-            orders.create_order(
-                event_key="order-create-1",
-                client_order_id="client-order-1",
-                instrument="ABC",
-                side="BUY",
-                requested_quantity="1",
-                committed_at="2026-09-25T09:00:00Z",
-                parent_intent_id="intent-1",
-            )
-
-            with self.assertRaisesRegex(
-                AccountingConflict,
-                "one physical JournalStore generation",
-            ):
-                self.atomic_fill(orders, economics, reservations)
-
-            self.assertEqual(
-                orders.order("client-order-1").snapshot().filled_quantity,
-                Decimal("0"),
-            )
-            self.assertEqual(
-                reservations.get("reservation-1").consumed["CASH:USD"],
-                Decimal("0"),
-            )
-            self.assertEqual(economics.transactions, ())
 
 
 

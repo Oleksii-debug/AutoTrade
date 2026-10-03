@@ -1,3 +1,5 @@
+using AutoTrade.Contracts;
+
 namespace AutoTrade.Desktop;
 
 /// <summary>
@@ -8,7 +10,10 @@ namespace AutoTrade.Desktop;
 /// </summary>
 public sealed class WebExperienceSecurityPolicy
 {
-    private const string CanonicalApiRoot = "/api/v1";
+    private const string CanonicalOperationPrefix = "/api/v1/operations/";
+    private static readonly string StatePath = "/" + HostApiRoutes.GetState;
+    private static readonly string CommandPath = "/" + HostApiRoutes.SubmitCommand;
+    private static readonly string EventPath = "/" + HostApiRoutes.StreamEvents;
 
     public WebExperienceSecurityPolicy(Uri hostOrigin)
     {
@@ -55,8 +60,24 @@ public sealed class WebExperienceSecurityPolicy
         }
 
         string path = target.AbsolutePath;
-        return string.Equals(path, CanonicalApiRoot, StringComparison.Ordinal)
-            || path.StartsWith(CanonicalApiRoot + "/", StringComparison.Ordinal);
+        if (string.Equals(path, StatePath, StringComparison.Ordinal)
+            || string.Equals(path, CommandPath, StringComparison.Ordinal)
+            || string.Equals(path, EventPath, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!path.StartsWith(CanonicalOperationPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string operationId = path[CanonicalOperationPrefix.Length..];
+        return Guid.TryParseExact(operationId, "D", out Guid parsedOperationId)
+            && string.Equals(
+                parsedOperationId.ToString("D"),
+                operationId,
+                StringComparison.Ordinal);
     }
 
     /// <summary>

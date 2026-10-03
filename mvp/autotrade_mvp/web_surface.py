@@ -58,6 +58,9 @@ def render_semantic_page(
 ) -> str:
     """Render a complete document that remains understandable without CSS or script."""
 
+    if type(snapshot) is not dict:
+        snapshot = {}
+
     state_version = _text(snapshot.get("state_version"), "0")
     event_cursor = _text(snapshot.get("event_cursor"), "0")
     operations = snapshot.get("operations")

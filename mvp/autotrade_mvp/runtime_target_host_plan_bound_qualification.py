@@ -75,22 +75,25 @@ def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
 
     if type(value) is not RuntimeCampaignCut:
         raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
-    for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
-        if type(getattr(value, field)) is not str:
-            raise RuntimeTargetHostCompositionError(
-                f"campaign_cut {field} must remain exact inert text"
-            )
-    for field in ("start_journal_sequence", "started_monotonic_ns"):
-        field_value = getattr(value, field)
-        if type(field_value) is not int or field_value < 0:
-            raise RuntimeTargetHostCompositionError(
-                f"campaign_cut {field} must remain a non-negative integer"
-            )
     detached = copy(value)
     if type(detached) is not RuntimeCampaignCut or detached is value:
         raise RuntimeTargetHostCompositionError(
             "campaign_cut could not be detached at terminal authority boundary"
         )
+    # Validate the detached copy, not the caller object. A hostile concurrent
+    # mutation that lands while ``copy`` runs therefore cannot smuggle executable
+    # or rewritten scalar state across this terminal boundary.
+    for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
+        if type(getattr(detached, field)) is not str:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain exact inert text"
+            )
+    for field in ("start_journal_sequence", "started_monotonic_ns"):
+        field_value = getattr(detached, field)
+        if type(field_value) is not int or field_value < 0:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain a non-negative integer"
+            )
     return detached
 
 

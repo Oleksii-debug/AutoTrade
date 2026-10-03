@@ -1029,27 +1029,6 @@ class JournalStore:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
-            journal_sequence_cut = (
-                self._journal_sequence_value(connection)
-                if self.SCHEMA_VERSION >= 6
-                else 0
-            )
-            if (
-                expected_journal_sequence is not None
-                and journal_sequence_cut != expected_journal_sequence
-            ):
-                connection.rollback()
-                raise ValueError(
-                    "journal sequence changed after whole-store validation"
-                )
-            if expected_counts is not None:
-                actual_counts = _whole_store_state_counts(connection)
-                if actual_counts != expected_counts:
-                    connection.rollback()
-                    raise ValueError(
-                        "whole-store state changed after bootstrap validation"
-                    )
-
             current = self._aggregate_version_value(
                 connection,
                 aggregate_type,
@@ -1264,6 +1243,27 @@ class JournalStore:
                     self._journal_sequence_value(connection)
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
+
+            journal_sequence_cut = (
+                self._journal_sequence_value(connection)
+                if self.SCHEMA_VERSION >= 6
+                else 0
+            )
+            if (
+                expected_journal_sequence is not None
+                and journal_sequence_cut != expected_journal_sequence
+            ):
+                connection.rollback()
+                raise ValueError(
+                    "journal sequence changed after whole-store validation"
+                )
+            if expected_counts is not None:
+                actual_counts = _whole_store_state_counts(connection)
+                if actual_counts != expected_counts:
+                    connection.rollback()
+                    raise ValueError(
+                        "whole-store state changed after bootstrap validation"
+                    )
 
             current = self._aggregate_version_value(
                 connection,

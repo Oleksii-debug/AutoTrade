@@ -76,6 +76,10 @@ import autotrade_runtime.artifacts as product
 assert research_artifacts.ArtifactStore is product.ArtifactStore
 assert importlib.import_module("research.autotrade_research.artifacts.store") is importlib.import_module("autotrade_runtime.artifacts.store")
 assert importlib.import_module("research.autotrade_research.artifacts._root_authority") is importlib.import_module("autotrade_runtime.artifacts._root_authority")
+repo_json = importlib.import_module("research.autotrade_research.io.strict_json")
+runtime_json = importlib.import_module("autotrade_runtime.strict_json")
+assert repo_json.strict_json_loads is runtime_json.strict_json_loads
+assert repo_json.InvalidJsonDomainError is runtime_json.InvalidJsonDomainError
 """,
             research_path=False,
         )

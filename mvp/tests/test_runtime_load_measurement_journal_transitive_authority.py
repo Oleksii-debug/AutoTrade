@@ -239,6 +239,142 @@ class RuntimeLoadMeasurementJournalTransitiveAuthorityTests(unittest.TestCase):
                 store.get_event(self._measurement_id(plan_id, expected.event_id))
             )
 
+    def test_operation_cannot_swap_exact_journal_store_class(self) -> None:
+        class ForgedStore(JournalStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+
+            def attack() -> None:
+                _append(store, expected)
+                store.__class__ = ForgedStore
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"JournalStore exact class changed",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                if type(store) is ForgedStore:
+                    store.__class__ = JournalStore
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_shadow_journal_decoder_on_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+
+            def attack() -> None:
+                _append(store, expected)
+                store._decode_event_row = lambda _row: {"event_id": "forged"}
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"JournalStore instance state shape changed",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                vars(store).pop("_decode_event_row", None)
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_replace_journal_instance_getattribute(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+            had_own_member = "__getattribute__" in JournalStore.__dict__
+            original_member = JournalStore.__dict__.get("__getattribute__")
+
+            def forged_getattribute(self, name):
+                return object.__getattribute__(self, name)
+
+            def attack() -> None:
+                _append(store, expected)
+                JournalStore.__getattribute__ = forged_getattribute
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"JournalStore dependency changed.*__getattribute__",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                if had_own_member:
+                    JournalStore.__getattribute__ = original_member
+                else:
+                    del JournalStore.__getattribute__
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_mutate_identity_equality_code_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+            identity = vars(store)["_store_identity"]
+            identity_type = type(identity)
+            equality = identity_type.__eq__
+            original_code = equality.__code__
+
+            def forged_eq(self, other):
+                return True
+
+            def attack() -> None:
+                _append(store, expected)
+                equality.__code__ = forged_eq.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"JournalStoreIdentity executable authority changed.*__eq__",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                equality.__code__ = original_code
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_mutate_stored_identity_fields_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+            identity = vars(store)["_store_identity"]
+            original_path = identity.canonical_path
+
+            def attack() -> None:
+                _append(store, expected)
+                object.__setattr__(identity, "canonical_path", original_path + ".forged")
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"stored JournalStore identity state changed.*canonical_path",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                object.__setattr__(identity, "canonical_path", original_path)
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

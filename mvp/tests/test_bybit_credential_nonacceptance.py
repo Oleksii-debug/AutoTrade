@@ -29,6 +29,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=0,
                         product_family=family,
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.STILL_ACCEPTED,
                 )
@@ -38,6 +39,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
             classify_bybit_credential_nonacceptance(
                 ret_code=10003,
                 product_family="SPOT",
+            response_surface="V5_UTA_REST",
             ),
             BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
         )
@@ -49,6 +51,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=-2015,
                         product_family=family,
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
                 )
@@ -62,6 +65,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=-2015,
                         product_family=family,
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.INCONCLUSIVE,
                 )
@@ -73,6 +77,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=33004,
                         product_family=family,
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
                 )
@@ -82,6 +87,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=33004,
                         product_family=family,
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.INCONCLUSIVE,
                 )
@@ -93,6 +99,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=code,
                         product_family="SPOT",
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.INCONCLUSIVE,
                 )
@@ -104,9 +111,36 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                     classify_bybit_credential_nonacceptance(
                         ret_code=code,
                         product_family="SPOT",
+                    response_surface="V5_UTA_REST",
                     ),
                     BybitCredentialNonAcceptance.INCONCLUSIVE,
                 )
+
+    def test_websocket_10003_cannot_be_relabelled_as_api_key_rejection(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "V5_UTA_REST",
+        ):
+            classify_bybit_credential_nonacceptance(
+                ret_code=10003,
+                product_family="SPOT",
+                response_surface="WS_OE_GENERAL",
+            )
+
+    def test_noncanonical_or_hostile_response_surface_is_rejected(self):
+        for surface in ("", "V5_UTA_REST ", "v5_uta_rest", "REST"):
+            with self.subTest(surface=surface), self.assertRaises(ProviderCoreError):
+                classify_bybit_credential_nonacceptance(
+                    ret_code=10003,
+                    product_family="SPOT",
+                    response_surface=surface,
+                )
+        with self.assertRaises(ProviderCoreError):
+            classify_bybit_credential_nonacceptance(
+                ret_code=10003,
+                product_family="SPOT",
+                response_surface=_StrSubclass("V5_UTA_REST"),
+            )
 
     def test_noncanonical_family_is_rejected_instead_of_normalized(self):
         for family in ("spot", " SPOT", "SPOT ", "FUTURES", ""):
@@ -114,6 +148,7 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
                 classify_bybit_credential_nonacceptance(
                     ret_code=10003,
                     product_family=family,
+                response_surface="V5_UTA_REST",
                 )
 
     def test_hostile_scalar_subclasses_are_not_admitted_as_semantic_authority(self):
@@ -121,16 +156,19 @@ class BybitCredentialNonAcceptanceTests(unittest.TestCase):
             classify_bybit_credential_nonacceptance(
                 ret_code=_IntSubclass(10003),
                 product_family="SPOT",
+            response_surface="V5_UTA_REST",
             )
         with self.assertRaises(ProviderCoreError):
             classify_bybit_credential_nonacceptance(
                 ret_code=10003,
                 product_family=_StrSubclass("SPOT"),
+            response_surface="V5_UTA_REST",
             )
         with self.assertRaises(ProviderCoreError):
             classify_bybit_credential_nonacceptance(
                 ret_code=True,
                 product_family="SPOT",
+            response_surface="V5_UTA_REST",
             )
 
 

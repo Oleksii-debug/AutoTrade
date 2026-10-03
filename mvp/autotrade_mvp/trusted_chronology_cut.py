@@ -455,10 +455,11 @@ _impl.parse_signed_qualification_attestation = (
     _guarded_parse_signed_qualification_attestation
 )
 
-# Capture the complete implementation namespace only after all guarded callback
-# and parser seams are installed. The complete seal therefore also freezes the
-# wrappers themselves, including their executable code/defaults/closure cells.
-_require_impl_namespace_sealed = _build_impl_namespace_guard(_impl.__dict__)
+# Setup required temporary exclusions while the four wrappers were being installed.
+# Rebuild the callback guard now against the finished runtime namespace so callback
+# code cannot replace the verifier, reader or either parser wrapper itself.
+_callback_impl_guard = _build_impl_namespace_guard(_impl.__dict__)
+_require_impl_namespace_sealed = _callback_impl_guard
 _require_recovery_owner_globals_sealed = _build_named_namespace_guard(
     RecoveryController.durable_owner_chain.__globals__,
     names=frozenset(

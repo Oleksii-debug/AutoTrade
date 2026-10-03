@@ -619,7 +619,8 @@ def prepare_order_request(
         raise WhiteBitAdapterError("capability environment does not match target environment")
     if capability.instrument_version != intent.instrument_version:
         raise WhiteBitAdapterError("capability instrument version does not match intent")
-    if not capability.admits(
+    if not CapabilitySnapshot.admits(
+        capability,
         at=point,
         order_type=intent.order_type,
         time_in_force=intent.time_in_force,

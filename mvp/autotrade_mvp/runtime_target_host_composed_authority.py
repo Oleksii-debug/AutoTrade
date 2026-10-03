@@ -24,6 +24,7 @@ from autotrade_runtime.artifacts import (
 )
 
 from .performance_qualification import (
+    RuntimeBudgetDecision,
     RuntimeBudgetError,
     RuntimeBudgetSpec,
     evaluate_runtime_budget,
@@ -142,6 +143,7 @@ def _build_signed_campaign_matcher(
     sha256_factory,
     parser_dependency_guard=None,
     budget_dependency_guard=None,
+    budget_decision_type=None,
 ):
     """Capture signed campaign re-read, parse, hash, and budget policy authority."""
 
@@ -199,6 +201,22 @@ def _build_signed_campaign_matcher(
             ) from error
         if parser_dependency_guard is not None:
             parser_dependency_guard()
+        if type(parsed) is not parsed_campaign_type:
+            raise composition_error_type(
+                "signed campaign parser returned non-canonical parsed result type"
+            )
+        try:
+            canonical_raw = parsed.canonical_bytes
+        except (TypeError, ValueError) as error:
+            raise composition_error_type(
+                "signed campaign parsed result cannot reproduce canonical raw bytes"
+            ) from error
+        if parser_dependency_guard is not None:
+            parser_dependency_guard()
+        if type(canonical_raw) is not bytes or canonical_raw != raw:
+            raise composition_error_type(
+                "signed campaign parsed result does not reproduce retained raw evidence"
+            )
 
         observation = parsed.evidence.observation
         expected_ids = tuple(sample.event_id for sample in measurement.financial_samples)
@@ -257,6 +275,10 @@ def _build_signed_campaign_matcher(
             budget_dependency_guard()
         if parser_dependency_guard is not None:
             parser_dependency_guard()
+        if budget_decision_type is not None and type(decision) is not budget_decision_type:
+            raise composition_error_type(
+                "runtime budget evaluator returned non-canonical decision type"
+            )
         if decision.status != "PASS" or decision.reasons:
             reasons = ",".join(decision.reasons) if decision.reasons else "none"
             raise composition_error_type(
@@ -501,6 +523,7 @@ _PRODUCTION_SIGNED_CAMPAIGN_MATCHER = _build_signed_campaign_matcher(
     sha256_factory=sha256,
     parser_dependency_guard=_PRODUCTION_CAMPAIGN_PARSER_GUARD,
     budget_dependency_guard=_PRODUCTION_BUDGET_EVALUATOR_GUARD,
+    budget_decision_type=RuntimeBudgetDecision,
 )
 _PRODUCTION_PROJECTION_DIGEST_BUILDER = _build_projection_digest_builder(
     projection_schema_version=PROJECTION_SCHEMA_VERSION,

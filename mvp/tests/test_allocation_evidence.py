@@ -1350,6 +1350,105 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_reservation_state_digest="4" * 64,
             )
 
+    def test_portfolio_candidates_must_share_one_forecast_horizon(self):
+        objective_a, market_a, capital, stress, resolved = self.bundle()
+        valuation_a = resolved["valuation:aaa:v1"]
+        horizon_b = "2026-09-27T18:30:00Z"
+
+        objective_b = self.evidence(
+            evidence_id="objective:bbb:v1",
+            kind="OBJECTIVE",
+            payload={
+                **objective_a.payload,
+                "symbol": "BBB",
+                "candidate_id": "candidate:bbb:v1",
+                "proposal_id": "proposal:bbb:v1",
+                "forecast_horizon_end": horizon_b,
+            },
+        )
+        market_b = self.evidence(
+            evidence_id="market:bbb:v1",
+            kind="MARKET_CONSTRAINT",
+            payload={
+                **market_a.payload,
+                "symbol": "BBB",
+                "instrument_version": "instrument:bbb:v1",
+                "capability_snapshot_id": "capability:2",
+            },
+        )
+        valuation_b = self.evidence(
+            evidence_id="valuation:bbb:v1",
+            kind="VALUATION",
+            payload={
+                **valuation_a.payload,
+                "symbol": "BBB",
+                "instrument_version": "instrument:bbb:v1",
+                "capability_snapshot_id": "capability:2",
+                "holding_cost_horizon_end": horizon_b,
+            },
+        )
+        capital = self.evidence(
+            evidence_id=capital.evidence_id,
+            kind="CAPITAL_STATE",
+            payload={
+                **capital.payload,
+                "position_quantities": {"AAA": "0", "BBB": "0"},
+            },
+        )
+        stress = self.evidence(
+            evidence_id=stress.evidence_id,
+            kind="STRESS_SCENARIO",
+            payload={
+                **stress.payload,
+                "shocks": {"AAA": "-0.20", "BBB": "-0.20"},
+                "instrument_versions": {
+                    "AAA": "instrument:aaa:v3",
+                    "BBB": "instrument:bbb:v1",
+                },
+            },
+        )
+        resolved = {
+            objective_a.evidence_id: objective_a,
+            market_a.evidence_id: market_a,
+            valuation_a.evidence_id: valuation_a,
+            objective_b.evidence_id: objective_b,
+            market_b.evidence_id: market_b,
+            valuation_b.evidence_id: valuation_b,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        candidate_b = ObjectiveCandidate.create(
+            symbol="BBB",
+            desired_notional="500",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="0",
+            max_executable_notional="500",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "objective candidates must share one forecast horizon",
+        ):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(), candidate_b),
+                self.policy(),
+                objective_evidence={"AAA": objective_a, "BBB": objective_b},
+                market_evidence={"AAA": market_a, "BBB": market_b},
+                valuation_evidence={"AAA": valuation_a, "BBB": valuation_b},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
     def test_evidence_bound_stress_coverage_ignores_only_zero_unchanged_symbols(self):
         objective_a, market_a, capital, stress, resolved = self.bundle()
         valuation_a = resolved["valuation:aaa:v1"]

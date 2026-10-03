@@ -148,7 +148,10 @@ class FifoLotBookTests(unittest.TestCase):
         with patch.object(
             lot_module,
             "_decimal_sum",
-            side_effect=ValueError("synthetic exact resource failure"),
+            side_effect=[
+                Decimal("2"),
+                ValueError("synthetic exact resource failure"),
+            ],
         ):
             with self.assertRaisesRegex(ValueError, "synthetic exact resource failure"):
                 book.sell("1", "130")

@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 import unittest
 
+import autotrade_research.data.vintages as vintages_module
 from autotrade_research.data.vintages import (
     HistoricalConflict,
     HistoricalDataError,
@@ -111,6 +114,21 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
         )
 
         self.assertEqual([row["source_sequence"] for row in history], ["10", "11"])
+
+    def test_research_market_event_fields_match_canonical_schema(self):
+        schema_path = (
+            Path(__file__).resolve().parents[2]
+            / "contracts"
+            / "jsonschema"
+            / "market.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        definition = schema["$defs"]["MarketEvent"]
+        self.assertFalse(definition["additionalProperties"])
+        self.assertEqual(
+            vintages_module._MARKET_EVENT_CANONICAL_FIELDS,
+            frozenset(definition["properties"]),
+        )
 
     def test_noncanonical_market_event_field_cannot_become_research_authority(self):
         row = _event(1, available_minutes=1, ingested_minutes=3)

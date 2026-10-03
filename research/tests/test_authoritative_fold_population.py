@@ -400,6 +400,25 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 spec=self.spec,
             )
 
+    def test_authenticated_population_cannot_hide_noncanonical_market_field(self):
+        rows = self._base_events()
+        rows[0]["stream_generation"] = "1"
+        manifest_digest = self._register(rows)
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "canonical MarketEvent contract",
+        ):
+            fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+
     def test_caller_forged_validation_feature_is_rejected(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)

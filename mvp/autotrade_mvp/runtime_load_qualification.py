@@ -567,6 +567,14 @@ def collect_runtime_campaign_evidence(
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
         raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
 
+    # Freeze the durable end cut before sampling the terminal monotonic clock.
+    # This is intentionally conservative: the measured duration may include time
+    # after the last admitted journal event, but an event committed after the
+    # terminal clock can never be credited to an already-ended duration.
+    end_sequence = journal.current_journal_sequence()
+    if end_sequence < cut.start_journal_sequence:
+        raise RuntimeBudgetError("campaign journal end cut precedes its start cut")
+
     ended_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="ended_monotonic_ns",
@@ -579,16 +587,20 @@ def collect_runtime_campaign_evidence(
     elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
     observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
     declared_duration_us = plan.declared_duration_ms * 1000
-    end_sequence = journal.current_journal_sequence()
+
     events = journal.load_events_after_journal_sequence(
         cut.start_journal_sequence,
         limit=max_events,
     )
-    if end_sequence > cut.start_journal_sequence:
-        if not events or events[-1].get("journal_sequence") != end_sequence:
+    if events:
+        if events[-1].get("journal_sequence") != end_sequence:
             raise RuntimeBudgetError(
-                "campaign journal range exceeds collector bound; evidence is incomplete"
+                "campaign journal range exceeds frozen end cut; evidence is incomplete"
             )
+    elif end_sequence != cut.start_journal_sequence:
+        raise RuntimeBudgetError(
+            "campaign journal range exceeds collector bound; evidence is incomplete"
+        )
 
     # Classification happens over the full durable cut. The caller-provided
     # financial_aggregate_types field is never a filter authority.

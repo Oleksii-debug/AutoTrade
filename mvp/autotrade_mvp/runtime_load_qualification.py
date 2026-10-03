@@ -33,7 +33,12 @@ from .performance_qualification import (
     RuntimeLoadObservation,
     evaluate_runtime_budget,
 )
-from .persistence import JournalStore, require_exact_journal_store_authority
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
+from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
 
 
 _CUT_TOKEN = object()
@@ -93,6 +98,26 @@ def _digest(payload: Mapping[str, object]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _journal_store_identity_digest(identity: JournalStoreIdentity) -> str:
+    """Bind campaign evidence to one exact canonical physical journal generation."""
+
+    identity = require_exact_journal_store_identity(
+        identity,
+        subject="runtime qualification journal store identity",
+    )
+    return _digest(
+        {
+            "canonical_path": identity.canonical_path,
+            "filesystem_device": identity.filesystem_device,
+            "filesystem_inode": identity.filesystem_inode,
+            "identity_source": identity.identity_source,
+            "windows_volume_serial": identity.windows_volume_serial,
+            "windows_file_index_high": identity.windows_file_index_high,
+            "windows_file_index_low": identity.windows_file_index_low,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -246,6 +271,7 @@ class RuntimeCampaignCut:
     spec_digest: str
     start_journal_sequence: int
     started_monotonic_ns: int
+    journal_store_identity_digest: str = ""
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -256,6 +282,14 @@ class RuntimeCampaignCut:
         )
         object.__setattr__(
             self, "spec_digest", _sha256_identity(self.spec_digest, name="spec_digest")
+        )
+        object.__setattr__(
+            self,
+            "journal_store_identity_digest",
+            _sha256_identity(
+                self.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
         )
         object.__setattr__(
             self,
@@ -297,6 +331,7 @@ class RuntimeCampaignEvidence:
     resource_evidence_hash: str
     resource_metrics: Mapping[str, int]
     journal_taxonomy_digest: str = ""
+    journal_store_identity_digest: str = ""
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -309,6 +344,14 @@ class RuntimeCampaignEvidence:
         )
         object.__setattr__(
             self, "spec_digest", _sha256_identity(self.spec_digest, name="spec_digest")
+        )
+        object.__setattr__(
+            self,
+            "journal_store_identity_digest",
+            _sha256_identity(
+                self.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
         )
         if (
             not isinstance(self.release_sha, str)
@@ -471,6 +514,7 @@ class RuntimeCampaignEvidence:
                 "resource_evidence_hash": self.resource_evidence_hash,
                 "resource_metrics": dict(self.resource_metrics),
                 "journal_taxonomy_digest": self.journal_taxonomy_digest,
+                "journal_store_identity_digest": self.journal_store_identity_digest,
             }
         )
 
@@ -510,7 +554,7 @@ def begin_runtime_campaign(
     plan: RuntimeCampaignPlan,
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> RuntimeCampaignCut:
-    require_exact_journal_store_authority(
+    journal_identity = require_exact_journal_store_authority(
         journal,
         subject="runtime qualification JournalStore",
     )
@@ -528,24 +572,27 @@ def begin_runtime_campaign(
         raise RuntimeBudgetError("runtime campaign plan does not match budget spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
         raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
-    # Bracket the start-clock sample with one stable durable journal sequence.
-    # Any event racing across that sample makes the cut ambiguous: counting it can
-    # overstate timed throughput, while hiding it can break event conservation.
-    start_journal_sequence = JournalStore.current_journal_sequence(journal)
-    started_monotonic_ns = _positive_int(
-        monotonic_ns(),
-        name="started_monotonic_ns",
-        allow_zero=True,
-    )
-    if JournalStore.current_journal_sequence(journal) != start_journal_sequence:
-        raise RuntimeBudgetError(
-            "campaign journal changed while sampling the start clock"
+    identity_digest = _journal_store_identity_digest(journal_identity)
+    # Bracket the start-clock sample with one stable durable journal sequence and
+    # one selected physical backing generation. A callback cannot rebind the
+    # JournalStore to another valid database while preserving a favorable cut.
+    with journal_store_authority_scope(journal, journal_identity):
+        start_journal_sequence = JournalStore.current_journal_sequence(journal)
+        started_monotonic_ns = _positive_int(
+            monotonic_ns(),
+            name="started_monotonic_ns",
+            allow_zero=True,
         )
+        if JournalStore.current_journal_sequence(journal) != start_journal_sequence:
+            raise RuntimeBudgetError(
+                "campaign journal changed while sampling the start clock"
+            )
     return RuntimeCampaignCut(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
         start_journal_sequence=start_journal_sequence,
         started_monotonic_ns=started_monotonic_ns,
+        journal_store_identity_digest=identity_digest,
         _token=_CUT_TOKEN,
     )
 
@@ -564,7 +611,7 @@ def collect_runtime_campaign_evidence(
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
     max_events: int = 100000,
 ) -> RuntimeCampaignEvidence:
-    require_exact_journal_store_authority(
+    journal_identity = require_exact_journal_store_authority(
         journal,
         subject="runtime qualification JournalStore",
     )
@@ -578,50 +625,52 @@ def collect_runtime_campaign_evidence(
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
         raise RuntimeBudgetError("runtime campaign plan journal taxonomy is stale")
+    identity_digest = _journal_store_identity_digest(journal_identity)
+    if cut.journal_store_identity_digest != identity_digest:
+        raise RuntimeBudgetError("campaign cut belongs to another journal generation")
 
-    # Freeze the durable end cut before sampling the terminal monotonic clock.
-    # This is intentionally conservative: the measured duration may include time
-    # after the last admitted journal event, but an event committed after the
-    # terminal clock can never be credited to an already-ended duration.
-    end_sequence = JournalStore.current_journal_sequence(journal)
-    if end_sequence < cut.start_journal_sequence:
-        raise RuntimeBudgetError("campaign journal end cut precedes its start cut")
+    # Freeze terminal journal/backlog state and read back the full cut under the
+    # exact physical generation selected by begin_runtime_campaign().
+    with journal_store_authority_scope(journal, journal_identity):
+        end_sequence = JournalStore.current_journal_sequence(journal)
+        if end_sequence < cut.start_journal_sequence:
+            raise RuntimeBudgetError("campaign journal end cut precedes its start cut")
 
-    # Backlog is part of the terminal campaign state. Snapshot it before the
-    # terminal clock so an acknowledgement that races after campaign end cannot
-    # erase reconnect pressure from the already-ended interval. A later drain is
-    # intentionally conservative for this evidence cut.
-    backlog_remaining = JournalStore.pending_outbox_count(journal)
-    if type(backlog_remaining) is not int or backlog_remaining < 0:
-        raise RuntimeBudgetError("campaign reconnect backlog is invalid")
+        # Backlog is part of the terminal campaign state. Snapshot it before the
+        # terminal clock so an acknowledgement that races after campaign end cannot
+        # erase reconnect pressure from the already-ended interval. A later drain is
+        # intentionally conservative for this evidence cut.
+        backlog_remaining = JournalStore.pending_outbox_count(journal)
+        if type(backlog_remaining) is not int or backlog_remaining < 0:
+            raise RuntimeBudgetError("campaign reconnect backlog is invalid")
 
-    ended_monotonic_ns = _positive_int(
-        monotonic_ns(),
-        name="ended_monotonic_ns",
-        allow_zero=True,
-    )
-    if ended_monotonic_ns < cut.started_monotonic_ns:
-        raise RuntimeBudgetError(
-            "monotonic clock moved backwards during runtime campaign"
+        ended_monotonic_ns = _positive_int(
+            monotonic_ns(),
+            name="ended_monotonic_ns",
+            allow_zero=True,
         )
-    elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
-    observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
-    declared_duration_us = plan.declared_duration_ms * 1000
-
-    events = JournalStore.load_events_after_journal_sequence(
-        journal,
-        cut.start_journal_sequence,
-        limit=max_events,
-    )
-    if events:
-        if events[-1].get("journal_sequence") != end_sequence:
+        if ended_monotonic_ns < cut.started_monotonic_ns:
             raise RuntimeBudgetError(
-                "campaign journal range exceeds frozen end cut; evidence is incomplete"
+                "monotonic clock moved backwards during runtime campaign"
             )
-    elif end_sequence != cut.start_journal_sequence:
-        raise RuntimeBudgetError(
-            "campaign journal range exceeds collector bound; evidence is incomplete"
+        elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
+        observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
+        declared_duration_us = plan.declared_duration_ms * 1000
+
+        events = JournalStore.load_events_after_journal_sequence(
+            journal,
+            cut.start_journal_sequence,
+            limit=max_events,
         )
+        if events:
+            if events[-1].get("journal_sequence") != end_sequence:
+                raise RuntimeBudgetError(
+                    "campaign journal range exceeds frozen end cut; evidence is incomplete"
+                )
+        elif end_sequence != cut.start_journal_sequence:
+            raise RuntimeBudgetError(
+                "campaign journal range exceeds collector bound; evidence is incomplete"
+            )
 
     # Classification happens over the full durable cut. The caller-provided
     # financial_aggregate_types field is never a filter authority.
@@ -679,6 +728,7 @@ def collect_runtime_campaign_evidence(
         resource_evidence_hash=resource_evidence_hash,
         resource_metrics=resource_metrics,
         journal_taxonomy_digest=plan.journal_taxonomy_digest,
+        journal_store_identity_digest=identity_digest,
         _token=_EVIDENCE_TOKEN,
     )
 

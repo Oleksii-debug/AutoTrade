@@ -8,6 +8,7 @@ from unittest.mock import Mock
 from mvp.autotrade_mvp import performance_qualification as budget_module
 from mvp.autotrade_mvp import runtime_target_host_campaign as campaign_module
 from mvp.autotrade_mvp import runtime_target_host_composed_authority as composed_authority
+from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetDecision
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
 )
@@ -48,7 +49,11 @@ class RuntimeTargetHostSignedCampaignAuthorityTests(unittest.TestCase):
     def test_parser_guard_rejects_added_constructor_override(self) -> None:
         parser_type = campaign_module.ParsedRuntimeTargetHostCampaign
         self.assertNotIn("__new__", parser_type.__dict__)
-        setattr(parser_type, "__new__", staticmethod(lambda cls, *args, **kwargs: object.__new__(cls)))
+        setattr(
+            parser_type,
+            "__new__",
+            staticmethod(lambda cls, *args, **kwargs: object.__new__(cls)),
+        )
         try:
             with self.assertRaisesRegex(
                 RuntimeTargetHostCompositionError,
@@ -111,23 +116,35 @@ class RuntimeTargetHostSignedCampaignAuthorityTests(unittest.TestCase):
         )
         return accepted, evidence, measurement, campaign_plan
 
+    @staticmethod
+    def _parsed_type(*, raw: bytes, evidence):
+        class ParsedCampaign:
+            def __init__(self, retained_evidence):
+                self.evidence = retained_evidence
+
+            @property
+            def canonical_bytes(self):
+                return raw
+
+            @classmethod
+            def parse(cls, _raw):
+                return cls(evidence)
+
+        return ParsedCampaign
+
     def test_matcher_calls_parser_and_budget_guards_around_execution(self) -> None:
         raw = b"signed-campaign-raw"
         accepted, evidence, measurement, campaign_plan = self._matching_inputs(raw)
         parser_guard = Mock()
         budget_guard = Mock()
-
-        class ParsedCampaign:
-            @classmethod
-            def parse(cls, _raw):
-                return SimpleNamespace(evidence=evidence)
+        parsed_type = self._parsed_type(raw=raw, evidence=evidence)
 
         matcher = composed_authority._build_signed_campaign_matcher(
             authenticated_reader_factory=lambda *_args, **_kwargs: (
                 lambda _artifact_id: (object(), raw)
             ),
             artifact_integrity_error_type=RuntimeError,
-            parsed_campaign_type=ParsedCampaign,
+            parsed_campaign_type=parsed_type,
             campaign_error_type=ValueError,
             budget_spec_type=type(_spec()),
             budget_evaluator=lambda _spec_value, _observation: SimpleNamespace(
@@ -152,8 +169,112 @@ class RuntimeTargetHostSignedCampaignAuthorityTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.status, "PASS")
-        self.assertEqual(parser_guard.call_count, 3)
+        self.assertEqual(parser_guard.call_count, 4)
         self.assertEqual(budget_guard.call_count, 2)
+
+    def test_matcher_rejects_structural_parser_result_fake(self) -> None:
+        raw = b"signed-campaign-raw"
+        accepted, evidence, measurement, campaign_plan = self._matching_inputs(raw)
+
+        class ParsedCampaign:
+            @classmethod
+            def parse(cls, _raw):
+                return SimpleNamespace(evidence=evidence, canonical_bytes=raw)
+
+        matcher = composed_authority._build_signed_campaign_matcher(
+            authenticated_reader_factory=lambda *_args, **_kwargs: (
+                lambda _artifact_id: (object(), raw)
+            ),
+            artifact_integrity_error_type=RuntimeError,
+            parsed_campaign_type=ParsedCampaign,
+            campaign_error_type=ValueError,
+            budget_spec_type=type(_spec()),
+            budget_evaluator=lambda *_args: object(),
+            budget_error_type=ValueError,
+            composition_error_type=RuntimeTargetHostCompositionError,
+            campaign_evidence_kind=CAMPAIGN_EVIDENCE_KIND,
+            sha256_factory=sha256,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "parser returned non-canonical parsed result type",
+        ):
+            matcher(
+                accepted,
+                evidence_store=object(),
+                evidence_root="evidence-root",
+                measurement=measurement,
+                campaign_plan=campaign_plan,
+                spec=None,
+            )
+
+    def test_matcher_rejects_parser_result_that_does_not_round_trip_raw(self) -> None:
+        raw = b"signed-campaign-raw"
+        accepted, evidence, measurement, campaign_plan = self._matching_inputs(raw)
+        parsed_type = self._parsed_type(raw=b"different-canonical-raw", evidence=evidence)
+
+        matcher = composed_authority._build_signed_campaign_matcher(
+            authenticated_reader_factory=lambda *_args, **_kwargs: (
+                lambda _artifact_id: (object(), raw)
+            ),
+            artifact_integrity_error_type=RuntimeError,
+            parsed_campaign_type=parsed_type,
+            campaign_error_type=ValueError,
+            budget_spec_type=type(_spec()),
+            budget_evaluator=lambda *_args: object(),
+            budget_error_type=ValueError,
+            composition_error_type=RuntimeTargetHostCompositionError,
+            campaign_evidence_kind=CAMPAIGN_EVIDENCE_KIND,
+            sha256_factory=sha256,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "does not reproduce retained raw evidence",
+        ):
+            matcher(
+                accepted,
+                evidence_store=object(),
+                evidence_root="evidence-root",
+                measurement=measurement,
+                campaign_plan=campaign_plan,
+                spec=None,
+            )
+
+    def test_matcher_rejects_structural_budget_decision_fake(self) -> None:
+        raw = b"signed-campaign-raw"
+        accepted, evidence, measurement, campaign_plan = self._matching_inputs(raw)
+        parsed_type = self._parsed_type(raw=raw, evidence=evidence)
+
+        matcher = composed_authority._build_signed_campaign_matcher(
+            authenticated_reader_factory=lambda *_args, **_kwargs: (
+                lambda _artifact_id: (object(), raw)
+            ),
+            artifact_integrity_error_type=RuntimeError,
+            parsed_campaign_type=parsed_type,
+            campaign_error_type=ValueError,
+            budget_spec_type=type(_spec()),
+            budget_evaluator=lambda *_args: SimpleNamespace(status="PASS", reasons=()),
+            budget_error_type=ValueError,
+            composition_error_type=RuntimeTargetHostCompositionError,
+            campaign_evidence_kind=CAMPAIGN_EVIDENCE_KIND,
+            sha256_factory=sha256,
+            budget_decision_type=RuntimeBudgetDecision,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "budget evaluator returned non-canonical decision type",
+        ):
+            matcher(
+                accepted,
+                evidence_store=object(),
+                evidence_root="evidence-root",
+                measurement=measurement,
+                campaign_plan=campaign_plan,
+                spec=_spec(),
+            )
 
     def test_parser_callback_mutation_is_rejected_before_result_use(self) -> None:
         raw = b"signed-campaign-raw"
@@ -210,11 +331,7 @@ class RuntimeTargetHostSignedCampaignAuthorityTests(unittest.TestCase):
         raw = b"signed-campaign-raw"
         accepted, evidence, measurement, campaign_plan = self._matching_inputs(raw)
         original = budget_module._snapshot_runtime_budget_spec
-
-        class ParsedCampaign:
-            @classmethod
-            def parse(cls, _raw):
-                return SimpleNamespace(evidence=evidence)
+        parsed_type = self._parsed_type(raw=raw, evidence=evidence)
 
         def mutating_budget(_spec_value, _observation):
             budget_module._snapshot_runtime_budget_spec = lambda value: value
@@ -225,7 +342,7 @@ class RuntimeTargetHostSignedCampaignAuthorityTests(unittest.TestCase):
                 lambda _artifact_id: (object(), raw)
             ),
             artifact_integrity_error_type=RuntimeError,
-            parsed_campaign_type=ParsedCampaign,
+            parsed_campaign_type=parsed_type,
             campaign_error_type=ValueError,
             budget_spec_type=type(_spec()),
             budget_evaluator=mutating_budget,

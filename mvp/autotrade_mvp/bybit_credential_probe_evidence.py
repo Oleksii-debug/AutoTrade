@@ -2,14 +2,14 @@
 
 This boundary binds one already-authenticated Bybit V5 credential probe to the
 exact historical TRADE credential generation that was used for the request and
-to the exact Bybit provider environment contacted.  It deliberately retains
+to the exact Bybit provider environment contacted. It deliberately retains
 only a canonical response digest plus non-secret scope metadata; the response
 body (including an API-key value returned by ``/v5/user/query-api`` on success)
 is never retained here.
 
-The resulting value is observation evidence only.  It cannot retire a vault
+The resulting value is observation evidence only. It cannot retire a vault
 credential generation, prove that an old process stopped, grant send authority,
-or authorize recovery takeover.  Those decisions remain owned by their
+or authorize recovery takeover. Those decisions remain owned by their
 separate canonical fences.
 """
 
@@ -74,12 +74,16 @@ def _response_digest(response: object) -> tuple[int, str]:
     """Return exact retCode plus a digest without retaining provider payload."""
 
     if type(response) is not dict:
-        raise ProviderCoreError("Bybit credential probe response must be an exact object")
+        raise ProviderCoreError(
+            "Bybit credential probe response must be an exact object"
+        )
     if "retCode" not in response:
         raise ProviderCoreError("Bybit credential probe response must include retCode")
     ret_code = response["retCode"]
     if type(ret_code) is not int:
-        raise ProviderCoreError("Bybit credential probe retCode must be an exact integer")
+        raise ProviderCoreError(
+            "Bybit credential probe retCode must be an exact integer"
+        )
     try:
         encoded = json.dumps(
             response,
@@ -100,8 +104,8 @@ class BybitCredentialProbeEvidence:
     """Detached non-secret evidence for one exact credential-generation probe.
 
     ``credential_handle`` identifies the local historical generation selected
-    for the authenticated request.  ``source_uri`` identifies the exact
-    environment-specific Bybit endpoint.  Neither claim is self-authenticating:
+    for the authenticated request. ``source_uri`` identifies the exact
+    environment-specific Bybit endpoint. Neither claim is self-authenticating:
     the transport boundary that creates this value must already have performed
     TLS/origin validation and used the selected credential generation.
     """
@@ -167,7 +171,9 @@ class BybitCredentialProbeEvidence:
                 "Bybit credential probe product_family must be canonical and supported"
             )
         if type(self.ret_code) is not int:
-            raise ProviderCoreError("Bybit credential probe ret_code must be exact integer")
+            raise ProviderCoreError(
+                "Bybit credential probe ret_code must be exact integer"
+            )
         response_sha256 = _exact_text(self.response_sha256, name="response_sha256")
         if _SHA256.fullmatch(response_sha256) is None:
             raise ProviderCoreError(
@@ -202,6 +208,43 @@ class BybitCredentialProbeEvidence:
         return False
 
 
+def bybit_credential_probe_receipt_metadata(
+    evidence: BybitCredentialProbeEvidence,
+) -> dict[str, object]:
+    """Return deterministic non-secret metadata for an immutable receipt.
+
+    This helper intentionally carries the exact credential generation and both
+    environment namespaces so a later qualification consumer cannot detach the
+    provider observation from the credential-generation scope that produced it.
+    The metadata repeats explicit negative-authority flags to make that boundary
+    durable when serialized outside the Python type system.
+    """
+
+    if type(evidence) is not BybitCredentialProbeEvidence:
+        raise TypeError("evidence must be exact BybitCredentialProbeEvidence")
+    handle = evidence.credential_handle
+    return {
+        "evidence_kind": "BYBIT_CREDENTIAL_PROBE",
+        "provider": "BYBIT",
+        "provider_environment": evidence.provider_environment,
+        "credential_handle_id": handle.handle_id,
+        "account_id": handle.account_id,
+        "credential_environment": handle.environment,
+        "credential_purpose": handle.purpose,
+        "credential_generation": handle.generation,
+        "source_uri": evidence.source_uri,
+        "response_surface": evidence.response_surface,
+        "product_family": evidence.product_family,
+        "ret_code": evidence.ret_code,
+        "response_sha256": evidence.response_sha256,
+        "observed_at": evidence.observed_at,
+        "classification": evidence.classification.value,
+        "send_authority": False,
+        "retirement_authority": False,
+        "takeover_authority": False,
+    }
+
+
 def capture_bybit_credential_probe_evidence(
     *,
     credential_handle: PersistentCredentialHandle,
@@ -215,7 +258,7 @@ def capture_bybit_credential_probe_evidence(
     """Scrub one authenticated ``query-api`` response into detached evidence.
 
     The caller must pass the exact ``PersistentCredentialHandle`` whose secret
-    material was used to authenticate the request.  This function stores no API
+    material was used to authenticate the request. This function stores no API
     key, API secret, provider response body, session token, or permission set.
     A successful ``query-api`` response may therefore prove that the selected
     credential was accepted at that instant, but the returned evidence still

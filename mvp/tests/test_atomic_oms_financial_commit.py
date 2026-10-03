@@ -559,7 +559,7 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "requires provider-derived financial binding",
+                "must use the provider-evidence entrypoint",
             ):
                 commit_order_fill_with_reservation_consumption(
                     orders,

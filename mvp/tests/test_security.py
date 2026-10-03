@@ -1002,6 +1002,66 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("must-hide-by-key", rendered)
         self.assertIn("[REDACTED]", rendered)
 
+    def test_diagnostic_redaction_never_executes_hostile_key_or_value_hooks(self):
+        class HostileKey:
+            def __hash__(self):
+                return 7
+
+            def __str__(self):
+                raise AssertionError("diagnostic redaction must not call hostile __str__")
+
+            def __repr__(self):
+                raise AssertionError("diagnostic redaction must not retain hostile keys")
+
+        class HostileValue:
+            def __str__(self):
+                raise AssertionError("diagnostic redaction must not call hostile __str__")
+
+            def __repr__(self):
+                raise AssertionError("diagnostic redaction must not retain hostile values")
+
+        redacted = self.boundary.redact_for_diagnostics(
+            {
+                HostileKey(): "must-never-surface",
+                "safe": HostileValue(),
+            },
+            sensitive_values=("must-never-surface",),
+        )
+        rendered = repr(redacted)
+        self.assertNotIn("must-never-surface", rendered)
+        self.assertIn("[REDACTED]", rendered)
+        self.assertEqual(redacted["safe"], "[REDACTED:UNSUPPORTED]")
+
+    def test_diagnostic_redaction_breaks_container_cycles_fail_closed(self):
+        cyclic_dict = {}
+        cyclic_dict["self"] = cyclic_dict
+        cyclic_list = []
+        cyclic_list.append(cyclic_list)
+
+        redacted_dict = self.boundary.redact(cyclic_dict)
+        redacted_list = self.boundary.redact(cyclic_list)
+
+        self.assertEqual(redacted_dict["self"], "[REDACTED:CYCLE]")
+        self.assertEqual(redacted_list[0], "[REDACTED:CYCLE]")
+
+    def test_diagnostic_redaction_scrubs_sensitive_values_from_mapping_keys(self):
+        redacted = self.boundary.redact_for_diagnostics(
+            {"prefix-top-secret-suffix": "visible"},
+            sensitive_values=("top-secret",),
+        )
+        rendered = repr(redacted)
+        self.assertNotIn("top-secret", rendered)
+        self.assertEqual(
+            redacted["prefix-[REDACTED]-suffix"],
+            "visible",
+        )
+
+    def test_diagnostic_redaction_never_emits_binary_payload_bytes(self):
+        redacted = self.boundary.redact(
+            {"wire": b"Authorization: Bearer should-never-log"}
+        )
+        self.assertEqual(redacted["wire"], "[REDACTED:BINARY]")
+
     def test_unpair_then_repair_never_revives_old_token(self):
         paired = self.boundary.pair_origin(
             self.owner.token,

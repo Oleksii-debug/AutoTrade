@@ -39,7 +39,19 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Run cross-platform core verification
-        run: python tools/verify.py
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          python tools/verify.py 2>&1 | Tee-Object -FilePath "artifacts/verify-${{ runner.os }}.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload core verification diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-log-${{ runner.os }}
+          path: artifacts/verify-${{ runner.os }}.log
+          if-no-files-found: warn
+          retention-days: 1
       - name: Write exact-head core verification evidence
         run: python tools/write_ci_evidence.py --suite core-repository --command "python tools/verify.py" --output "artifacts/verify-${{ runner.os }}.json"
       - name: Upload exact-head verification evidence

@@ -10,6 +10,7 @@ from __future__ import annotations
 from math import isfinite
 from typing import Any
 
+from ._generated_common_scalars import is_valid_common_scalar
 from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 
 
@@ -52,6 +53,32 @@ def _reservation_amount_text(value: Any) -> str:
     if amount < 0:
         return ""
     return value
+
+
+def _canonical_decimal_value(
+    mapping: dict[str, Any] | None,
+    key: str,
+    default: str = "Unavailable",
+) -> str:
+    if mapping is None:
+        return default
+    value = mapping.get(key)
+    try:
+        parse_canonical_decimal_text(value)
+    except ExactDecimalError:
+        return default
+    return value
+
+
+def _canonical_sequence_value(
+    mapping: dict[str, Any] | None,
+    key: str,
+    default: str = "Unavailable",
+) -> str:
+    if mapping is None:
+        return default
+    value = mapping.get(key)
+    return value if is_valid_common_scalar("Sequence", value) else default
 
 
 def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable") -> str:
@@ -114,11 +141,17 @@ def format_accessible_status(
     replay_verified = status.get("replay_verified")
     fills = status.get("fills", {})
     recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
+    state_format = _safe_text(status.get("state_format"), "")
+    initial_capital = (
+        _canonical_decimal_value(status, "initial_cash")
+        if state_format == "canonical_journal"
+        else _value(status, "initial_cash")
+    )
     lines.extend(
         [
             f"Replay verification: {_replay_verification_text(replay_verified)}",
             f"Instrument: {_value(status, 'symbol')}",
-            f"Initial capital: {_value(status, 'initial_cash')}",
+            f"Initial capital: {initial_capital}",
             f"Recorded evidence items: {_value(status, 'evidence_count', '0')}",
             f"Recorded fills: {recorded_fills}",
         ]
@@ -127,14 +160,13 @@ def format_accessible_status(
     if state == "needs_recovery":
         lines.append("Action required: recovery or reconciliation is needed before trusting current state")
 
-    state_format = _safe_text(status.get("state_format"), "")
     if state_format == "canonical_journal":
         lines.extend([
             f"Episode: {_value(status, 'episode_id')}",
             f"Session outcome: {_value(status, 'session_status')}",
-            f"Cash (USD): {_value(status, 'cash')}",
-            f"Position (shares): {_value(status, 'position')}",
-            f"Journal sequence: {_value(status, 'journal_sequence')}",
+            f"Cash (USD): {_canonical_decimal_value(status, 'cash')}",
+            f"Position (shares): {_canonical_decimal_value(status, 'position')}",
+            f"Journal sequence: {_canonical_sequence_value(status, 'journal_sequence')}",
             "Order submission during this read: none",
         ])
         reservations = status.get("active_reservations", [])
@@ -207,13 +239,18 @@ def format_accessible_status(
         if type(economic_report) is not dict:
             lines.append("Economic report: unavailable; malformed state")
         else:
+            report_value = (
+                _canonical_decimal_value
+                if state_format == "canonical_journal"
+                else _value
+            )
             lines.extend(
                 [
-                    f"Final equity: {_value(economic_report, 'final_equity')}",
-                    f"Net profit or loss: {_value(economic_report, 'net_pnl')}",
-                    f"Total fees: {_value(economic_report, 'total_fees')}",
-                    f"Turnover: {_value(economic_report, 'turnover')}",
-                    f"Maximum drawdown: {_value(economic_report, 'max_drawdown')}",
+                    f"Final equity: {report_value(economic_report, 'final_equity')}",
+                    f"Net profit or loss: {report_value(economic_report, 'net_pnl')}",
+                    f"Total fees: {report_value(economic_report, 'total_fees')}",
+                    f"Turnover: {report_value(economic_report, 'turnover')}",
+                    f"Maximum drawdown: {report_value(economic_report, 'max_drawdown')}",
                     f"Economic reconciliation: {'passed' if economic_report.get('reconciled') is True else 'not confirmed'}",
                 ]
             )

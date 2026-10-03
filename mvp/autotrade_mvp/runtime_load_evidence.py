@@ -54,6 +54,14 @@ def _positive_int(value: object, *, name: str) -> int:
     return value
 
 
+def _snapshot_metric_series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
+    """Freeze inert caller measurements before durable conservation is read."""
+
+    if type(values) not in (tuple, list):
+        raise RuntimeLoadEvidenceError(f"{name} must be an exact tuple or list")
+    return tuple(_non_negative_int(value, name=name) for value in values)
+
+
 def _validated_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
     if type(value) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
@@ -344,13 +352,29 @@ def evaluate_journal_backed_runtime_budget(
 ) -> tuple[RuntimeBudgetDecision, JournalConservationEvidence]:
     """Evaluate a runtime budget with conservation derived from durable truth.
 
-    Latency/staleness/interference samples remain measurement inputs owned by the
-    later target-host campaign harness. This bridge closes only financial-event
-    conservation: both counts come from exact predeclared bindings and one
-    contiguous JournalStore cut rather than caller-authored summary integers.
+    Caller-owned measurement containers are copied into exact inert tuples before
+    reading the journal cut, so iteration cannot mutate durable truth after the
+    conservation boundary has been selected. Latency/staleness/interference are
+    still measurement inputs owned by the later target-host campaign harness.
     """
 
     spec = _validated_spec(spec)
+    financial_latency_us = _snapshot_metric_series(
+        financial_latency_us,
+        name="financial_latency_us",
+    )
+    financial_staleness_us = _snapshot_metric_series(
+        financial_staleness_us,
+        name="financial_staleness_us",
+    )
+    research_interference_us = _snapshot_metric_series(
+        research_interference_us,
+        name="research_interference_us",
+    )
+    reconnect_backlog_remaining = _non_negative_int(
+        reconnect_backlog_remaining,
+        name="reconnect_backlog_remaining",
+    )
     evidence = collect_journal_conservation_evidence(
         store,
         scenario_id=spec.scenario_id,

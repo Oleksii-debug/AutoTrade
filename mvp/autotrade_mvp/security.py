@@ -21,6 +21,7 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from .host_actions import required_roles_for_host_action
+from .decision_trace import _redact_embedded_secret_text
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
 
@@ -594,14 +595,34 @@ class SecurityBoundary:
                 try:
                     result: dict[object, object] = {}
                     unsupported_key = 0
+
+                    def unique_key(candidate: str) -> str:
+                        if candidate not in result:
+                            return candidate
+                        suffix = 2
+                        while f"{candidate} [{suffix}]" in result:
+                            suffix += 1
+                        return f"{candidate} [{suffix}]"
+
                     for key, child in item.items():
                         if type(key) is not str:
                             unsupported_key += 1
-                            result[f"[UNSUPPORTED_KEY_{unsupported_key}]"] = "[REDACTED]"
-                        elif _REDACT_RE.search(key):
-                            result[key] = "[REDACTED]"
+                            safe_key = unique_key(
+                                f"[UNSUPPORTED_KEY_{unsupported_key}]"
+                            )
+                            result[safe_key] = "[REDACTED]"
+                            continue
+
+                        safe_key = unique_key(
+                            _redact_embedded_secret_text(key)
+                        )
+                        if _REDACT_RE.search(key):
+                            result[safe_key] = "[REDACTED]"
                         else:
-                            result[key] = scrub(child, depth=depth + 1)
+                            result[safe_key] = scrub(
+                                child,
+                                depth=depth + 1,
+                            )
                     return result
                 finally:
                     active_containers.remove(identity)

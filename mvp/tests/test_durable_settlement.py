@@ -489,6 +489,43 @@ class DurableSettlementBookTests(unittest.TestCase):
                 Decimal("1100"),
             )
 
+    def test_project_observes_cross_instance_settlement_registration(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            economic = economics(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="deposit-cross-instance",
+                    cause_event_id="deposit-event-cross-instance",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            sold = sell_transaction()
+            economic.append(sold)
+
+            reader = durable(store)
+            writer_store = JournalStore(path)
+            writer = durable(writer_store)
+            writer_item = obligation(writer_store, sold)
+            self.assertTrue(
+                writer.register_obligations(
+                    (writer_item,),
+                    command_id="register-cross-instance",
+                    idempotency_key="register-cross-instance",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+
+            projected = reader.project(economic)
+            self.assertEqual(projected.snapshot("USD").settled_cash, Decimal("1000"))
+            self.assertEqual(
+                projected.snapshot("USD").unsettled_receivable,
+                Decimal("100"),
+            )
+            self.assertEqual(projected.available_to_spend("USD"), Decimal("1000"))
+
     def test_changed_evidence_after_settlement_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

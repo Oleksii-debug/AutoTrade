@@ -17,7 +17,10 @@ Trusted scope approval is deliberately external to the candidate tree. The
 whose first line is ``AUTOTRADE_RECONVERGENCE_SCOPE_V1`` followed by one exact
 ``head:`` line and explicit ``path:`` lines. The parser here validates that
 external record; PR body/title content remains non-authoritative. Approval for an
-older exact head is simply non-authoritative after the head moves.
+older exact head is simply non-authoritative after the head moves. Exact trust-root
+approval is intentionally distinct from the optional full mutation-scope fence:
+approving one protected root never constrains or silently authorizes unrelated
+ordinary candidate paths.
 
 This directly protects against commits accidentally built from a stale or partial
 tree, candidate-controlled rewrites/spoofs of integration check authorities, and
@@ -279,6 +282,7 @@ def assess_reconvergence(
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
     base_is_ancestor: bool = True,
     allowed_scopes: Sequence[str] | None = None,
+    trusted_root_approvals: Sequence[str] | None = None,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
@@ -297,8 +301,17 @@ def assess_reconvergence(
     if allowed_scopes is not None:
         normalized_scopes = _normalized_scopes(allowed_scopes)
 
+    normalized_trust_root_approvals: tuple[str, ...] = ()
+    if trusted_root_approvals is not None:
+        normalized_trust_root_approvals = _normalized_scopes(
+            trusted_root_approvals
+        )
+
     def exactly_authorized(path: str) -> bool:
-        return normalized_scopes is not None and path in normalized_scopes
+        return (
+            path in normalized_trust_root_approvals
+            or (normalized_scopes is not None and path in normalized_scopes)
+        )
 
     disappeared_paths: set[str] = set()
     direct_deletions: set[str] = set()
@@ -477,6 +490,7 @@ def assess_git_revisions(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     allowed_scopes: Sequence[str] | None = None,
+    trusted_root_approvals: Sequence[str] | None = None,
     cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
     """Assess revisions inside one explicit Git repository/worktree.
@@ -505,6 +519,7 @@ def assess_git_revisions(
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,
         allowed_scopes=allowed_scopes,
+        trusted_root_approvals=trusted_root_approvals,
     )
 
 
@@ -516,6 +531,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--head", required=True, help="Exact head commit SHA/ref")
     parser.add_argument("--max-deletions", type=int, default=50)
     parser.add_argument("--max-deleted-fraction", type=float, default=0.35)
+    parser.add_argument(
+        "--trusted-root-approval",
+        action="append",
+        default=None,
+        help=(
+            "Externally approved exact trust-root path. This authorizes only "
+            "protected trust-root evolution and does not establish a full "
+            "candidate mutation scope."
+        ),
+    )
     parser.add_argument(
         "--allowed-scope",
         action="append",
@@ -534,6 +559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=args.allowed_scope,
+        trusted_root_approvals=args.trusted_root_approval,
     )
     print(
         "Reconvergence tree guard: "

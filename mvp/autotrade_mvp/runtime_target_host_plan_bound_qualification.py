@@ -272,7 +272,7 @@ def _build_composed_acceptance_binding_validator(
     provenance_kinds,
     projection_kinds,
 ):
-    """Revalidate detached PASS relationships against captured outer authority."""
+    """Revalidate detached PASS relationships against frozen outer authority."""
 
     def exact_text(value: object, *, name: str) -> str:
         if type(value) is not str or not value or value != value.strip():
@@ -339,8 +339,12 @@ def _build_composed_acceptance_binding_validator(
     def validate(
         value,
         *,
-        spec,
-        durable_plan_digest: str,
+        expected_source_sha: str,
+        expected_scenario_id: str,
+        expected_spec_digest: str,
+        expected_configuration_hash: str,
+        expected_host_fingerprint: str,
+        expected_workload_profile_hash: str,
         expected_release_artifact_id: str,
         expected_release_artifact_sha256: str,
     ):
@@ -428,30 +432,58 @@ def _build_composed_acceptance_binding_validator(
             value_validator=canonical_sha256,
         )
 
-        expected_release_id = canonical_uuid(
+        frozen_source_sha = canonical_git_sha(
+            expected_source_sha,
+            name="frozen expected source SHA",
+        )
+        frozen_scenario_id = exact_text(
+            expected_scenario_id,
+            name="frozen expected scenario id",
+        )
+        frozen_spec_digest = canonical_sha256(
+            expected_spec_digest,
+            name="frozen expected spec digest",
+        )
+        frozen_configuration_hash = canonical_sha256(
+            expected_configuration_hash,
+            name="frozen expected configuration hash",
+        )
+        frozen_host_fingerprint = canonical_sha256(
+            expected_host_fingerprint,
+            name="frozen expected host fingerprint",
+        )
+        frozen_workload = canonical_sha256(
+            expected_workload_profile_hash,
+            name="frozen expected workload identity",
+        )
+        frozen_release_id = canonical_uuid(
             expected_release_artifact_id,
             name="expected release artifact id",
         )
-        expected_release_sha = canonical_sha256(
+        frozen_release_sha = canonical_sha256(
             expected_release_artifact_sha256,
             name="expected release artifact digest",
         )
         bindings = (
-            ("source SHA", accepted.source_sha, spec.release_sha),
-            ("scenario id", accepted.scenario_id, spec.scenario_id),
-            ("spec digest", accepted.spec_digest, spec.digest),
-            ("configuration hash", accepted.configuration_hash, spec.configuration_hash),
-            ("host fingerprint", accepted.host_fingerprint, spec.host_fingerprint),
-            ("workload identity", accepted.workload_profile_hash, durable_plan_digest),
-            ("release artifact id", accepted.release_artifact_id, expected_release_id),
+            ("source SHA", accepted.source_sha, frozen_source_sha),
+            ("scenario id", accepted.scenario_id, frozen_scenario_id),
+            ("spec digest", accepted.spec_digest, frozen_spec_digest),
+            (
+                "configuration hash",
+                accepted.configuration_hash,
+                frozen_configuration_hash,
+            ),
+            ("host fingerprint", accepted.host_fingerprint, frozen_host_fingerprint),
+            ("workload identity", accepted.workload_profile_hash, frozen_workload),
+            ("release artifact id", accepted.release_artifact_id, frozen_release_id),
             (
                 "release artifact digest",
                 accepted.release_artifact_sha256,
-                expected_release_sha,
+                frozen_release_sha,
             ),
         )
         for name, observed, expected in bindings:
-            if type(expected) is not str or observed != expected:
+            if observed != expected:
                 raise composition_error_type(
                     f"detached target-host {name} differs from captured authority"
                 )
@@ -587,6 +619,29 @@ def _build_chronology_free_verifier(
                     )
             if type(campaign_cut) is campaign_cut_type:
                 campaign_cut = snapshot_campaign_cut(campaign_cut)
+
+            # Freeze every scalar used to rebind the lower verifier's detached
+            # result before handing the detached RuntimeBudgetSpec to that verifier.
+            # The lower path must not be able to mutate the object it received and
+            # then make its own returned acceptance agree with the mutation.
+            frozen_source_sha = spec.release_sha
+            frozen_scenario_id = spec.scenario_id
+            frozen_spec_digest = canonical_sha256_text(
+                spec.digest,
+                name="frozen runtime budget spec digest",
+            )
+            frozen_configuration_hash = canonical_sha256_text(
+                spec.configuration_hash,
+                name="frozen runtime configuration hash",
+            )
+            frozen_host_fingerprint = canonical_sha256_text(
+                spec.host_fingerprint,
+                name="frozen runtime host fingerprint",
+            )
+            frozen_workload_profile_hash = durable_plan_digest
+            frozen_release_artifact_id = expected_release_artifact_id
+            frozen_release_artifact_sha256 = expected_release_artifact_sha256
+
             accepted = acceptance_snapshotter(
                 verify_composed(
                     receipt,
@@ -598,16 +653,20 @@ def _build_chronology_free_verifier(
                     campaign_cut=campaign_cut,
                     declared_plan_id=plan.plan_id,
                     measurement=measurement,
-                    expected_release_artifact_id=expected_release_artifact_id,
-                    expected_release_artifact_sha256=expected_release_artifact_sha256,
+                    expected_release_artifact_id=frozen_release_artifact_id,
+                    expected_release_artifact_sha256=frozen_release_artifact_sha256,
                 )
             )
             accepted = acceptance_binding_validator(
                 accepted,
-                spec=spec,
-                durable_plan_digest=durable_plan_digest,
-                expected_release_artifact_id=expected_release_artifact_id,
-                expected_release_artifact_sha256=expected_release_artifact_sha256,
+                expected_source_sha=frozen_source_sha,
+                expected_scenario_id=frozen_scenario_id,
+                expected_spec_digest=frozen_spec_digest,
+                expected_configuration_hash=frozen_configuration_hash,
+                expected_host_fingerprint=frozen_host_fingerprint,
+                expected_workload_profile_hash=frozen_workload_profile_hash,
+                expected_release_artifact_id=frozen_release_artifact_id,
+                expected_release_artifact_sha256=frozen_release_artifact_sha256,
             )
 
             final_plan = load_declared_plan(
@@ -639,9 +698,9 @@ def _build_chronology_free_verifier(
 # Canonical chronology-bound verification captures this closure during module
 # initialization. All authority-bearing dependencies are captured above, the
 # verifier-owned result is detached, and its canonical relationships are rebound
-# to the outer plan/spec/release authority before post-verification revalidation.
-# Focused tests build injected verifiers explicitly instead of rebinding the
-# production closure.
+# to pre-dispatch frozen plan/spec/release scalars before post-verification
+# revalidation. Focused tests build injected verifiers explicitly instead of
+# rebinding the production closure.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
     _build_chronology_free_verifier(
         verify_composed=verify_sealed_composed_runtime_target_host_qualification,

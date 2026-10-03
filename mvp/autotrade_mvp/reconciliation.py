@@ -591,6 +591,115 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
     }
 
 
+def _snapshot_provider_fill(fill: ProviderFillEvidence) -> ProviderFillEvidence:
+    """Detach one caller-owned fill into exact inert reconciliation state."""
+
+    if type(fill) is not ProviderFillEvidence:
+        raise TypeError("provider_fills must contain exact ProviderFillEvidence")
+
+    provider_id = fill.provider_id
+    account_id = fill.account_id
+    environment = fill.environment
+    provider_execution_id = fill.provider_execution_id
+    client_order_id = fill.client_order_id
+    instrument = fill.instrument
+    quantity = fill.quantity
+    price = fill.price
+    fee_amount = fill.fee_amount
+    fee_currency = fill.fee_currency
+    trade_time = fill.trade_time
+    side = fill.side
+    position_side = fill.position_side
+    position_effect = fill.position_effect
+    evidence_refs = fill.evidence_refs
+
+    for name, value in (
+        ("provider_id", provider_id),
+        ("account_id", account_id),
+        ("environment", environment),
+        ("provider_execution_id", provider_execution_id),
+        ("instrument", instrument),
+        ("fee_currency", fee_currency),
+        ("trade_time", trade_time),
+    ):
+        if type(value) is not str:
+            raise TypeError(f"provider fill {name} must be exact str")
+    for name, value in (
+        ("client_order_id", client_order_id),
+        ("side", side),
+        ("position_side", position_side),
+        ("position_effect", position_effect),
+    ):
+        if value is not None and type(value) is not str:
+            raise TypeError(f"provider fill {name} must be exact str or None")
+    for name, value in (
+        ("quantity", quantity),
+        ("price", price),
+        ("fee_amount", fee_amount),
+    ):
+        if type(value) is not Decimal:
+            raise TypeError(f"provider fill {name} must be exact Decimal")
+    if type(evidence_refs) is not tuple:
+        raise TypeError("provider fill evidence_refs must be exact tuple")
+    if any(type(reference) is not str for reference in evidence_refs):
+        raise TypeError("provider fill evidence_refs must contain exact str")
+
+    snapshot = ProviderFillEvidence(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        provider_execution_id=provider_execution_id,
+        client_order_id=client_order_id,
+        instrument=instrument,
+        quantity=quantity,
+        price=price,
+        fee_amount=fee_amount,
+        fee_currency=fee_currency,
+        trade_time=trade_time,
+        side=side,
+        position_side=position_side,
+        position_effect=position_effect,
+        evidence_refs=tuple(evidence_refs),
+    )
+    observed = (
+        provider_id,
+        account_id,
+        environment,
+        provider_execution_id,
+        client_order_id,
+        instrument,
+        quantity,
+        price,
+        fee_amount,
+        fee_currency,
+        trade_time,
+        side,
+        position_side,
+        position_effect,
+        evidence_refs,
+    )
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.provider_execution_id,
+        snapshot.client_order_id,
+        snapshot.instrument,
+        snapshot.quantity,
+        snapshot.price,
+        snapshot.fee_amount,
+        snapshot.fee_currency,
+        snapshot.trade_time,
+        snapshot.side,
+        snapshot.position_side,
+        snapshot.position_effect,
+        snapshot.evidence_refs,
+    )
+    if observed != canonical:
+        raise ValueError("provider fill evidence changed from canonical normalized state")
+    return snapshot
+
+
 def _provider_fill_reconciliation_ingress_errors(
     fill: ProviderFillEvidence,
 ) -> tuple[str, ...]:
@@ -990,8 +1099,7 @@ def reconcile_account(
     provider_client_fill_times: dict[str, list[datetime]] = {}
     provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
     for fill in provider_fills:
-        if not isinstance(fill, ProviderFillEvidence):
-            raise TypeError("provider_fills must contain ProviderFillEvidence")
+        fill = _snapshot_provider_fill(fill)
         if fill.provider_id != provider_scope:
             raise ValueError("provider fill evidence provider_id mismatch")
         if fill.account_id != account_scope:

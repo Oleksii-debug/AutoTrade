@@ -67,8 +67,8 @@ def _trusted_git_candidate_paths() -> tuple[Path, ...]:
 
     if os.name == "nt":
         return (
-            Path(r"C:\Program Files\Git\cmd\git.exe"),
-            Path(r"C:\Program Files\Git\bin\git.exe"),
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
         )
     return (Path("/usr/bin/git"), Path("/bin/git"))
 

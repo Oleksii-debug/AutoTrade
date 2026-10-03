@@ -78,6 +78,26 @@ class AuthorityServiceStoreUnforgeabilityTests(unittest.TestCase):
                 service._restore_journal()
             self.assertEqual(calls, [])
 
+    def test_ephemeral_service_cannot_gain_store_by_visible_retarget(self):
+        with TemporaryDirectory() as directory:
+            service = AuthorityService()
+            replacement = JournalStore(Path(directory) / "replacement.sqlite3")
+
+            service.store = replacement
+
+            with self.assertRaises(AuthorityConflict):
+                service._restore_journal()
+
+    def test_ephemeral_service_explicit_reinit_cannot_gain_store(self):
+        with TemporaryDirectory() as directory:
+            service = AuthorityService()
+            replacement = JournalStore(Path(directory) / "replacement.sqlite3")
+
+            with self.assertRaises(AuthorityConflict):
+                AuthorityService.__init__(service, replacement)
+
+            self.assertIsNone(service.store)
+
     def test_selected_physical_store_path_cannot_be_retargeted(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

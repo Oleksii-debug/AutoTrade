@@ -174,6 +174,24 @@ class ContractSchemaTests(unittest.TestCase):
         candidate["source_evidence"] = []
         self.assertFalse(validator.is_valid(candidate))
 
+    def test_market_event_requires_canonical_adapter_version(self):
+        fixture = json.loads((FIXTURES / "market-event.valid.json").read_text())
+        self.validate("market.schema.json", "MarketEvent", fixture)
+        schema = self.schemas["market.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/MarketEvent"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        for bad in ("", " adapter@1", "adapter version", "a" * 129):
+            with self.subTest(adapter_version=bad):
+                candidate = json.loads(json.dumps(fixture))
+                candidate["adapter_version"] = bad
+                self.assertFalse(validator.is_valid(candidate))
+        missing = json.loads(json.dumps(fixture))
+        missing.pop("adapter_version")
+        self.assertFalse(validator.is_valid(missing))
+
     def test_ui_command_fixture(self):
         self.validate("ui.schema.json", "UiCommand", json.loads((FIXTURES / "ui-command.valid.json").read_text()))
 

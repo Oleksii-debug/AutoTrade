@@ -66,11 +66,16 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             receipt = object()
             evidence_store = object()
             accepted = object()
+            semantically_accepted = object()
             with patch(
                 "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
                 "verify_runtime_target_host_qualification",
                 return_value=accepted,
-            ) as terminal:
+            ) as terminal, patch(
+                "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
+                "verify_runtime_target_host_measurement_evidence",
+                return_value=semantically_accepted,
+            ) as semantic:
                 result = verify_declared_plan_runtime_target_host_qualification(
                     receipt,
                     evidence_store=evidence_store,
@@ -82,7 +87,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     expected_release_artifact_sha256=RELEASE_SHA,
                 )
 
-            self.assertIs(result, accepted)
+            self.assertIs(result, semantically_accepted)
             args = terminal.call_args
             self.assertEqual(args.args, (receipt,))
             self.assertIs(args.kwargs["evidence_store"], evidence_store)
@@ -111,6 +116,11 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 args.kwargs["expected_release_artifact_sha256"],
                 RELEASE_SHA,
             )
+            semantic.assert_called_once_with(
+                accepted,
+                evidence_store=evidence_store,
+                evidence_root=directory,
+            )
 
     def test_caller_owned_spec_is_detached_before_durable_plan_read(self) -> None:
         with TemporaryDirectory() as directory:
@@ -124,6 +134,8 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             )
             original_loader = plan_bound_module.load_declared_runtime_event_plan
             accepted = object()
+            semantically_accepted = object()
+            evidence_store = object()
 
             def mutating_loader(current_store, *, plan_id, spec):
                 self.assertIsNot(spec, caller_spec)
@@ -147,10 +159,14 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 plan_bound_module,
                 "verify_runtime_target_host_qualification",
                 return_value=accepted,
-            ) as terminal:
+            ) as terminal, patch.object(
+                plan_bound_module,
+                "verify_runtime_target_host_measurement_evidence",
+                return_value=semantically_accepted,
+            ) as semantic:
                 result = verify_declared_plan_runtime_target_host_qualification(
                     object(),
-                    evidence_store=object(),
+                    evidence_store=evidence_store,
                     evidence_root=directory,
                     journal_store=store,
                     plan_id=plan.plan_id,
@@ -159,7 +175,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     expected_release_artifact_sha256=RELEASE_SHA,
                 )
 
-            self.assertIs(result, accepted)
+            self.assertIs(result, semantically_accepted)
             self.assertEqual(
                 terminal.call_args.kwargs["expected_configuration_hash"],
                 CONFIG,
@@ -167,6 +183,11 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             self.assertEqual(
                 terminal.call_args.kwargs["expected_source_sha"],
                 SOURCE_SHA,
+            )
+            semantic.assert_called_once_with(
+                accepted,
+                evidence_store=evidence_store,
+                evidence_root=directory,
             )
             self.assertNotEqual(caller_spec.configuration_hash, CONFIG)
 
@@ -186,7 +207,10 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
             with patch(
                 "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
                 "verify_runtime_target_host_qualification",
-            ) as terminal:
+            ) as terminal, patch(
+                "mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification."
+                "verify_runtime_target_host_measurement_evidence",
+            ) as semantic:
                 with self.assertRaisesRegex(
                     RuntimeLoadPlanError,
                     "plan configuration conflicts",
@@ -202,6 +226,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                         expected_release_artifact_sha256=RELEASE_SHA,
                     )
             terminal.assert_not_called()
+            semantic.assert_not_called()
 
     def test_selected_store_generation_is_held_through_plan_read(self) -> None:
         with TemporaryDirectory() as directory:
@@ -248,7 +273,10 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 plan_bound_module,
                 "verify_runtime_target_host_qualification",
                 return_value=accepted,
-            ) as terminal:
+            ) as terminal, patch.object(
+                plan_bound_module,
+                "verify_runtime_target_host_measurement_evidence",
+            ) as semantic:
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "journal operation authority changed",
@@ -265,6 +293,7 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     )
 
             terminal.assert_not_called()
+            semantic.assert_not_called()
 
     def test_adapter_requires_exact_journal_store_and_budget_spec_types(self) -> None:
         with self.assertRaisesRegex(TypeError, "journal_store must be exact JournalStore"):

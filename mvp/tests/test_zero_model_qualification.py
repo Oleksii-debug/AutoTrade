@@ -53,6 +53,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         )
         self.assertEqual(evidence["source_sha"], observed)
         self.assertEqual(evidence["observed_source_sha"], observed)
+        self.assertTrue(evidence["source_checkout_clean"])
         self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")
         route = evidence["model_route"]
         self.assertEqual(route["status"], "NO_MODEL")

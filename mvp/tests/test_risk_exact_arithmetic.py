@@ -1,8 +1,11 @@
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp import risk as risk_module
 from mvp.autotrade_mvp.risk import (
+    LiquidationHeadroomEvidence,
+    LiquidationScope,
     RiskContext,
     RiskIntent,
     RiskPolicy,
@@ -240,6 +243,188 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(context.stress_scenario_labels, ("base",))
         self.assertEqual(context.tail_scenarios, ({"ABC": Decimal("0")},))
         self.assertEqual(configured.allowed_actions, ("TRADE", "HEDGE"))
+
+    def test_context_rejects_datetime_subclass_before_temporal_dispatch(self):
+        touched = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                touched.append("utcoffset")
+                raise AssertionError("hostile datetime utcoffset")
+
+            def astimezone(self, *args, **kwargs):
+                touched.append("astimezone")
+                raise AssertionError("hostile datetime astimezone")
+
+        hostile = HostileDateTime(
+            2026,
+            10,
+            3,
+            20,
+            0,
+            tzinfo=timezone.utc,
+        )
+        touched.clear()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact datetime with a built-in timezone",
+        ):
+            RiskContext.create(
+                state_version=7,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                decision_time=hostile,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_context_rejects_custom_timezone_before_timezone_callbacks(self):
+        touched = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile timezone utcoffset")
+
+            def dst(self, dt):
+                touched.append("dst")
+                raise AssertionError("hostile timezone dst")
+
+        hostile_timezone = HostileTimezone()
+        stamp = datetime(2026, 10, 3, 20, 0, tzinfo=hostile_timezone)
+        touched.clear()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact datetime with a built-in timezone",
+        ):
+            RiskContext.create(
+                state_version=7,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                decision_time=stamp,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_context_rejects_liquidation_scope_subclass_before_field_reads(self):
+        base = LiquidationScope(
+            provider_id="BYBIT",
+            account_id="acct",
+            environment="PAPER",
+            margin_mode="CROSS",
+            risk_tier_version="v1",
+        )
+
+        class HostileScope(LiquidationScope):
+            reads = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "provider_id",
+                    "account_id",
+                    "environment",
+                    "margin_mode",
+                    "risk_tier_version",
+                }:
+                    type(self).reads += 1
+                    raise AssertionError("hostile liquidation scope read")
+                return super().__getattribute__(name)
+
+        hostile = HostileScope(**vars(base))
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact LiquidationScope",
+        ):
+            RiskContext.create(
+                state_version=7,
+                equity="1000",
+                positions={},
+                marks={"ABC": "1"},
+                daily_pnl="0",
+                drawdown_fraction="0",
+                market_data_age_seconds="0",
+                fx_age_seconds={},
+                margin_headroom="1",
+                capability_allowed=True,
+                borrow_available=True,
+                liquidation_scope=hostile,
+            )
+        self.assertEqual(HostileScope.reads, 0)
+
+    def test_liquidation_evidence_rejects_state_version_subclass_before_comparison(self):
+        touched = []
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                touched.append("lt")
+                raise AssertionError("hostile liquidation state_version comparison")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "liquidation evidence state_version must be non-negative",
+        ):
+            LiquidationHeadroomEvidence(
+                headroom=Decimal("1"),
+                state_version=HostileInt(7),
+                provider_id="BYBIT",
+                account_id="acct",
+                environment="PAPER",
+                margin_mode="CROSS",
+                risk_tier_version="v1",
+                observed_at=datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 10, 3, 20, 1, tzinfo=timezone.utc),
+                artifact_id="00000000-0000-0000-0000-000000000001",
+                sha256="sha256:" + "0" * 64,
+            )
+
+        self.assertEqual(touched, [])
+
+    def test_builtin_fixed_offset_timezone_remains_supported(self):
+        point = datetime(
+            2026,
+            10,
+            3,
+            22,
+            0,
+            tzinfo=timezone(timedelta(hours=2)),
+        )
+        context = RiskContext.create(
+            state_version=7,
+            equity="1000",
+            positions={},
+            marks={"ABC": "1"},
+            daily_pnl="0",
+            drawdown_fraction="0",
+            market_data_age_seconds="0",
+            fx_age_seconds={},
+            margin_headroom="1",
+            capability_allowed=True,
+            borrow_available=True,
+            decision_time=point,
+        )
+
+        self.assertEqual(
+            context.decision_time,
+            datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc),
+        )
 
     def test_hostile_text_scalar_is_rejected_before_normalization(self):
         class HostileText(str):

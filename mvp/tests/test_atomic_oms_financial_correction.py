@@ -470,6 +470,66 @@ class AtomicOmsFinancialCorrectionTests(unittest.TestCase):
                 atomic_correction(orders, economics, reservations, settlements)
             )
 
+    def test_oms_only_recovery_fences_post_evidence_journal_change(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations, settlements = books(store)
+            seed_initial(orders, economics, reservations, settlements)
+            corrected = projected_correction()
+            orders.correct_fill(
+                event_key="correct-fill-1",
+                client_order_id="order-1",
+                fill_id=corrected.correction_of,
+                quantity=corrected.quantity,
+                price=corrected.price,
+                provider_revision=corrected.provider_revision,
+                correction_fill_id=corrected.fill_id,
+                committed_at=CORRECTION_AT,
+            )
+            original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
+            injected = False
+
+            def race_after_order_cut(selected_book, transactions, **kwargs):
+                nonlocal injected
+                if selected_book is economics and not injected:
+                    injected = True
+                    orders.request_cancel(
+                        event_key="post-correction-cancel",
+                        client_order_id="order-1",
+                        command_id="post-correction-cancel-command",
+                        committed_at=CORRECTION_AT,
+                    )
+                return original_prepare(selected_book, transactions, **kwargs)
+
+            DurableProviderEconomicBook.prepare_batch_mutation = race_after_order_cut
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed after financial evidence validation",
+                ):
+                    atomic_correction(
+                        orders,
+                        economics,
+                        reservations,
+                        settlements,
+                    )
+            finally:
+                DurableProviderEconomicBook.prepare_batch_mutation = original_prepare
+
+            ro, re, rr, rs = books(JournalStore(path))
+            self.assertTrue(ro.order("order-1").cancel_requested)
+            self.assertEqual(
+                ro.order("order-1").snapshot().filled_quantity,
+                Decimal("1.1"),
+            )
+            self.assertEqual(len(re.transactions), 1)
+            self.assertEqual(
+                rr.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(len(rs.obligations), 1)
+
     def test_finance_only_correction_cannot_be_relabelled_atomic(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

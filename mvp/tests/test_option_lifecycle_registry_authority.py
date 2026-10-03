@@ -85,7 +85,11 @@ class OptionLifecycleRegistryAuthorityTests(unittest.TestCase):
                 calls.append(("at", instrument_id, instant))
                 return forged
 
-        registry = HostileRegistry(versions=(canonical,))
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            HostileRegistry(versions=(canonical,))
+        # Exercise the lifecycle admission fence independently of the earlier
+        # canonical registry constructor fence, without invoking virtual methods.
+        registry = object.__new__(HostileRegistry)
 
         with self.assertRaises(TypeError):
             _bind_version(registry, observation())

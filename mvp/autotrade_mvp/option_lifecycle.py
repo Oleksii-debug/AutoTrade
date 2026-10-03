@@ -25,6 +25,9 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_abs,
+    exact_multiply,
+    exact_subtract,
+    parse_bounded_exact_decimal,
     is_exact_decimal_multiple,
 )
 from .instruments import InstrumentRegistry, InstrumentVersion
@@ -189,12 +192,16 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise OptionLifecycleError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionLifecycleError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionLifecycleError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(f"{name} must be a bounded exact decimal") from error
+
+
+def _exact(operation, *args):
+    try:
+        return operation(*args)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError("option lifecycle arithmetic exceeds the exact resource envelope") from error
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -364,7 +371,7 @@ def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
         raise OptionLifecycleError(
             "adjusted physical deliverable requires explicit canonical exercise cash evidence"
         )
-    return version.strike * version.contract_multiplier
+    return _exact(exact_multiply, version.strike, version.contract_multiplier)
 
 
 def _contract_from_version(version: InstrumentVersion) -> OptionContract:
@@ -479,7 +486,7 @@ def _economic_transaction(
         posting(
             f"POSITION:{contract.instrument}",
             contract.instrument,
-            -observation.signed_contracts,
+            _exact(exact_subtract, Decimal("0"), observation.signed_contracts),
         ),
         posting(
             f"CLEARING:{contract.instrument}",
@@ -554,7 +561,7 @@ def _project_position_after_reversal(
             raise OptionLifecycleConflict(
                 "prior lifecycle economics do not contain one option-position retirement"
             )
-        projected -= matching[0].signed_amount
+        projected = _exact(exact_subtract, projected, matching[0].signed_amount)
     return projected
 
 

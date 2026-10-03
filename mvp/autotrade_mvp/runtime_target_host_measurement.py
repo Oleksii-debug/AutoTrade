@@ -42,6 +42,7 @@ class RuntimeTargetHostMeasurementError(ValueError):
 SCHEMA_VERSION = "1.0.0"
 MEASUREMENT_METHOD_ID = "wp65-target-host-monotonic-v1"
 MEASUREMENT_METHOD_VERSION = "1.0.0"
+MONOTONIC_CLOCK_ID = "python-time.monotonic_ns"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -453,12 +454,20 @@ class TargetHostMeasurementArtifact:
             )
         for field in (
             "scenario_id",
-            "monotonic_clock_id",
             "staleness_basis",
             "research_interference_basis",
         ):
             object.__setattr__(
                 self, field, _text(getattr(self, field), name=field)
+            )
+        object.__setattr__(
+            self,
+            "monotonic_clock_id",
+            _text(self.monotonic_clock_id, name="monotonic_clock_id"),
+        )
+        if self.monotonic_clock_id != MONOTONIC_CLOCK_ID:
+            raise RuntimeTargetHostMeasurementError(
+                "monotonic_clock_id must match canonical campaign time.monotonic_ns authority"
             )
         start = _non_negative_int(
             self.start_journal_sequence, name="start_journal_sequence"

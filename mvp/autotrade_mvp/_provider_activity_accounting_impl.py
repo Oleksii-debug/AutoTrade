@@ -2606,11 +2606,65 @@ def commit_order_fill_with_reservation_consumption(
 
     if type(order_book) is not DurableOrderBookProjection:
         raise TypeError("order_book must be exact DurableOrderBookProjection")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+
+    normalized_execution = _text(
+        provider_execution_id,
+        name="provider_execution_id",
+    )
+    normalized_reservation = _text(reservation_id, name="reservation_id")
+    normalized_fill = _text(fill_id, name="fill_id")
+    transaction_batch = tuple(transactions)
+
+    if economic_book.environment in {"PAPER", "LIVE"} and provider_fill_binding is None:
+        raise AccountingConflict(
+            "PAPER/LIVE OMS fill financial composition requires "
+            "provider-derived financial binding"
+        )
+
+    if provider_fill_binding is not None:
+        if type(provider_fill_binding) is not PreparedProviderFillBinding:
+            raise TypeError(
+                "provider_fill_binding must be exact PreparedProviderFillBinding"
+            )
+        binding_request = provider_fill_binding.request
+        normalized_usage = _positive_usage_map(
+            usage,
+            name="order fill financial usage",
+        )
+        if (
+            binding_request.get("provider_execution_id") != normalized_execution
+            or binding_request.get("reservation_id") != normalized_reservation
+            or binding_request.get("fill_id") != normalized_fill
+        ):
+            raise AccountingConflict(
+                "provider-derived financial binding does not match OMS fill identity"
+            )
+        if len(transaction_batch) != 1:
+            raise AccountingConflict(
+                "provider-derived OMS fill must bind exactly one economic transaction"
+            )
+        bound_transaction = transaction_batch[0]
+        if not isinstance(bound_transaction, JournalTransaction):
+            raise TypeError("transactions must contain JournalTransaction")
+        if (
+            binding_request.get("transaction_id")
+            != bound_transaction.transaction_id
+            or binding_request.get("transaction_digest")
+            != payload_digest(canonical_transaction(bound_transaction))
+            or binding_request.get("derived_usage")
+            != _usage_payload(normalized_usage)
+        ):
+            raise AccountingConflict(
+                "provider-derived financial binding does not match supplied economics"
+            )
+
     plan = order_book.prepare_record_fill_mutation(
         event_key=order_event_key,
         client_order_id=client_order_id,
         fill_id=fill_id,
-        provider_execution_id=provider_execution_id,
+        provider_execution_id=normalized_execution,
         quantity=quantity,
         price=price,
         committed_at=committed_at,
@@ -2622,9 +2676,9 @@ def commit_order_fill_with_reservation_consumption(
         reservation_book,
         command_id=command_id,
         idempotency_key=idempotency_key,
-        reservation_id=reservation_id,
+        reservation_id=normalized_reservation,
         usage=usage,
-        transactions=transactions,
+        transactions=transaction_batch,
         reservation_expected_snapshot_digest=reservation_expected_snapshot_digest,
         committed_at=committed_at,
         settlement_book=settlement_book,
@@ -3077,6 +3131,9 @@ def commit_provider_fill_with_reservation_consumption(
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
+    order_book: DurableOrderBookProjection | None = None,
+    order_event_key: str | None = None,
+    order_evidence_refs: Sequence[Mapping[str, object]] | None = None,
 ) -> bool:
     """Atomically book one provider fill and consume only evidence-derived resources.
 
@@ -3127,9 +3184,46 @@ def commit_provider_fill_with_reservation_consumption(
         provider_fill=provider_fill,
         committed_at=when,
     )
-    return commit_economic_batch_with_reservation_consumption(
+    if order_book is None:
+        if order_event_key is not None or order_evidence_refs is not None:
+            raise ValueError(
+                "order_event_key/evidence require order_book"
+            )
+        return commit_economic_batch_with_reservation_consumption(
+            economic_book,
+            reservation_book,
+            command_id=command_id,
+            idempotency_key=f"{caller_idempotency}:provider-fill",
+            reservation_id=rid,
+            usage=plan.usage,
+            transactions=(plan.transaction,),
+            reservation_expected_snapshot_digest=plan.reservation_cut_digest,
+            committed_at=when,
+            settlement_book=settlement_book,
+            settlement_obligations=settlement_obligations,
+            provider_fill_binding=binding,
+        )
+
+    if type(order_book) is not DurableOrderBookProjection:
+        raise TypeError("order_book must be exact DurableOrderBookProjection")
+    if order_event_key is None:
+        raise ValueError("order_event_key is required with order_book")
+    if projected_fill.client_order_id is None:
+        raise AccountingConflict(
+            "provider-evidenced OMS composition requires client_order_id"
+        )
+    return commit_order_fill_with_reservation_consumption(
+        order_book,
         economic_book,
         reservation_book,
+        order_event_key=order_event_key,
+        client_order_id=projected_fill.client_order_id,
+        fill_id=projected_fill.fill_id,
+        provider_execution_id=projected_fill.provider_execution_id,
+        quantity=projected_fill.quantity,
+        price=projected_fill.price,
+        provider_revision=projected_fill.provider_revision,
+        order_evidence_refs=order_evidence_refs,
         command_id=command_id,
         idempotency_key=f"{caller_idempotency}:provider-fill",
         reservation_id=rid,

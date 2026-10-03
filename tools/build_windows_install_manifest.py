@@ -8,6 +8,7 @@ policies instead of trusting an arbitrary staging directory.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -17,6 +18,10 @@ import re
 import sys
 import zipfile
 
+from autotrade_foundation.windows_namespace import (
+    retain_windows_parent_namespace,
+    retain_windows_regular_file,
+)
 from research.autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_bytes_with_sha256_sidecar,
@@ -264,41 +269,40 @@ def _verify_composition(
     }
 
 
-def _assert_windows_path_chain_is_not_reparse(path: Path, *, name: str) -> None:
-    """Reject Windows reparse indirection in every existing input path component."""
-
-    absolute = path.absolute()
-    anchor = Path(absolute.anchor)
-    current = anchor
-    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
-    for part in parts:
-        current = current / part
-        try:
-            observed = os.stat(current, follow_symlinks=False)
-        except OSError as error:
-            raise InstallerManifestError(
-                f"{name} path identity cannot be verified"
-            ) from error
-        if _has_windows_reparse_point(observed):
-            raise InstallerManifestError(
-                f"{name} path must not contain a Windows reparse point"
-            )
-
-
+@contextmanager
 def _open_stable_regular_file(path: Path, *, name: str):
-    """Open one immutable-by-identity verification snapshot without path re-open."""
+    """Open one retained verification snapshot without mutable Windows pathname authority."""
 
-    _assert_windows_path_chain_is_not_reparse(path, name=name)
+    if sys.platform == "win32":
+        candidate = Path(os.path.abspath(os.fspath(path)))
+        try:
+            with retain_windows_parent_namespace(
+                candidate,
+                create=False,
+            ) as parent_authority:
+                with retain_windows_regular_file(
+                    parent_authority,
+                    target_name=candidate.name,
+                    subject=name,
+                ) as descriptor:
+                    with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                        _assert_open_file_identity(candidate, stream, name=name)
+                        yield stream
+        except (OSError, RuntimeError, TypeError) as error:
+            raise InstallerManifestError(
+                f"{name} retained Windows namespace authority failed"
+            ) from error
+        return
+
     try:
         stream = path.open("rb")
     except OSError as error:
         raise InstallerManifestError(f"{name} must be an existing regular file") from error
     try:
         _assert_open_file_identity(path, stream, name=name)
-    except BaseException:
+        yield stream
+    finally:
         stream.close()
-        raise
-    return stream
 
 
 def _has_windows_reparse_point(observed: os.stat_result) -> bool:
@@ -316,7 +320,6 @@ def _assert_open_file_identity(
     *,
     name: str,
 ) -> os.stat_result:
-    _assert_windows_path_chain_is_not_reparse(path, name=name)
     try:
         opened = os.fstat(stream.fileno())
         current = os.stat(path, follow_symlinks=False)

@@ -23,6 +23,8 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
 
+from autotrade_runtime.strict_json import strict_json_loads
+
 from .performance_qualification import RuntimeBudgetSpec
 from .persistence import JournalStore
 from .runtime_load_qualification import (
@@ -119,33 +121,15 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeTargetHostMeasurementError(
-                "target-host measurement contains duplicate JSON object key"
-            )
-        result[key] = value
-    return result
-
-
 def _strict_json(raw: bytes, *, name: str) -> dict[str, object]:
     if type(raw) is not bytes or not raw:
         raise RuntimeTargetHostMeasurementError(f"{name} must be non-empty bytes")
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                RuntimeTargetHostMeasurementError(
-                    f"{name} contains invalid JSON constant {token}"
-                )
-            ),
-        )
-    except (UnicodeError, json.JSONDecodeError) as error:
+        text = raw.decode("utf-8")
+        value = strict_json_loads(text)
+    except (UnicodeError, TypeError, ValueError) as error:
         raise RuntimeTargetHostMeasurementError(
-            f"{name} is not valid UTF-8 JSON"
+            f"{name} is not valid bounded strict UTF-8 JSON"
         ) from error
     if type(value) is not dict:
         raise RuntimeTargetHostMeasurementError(f"{name} must be a JSON object")
@@ -850,17 +834,17 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     )
     measurement.require_evidence_match(evidence)
 
-    campaign_end_upper_ns = cut.started_monotonic_ns + evidence.observed_duration_us * 1_000
+    campaign_end_ns = evidence.ended_monotonic_ns
     for sample in measurement.financial_samples:
         if sample.latency_start_monotonic_ns < cut.started_monotonic_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial latency sample starts before campaign monotonic cut"
             )
-        if sample.latency_end_monotonic_ns > campaign_end_upper_ns:
+        if sample.latency_end_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial latency sample ends after campaign monotonic cut"
             )
-        if sample.staleness_observed_monotonic_ns > campaign_end_upper_ns:
+        if sample.staleness_observed_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial staleness observation occurs after campaign end"
             )
@@ -869,12 +853,12 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
             raise RuntimeTargetHostMeasurementError(
                 "research sample starts before campaign monotonic cut"
             )
-        if sample.end_monotonic_ns > campaign_end_upper_ns:
+        if sample.end_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "research sample ends after campaign monotonic cut"
             )
     for sample in measurement.resource_samples:
-        if not cut.started_monotonic_ns <= sample.monotonic_ns <= campaign_end_upper_ns:
+        if not cut.started_monotonic_ns <= sample.monotonic_ns <= campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "resource sample lies outside campaign monotonic cut"
             )

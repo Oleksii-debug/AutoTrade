@@ -305,7 +305,12 @@ class RuntimeTargetHostMeasurementTests(unittest.TestCase):
             self.assertEqual(evidence.resource_evidence_hash, value.digest)
             self.assertEqual(evidence.resource_metrics["memory_rss_bytes"], 8192)
             self.assertEqual(evidence.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, evidence).status, "PASS")
+            decision = evaluate_runtime_campaign(spec, evidence)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(
+                decision.reasons,
+                ("unverified_runtime_measurement_provenance",),
+            )
 
     def test_measurement_for_substituted_event_identity_cannot_pair_with_journal(self):
         with TemporaryDirectory() as directory:

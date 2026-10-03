@@ -343,10 +343,14 @@ def causal_market_event_history(
             raise HistoricalDataError(
                 "market event quality_flags must be a unique array of non-empty strings"
             )
+        if "source_sequence" in event and type(event["source_sequence"]) is not str:
+            raise HistoricalDataError("source_sequence must be a canonical string Sequence")
         _optional_non_negative_sequence(
             event.get("source_sequence"),
             "source_sequence",
         )
+        if type(event.get("revision")) is not str:
+            raise HistoricalDataError("revision must be a canonical string Sequence")
         revision = _non_negative_sequence(event.get("revision"), "revision")
         available = _utc(event.get("available_at"), "available_at")
         source_at = _utc(event.get("source_event_at"), "source_event_at")

@@ -153,6 +153,14 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
         invalid_payload["payload"] = []
         cases.append((invalid_payload, "payload must be an object"))
 
+        numeric_revision = _event(1, available_minutes=1, ingested_minutes=3)
+        numeric_revision["revision"] = 1
+        cases.append((numeric_revision, "revision must be a canonical string Sequence"))
+
+        numeric_sequence = _event(1, available_minutes=1, ingested_minutes=3)
+        numeric_sequence["source_sequence"] = 1
+        cases.append((numeric_sequence, "source_sequence must be a canonical string Sequence"))
+
         duplicate_flags = _event(1, available_minutes=1, ingested_minutes=3)
         duplicate_flags["quality_flags"] = ["STALE", "STALE"]
         cases.append((duplicate_flags, "quality_flags"))

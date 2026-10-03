@@ -1665,13 +1665,24 @@ _SEALED_ALLOCATION_PAYLOADS: dict[int, weakref.ReferenceType] = {}
 
 
 class _SealedAllocationPayload:
-    """Private provenance owner for one canonical frozen mapping node."""
+    """Private read-only provenance owner for one canonical frozen mapping node."""
 
-    __slots__ = ("proxy", "canonical_json", "__weakref__")
+    __slots__ = ("_proxy", "_canonical_json", "__weakref__")
 
     def __init__(self, proxy, canonical_json: str) -> None:
-        self.proxy = proxy
-        self.canonical_json = canonical_json
+        object.__setattr__(self, "_proxy", proxy)
+        object.__setattr__(self, "_canonical_json", canonical_json)
+
+    @property
+    def proxy(self):
+        return self._proxy
+
+    @property
+    def canonical_json(self) -> str:
+        return self._canonical_json
+
+    def __setattr__(self, name, value) -> None:
+        raise AttributeError("sealed allocation payload provenance is read-only")
 
 
 def _registered_allocation_payload(value):
@@ -1957,6 +1968,17 @@ def _allocation_payload_snapshot(
     decoded = json.loads(owner.canonical_json)
     if type(decoded) is not dict:
         raise RuntimeError("sealed allocation payload provenance is invalid")
+    expected_digest = _allocation_evidence_digest(
+        evidence_id=object.__getattribute__(evidence, "evidence_id"),
+        kind=object.__getattribute__(evidence, "kind"),
+        environment=object.__getattribute__(evidence, "environment"),
+        schema_version=object.__getattribute__(evidence, "schema_version"),
+        observed_at=object.__getattribute__(evidence, "observed_at"),
+        valid_until=object.__getattribute__(evidence, "valid_until"),
+        payload=decoded,
+    )
+    if expected_digest != object.__getattribute__(evidence, "digest"):
+        raise ValueError("allocation evidence payload provenance digest mismatch")
     return decoded
 
 
@@ -2011,8 +2033,8 @@ def _resolve_allocation_evidence(
     expected_environment: str,
     at: str,
 ) -> ImmutableAllocationEvidence:
-    if not isinstance(evidence, ImmutableAllocationEvidence):
-        raise TypeError("allocation evidence values must be ImmutableAllocationEvidence")
+    if type(evidence) is not ImmutableAllocationEvidence:
+        raise TypeError("allocation evidence values must use the canonical evidence type")
     if evidence.kind != expected_kind:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} has kind {evidence.kind}, "
@@ -2027,7 +2049,7 @@ def _resolve_allocation_evidence(
             f"allocation evidence {evidence.evidence_id} is stale or not yet observable"
         )
     resolved = resolved_evidence.get(evidence.evidence_id)
-    if not isinstance(resolved, ImmutableAllocationEvidence):
+    if type(resolved) is not ImmutableAllocationEvidence:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} cannot be resolved authoritatively"
         )

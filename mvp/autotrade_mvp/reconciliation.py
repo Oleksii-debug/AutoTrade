@@ -1310,6 +1310,138 @@ def _snapshot_coverage_surface(
     return snapshot
 
 
+def _snapshot_resource_availability(
+    evidence: ResourceAvailabilityEvidence,
+) -> ResourceAvailabilityEvidence:
+    """Detach provider-derived reservable values before any caller callbacks."""
+
+    if type(evidence) is not ResourceAvailabilityEvidence:
+        raise TypeError(
+            "resource_availability must be exact ResourceAvailabilityEvidence"
+        )
+    raw_state = object.__getattribute__(evidence, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("resource availability state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "snapshot_id",
+        "query_started_at",
+        "query_completed_at",
+        "valid_until",
+        "available_resources",
+        "provider_as_of",
+        "evidence_refs",
+        "resource_details",
+    }
+    if set(state) != expected_fields:
+        raise TypeError(
+            "resource availability evidence contains unexpected state fields"
+        )
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "snapshot_id",
+        "query_started_at",
+        "query_completed_at",
+        "valid_until",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"resource availability {name} must be exact str")
+    if state["provider_as_of"] is not None and type(state["provider_as_of"]) is not str:
+        raise TypeError(
+            "resource availability provider_as_of must be exact str or None"
+        )
+    if type(state["available_resources"]) is not MappingProxyType:
+        raise TypeError(
+            "resource availability values must use inert mappingproxy storage"
+        )
+    if type(state["resource_details"]) is not MappingProxyType:
+        raise TypeError(
+            "resource availability details must use inert mappingproxy storage"
+        )
+    if type(state["evidence_refs"]) is not tuple or any(
+        type(reference) is not str for reference in state["evidence_refs"]
+    ):
+        raise TypeError(
+            "resource availability evidence_refs must be exact tuple[str, ...]"
+        )
+
+    available_resources: dict[str, Decimal] = {}
+    for resource, amount in state["available_resources"].items():
+        if type(resource) is not str or type(amount) is not Decimal:
+            raise TypeError(
+                "resource availability map must contain exact str/Decimal entries"
+            )
+        available_resources[resource] = amount
+
+    resource_details: dict[str, dict[str, str]] = {}
+    for resource, detail in state["resource_details"].items():
+        if type(resource) is not str or type(detail) is not MappingProxyType:
+            raise TypeError(
+                "resource availability detail map must use exact inert entries"
+            )
+        copied: dict[str, str] = {}
+        for key, value in detail.items():
+            if type(key) is not str or type(value) is not str:
+                raise TypeError(
+                    "resource availability details must contain exact str entries"
+                )
+            copied[key] = value
+        resource_details[resource] = copied
+
+    snapshot = ResourceAvailabilityEvidence(
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        snapshot_id=state["snapshot_id"],
+        query_started_at=state["query_started_at"],
+        query_completed_at=state["query_completed_at"],
+        valid_until=state["valid_until"],
+        available_resources=available_resources,
+        provider_as_of=state["provider_as_of"],
+        evidence_refs=tuple(state["evidence_refs"]),
+        resource_details=resource_details,
+    )
+    observed = (
+        state["provider_id"],
+        state["account_id"],
+        state["environment"],
+        state["snapshot_id"],
+        state["query_started_at"],
+        state["query_completed_at"],
+        state["valid_until"],
+        available_resources,
+        state["provider_as_of"],
+        tuple(state["evidence_refs"]),
+        resource_details,
+    )
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.snapshot_id,
+        snapshot.query_started_at,
+        snapshot.query_completed_at,
+        snapshot.valid_until,
+        dict(snapshot.available_resources),
+        snapshot.provider_as_of,
+        snapshot.evidence_refs,
+        {
+            resource: dict(detail)
+            for resource, detail in snapshot.resource_details.items()
+        },
+    )
+    if observed != canonical:
+        raise ValueError(
+            "resource availability evidence changed from canonical normalized state"
+        )
+    return snapshot
+
+
 def _snapshot_consistency_evidence(
     evidence: SnapshotConsistencyEvidence,
 ) -> SnapshotConsistencyEvidence:
@@ -1491,6 +1623,30 @@ def reconcile_account(
     if end < start:
         raise ValueError("coverage_end must not precede coverage_start")
 
+    # Freeze authority-bearing caller-owned evidence before any arbitrary
+    # sequence iteration can mutate an adjacent frozen dataclass via
+    # object.__setattr__.
+    if snapshot_consistency is not None:
+        snapshot_consistency = _snapshot_consistency_evidence(
+            snapshot_consistency
+        )
+    if resource_availability is not None:
+        resource_availability = _snapshot_resource_availability(
+            resource_availability
+        )
+    if activity_coverage is not None:
+        activity_coverage = _snapshot_coverage_surface(
+            activity_coverage,
+            source_name="activity_coverage",
+        )
+    absence_coverage = tuple(
+        _snapshot_coverage_surface(
+            item,
+            source_name="absence_coverage",
+        )
+        for item in absence_coverage
+    )
+
     local_cash_map = _amount_map(local_cash, name="local_cash")
     provider_cash_map = _amount_map(provider_cash, name="provider_cash")
     local_position_map = _amount_map(local_positions, name="local_positions")
@@ -1608,10 +1764,6 @@ def reconcile_account(
         )
     )
 
-    if snapshot_consistency is not None:
-        snapshot_consistency = _snapshot_consistency_evidence(
-            snapshot_consistency
-        )
     snapshot_window_covered = False
     snapshot_started: datetime | None = None
     snapshot_completed: datetime | None = None
@@ -1640,10 +1792,6 @@ def reconcile_account(
     )
 
     if resource_availability is not None:
-        if not isinstance(resource_availability, ResourceAvailabilityEvidence):
-            raise TypeError(
-                "resource_availability must be ResourceAvailabilityEvidence"
-            )
         if (
             resource_availability.provider_id != provider_scope
             or resource_availability.account_id != account_scope
@@ -1864,11 +2012,6 @@ def reconcile_account(
         )
     )
 
-    if activity_coverage is not None:
-        activity_coverage = _snapshot_coverage_surface(
-            activity_coverage,
-            source_name="activity_coverage",
-        )
     if activity_coverage is not None and (
         activity_coverage.provider_id != provider_scope
         or activity_coverage.account_id != account_scope

@@ -111,8 +111,8 @@ def _freeze_proposal(
             )
         frozen: dict[str, object] = {}
         for key, nested in value.items():
-            if not isinstance(key, str):
-                raise ResearchBoundaryError(f"{label} object keys must be strings")
+            if type(key) is not str:
+                raise ResearchBoundaryError(f"{label} object keys must be exact strings")
             key_size = _utf8_size(key, label=f"{label} object key")
             if key_size > _MAX_STRING_UTF8_BYTES:
                 raise ResearchBoundaryError(
@@ -191,9 +191,15 @@ class Redistribution(StrEnum):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ResearchBoundaryError(f"{name} is required")
     return value.strip()
+
+
+def _exact_collection(value: object, *, name: str) -> tuple[object, ...]:
+    if type(value) not in (tuple, list):
+        raise ResearchBoundaryError(f"{name} must be an exact collection")
+    return tuple(value)
 
 
 def _hash(value: str) -> str:
@@ -245,7 +251,10 @@ class ResearchToolRequest:
         object.__setattr__(self, "tool_name", _text(self.tool_name, name="tool_name"))
         capabilities = tuple(
             _text(item, name="requested_capability").upper()
-            for item in self.requested_capabilities
+            for item in _exact_collection(
+                self.requested_capabilities,
+                name="requested_capabilities",
+            )
         )
         if len(set(capabilities)) != len(capabilities):
             raise ResearchBoundaryError("requested capabilities must be unique")
@@ -257,7 +266,10 @@ class ResearchToolRequest:
             "arguments",
             _freeze_proposal(self.arguments, label="research tool arguments"),
         )
-        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
+        )
         object.__setattr__(self, "evidence_refs", refs)
 
 
@@ -281,9 +293,7 @@ class AdmittedResearchToolRequest:
             "tool_name",
             _text(self.tool_name, name="tool_name"),
         )
-        if isinstance(self.capabilities, (str, bytes)):
-            raise ResearchBoundaryError("capabilities must be a collection")
-        capabilities = tuple(self.capabilities)
+        capabilities = _exact_collection(self.capabilities, name="capabilities")
         if not capabilities:
             raise ResearchBoundaryError(
                 "admitted request requires at least one research capability"
@@ -317,7 +327,7 @@ class AdmittedResearchToolRequest:
             )
         refs = tuple(
             _text(item, name="evidence_ref")
-            for item in self.evidence_refs
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
         )
         if len(set(refs)) != len(refs):
             raise ResearchBoundaryError("evidence references must be unique")
@@ -406,13 +416,19 @@ class ResearchModelResult:
         if type(self.proposal) is not dict:
             raise ResearchBoundaryError("proposal must be an exact object")
         object.__setattr__(self, "proposal", _freeze_proposal(self.proposal))
-        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
+        )
         if not refs:
             raise ResearchBoundaryError("model result requires evidence references")
         object.__setattr__(self, "evidence_refs", refs)
         capabilities = tuple(
             _text(item, name="requested_capability").upper()
-            for item in self.requested_capabilities
+            for item in _exact_collection(
+                self.requested_capabilities,
+                name="requested_capabilities",
+            )
         )
         object.__setattr__(self, "requested_capabilities", capabilities)
         if self.permission_effect != "NONE":

@@ -989,6 +989,99 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertNotIn("SEQUENCE_GAP", ranged.quality_flags)
         self.assertNotIn("OUT_OF_ORDER", ranged.quality_flags)
 
+    def test_provider_snapshot_registration_rejects_unqualified_snapshot_continuity(self):
+        policy_id = TEST_BOOK_POLICY_ID
+        normalizer = MarketNormalizer(
+            registry(),
+            book_stream_policies=(
+                provider_book_policy(policy_id=policy_id),
+            ),
+        )
+        begin_provider_policy(normalizer, policy_id=policy_id)
+        snapshot = normalizer.normalize(
+            provider_raw(
+                "BOOK_SNAPSHOT",
+                {
+                    "bids": [["99.99", "1"]],
+                    "asks": [["100.01", "1"]],
+                    "checksum": "unverified-snapshot-checksum",
+                },
+                sequence=100,
+                stream="book",
+            )
+        )
+        self.assertIn(
+            "BOOK_RANGE_CONTINUITY_UNVERIFIED",
+            snapshot.quality_flags,
+        )
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "snapshot provider continuity is not qualified",
+        ):
+            normalizer.register_provider_book_snapshot(
+                snapshot,
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+                policy_id=policy_id,
+                cursor_sequence=100,
+            )
+
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "UNINITIALIZED",
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "provider book cursor is unavailable",
+        ):
+            normalizer.provider_book_cursor(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        begin_provider_policy(
+            normalizer,
+            generation=2,
+            policy_id=policy_id,
+        )
+        clean_snapshot = normalizer.normalize(
+            provider_raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=200,
+                stream="book",
+                generation=2,
+            )
+        )
+        normalizer.register_provider_book_snapshot(
+            clean_snapshot,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+            policy_id=policy_id,
+            cursor_sequence=200,
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "BOOTSTRAPPING",
+        )
+
     def test_qualified_provider_range_bootstraps_materialized_book(self):
         policy_id = TEST_BOOK_POLICY_ID
         normalizer = MarketNormalizer(
@@ -1416,6 +1509,47 @@ class MarketNormalizationTests(unittest.TestCase):
             "BOOTSTRAPPING",
         )
 
+        old_correction = normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.40", "2"]],
+                    "asks": [],
+                    "first_sequence": 90,
+                    "last_sequence": 100,
+                },
+                sequence=100,
+                stream="book",
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=1, milliseconds=100),
+            )
+        )
+        self.assertIn("CORRECTION", old_correction.quality_flags)
+        discarded_correction = normalizer.apply_qualified_book_range(
+            old_correction,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+        )
+        self.assertEqual(discarded_correction.disposition, "DISCARD")
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            ),
+            "BOOTSTRAPPING",
+        )
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            ),
+            100,
+        )
+
         gap = normalizer.normalize(
             provider_raw(
                 "BOOK_DELTA",
@@ -1452,6 +1586,151 @@ class MarketNormalizationTests(unittest.TestCase):
             ),
             "GAPPED",
         )
+
+    def test_historical_provider_delta_correction_invalidates_ready_book(self):
+        policy_id = TEST_BOOK_POLICY_ID
+        normalizer = MarketNormalizer(
+            registry(),
+            max_book_age=timedelta(seconds=5),
+            book_stream_policies=(
+                provider_book_policy(policy_id=policy_id),
+            ),
+        )
+        begin_provider_policy(normalizer, policy_id=policy_id)
+        snapshot = normalizer.normalize(
+            provider_raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=100,
+                stream="book",
+            )
+        )
+        normalizer.register_provider_book_snapshot(
+            snapshot,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+            policy_id=policy_id,
+            cursor_sequence=100,
+        )
+
+        first = normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "2"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                stream="book",
+            )
+        )
+        normalizer.apply_qualified_book_range(
+            first,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+        second = normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.98", "1"]],
+                    "asks": [],
+                    "first_sequence": 106,
+                    "last_sequence": 110,
+                },
+                sequence=110,
+                stream="book",
+            )
+        )
+        normalizer.apply_qualified_book_range(
+            second,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+        self.assertEqual(
+            normalizer.provider_book_cursor(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            110,
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        correction = normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["100.00", "3"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 105,
+                },
+                sequence=105,
+                stream="book",
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=1, milliseconds=100),
+            )
+        )
+        self.assertIn("CORRECTION", correction.quality_flags)
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "historical provider range correction requires book rebuild",
+        ):
+            normalizer.apply_qualified_book_range(
+                correction,
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "provider book cursor is unavailable",
+        ):
+            normalizer.provider_book_cursor(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
+        with self.assertRaisesRegex(MarketDataError, "new risk is blocked"):
+            normalizer.executable_book(
+                as_of=at() + timedelta(seconds=2),
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            )
 
     def test_caller_forged_apply_cannot_override_registered_gap(self):
         policy_id = TEST_BOOK_POLICY_ID
@@ -3031,6 +3310,104 @@ class MarketNormalizationTests(unittest.TestCase):
                 stream="trades",
                 generation=True,
             )
+
+    def test_book_generation_boundary_requires_new_snapshot_and_fences_old_frames(self):
+        normalizer = MarketNormalizer(registry(), max_book_age=timedelta(seconds=5))
+        normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=100,
+                stream="book",
+                generation=1,
+            )
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        first_new_generation_frame = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.98", "2"]], "asks": []},
+                sequence=1,
+                stream="book",
+                generation=2,
+            )
+        )
+        self.assertIn("BOOK_UNUSABLE", first_new_generation_frame.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
+        new_snapshot = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["100.00", "3"]], "asks": [["100.02", "4"]]},
+                sequence=2,
+                stream="book",
+                generation=2,
+            )
+        )
+        self.assertNotIn("BOOK_UNUSABLE", new_snapshot.quality_flags)
+        expected = normalizer.executable_book(
+            as_of=at() + timedelta(seconds=1),
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            stream="book",
+        )
+        self.assertEqual(expected["bids"][0], {"price": "100", "quantity": "3"})
+        self.assertEqual(expected["asks"][0], {"price": "100.02", "quantity": "4"})
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "superseded stream generation",
+        ):
+            normalizer.normalize(
+                raw(
+                    "BOOK_SNAPSHOT",
+                    {"bids": [["1", "9"]], "asks": [["2", "9"]]},
+                    sequence=101,
+                    stream="book",
+                    generation=1,
+                )
+            )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "requires the active stream generation",
+        ):
+            normalizer.normalize(
+                raw(
+                    "BOOK_SNAPSHOT",
+                    {"bids": [["1", "9"]], "asks": [["2", "9"]]},
+                    sequence=102,
+                    stream="book",
+                )
+            )
+
+        self.assertEqual(
+            normalizer.executable_book(
+                as_of=at() + timedelta(seconds=1),
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            expected,
+        )
 
     def test_scalar_sequence_chronology_resets_by_explicit_stream_generation(self):
         normalizer = MarketNormalizer(registry())

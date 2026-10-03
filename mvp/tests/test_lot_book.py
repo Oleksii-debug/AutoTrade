@@ -158,6 +158,33 @@ class FifoLotBookTests(unittest.TestCase):
         self.assertEqual(book.lots, before_lots)
         self.assertEqual(book.snapshot(), before_snapshot)
 
+    def test_internal_accounting_ignores_instance_method_shadows(self):
+        book = FifoLotBook()
+        book.buy("2", "100")
+        calls = []
+        forged = lot_module.BasisSnapshot(
+            position=Decimal("999"),
+            open_basis=Decimal("1"),
+            realized_pnl=Decimal("999"),
+        )
+        book.snapshot = lambda: calls.append("snapshot") or forged
+        book._snapshot_for = lambda *_args: calls.append("_snapshot_for") or forged
+        book._open_basis_fraction = (
+            lambda: calls.append("_open_basis_fraction") or Fraction(1, 1)
+        )
+
+        state = book.buy("1", "120")
+        self.assertEqual(state.position, Decimal("3"))
+        self.assertEqual(state.open_basis, Decimal("320"))
+        self.assertEqual(state.realized_pnl, Decimal("0"))
+
+        state = book.sell("1", "130")
+        self.assertEqual(state.position, Decimal("2"))
+        self.assertEqual(state.open_basis, Decimal("220"))
+        self.assertEqual(state.realized_pnl, Decimal("30"))
+        self.assertEqual(book.mark_to_market("140"), Decimal("60"))
+        self.assertEqual(calls, [])
+
     def test_authoritative_arithmetic_is_independent_of_ambient_decimal_context(self):
         book = FifoLotBook()
         with localcontext() as context:

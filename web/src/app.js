@@ -1572,6 +1572,11 @@
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
       return;
     }
+    // Freeze the visible action/policy controls immediately after the exact
+    // command payload is retained. The operator must never see editable values
+    // that differ from the in-flight request.
+    syncHostActionOptions(state.sessionIdentity.role);
+    renderPendingAuthorityPolicyForRetry();
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;

@@ -648,6 +648,78 @@ class DurableFinancingTests(unittest.TestCase):
             )
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
 
+
+    def test_charge_scope_cannot_migrate_across_revisions_after_restart(self):
+        first = "00000000-0000-0000-0000-000000000074"
+        migrated = "00000000-0000-0000-0000-000000000075"
+        self.artifacts.put(
+            first,
+            revision=1,
+            amount="1.20",
+            source_account="CASH:BTC",
+            charge_scope_type="INSTRUMENT",
+            charge_scope_id="instrument-alpha",
+        )
+        self.financing.record_authenticated_artifact(
+            self.artifacts,
+            artifact_id=first,
+            committed_at=BASE.isoformat(),
+        )
+
+        restarted_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        restarted = DurableFinancingBook(
+            self.store,
+            restarted_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        self.artifacts.put(
+            migrated,
+            revision=2,
+            amount="1.50",
+            available_at=BASE + timedelta(minutes=1),
+            source_account="CASH:BTC",
+            charge_scope_type="INSTRUMENT",
+            charge_scope_id="instrument-beta",
+        )
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "charge scope cannot change across revisions",
+        ):
+            restarted.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=migrated,
+                committed_at=(BASE + timedelta(minutes=1)).isoformat(),
+            )
+
+        latest = restarted.latest("borrow-btc-2026-09-28")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.revision, 1)
+        self.assertEqual(
+            str(restarted_economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
+            "1.20",
+        )
+        self.assertEqual(
+            str(restarted_economic.balance("CASH:BTC", "BTC")),
+            "-1.20",
+        )
+        self.assertEqual(
+            len(
+                self.store.load_events(
+                    "provider_financing_charge",
+                    restarted._aggregate_id("borrow-btc-2026-09-28"),
+                )
+            ),
+            1,
+        )
+
     def test_provider_evidence_cannot_redirect_internal_financing_account(self):
         first = "00000000-0000-0000-0000-000000000072"
         malicious = "00000000-0000-0000-0000-000000000073"

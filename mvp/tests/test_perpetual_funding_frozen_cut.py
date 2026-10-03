@@ -156,6 +156,53 @@ class FundingFrozenCutTests(unittest.TestCase):
             authority.instrument_registry.at = lambda *_: self.fail("caller registry dispatch")
             self.assertEqual(authority.apply(source.evidence_ref).cashflow, Decimal("-0.2"))
 
+    def test_financial_store_binding_cannot_be_rebound_after_construction(self):
+        source = fixtures.sealed_funding()
+        for mutation in ("authority_store", "economic_book", "economic_book_store"):
+            with self.subTest(mutation=mutation), TemporaryDirectory() as directory:
+                primary_store = JournalStore(f"{directory}/primary.sqlite3")
+                authority, book = self.authority(primary_store, [source])
+                foreign_store = JournalStore(f"{directory}/foreign.sqlite3")
+                foreign_book = DurableProviderEconomicBook(
+                    foreign_store,
+                    provider_id=book.provider_id,
+                    account_id=book.account_id,
+                    environment=book.environment,
+                )
+                fixtures.seed_position(foreign_book, transaction_id="foreign-position")
+
+                primary_before = primary_store.current_journal_sequence()
+                foreign_before = foreign_store.current_journal_sequence()
+
+                if mutation == "authority_store":
+                    authority.store = foreign_store
+                elif mutation == "economic_book":
+                    authority.economic_book = foreign_book
+                else:
+                    book.store = foreign_store
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingConflict,
+                    "durable store binding changed after construction",
+                ):
+                    authority.apply(source.evidence_ref)
+
+                self.assertEqual(
+                    primary_store.current_journal_sequence(),
+                    primary_before,
+                )
+                self.assertEqual(
+                    foreign_store.current_journal_sequence(),
+                    foreign_before,
+                )
+                self.assertEqual(
+                    primary_store.load_events(
+                        "perpetual_funding",
+                        authority.aggregate_id,
+                    ),
+                    [],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

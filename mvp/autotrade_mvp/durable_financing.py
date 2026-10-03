@@ -71,7 +71,7 @@ class DurableFinancingResult:
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise FinancingError(f"{name} is required")
     return value.strip()
 
@@ -180,7 +180,7 @@ def _scoped_identity(kind: str, *parts: str) -> str:
 
 
 def _strict_json_object(data: bytes) -> dict[str, Any]:
-    if not isinstance(data, bytes):
+    if type(data) is not bytes:
         raise FinancingError("authenticated financing evidence bytes are required")
     try:
         text = data.decode("utf-8")
@@ -213,15 +213,19 @@ def _strict_json_object(data: bytes) -> dict[str, Any]:
         raise FinancingError(
             "financing evidence must be valid bounded JSON"
         ) from error
-    if not isinstance(value, dict):
+    if type(value) is not dict:
         raise FinancingError("financing evidence must be a JSON object")
     return value
 
 
 def _normalize_artifact_digest(manifest: Mapping[str, Any]) -> str:
+    if type(manifest) is not dict:
+        raise FinancingError(
+            "authenticated artifact manifest must be an exact dict"
+        )
     digest = manifest.get("sha256")
     if (
-        not isinstance(digest, str)
+        type(digest) is not str
         or len(digest) != 71
         or not digest.startswith("sha256:")
         or any(ch not in "0123456789abcdef" for ch in digest[7:])
@@ -347,14 +351,14 @@ def authenticated_financing_event(
         raise FinancingError(
             "financing evidence could not be authenticated"
         ) from error
-    if not isinstance(manifest, Mapping):
+    if type(manifest) is not dict:
         raise FinancingError("authenticated artifact manifest is invalid")
     if manifest.get("artifact_id") != aid:
         raise FinancingError("authenticated artifact identity does not match request")
     if manifest.get("media_type") != "application/json":
         raise FinancingError("financing evidence artifact must be application/json")
     rights = manifest.get("rights")
-    if not isinstance(rights, Mapping) or rights.get("storage") is not True:
+    if type(rights) is not dict or rights.get("storage") is not True:
         raise FinancingError(
             "financing evidence artifact lacks canonical storage rights"
         )
@@ -455,16 +459,16 @@ def _bybit_funding_event_from_exact_response(
     if response.get("retCode") != 0:
         raise FinancingError("Bybit transaction-log response was not successful")
     result = response.get("result")
-    if not isinstance(result, Mapping):
+    if type(result) is not dict:
         raise FinancingError("Bybit transaction-log result must be an object")
     rows = result.get("list")
-    if not isinstance(rows, list):
+    if type(rows) is not list:
         raise FinancingError("Bybit transaction-log result.list must be an array")
     target_id = _text(row_id, name="row_id")
     matches = [
         row
         for row in rows
-        if isinstance(row, Mapping) and row.get("id") == target_id
+        if type(row) is dict and row.get("id") == target_id
     ]
     if len(matches) != 1:
         raise FinancingError(
@@ -485,7 +489,7 @@ def _bybit_funding_event_from_exact_response(
     if _text(row.get("type"), name="type").upper() != "SETTLEMENT":
         raise FinancingError("Bybit financing row must be a SETTLEMENT record")
     raw_funding = row.get("funding")
-    if not isinstance(raw_funding, str) or raw_funding != raw_funding.strip():
+    if type(raw_funding) is not str or raw_funding != raw_funding.strip():
         raise FinancingError("Bybit funding must be an exact decimal string")
     try:
         funding = parse_bounded_exact_decimal(raw_funding, allow_exponent=False)
@@ -511,11 +515,14 @@ def _bybit_funding_event_from_exact_response(
         raise FinancingError(
             "Bybit financing requires exact canonical InstrumentRegistry authority"
         )
-    if not isinstance(instrument_versions, Mapping):
-        raise FinancingError("instrument_versions must be a mapping")
+    if type(instrument_versions) is not dict:
+        raise FinancingError(
+            "instrument_versions must be a mapping backed by an exact dict"
+        )
+    instrument_version_snapshot = dict.copy(instrument_versions)
     try:
         requested_instrument_version = _text(
-            instrument_versions[symbol],
+            instrument_version_snapshot[symbol],
             name="instrument_version",
         )
     except KeyError as error:
@@ -1004,12 +1011,12 @@ class DurableFinancingBook:
             raise FinancingError(
                 "Bybit financing artifact could not be authenticated"
             ) from error
-        if not isinstance(manifest, Mapping) or manifest.get("artifact_id") != aid:
+        if type(manifest) is not dict or manifest.get("artifact_id") != aid:
             raise FinancingError("Bybit financing artifact identity mismatch")
         if manifest.get("media_type") != "application/json":
             raise FinancingError("Bybit financing artifact must be application/json")
         rights = manifest.get("rights")
-        if not isinstance(rights, Mapping) or rights.get("storage") is not True:
+        if type(rights) is not dict or rights.get("storage") is not True:
             raise FinancingError("Bybit financing artifact lacks storage rights")
         artifact_digest = _normalize_artifact_digest(manifest)
         _verify_authenticated_snapshot_bytes(

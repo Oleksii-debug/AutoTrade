@@ -400,6 +400,7 @@ def _build_composed_production_verifier(
     composed_type,
     signed_dependency_guard=None,
     signed_external_dependency_guard=None,
+    artifact_reader_dependency_guard=None,
 ):
     """Build a composed verifier whose direct dependencies are immutable captures."""
 
@@ -449,6 +450,8 @@ def _build_composed_production_verifier(
             signed_dependency_guard()
         if signed_external_dependency_guard is not None:
             signed_external_dependency_guard()
+        if artifact_reader_dependency_guard is not None:
+            artifact_reader_dependency_guard()
         accepted = signed_verifier(
             receipt,
             evidence_store=evidence_store,
@@ -469,11 +472,15 @@ def _build_composed_production_verifier(
             signed_dependency_guard()
         if signed_external_dependency_guard is not None:
             signed_external_dependency_guard()
+        if artifact_reader_dependency_guard is not None:
+            artifact_reader_dependency_guard()
         if type(accepted) is not accepted_type:
             raise composition_error_type(
                 "signed target-host verifier returned non-canonical acceptance"
             )
 
+        if artifact_reader_dependency_guard is not None:
+            artifact_reader_dependency_guard()
         signed_campaign_matcher(
             accepted,
             evidence_store=evidence_store,
@@ -482,6 +489,8 @@ def _build_composed_production_verifier(
             campaign_plan=campaign_plan_authority,
             spec=spec_authority,
         )
+        if artifact_reader_dependency_guard is not None:
+            artifact_reader_dependency_guard()
 
         projection_digests = projection_digest_builder(measurement_authority)
         for kind, expected_digest in projection_digests.items():
@@ -495,6 +504,8 @@ def _build_composed_production_verifier(
             signed_dependency_guard()
         if signed_external_dependency_guard is not None:
             signed_external_dependency_guard()
+        if artifact_reader_dependency_guard is not None:
+            artifact_reader_dependency_guard()
         return composed_type(
             qualification=accepted,
             target_host_measurement_digest=measurement_authority.digest,
@@ -555,6 +566,11 @@ _PRODUCTION_CANONICAL_QUALIFICATION_GUARD = _build_module_authority_guard(
     error_type=RuntimeTargetHostCompositionError,
     label="canonical qualification verifier",
 )
+_PRODUCTION_ARTIFACT_READER_GUARD = _build_module_authority_guard(
+    root=trusted_authenticated_reader,
+    error_type=RuntimeTargetHostCompositionError,
+    label="authenticated artifact reader",
+)
 
 verify_sealed_composed_runtime_target_host_qualification = (
     _build_composed_production_verifier(
@@ -575,5 +591,6 @@ verify_sealed_composed_runtime_target_host_qualification = (
         composed_type=AcceptedComposedRuntimeTargetHostQualification,
         signed_dependency_guard=_PRODUCTION_SIGNED_VERIFIER_GUARD,
         signed_external_dependency_guard=_PRODUCTION_CANONICAL_QUALIFICATION_GUARD,
+        artifact_reader_dependency_guard=_PRODUCTION_ARTIFACT_READER_GUARD,
     )
 )

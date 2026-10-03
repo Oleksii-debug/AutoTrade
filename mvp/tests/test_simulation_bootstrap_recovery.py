@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -116,12 +117,12 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             real_deliver = simulation_session._deliver_event
             calls = 0
 
-            def crash_second(store, event_id):
+            def crash_second(store, event_id, *, topic):
                 nonlocal calls
                 calls += 1
                 if calls == 2:
                     raise RuntimeError("crash-before-checkpoint-delivery")
-                return real_deliver(store, event_id)
+                return real_deliver(store, event_id, topic=topic)
 
             with patch.object(
                 simulation_session, "_deliver_event", side_effect=crash_second
@@ -149,6 +150,52 @@ class SimulationBootstrapRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.load_events_by_aggregate_type("account_reconciliation"),
                 checkpoints,
+            )
+
+    def test_missing_seed_outbox_row_fails_closed_before_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                simulation_session,
+                "_deliver_event",
+                side_effect=RuntimeError("crash-before-seed-delivery"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="missing-outbox", now=NOW
+                    )
+
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            before_sequence = store.current_journal_sequence()
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DELETE FROM outbox WHERE event_id = ?",
+                    (
+                        simulation_session._uuid(
+                            "EconomicTransactionBatchBooked",
+                            "missing-outbox",
+                        ),
+                    ),
+                )
+                # The economic event ID is content-derived by the economic
+                # authority rather than the session helper. Delete the sole
+                # bootstrap outbox row regardless of that internal identity.
+                connection.execute("DELETE FROM outbox")
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ValueError, "durable outbox publication is missing"
+            ):
+                run_canonical_simulation(
+                    HOLD, directory, episode_id="missing-outbox"
+                )
+
+            self.assertEqual(store.current_journal_sequence(), before_sequence)
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"), []
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"), []
             )
 
     def test_foreign_event_after_owner_blocks_before_bootstrap_continuation(self):

@@ -336,6 +336,65 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             )
         mechanics.assert_not_called()
 
+    def test_release_bound_facade_rejects_self_authored_later_terminal_cut_before_mechanics(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        frozen_end = JournalStore.current_journal_sequence(store)
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+            end_journal_sequence=frozen_end + 1,
+        )
+        with patch.object(
+            durable_financial_module,
+            "bind_durable_financial_latency_to_target_host_measurement",
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "measurement end cut does not match campaign evidence",
+        ):
+            bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                campaign_plan=current_plan,
+                campaign_cut=cut,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        mechanics.assert_not_called()
+
+    def test_release_bound_facade_rejects_resource_sample_after_terminal_clock_before_mechanics(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        with patch(
+            "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+            return_value=1_250_000_000,
+        ), patch.object(
+            durable_financial_module,
+            "bind_durable_financial_latency_to_target_host_measurement",
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "resource sample lies outside campaign monotonic cut",
+        ):
+            bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                campaign_plan=current_plan,
+                campaign_cut=cut,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        mechanics.assert_not_called()
+
     def test_target_measurement_must_bind_exact_journal_store_generation(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)

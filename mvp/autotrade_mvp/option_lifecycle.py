@@ -425,10 +425,20 @@ def _bind_version(
     registry: InstrumentRegistry,
     observation: OptionLifecycleObservation,
 ) -> InstrumentVersion:
-    if not isinstance(registry, InstrumentRegistry):
-        raise TypeError("registry must be InstrumentRegistry")
-    version = registry.exact(observation.instrument_version)
-    effective = registry.at(version.instrument_id, observation.effective_at)
+    if type(registry) is not InstrumentRegistry:
+        raise TypeError("registry must be exact InstrumentRegistry")
+    if {"exact", "at"}.intersection(vars(registry)):
+        raise TypeError("InstrumentRegistry authority is shadowed")
+    version = InstrumentRegistry.exact(registry, observation.instrument_version)
+    if type(version) is not InstrumentVersion:
+        raise TypeError("registry must return exact InstrumentVersion")
+    effective = InstrumentRegistry.at(
+        registry,
+        version.instrument_id,
+        observation.effective_at,
+    )
+    if type(effective) is not InstrumentVersion:
+        raise TypeError("registry must return exact InstrumentVersion")
     if effective != version:
         raise OptionLifecycleError(
             "instrument_version is not the version effective for lifecycle event"
@@ -592,12 +602,12 @@ class DurableOptionLifecycleAuthority:
         lifecycle_endpoints: frozenset[str],
         permission_scope: str,
     ) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
-        if not isinstance(economic_book, DurableProviderEconomicBook):
-            raise TypeError("economic_book must be DurableProviderEconomicBook")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        if type(economic_book) is not DurableProviderEconomicBook:
+            raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         if economic_book.store is not store:
             raise ValueError("lifecycle and economic authorities must share one JournalStore")
         if not callable(evidence_resolver):
@@ -619,6 +629,13 @@ class DurableOptionLifecycleAuthority:
         self.evidence_resolver = evidence_resolver
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
+        self._expected_economic_scope = (
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            economic_book.book_id,
+        )
+        self._require_canonical_authorities()
         self.aggregate_id = _identity(
             "option-lifecycle-book",
             economic_book.provider_id,
@@ -626,8 +643,49 @@ class DurableOptionLifecycleAuthority:
             economic_book.environment,
         )
 
+    def _require_canonical_authorities(self) -> None:
+        if type(self.store) is not JournalStore:
+            raise TypeError("store must remain exact JournalStore")
+        if {"load_events", "commit_command"}.intersection(vars(self.store)):
+            raise TypeError("JournalStore authority is shadowed")
+        if type(self.registry) is not InstrumentRegistry:
+            raise TypeError("registry must remain exact InstrumentRegistry")
+        if {"exact", "at"}.intersection(vars(self.registry)):
+            raise TypeError("InstrumentRegistry authority is shadowed")
+        if type(self.economic_book) is not DurableProviderEconomicBook:
+            raise TypeError(
+                "economic_book must remain exact DurableProviderEconomicBook"
+            )
+        if {
+            "read_cut",
+            "prepare_batch_mutation",
+            "refresh",
+            "_events",
+            "_replay",
+        }.intersection(vars(self.economic_book)):
+            raise TypeError("DurableProviderEconomicBook authority is shadowed")
+        if self.economic_book.store is not self.store:
+            raise OptionLifecycleConflict(
+                "lifecycle and economic authorities no longer share one JournalStore"
+            )
+        current_scope = (
+            self.economic_book.provider_id,
+            self.economic_book.account_id,
+            self.economic_book.environment,
+            self.economic_book.book_id,
+        )
+        if current_scope != self._expected_economic_scope:
+            raise OptionLifecycleConflict(
+                "durable economic-book scope changed after lifecycle construction"
+            )
+
     def _events(self) -> list[dict[str, Any]]:
-        return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
+        self._require_canonical_authorities()
+        return JournalStore.load_events(
+            self.store,
+            self._AGGREGATE_TYPE,
+            self.aggregate_id,
+        )
 
     @staticmethod
     def _payload(event: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -698,7 +756,11 @@ class DurableOptionLifecycleAuthority:
         self,
         evidence_ref: str,
     ) -> OptionLifecycleApplyResult:
+        self._require_canonical_authorities()
         observation, provider_evidence = self._observation_from_evidence(evidence_ref)
+        # The evidence resolver is caller-supplied and may execute arbitrary code.
+        # Revalidate every canonical financial owner after crossing that callback.
+        self._require_canonical_authorities()
         if observation.provider_id != self.economic_book.provider_id:
             raise OptionLifecycleError("provider scope does not match economic book")
         if observation.account_id != self.economic_book.account_id:
@@ -761,7 +823,7 @@ class DurableOptionLifecycleAuthority:
                 ),
             )
 
-        economic_cut = self.economic_book.read_cut()
+        economic_cut = DurableProviderEconomicBook.read_cut(self.economic_book)
 
         prior_event: Mapping[str, Any] | None = None
         prior_payload: Mapping[str, Any] | None = None
@@ -893,7 +955,8 @@ class DurableOptionLifecycleAuthority:
 
         try:
             plan = (
-                self.economic_book.prepare_batch_mutation(
+                DurableProviderEconomicBook.prepare_batch_mutation(
+                    self.economic_book,
                     economic_transactions,
                     committed_at=_utc_text(observation.observed_at),
                     expected_previous_book_digest=economic_cut.book_digest,
@@ -902,7 +965,7 @@ class DurableOptionLifecycleAuthority:
                 else None
             )
         except AccountingConflict as error:
-            self.economic_book.refresh()
+            DurableProviderEconomicBook.refresh(self.economic_book)
             if str(error) == "economic book changed after validated read cut":
                 raise OptionLifecycleConflict(
                     "canonical economic book changed after lifecycle position validation"

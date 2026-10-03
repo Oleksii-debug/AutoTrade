@@ -323,6 +323,13 @@ def value_amount(
             raise FxValuationError(
                 "rounding_policy must be exact FxRoundingPolicy or None"
             )
+        rounding_policy = FxRoundingPolicy(
+            reporting_currency=object.__getattribute__(
+                rounding_policy, "reporting_currency"
+            ),
+            quantum=object.__getattribute__(rounding_policy, "quantum"),
+            version=object.__getattribute__(rounding_policy, "version"),
+        )
         if rounding_policy.reporting_currency != reporting:
             raise FxValuationError("FX rounding policy reporting currency mismatch")
 
@@ -375,6 +382,15 @@ def value_amount(
         )
     if type(quote) is not FxQuote:
         raise FxValuationError("quote must be exact FxQuote or None")
+    quote = FxQuote.create(
+        base_currency=object.__getattribute__(quote, "base_currency"),
+        quote_currency=object.__getattribute__(quote, "quote_currency"),
+        bid=object.__getattribute__(quote, "bid"),
+        ask=object.__getattribute__(quote, "ask"),
+        available_at=object.__getattribute__(quote, "available_at"),
+        source_id=object.__getattribute__(quote, "source_id"),
+        evidence_sha256=object.__getattribute__(quote, "evidence_sha256"),
+    )
 
     if quote.available_at > point:
         return _unavailable(

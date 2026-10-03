@@ -296,7 +296,8 @@ class SecurityBoundary:
             )
         except PermissionError:
             with self._state_lock:
-                if prior is not None and normalized_token in self._sessions:
+                live = self._sessions.get(normalized_token)
+                if prior is not None and live == current:
                     self._sessions[normalized_token] = prior
             raise
         now = self._now_value()

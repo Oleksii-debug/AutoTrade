@@ -170,6 +170,35 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 
 
+    def test_redactor_rejects_container_and_key_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping callback executed")
+
+        class HostileStr(str):
+            def lower(self):
+                touched.append("lower")
+                raise AssertionError("hostile string callback executed")
+
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile string callback executed")
+
+        with self.assertRaisesRegex(ValueError, "exact built-in"):
+            redact_diagnostic_value(HostileDict({"safe": "value"}))
+        with self.assertRaisesRegex(ValueError, "exact built-in"):
+            redact_diagnostic_value(HostileStr("safe=value"))
+
+        hostile_key = HostileStr("accessToken")
+        mapping = {hostile_key: "SHOULD-NOT-BE-READ"}
+        touched.clear()
+        with self.assertRaisesRegex(ValueError, "keys must be exact strings"):
+            redact_diagnostic_value(mapping)
+        self.assertEqual(touched, [])
+
     def test_embedded_secret_text_is_redacted_even_under_safe_keys(self):
         payload = {
             "url": "https://provider.test/path?access_token=token123&mode=read",

@@ -32,7 +32,9 @@ _REDACTION_MARKERS = (
 
 
 def _normalized_key(value: object) -> str:
-    return "".join(character for character in str(value).lower() if character.isalnum())
+    if type(value) is not str:
+        raise ValueError("diagnostic keys must be exact strings")
+    return "".join(character for character in value.lower() if character.isalnum())
 
 
 def _is_sensitive_key(value: object) -> bool:
@@ -142,20 +144,26 @@ def _redact_embedded_secret_text(value: str) -> str:
 def redact_diagnostic_value(value: Any) -> Any:
     """Recursively redact credential-shaped keys and embedded secret text."""
 
-    if isinstance(value, str):
+    if type(value) is str:
         return _redact_embedded_secret_text(value)
-    if isinstance(value, dict):
+    if type(value) is dict:
         result = {}
         for key, child in value.items():
+            if type(key) is not str:
+                raise ValueError("diagnostic object keys must be exact strings")
             if _is_sensitive_key(key):
                 result[key] = "[REDACTED]"
             else:
                 result[key] = redact_diagnostic_value(child)
         return result
-    if isinstance(value, list):
+    if type(value) is list:
         return [redact_diagnostic_value(child) for child in value]
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return [redact_diagnostic_value(child) for child in value]
+    if isinstance(value, (str, dict, list, tuple)):
+        raise ValueError(
+            "diagnostic structured values must use exact built-in containers and strings"
+        )
     return value
 
 

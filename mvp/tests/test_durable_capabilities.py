@@ -296,6 +296,60 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     at=NOW + timedelta(seconds=1),
                 )
 
+    def test_concurrent_newer_writer_invalidates_stale_validated_cut(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            seed = DurableCapabilityRegistry(JournalStore(path))
+            seed.add(
+                verified(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    NOW,
+                )
+            )
+            stale = DurableCapabilityRegistry(JournalStore(path))
+            winner = DurableCapabilityRegistry(JournalStore(path))
+            stale_candidate = verified(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                NOW + timedelta(minutes=1),
+            )
+            newer = verified(
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                NOW + timedelta(minutes=2),
+            )
+
+            original_history = stale._history_with_versions
+
+            def interleaved_history():
+                validated_cut = original_history()
+                self.assertTrue(winner.add(newer))
+                return validated_cut
+
+            stale._history_with_versions = interleaved_history
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "history changed concurrently",
+            ):
+                stale.add(stale_candidate)
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            latest = restarted.latest(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(minutes=3),
+            )
+            self.assertEqual(latest.snapshot_id, newer.snapshot_id)
+            events = restarted.store.load_events_by_aggregate_type(
+                "capability_history"
+            )
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                [event["aggregate_version"] for event in events],
+                [1, 2],
+            )
+
     def test_stale_writer_cannot_append_older_snapshot(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

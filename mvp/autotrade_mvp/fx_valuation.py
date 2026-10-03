@@ -119,6 +119,13 @@ def _age_limit(value: timedelta) -> timedelta:
     return value
 
 
+def _exact_field(value, field: str, *, name: str):
+    try:
+        return object.__getattribute__(value, field)
+    except AttributeError as error:
+        raise FxValuationError(f"{name} is missing required field {field}") from error
+
+
 def _has_terminating_decimal(value: Fraction) -> bool:
     denominator = value.denominator
     while denominator % 2 == 0:
@@ -326,11 +333,11 @@ def value_amount(
                 "rounding_policy must be exact FxRoundingPolicy or None"
             )
         rounding_policy = FxRoundingPolicy(
-            reporting_currency=object.__getattribute__(
-                rounding_policy, "reporting_currency"
+            reporting_currency=_exact_field(
+                rounding_policy, "reporting_currency", name="rounding_policy"
             ),
-            quantum=object.__getattribute__(rounding_policy, "quantum"),
-            version=object.__getattribute__(rounding_policy, "version"),
+            quantum=_exact_field(rounding_policy, "quantum", name="rounding_policy"),
+            version=_exact_field(rounding_policy, "version", name="rounding_policy"),
         )
         if rounding_policy.reporting_currency != reporting:
             raise FxValuationError("FX rounding policy reporting currency mismatch")
@@ -385,13 +392,13 @@ def value_amount(
     if type(quote) is not FxQuote:
         raise FxValuationError("quote must be exact FxQuote or None")
     quote = FxQuote.create(
-        base_currency=object.__getattribute__(quote, "base_currency"),
-        quote_currency=object.__getattribute__(quote, "quote_currency"),
-        bid=object.__getattribute__(quote, "bid"),
-        ask=object.__getattribute__(quote, "ask"),
-        available_at=object.__getattribute__(quote, "available_at"),
-        source_id=object.__getattribute__(quote, "source_id"),
-        evidence_sha256=object.__getattribute__(quote, "evidence_sha256"),
+        base_currency=_exact_field(quote, "base_currency", name="quote"),
+        quote_currency=_exact_field(quote, "quote_currency", name="quote"),
+        bid=_exact_field(quote, "bid", name="quote"),
+        ask=_exact_field(quote, "ask", name="quote"),
+        available_at=_exact_field(quote, "available_at", name="quote"),
+        source_id=_exact_field(quote, "source_id", name="quote"),
+        evidence_sha256=_exact_field(quote, "evidence_sha256", name="quote"),
     )
 
     if quote.available_at > point:

@@ -70,6 +70,11 @@ def collect_release_bound_target_host_evidence(
     if type(cut) is not RuntimeCampaignCut:
         raise TypeError("cut must be exact RuntimeCampaignCut")
 
+    # Snapshot caller-owned state before applying external authority checks. This
+    # prevents object.__setattr__/concurrent mutation from changing the raw bundle
+    # between UUID/window validation and the downstream campaign mechanics.
+    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+
     frozen_release_artifact_id = _canonical_uuid(
         expected_release_artifact_id,
         name="expected_release_artifact_id",

@@ -323,6 +323,102 @@ class SimulationZeroWireTerminalTests(unittest.TestCase):
             self.assertEqual(len(reservations.active()), 1)
             self.assertEqual(reservations.active()[0].state, "WORKING")
 
+    def test_completed_blocked_revalidates_order_identity_from_durable_attempt(self):
+        episode_id = "blocked-order-tamper"
+        terminal_command = simulation_session._uuid(
+            "blocked-terminal-command",
+            episode_id,
+        )
+        real_commit = JournalStore.commit_command
+
+        def crash_terminal(store, **kwargs):
+            if kwargs.get("command_id") == terminal_command:
+                raise RuntimeError("crash-before-zero-wire-terminal")
+            return real_commit(store, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            with self._block_dispatch(), patch.object(
+                JournalStore,
+                "commit_command",
+                new=crash_terminal,
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_canonical_simulation(
+                        BUY,
+                        directory,
+                        episode_id=episode_id,
+                        now=NOW,
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = self._reservations(directory)
+            reservation_id = simulation_session._uuid(
+                "reservation",
+                episode_id,
+            )
+            attempt_id = simulation_session._uuid("attempt", episode_id)
+            client_order_id = simulation_session.stable_client_order_id(
+                "simulated",
+                simulation_session._uuid("intent", episode_id),
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT,
+            )
+            plan = reservations.prepare_zero_wire_blocked_terminal_mutation(
+                event_key="reservation-only-terminal",
+                idempotency_key="reservation-only-terminal",
+                reservation_id=reservation_id,
+                provider="SIMULATED",
+                attempt_id=attempt_id,
+                client_order_id=client_order_id,
+                committed_at=NOW,
+            )
+            self.assertIsNotNone(plan.envelope)
+            cut = store.current_journal_sequence()
+            store.commit_command(
+                command_id="reservation-only-terminal-command",
+                actor="test-zero-wire-projector",
+                environment=ENVIRONMENT,
+                idempotency_key="reservation-only-terminal-command",
+                request={"reservation_id": reservation_id},
+                result=plan.snapshot_payload,
+                state_version=plan.aggregate_version,
+                events=[(plan.envelope, None)],
+                expected_journal_sequence=cut,
+            )
+            checkpoint = store.load_events_by_aggregate_type(
+                "account_reconciliation"
+            )[0]
+            fake = {
+                "status": "BLOCKED",
+                "decision": "BUY",
+                "environment": ENVIRONMENT,
+                "episode_id": episode_id,
+                "reason": "test_pre_send_block",
+                "cash": "1000",
+                "position": "0",
+                "reconciled": True,
+                "order_id": "forged-client-order-id",
+                "fill_id": None,
+                "reconciliation_event_id": checkpoint["event_id"],
+                "new_outbound_requests": 0,
+            }
+            simulation_session._event(
+                store,
+                "SimulationSessionCompleted",
+                episode_id,
+                fake,
+                NOW,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match durable zero-wire facts",
+            ):
+                run_canonical_simulation(
+                    BUY,
+                    directory,
+                    episode_id=episode_id,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

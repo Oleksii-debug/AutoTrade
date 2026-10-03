@@ -236,6 +236,70 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
         self.assertEqual(second_receipt.transition_sequence, 2)
         self.assertEqual(second_receipt.successor_generation, third.generation)
 
+    def test_tampered_prior_receipt_cannot_be_laundered_by_next_rotation(self) -> None:
+        first = self._register()
+        second, _receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        stored = state["credential_transition_authority"]["latest_by_handle"][first.handle_id]
+        stored["receipt"]["transition_sequence"] += 7
+        self.path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "prior credential transition receipt content identity",
+        ):
+            rotate_trade_credential_with_receipt(
+                self.vault,
+                second,
+                execution_identity="windows-user-1",
+                new_secret_value="secret-v3",
+            )
+
+        self.assertEqual(
+            self.vault.resolve(
+                second,
+                execution_identity="windows-user-1",
+                account_id=second.account_id,
+                provider=second.provider,
+                environment=second.environment,
+                purpose=second.purpose,
+            ),
+            "secret-v2",
+        )
+
+    def test_tampered_vault_instance_cannot_be_laundered_by_next_transition(self) -> None:
+        first = self._register()
+        second, _receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        state = json.loads(self.path.read_text(encoding="utf-8"))
+        state["credential_transition_authority"]["instance_id"] = "f" * 32
+        self.path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "prior credential transition receipt vault authority",
+        ):
+            revoke_trade_credential_with_receipt(
+                self.vault,
+                second,
+                execution_identity="windows-user-1",
+            )
+
     def test_later_legacy_mutation_invalidates_prior_receipt(self) -> None:
         first = self._register()
         second, receipt = rotate_trade_credential_with_receipt(

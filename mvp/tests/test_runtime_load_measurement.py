@@ -45,7 +45,7 @@ def _event(
     return ExpectedJournalEvent(
         event_id=event_id,
         event_type=EVENT_TYPE,
-        aggregate_type="runtime_load_measurement_fixture",
+        aggregate_type="risk_decision",
         aggregate_id=aggregate_id,
         aggregate_version=version,
     )

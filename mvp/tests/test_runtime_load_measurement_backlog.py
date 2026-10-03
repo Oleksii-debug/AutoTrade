@@ -38,7 +38,7 @@ def _expected() -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id="durable-backlog-financial-1",
         event_type="RuntimeQualificationFinancialEvent",
-        aggregate_type="durable_backlog_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="durable-backlog",
         aggregate_version=1,
     )

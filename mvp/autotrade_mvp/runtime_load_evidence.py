@@ -96,11 +96,18 @@ class ExpectedJournalEvent:
             "event_type",
             _text(self.event_type, name="event_type"),
         )
-        object.__setattr__(
-            self,
-            "aggregate_type",
-            _text(self.aggregate_type, name="aggregate_type"),
-        )
+        aggregate_type = _text(self.aggregate_type, name="aggregate_type")
+        try:
+            is_financial = is_financial_for_qualification(aggregate_type)
+        except JournalTaxonomyError as error:
+            raise RuntimeLoadEvidenceError(
+                "expected financial event uses an unclassified durable aggregate"
+            ) from error
+        if not is_financial:
+            raise RuntimeLoadEvidenceError(
+                "expected financial event aggregate is not qualification-financial"
+            )
+        object.__setattr__(self, "aggregate_type", aggregate_type)
         object.__setattr__(
             self,
             "aggregate_id",

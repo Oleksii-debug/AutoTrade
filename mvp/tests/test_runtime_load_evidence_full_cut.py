@@ -40,7 +40,7 @@ def _expected() -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id="fin-expected",
         event_type="RuntimeQualificationFinancialEvent",
-        aggregate_type="runtime_load_measurement_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="wp65-full-cut",
         aggregate_version=1,
     )

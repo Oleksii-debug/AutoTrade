@@ -36,7 +36,7 @@ def _expected() -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id="financial-raced",
         event_type="RuntimeQualificationFinancialEvent",
-        aggregate_type="runtime_load_measurement_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="monotonic-race",
         aggregate_version=1,
     )
@@ -82,8 +82,6 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
                 clock_calls += 1
                 if clock_calls == 1:
                     return 1_000_000
-                # The operation has already returned. A commit admitted only
-                # while sampling the terminal clock must not be credited to it.
                 _append(store, expected)
                 return 1_000_100
 
@@ -126,8 +124,6 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
                 nonlocal clock_calls
                 clock_calls += 1
                 if clock_calls == 1:
-                    # The durable event appears after pre_sequence but before the
-                    # function has obtained its monotonic start timestamp.
                     _append(store, expected)
                     return 1_000_000
                 return 1_000_100
@@ -145,8 +141,6 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
                         operation=operation,
                     )
                 except RuntimeLoadMeasurementError:
-                    # A repaired measurement path must fail closed before issuing
-                    # durable latency evidence for this pre-start event.
                     return
 
             self.fail(
@@ -168,7 +162,7 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
             seed = ExpectedJournalEvent(
                 event_id="other-store-seed",
                 event_type="RuntimeQualificationFinancialEvent",
-                aggregate_type="runtime_load_measurement_fixture",
+                aggregate_type="risk_decision",
                 aggregate_id="other-store-seed",
                 aggregate_version=1,
             )

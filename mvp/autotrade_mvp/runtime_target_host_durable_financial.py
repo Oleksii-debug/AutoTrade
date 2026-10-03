@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID
 
-from .performance_qualification import RuntimeBudgetSpec
+from .performance_qualification import RuntimeBudgetError, RuntimeBudgetSpec
 from .persistence import (
     JournalStore,
     journal_store_authority_scope,
@@ -38,6 +38,9 @@ from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
 from .runtime_target_host_measurement import (
     RuntimeTargetHostMeasurementError,
     TargetHostMeasurementArtifact,
+)
+from .runtime_target_host_measurement_authority import (
+    collect_release_bound_target_host_evidence,
 )
 
 
@@ -508,8 +511,10 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
 
     The low-level durable bridge proves JournalStore/measurement identity. Terminal
     consumers must additionally freeze the delivered artifact UUID and SHA-256
-    outside caller-owned measurement state and reuse the parent WP-65 campaign
-    authority for exact workload/plan/taxonomy/start-cut identity.
+    outside caller-owned measurement state and pass the target-host artifact through
+    the parent WP-65 release-bound evidence collector before lower durable mechanics.
+    That parent authority freezes the exact terminal journal/clock cut and enforces
+    workload, plan, taxonomy, JournalStore, raw-window and conservation bindings.
     """
 
     if type(measurement) is not TargetHostMeasurementArtifact:
@@ -531,17 +536,22 @@ def bind_release_bound_durable_financial_latency_to_target_host_measurement(
         raise RuntimeTargetHostDurableFinancialError(
             "target-host measurement belongs to another delivered release digest"
         )
-    # Reuse the parent measurement authority rather than reproducing its campaign
-    # contract here. This checks exact workload profile, plan digest, taxonomy,
-    # JournalStore generation/start cut and plan-delivered-artifact SHA before any
-    # durable-financial JournalStore mechanics are allowed to run.
+    # Reuse the parent terminal measurement authority rather than reproducing a
+    # partial campaign contract here. In particular this freezes the terminal
+    # journal sequence and monotonic window before durable-financial mechanics,
+    # preventing a caller-authored later measurement.end_journal_sequence from
+    # widening the accepted durable latency cut.
     try:
-        measurement.require_campaign_binding(
+        collect_release_bound_target_host_evidence(
+            journal=store,
             spec=spec,
             plan=campaign_plan,
             cut=campaign_cut,
+            measurement=measurement,
+            expected_release_artifact_id=frozen_release_artifact_id,
+            expected_release_artifact_sha256=frozen_release_artifact_sha256,
         )
-    except RuntimeTargetHostMeasurementError as error:
+    except (RuntimeTargetHostMeasurementError, RuntimeBudgetError) as error:
         raise RuntimeTargetHostDurableFinancialError(str(error)) from error
     return bind_durable_financial_latency_to_target_host_measurement(
         store,

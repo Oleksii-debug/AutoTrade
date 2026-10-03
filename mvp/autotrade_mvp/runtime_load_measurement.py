@@ -22,7 +22,12 @@ from time import perf_counter_ns
 from typing import Callable, Sequence, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
-from .persistence import JournalStore, payload_digest, require_exact_journal_store_authority
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .runtime_load_evidence import ExpectedJournalEvent, JournalConservationEvidence
 from .runtime_load_plan import (
     DeclaredRuntimeEventPlan,
@@ -249,84 +254,89 @@ def measure_declared_financial_operation(
 
     if not callable(operation):
         raise TypeError("operation must be callable")
-    require_exact_journal_store_authority(
+    store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
     )
-    plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
-    expected_index, expected = _expected_for_id(plan, event_id)
-    measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
-    if JournalStore.get_event(store, measurement_id) is not None:
-        raise RuntimeLoadMeasurementError("financial latency was already measured")
-    if JournalStore.get_event(store, expected.event_id) is not None:
-        raise RuntimeLoadMeasurementError(
-            "predeclared financial event already exists before monotonic measurement"
-        )
+    # The operation callback is inside the evidence issuance boundary. Hold the
+    # exact physical JournalStore generation across pre-cut, operation, event
+    # readback and measurement commit so callback code cannot rebind the same
+    # Python object to another valid journal and splice two generations.
+    with journal_store_authority_scope(store, store_identity):
+        plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
+        expected_index, expected = _expected_for_id(plan, event_id)
+        measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
+        if JournalStore.get_event(store, measurement_id) is not None:
+            raise RuntimeLoadMeasurementError("financial latency was already measured")
+        if JournalStore.get_event(store, expected.event_id) is not None:
+            raise RuntimeLoadMeasurementError(
+                "predeclared financial event already exists before monotonic measurement"
+            )
 
-    pre_sequence = JournalStore.current_journal_sequence(store)
-    start_ns = perf_counter_ns()
-    if JournalStore.get_event(store, expected.event_id) is not None:
-        raise RuntimeLoadMeasurementError(
-            "predeclared financial event appeared before monotonic measurement start"
+        pre_sequence = JournalStore.current_journal_sequence(store)
+        start_ns = perf_counter_ns()
+        if JournalStore.get_event(store, expected.event_id) is not None:
+            raise RuntimeLoadMeasurementError(
+                "predeclared financial event appeared before monotonic measurement start"
+            )
+        result = operation()
+        # Bind the expected durable event before sampling the terminal clock. If the
+        # operation returned without publishing it, an unrelated commit racing with
+        # end-clock sampling must not be attributed to the measured operation.
+        financial_event = _require_expected_event(
+            JournalStore.get_event(store, expected.event_id),
+            expected,
+            after_sequence=pre_sequence,
         )
-    result = operation()
-    # Bind the expected durable event before sampling the terminal clock. If the
-    # operation returned without publishing it, an unrelated commit racing with
-    # end-clock sampling must not be attributed to the measured operation.
-    financial_event = _require_expected_event(
-        JournalStore.get_event(store, expected.event_id),
-        expected,
-        after_sequence=pre_sequence,
-    )
-    end_ns = perf_counter_ns()
-    if (
-        type(start_ns) is not int
-        or type(end_ns) is not int
-        or start_ns < 0
-        or end_ns < start_ns
-    ):
-        raise RuntimeLoadMeasurementError(
-            "system monotonic clock produced an invalid interval"
-        )
+        end_ns = perf_counter_ns()
+        if (
+            type(start_ns) is not int
+            or type(end_ns) is not int
+            or start_ns < 0
+            or end_ns < start_ns
+        ):
+            raise RuntimeLoadMeasurementError(
+                "system monotonic clock produced an invalid interval"
+            )
 
-    latency_us = (end_ns - start_ns + 999) // 1_000
-    payload = {
-        "schema_version": _MEASUREMENT_SCHEMA_VERSION,
-        "plan_id": plan.plan_id,
-        "plan_digest": plan.digest,
-        "spec_digest": plan.spec_digest,
-        "expected_event": expected.payload,
-        "event_journal_sequence": financial_event["journal_sequence"],
-        "event_payload_hash": financial_event["payload_hash"],
-        "pre_operation_journal_sequence": pre_sequence,
-        "monotonic_start_ns": start_ns,
-        "monotonic_end_ns": end_ns,
-        "latency_us": latency_us,
-    }
-    JournalStore.append_event(
-        store,
-        {
-            "event_id": measurement_id,
-            "event_type": _MEASUREMENT_EVENT_TYPE,
-            "aggregate_type": _MEASUREMENT_AGGREGATE_TYPE,
-            "aggregate_id": plan.plan_id,
-            "aggregate_version": str(expected_index + 1),
-            "payload": payload,
-            "payload_hash": payload_digest(payload),
-            "committed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        },
-    )
-    measurement_event = JournalStore.get_event(store, measurement_id)
-    if measurement_event is None:
-        raise RuntimeLoadMeasurementError("durable latency measurement disappeared")
-    sample = _decode_measurement(
-        event=measurement_event,
-        plan=plan,
-        expected_index=expected_index,
-        expected=expected,
-        financial_event=financial_event,
-    )
-    return result, sample
+        latency_us = (end_ns - start_ns + 999) // 1_000
+        payload = {
+            "schema_version": _MEASUREMENT_SCHEMA_VERSION,
+            "plan_id": plan.plan_id,
+            "plan_digest": plan.digest,
+            "spec_digest": plan.spec_digest,
+            "expected_event": expected.payload,
+            "event_journal_sequence": financial_event["journal_sequence"],
+            "event_payload_hash": financial_event["payload_hash"],
+            "pre_operation_journal_sequence": pre_sequence,
+            "monotonic_start_ns": start_ns,
+            "monotonic_end_ns": end_ns,
+            "latency_us": latency_us,
+        }
+        JournalStore.append_event(
+            store,
+            {
+                "event_id": measurement_id,
+                "event_type": _MEASUREMENT_EVENT_TYPE,
+                "aggregate_type": _MEASUREMENT_AGGREGATE_TYPE,
+                "aggregate_id": plan.plan_id,
+                "aggregate_version": str(expected_index + 1),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        measurement_event = JournalStore.get_event(store, measurement_id)
+        if measurement_event is None:
+            raise RuntimeLoadMeasurementError("durable latency measurement disappeared")
+        sample = _decode_measurement(
+            event=measurement_event,
+            plan=plan,
+            expected_index=expected_index,
+            expected=expected,
+            financial_event=financial_event,
+        )
+        return result, sample
 
 
 def load_declared_financial_latency_samples(
@@ -337,35 +347,36 @@ def load_declared_financial_latency_samples(
 ) -> tuple[DurableFinancialLatencySample, ...]:
     """Reload the complete ordered latency sample set for one durable plan."""
 
-    require_exact_journal_store_authority(
+    store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
     )
-    plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
-    samples: list[DurableFinancialLatencySample] = []
-    for index, expected in enumerate(plan.expected_events):
-        financial_event = JournalStore.get_event(store, expected.event_id)
-        financial_event = _require_expected_event(
-            financial_event,
-            expected,
-            after_sequence=plan.declared_journal_sequence,
-        )
-        measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
-        measurement = JournalStore.get_event(store, measurement_id)
-        if measurement is None:
-            raise RuntimeLoadMeasurementError(
-                "declared financial event lacks a durable monotonic latency sample"
+    with journal_store_authority_scope(store, store_identity):
+        plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
+        samples: list[DurableFinancialLatencySample] = []
+        for index, expected in enumerate(plan.expected_events):
+            financial_event = JournalStore.get_event(store, expected.event_id)
+            financial_event = _require_expected_event(
+                financial_event,
+                expected,
+                after_sequence=plan.declared_journal_sequence,
             )
-        samples.append(
-            _decode_measurement(
-                event=measurement,
-                plan=plan,
-                expected_index=index,
-                expected=expected,
-                financial_event=financial_event,
+            measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
+            measurement = JournalStore.get_event(store, measurement_id)
+            if measurement is None:
+                raise RuntimeLoadMeasurementError(
+                    "declared financial event lacks a durable monotonic latency sample"
+                )
+            samples.append(
+                _decode_measurement(
+                    event=measurement,
+                    plan=plan,
+                    expected_index=index,
+                    expected=expected,
+                    financial_event=financial_event,
+                )
             )
-        )
-    return tuple(samples)
+        return tuple(samples)
 
 
 def evaluate_monotonic_declared_runtime_budget(
@@ -395,35 +406,36 @@ def evaluate_monotonic_declared_runtime_budget(
     terminal WP-65 qualification.
     """
 
-    require_exact_journal_store_authority(
+    store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
     )
-    samples = load_declared_financial_latency_samples(store, spec, plan_id=plan_id)
-    durable_backlog = JournalStore.pending_outbox_count(store)
-    if type(durable_backlog) is not int or durable_backlog < 0:
-        raise RuntimeLoadMeasurementError(
-            "canonical JournalStore returned an invalid reconnect backlog"
-        )
-    if reconnect_backlog_remaining is not None:
-        asserted_backlog = _non_negative_int(
-            reconnect_backlog_remaining,
-            name="reconnect_backlog_remaining",
-        )
-        if asserted_backlog != durable_backlog:
+    with journal_store_authority_scope(store, store_identity):
+        samples = load_declared_financial_latency_samples(store, spec, plan_id=plan_id)
+        durable_backlog = JournalStore.pending_outbox_count(store)
+        if type(durable_backlog) is not int or durable_backlog < 0:
             raise RuntimeLoadMeasurementError(
-                "caller reconnect backlog assertion conflicts with durable outbox"
+                "canonical JournalStore returned an invalid reconnect backlog"
             )
+        if reconnect_backlog_remaining is not None:
+            asserted_backlog = _non_negative_int(
+                reconnect_backlog_remaining,
+                name="reconnect_backlog_remaining",
+            )
+            if asserted_backlog != durable_backlog:
+                raise RuntimeLoadMeasurementError(
+                    "caller reconnect backlog assertion conflicts with durable outbox"
+                )
 
-    decision, evidence, plan = evaluate_declared_runtime_budget(
-        spec,
-        store,
-        plan_id=plan_id,
-        financial_latency_us=tuple(sample.latency_us for sample in samples),
-        financial_staleness_us=financial_staleness_us,
-        research_interference_us=research_interference_us,
-        reconnect_backlog_remaining=durable_backlog,
-        declared_duration_us=declared_duration_us,
-        observed_duration_us=observed_duration_us,
-    )
-    return decision, evidence, plan, samples
+        decision, evidence, plan = evaluate_declared_runtime_budget(
+            spec,
+            store,
+            plan_id=plan_id,
+            financial_latency_us=tuple(sample.latency_us for sample in samples),
+            financial_staleness_us=financial_staleness_us,
+            research_interference_us=research_interference_us,
+            reconnect_backlog_remaining=durable_backlog,
+            declared_duration_us=declared_duration_us,
+            observed_duration_us=observed_duration_us,
+        )
+        return decision, evidence, plan, samples

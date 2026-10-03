@@ -277,6 +277,72 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
 
             parser.assert_not_called()
 
+    def test_windows_split_path_descriptor_identity_is_admissible_under_retained_authority(self) -> None:
+        opened = self._stat_snapshot(attributes=0)
+        current = SimpleNamespace(
+            **{
+                **vars(opened),
+                "st_dev": opened.st_dev + 17,
+                "st_ino": opened.st_ino + 101,
+            }
+        )
+        stream = SimpleNamespace(fileno=lambda: 123)
+
+        with patch.object(
+            installer_manifest,
+            "_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY",
+            True,
+        ), patch.object(
+            installer_manifest.os,
+            "fstat",
+            return_value=opened,
+        ), patch.object(
+            installer_manifest.os,
+            "stat",
+            return_value=current,
+        ):
+            self.assertIs(
+                installer_manifest._assert_open_file_identity(
+                    Path("release.zip"),
+                    stream,
+                    name="release bundle",
+                ),
+                opened,
+            )
+
+    def test_posix_path_descriptor_identity_mismatch_still_fails_closed(self) -> None:
+        opened = self._stat_snapshot(attributes=0)
+        current = SimpleNamespace(
+            **{
+                **vars(opened),
+                "st_ino": opened.st_ino + 1,
+            }
+        )
+        stream = SimpleNamespace(fileno=lambda: 123)
+
+        with patch.object(
+            installer_manifest,
+            "_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY",
+            False,
+        ), patch.object(
+            installer_manifest.os,
+            "fstat",
+            return_value=opened,
+        ), patch.object(
+            installer_manifest.os,
+            "stat",
+            return_value=current,
+        ):
+            with self.assertRaisesRegex(
+                installer_manifest.InstallerManifestError,
+                "changed during verification",
+            ):
+                installer_manifest._assert_open_file_identity(
+                    Path("release.zip"),
+                    stream,
+                    name="release bundle",
+                )
+
     def test_non_windows_stat_without_attribute_remains_admissible(self) -> None:
         regular = SimpleNamespace(
             st_mode=stat.S_IFREG | 0o600,

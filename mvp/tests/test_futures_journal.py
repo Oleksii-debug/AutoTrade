@@ -780,7 +780,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 )
 
             self.assertTrue(inserted)
-            self.assertEqual(delta, Decimal("1"))
+            self.assertEqual(delta, Decimal("10"))
             self.assertEqual(corrected.last_settlement_price, Decimal("106"))
             self.assertEqual(len(factory_calls), 1)
             self.assertEqual(len(read_calls), 2)

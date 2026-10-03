@@ -67,7 +67,7 @@ class RuntimeTargetHostDurableFinancialCodecTests(unittest.TestCase):
         ):
             parse_durable_target_host_financial_binding(duplicate)
 
-    def test_retained_binding_rejects_noncanonical_source_sha(self):
+    def test_retained_binding_rejects_malformed_source_sha(self):
         payload = json.loads(binding().canonical_bytes().decode("utf-8"))
         payload["source_sha"] = "not-a-canonical-git-sha"
         raw = json.dumps(
@@ -243,7 +243,7 @@ class RuntimeTargetHostDurableFinancialCodecTests(unittest.TestCase):
         ):
             parse_durable_target_host_financial_binding(raw)
 
-    def test_retained_binding_rejects_noncanonical_source_sha(self):
+    def test_retained_binding_rejects_short_source_sha(self):
         payload = json.loads(binding().canonical_bytes().decode("utf-8"))
         payload["source_sha"] = "not-a-git-object"
         raw = json.dumps(

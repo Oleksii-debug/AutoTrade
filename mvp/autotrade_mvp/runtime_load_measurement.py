@@ -6,9 +6,11 @@ predeclared financial event with the process monotonic clock, proves the exact
 durable journal event appeared during that operation, and retains the raw timing
 sample in the same canonical JournalStore.
 
-A caller cannot supply a clock or latency integer. Target-host load generation,
-staleness provenance, research contention, restart/reconnect orchestration and
-resource telemetry remain separate WP-65 work.
+A caller cannot supply a clock or latency integer. Reconnect backlog is derived
+from the canonical durable outbox at evaluation time; an optional caller value is
+only a consistency assertion. Target-host load generation, staleness provenance,
+research contention, restart/reconnect orchestration and resource telemetry
+remain separate WP-65 work.
 """
 
 from __future__ import annotations
@@ -197,8 +199,14 @@ def _decode_measurement(
         raise RuntimeLoadMeasurementError(
             "measured financial event does not follow the pre-operation journal cut"
         )
-    start_ns = _non_negative_int(payload.get("monotonic_start_ns"), name="monotonic_start_ns")
-    end_ns = _non_negative_int(payload.get("monotonic_end_ns"), name="monotonic_end_ns")
+    start_ns = _non_negative_int(
+        payload.get("monotonic_start_ns"),
+        name="monotonic_start_ns",
+    )
+    end_ns = _non_negative_int(
+        payload.get("monotonic_end_ns"),
+        name="monotonic_end_ns",
+    )
     if end_ns < start_ns:
         raise RuntimeLoadMeasurementError("monotonic measurement moved backwards")
     latency_us = _non_negative_int(payload.get("latency_us"), name="latency_us")
@@ -259,8 +267,15 @@ def measure_declared_financial_operation(
     start_ns = perf_counter_ns()
     result = operation()
     end_ns = perf_counter_ns()
-    if type(start_ns) is not int or type(end_ns) is not int or start_ns < 0 or end_ns < start_ns:
-        raise RuntimeLoadMeasurementError("system monotonic clock produced an invalid interval")
+    if (
+        type(start_ns) is not int
+        or type(end_ns) is not int
+        or start_ns < 0
+        or end_ns < start_ns
+    ):
+        raise RuntimeLoadMeasurementError(
+            "system monotonic clock produced an invalid interval"
+        )
 
     financial_event = _require_expected_event(
         JournalStore.get_event(store, expected.event_id),
@@ -353,7 +368,7 @@ def evaluate_monotonic_declared_runtime_budget(
     plan_id: str,
     financial_staleness_us: Sequence[int],
     research_interference_us: Sequence[int],
-    reconnect_backlog_remaining: int,
+    reconnect_backlog_remaining: int | None = None,
     declared_duration_us: int | None = None,
     observed_duration_us: int | None = None,
 ) -> tuple[
@@ -362,14 +377,37 @@ def evaluate_monotonic_declared_runtime_budget(
     DeclaredRuntimeEventPlan,
     tuple[DurableFinancialLatencySample, ...],
 ]:
-    """Evaluate using durable monotonic financial latency rather than caller values.
+    """Evaluate using durable latency and durable-outbox reconnect backlog.
 
-    Staleness/interference/backlog remain explicit inputs until their own raw
-    target-host collectors are implemented; this function therefore does not
-    represent terminal WP-65 qualification.
+    ``reconnect_backlog_remaining`` is compatibility/assertion metadata only.
+    When supplied it must equal the canonical JournalStore pending-outbox count;
+    the caller cannot turn a non-zero durable backlog into zero.
+
+    Staleness/interference remain explicit inputs until their own raw target-host
+    collectors are implemented; this function therefore does not represent
+    terminal WP-65 qualification.
     """
 
+    require_exact_journal_store_authority(
+        store,
+        subject="runtime qualification JournalStore",
+    )
     samples = load_declared_financial_latency_samples(store, spec, plan_id=plan_id)
+    durable_backlog = JournalStore.pending_outbox_count(store)
+    if type(durable_backlog) is not int or durable_backlog < 0:
+        raise RuntimeLoadMeasurementError(
+            "canonical JournalStore returned an invalid reconnect backlog"
+        )
+    if reconnect_backlog_remaining is not None:
+        asserted_backlog = _non_negative_int(
+            reconnect_backlog_remaining,
+            name="reconnect_backlog_remaining",
+        )
+        if asserted_backlog != durable_backlog:
+            raise RuntimeLoadMeasurementError(
+                "caller reconnect backlog assertion conflicts with durable outbox"
+            )
+
     decision, evidence, plan = evaluate_declared_runtime_budget(
         spec,
         store,
@@ -377,7 +415,7 @@ def evaluate_monotonic_declared_runtime_budget(
         financial_latency_us=tuple(sample.latency_us for sample in samples),
         financial_staleness_us=financial_staleness_us,
         research_interference_us=research_interference_us,
-        reconnect_backlog_remaining=reconnect_backlog_remaining,
+        reconnect_backlog_remaining=durable_backlog,
         declared_duration_us=declared_duration_us,
         observed_duration_us=observed_duration_us,
     )

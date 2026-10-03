@@ -343,7 +343,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertEqual(first.ret_code, 10003)
         self.assertEqual(first.response_sha256, digest)
 
-    def test_success_direct_capture_requires_explicit_echo_confirmation_and_scrubs_payload(self):
+    def test_success_direct_capture_cannot_self_mint_provider_acceptance(self):
         raw_api_key = "RAW-API-KEY-MUST-NOT-PERSIST"
         response = {
             "retCode": 0,
@@ -357,17 +357,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ProviderCoreError, "echo confirmation"):
             _capture(response=response)
-        evidence = _capture(response=response, api_key_echo_confirmed=True)
-        metadata = bybit_credential_probe_receipt_metadata(evidence)
-        self.assertIs(
-            evidence.classification,
-            BybitCredentialNonAcceptance.STILL_ACCEPTED,
-        )
-        self.assertTrue(evidence.api_key_echo_confirmed)
-        self.assertTrue(metadata["api_key_echo_confirmed"])
-        serialized = repr(evidence) + repr(metadata)
-        self.assertNotIn(raw_api_key, serialized)
-        self.assertNotIn("permissions", serialized)
+        with self.assertRaisesRegex(ProviderCoreError, "provider-derived"):
+            _capture(response=response, api_key_echo_confirmed=True)
 
     def test_impossible_echo_confirmation_combinations_fail_closed(self):
         with self.assertRaisesRegex(ProviderCoreError, "only for successful"):

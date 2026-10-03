@@ -37,7 +37,11 @@ from .runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
     verify_composed_runtime_target_host_qualification,
 )
-from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+from .runtime_target_host_measurement import (
+    RuntimeTargetHostMeasurementError,
+    TargetHostMeasurementArtifact,
+    snapshot_target_host_measurement,
+)
 from .runtime_target_host_qualification import (
     AcceptedRuntimeTargetHostQualification,
     BINDING_EVIDENCE_KIND,
@@ -335,12 +339,145 @@ def _build_composed_acceptance_snapshotter(
     return snapshot
 
 
+def _build_composed_acceptance_binding_validator(
+    *,
+    composed_type,
+    accepted_type,
+    composition_error_type,
+    binding_evidence_kind,
+    provenance_kinds,
+    projection_kinds,
+):
+    """Preserve lower-verifier relationships after detaching its accepted output."""
+
+    def validate(
+        value,
+        *,
+        spec,
+        durable_plan_digest: str,
+        measurement,
+        expected_release_artifact_id: str,
+        expected_release_artifact_sha256: str,
+    ):
+        if type(value) is not composed_type or type(value.qualification) is not accepted_type:
+            raise composition_error_type(
+                "detached composed acceptance lost canonical result types"
+            )
+        accepted = value.qualification
+        bindings = (
+            ("source SHA", accepted.source_sha, spec.release_sha),
+            ("scenario id", accepted.scenario_id, spec.scenario_id),
+            ("spec digest", accepted.spec_digest, spec.digest),
+            ("configuration hash", accepted.configuration_hash, spec.configuration_hash),
+            ("host fingerprint", accepted.host_fingerprint, spec.host_fingerprint),
+            ("workload identity", accepted.workload_profile_hash, durable_plan_digest),
+            ("release artifact id", accepted.release_artifact_id, expected_release_artifact_id),
+            (
+                "release artifact digest",
+                accepted.release_artifact_sha256,
+                expected_release_artifact_sha256,
+            ),
+            ("measurement source SHA", accepted.source_sha, measurement.source_sha),
+            ("measurement scenario id", accepted.scenario_id, measurement.scenario_id),
+            ("measurement spec digest", accepted.spec_digest, measurement.spec_digest),
+            (
+                "measurement configuration hash",
+                accepted.configuration_hash,
+                measurement.configuration_hash,
+            ),
+            (
+                "measurement host fingerprint",
+                accepted.host_fingerprint,
+                measurement.host_fingerprint,
+            ),
+            (
+                "measurement workload identity",
+                accepted.workload_profile_hash,
+                measurement.workload_profile_hash,
+            ),
+            (
+                "measurement JournalStore identity",
+                accepted.journal_store_identity_digest,
+                measurement.journal_store_identity_digest,
+            ),
+            (
+                "measurement release artifact id",
+                accepted.release_artifact_id,
+                measurement.release_artifact_id,
+            ),
+            (
+                "measurement release artifact digest",
+                accepted.release_artifact_sha256,
+                measurement.release_artifact_sha256,
+            ),
+            (
+                "target-host measurement digest",
+                value.target_host_measurement_digest,
+                measurement.digest,
+            ),
+        )
+        for name, observed, expected in bindings:
+            if type(observed) is not str or type(expected) is not str or observed != expected:
+                raise composition_error_type(
+                    f"detached target-host {name} differs from captured authority"
+                )
+
+        evidence_digests = dict(accepted.evidence_sha256_by_kind)
+        payload_ids = dict(accepted.payload_artifact_id_by_kind)
+        payload_digests = dict(accepted.payload_sha256_by_kind)
+        projections = dict(value.projection_sha256_by_kind)
+        if accepted.binding_sha256 != evidence_digests[binding_evidence_kind]:
+            raise composition_error_type(
+                "detached target-host binding digest differs from accepted evidence map"
+            )
+        for kind in projection_kinds:
+            if projections[kind] != payload_digests[kind]:
+                raise composition_error_type(
+                    f"detached target-host projection differs from retained payload for {kind}"
+                )
+
+        payload_id_values = tuple(payload_ids[kind] for kind in provenance_kinds)
+        payload_digest_values = tuple(payload_digests[kind] for kind in provenance_kinds)
+        if len(set(payload_id_values)) != len(provenance_kinds):
+            raise composition_error_type(
+                "detached target-host payload artifact identities are not independent"
+            )
+        if len(set(payload_digest_values)) != len(provenance_kinds):
+            raise composition_error_type(
+                "detached target-host payload digests are not independent"
+            )
+        if (
+            accepted.release_artifact_id in payload_id_values
+            or accepted.binding_artifact_id in payload_id_values
+        ):
+            raise composition_error_type(
+                "detached target-host payload artifact aliases retained authority artifact"
+            )
+        if accepted.release_artifact_sha256 in payload_digest_values or (
+            set(payload_digest_values) & set(evidence_digests.values())
+        ):
+            raise composition_error_type(
+                "detached target-host payload bytes alias retained authority bytes"
+            )
+        return value
+
+    return validate
+
+
 _PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
     composed_type=AcceptedComposedRuntimeTargetHostQualification,
     accepted_type=AcceptedRuntimeTargetHostQualification,
     composition_error_type=RuntimeTargetHostCompositionError,
     mapping_proxy_type=type(MappingProxyType({})),
     required_evidence_kinds=_REQUIRED_ACCEPTED_EVIDENCE_KINDS,
+    provenance_kinds=_PROVENANCE_ACCEPTED_KINDS,
+    projection_kinds=_PROJECTION_ACCEPTED_KINDS,
+)
+_PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR = _build_composed_acceptance_binding_validator(
+    composed_type=AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=AcceptedRuntimeTargetHostQualification,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    binding_evidence_kind=BINDING_EVIDENCE_KIND,
     provenance_kinds=_PROVENANCE_ACCEPTED_KINDS,
     projection_kinds=_PROJECTION_ACCEPTED_KINDS,
 )
@@ -357,10 +494,13 @@ def _build_chronology_free_verifier(
     canonical_sha256_text=_canonical_sha256_text,
     campaign_plan_type=RuntimeCampaignPlan,
     measurement_type=TargetHostMeasurementArtifact,
+    measurement_error_type=RuntimeTargetHostMeasurementError,
+    snapshot_measurement=None,
     campaign_cut_type=RuntimeCampaignCut,
     snapshot_campaign_cut=_snapshot_campaign_cut,
     verify_composed=verify_composed_runtime_target_host_qualification,
     acceptance_snapshotter=None,
+    acceptance_binding_validator=None,
 ):
     """Capture the durable-plan/composed authority graph behind one private closure."""
 
@@ -413,6 +553,11 @@ def _build_chronology_free_verifier(
                         "campaign workload identity does not match durable pre-run plan"
                     )
             if type(measurement) is measurement_type:
+                if snapshot_measurement is not None:
+                    try:
+                        measurement = snapshot_measurement(measurement)
+                    except measurement_error_type as error:
+                        raise composition_error_type(str(error)) from error
                 measurement_workload = canonical_sha256_text(
                     measurement.workload_profile_hash,
                     name="measurement workload identity",
@@ -438,6 +583,19 @@ def _build_chronology_free_verifier(
             )
             if acceptance_snapshotter is not None:
                 accepted = acceptance_snapshotter(accepted)
+            if acceptance_binding_validator is not None:
+                if type(measurement) is not measurement_type:
+                    raise composition_error_type(
+                        "terminal WP-65 acceptance binding requires canonical target-host measurement"
+                    )
+                accepted = acceptance_binding_validator(
+                    accepted,
+                    spec=spec,
+                    durable_plan_digest=durable_plan_digest,
+                    measurement=measurement,
+                    expected_release_artifact_id=expected_release_artifact_id,
+                    expected_release_artifact_sha256=expected_release_artifact_sha256,
+                )
 
             final_plan = load_declared_plan(
                 journal_store,
@@ -466,13 +624,14 @@ def _build_chronology_free_verifier(
 
 
 # Canonical chronology-bound verification captures this closure during module
-# initialization. All authority-bearing dependencies are default-captured above,
-# so later module-global rebinding cannot redirect durable plan, JournalStore or
-# composed qualification authority. Focused tests use the private factory with
-# explicit injected doubles instead of rebinding production globals.
+# initialization. All authority-bearing dependencies are captured here, so later
+# module-global rebinding cannot redirect durable plan, JournalStore, measurement,
+# composed qualification, accepted-output snapshot, or output-binding authority.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
     _build_chronology_free_verifier(
+        snapshot_measurement=snapshot_target_host_measurement,
         acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+        acceptance_binding_validator=_PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR,
     )
 )
 

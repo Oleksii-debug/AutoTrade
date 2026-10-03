@@ -1,0 +1,60 @@
+name: WP-14 Provider Domain Apply
+
+on:
+  push:
+    branches:
+      - automation/wp14-provider-domain-apply-20261003-0521
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply reviewed patch to latest canonical integration head
+        shell: bash
+        env:
+          TARGET_BRANCH: integration/whole-safety-trust-decimal-convergence-main-671180-20261002
+          STAGING_BRANCH: automation/wp14-provider-domain-apply-20261003-0521
+        run: |
+          set -euo pipefail
+          cp .wp14-provider-domain.patch "$RUNNER_TEMP/wp14-provider-domain.patch"
+          git config user.name "autotrade-primary-implementer"
+          git config user.email "actions@users.noreply.github.com"
+
+          git fetch origin "$TARGET_BRANCH"
+          target_sha="$(git rev-parse "origin/$TARGET_BRANCH")"
+          git checkout --detach "$target_sha"
+          git reset --hard "$target_sha"
+
+          git apply --check "$RUNNER_TEMP/wp14-provider-domain.patch"
+          git apply "$RUNNER_TEMP/wp14-provider-domain.patch"
+
+          expected=$'mvp/autotrade_mvp/authority.py\nmvp/autotrade_mvp/durable_settlement.py\nmvp/autotrade_mvp/reconciliation_journal.py\nmvp/autotrade_mvp/settlement.py'
+          actual="$(git diff --name-only | sort)"
+          test "$actual" = "$expected"
+          git diff --check
+
+          export PYTHONPATH="mvp:research${PYTHONPATH:+:$PYTHONPATH}"
+          python -m unittest discover -s mvp/tests -p 'test_provider_domain_durable_settlement_current_head.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_settlement_provider_domain_authority.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_reconciliation_journal.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_durable_settlement.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_settlement.py' -v
+
+          git add mvp/autotrade_mvp/authority.py \
+                  mvp/autotrade_mvp/durable_settlement.py \
+                  mvp/autotrade_mvp/reconciliation_journal.py \
+                  mvp/autotrade_mvp/settlement.py
+          git commit -m "WP-14: bind settlement authority to exact provider domain"
+          candidate_sha="$(git rev-parse HEAD)"
+          echo "candidate_sha=$candidate_sha"
+          echo "candidate_parent=$target_sha"
+
+          git push --force origin "HEAD:refs/heads/$STAGING_BRANCH"

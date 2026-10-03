@@ -38,7 +38,7 @@ from .reconciliation import (
 )
 from .reconciliation_journal import reconciliation_payload, record_reconciliation_checkpoint
 from .risk import RiskContext, RiskIntent, RiskPolicy
-from .simulated_provider import SimulatedProvider
+from .simulated_provider import SimulatedProvider, TRANSPORT_SEND_CONTRACT
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -54,6 +54,7 @@ _AGGREGATE = "single-episode"
 _OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
 _OWNER_AGGREGATE_ID = "canonical"
 _BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
+_PREPARED_ZERO_WIRE_REASON = "recovered_prepared_before_send_boundary"
 
 
 def _uuid(kind: str, episode_id: str) -> str:
@@ -307,6 +308,58 @@ def _require_zero_wire_blocked_submission(
     return attempt_id, expected_client_order_id, reason.strip()
 
 
+def _require_zero_wire_prepared_submission(
+    store: JournalStore,
+    *,
+    episode_id: str,
+) -> tuple[str, str]:
+    attempt_id = _uuid("attempt", episode_id)
+    aggregate_id = submission_attempt_aggregate_id(
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        attempt_id=attempt_id,
+    )
+    events = JournalStore.load_events(
+        store,
+        "submission_attempt",
+        aggregate_id,
+    )
+    if (
+        len(events) != 1
+        or events[0].get("event_type") != "SubmissionPrepared"
+        or events[0].get("aggregate_version") != 1
+    ):
+        raise ValueError(
+            "Prepared-only zero-wire recovery requires exact Prepared chronology"
+        )
+    prepared = events[0]
+    payload = prepared.get("payload")
+    if type(payload) is not dict:
+        raise ValueError("durable Prepared submission payload is invalid")
+    intent_id = _uuid("intent", episode_id)
+    expected_client_order_id = stable_client_order_id(
+        "simulated",
+        intent_id,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+    )
+    expected_scope = {"transport_contract": TRANSPORT_SEND_CONTRACT}
+    if (
+        payload.get("attempt_id") != attempt_id
+        or payload.get("intent_id") != intent_id
+        or payload.get("provider") != "simulated"
+        or payload.get("environment") != ENVIRONMENT
+        or payload.get("account_id") != ACCOUNT
+        or payload.get("client_order_id") != expected_client_order_id
+        or payload.get("submission_scope") != expected_scope
+        or payload.get("submission_scope_hash") != payload_digest(expected_scope)
+    ):
+        raise ValueError(
+            "durable Prepared submission is not bound to canonical simulated transport"
+        )
+    return attempt_id, expected_client_order_id
+
+
 def _require_initial_reconciliation_checkpoint(store: JournalStore) -> dict:
     checkpoints = JournalStore.load_events_by_aggregate_type(
         store,
@@ -518,6 +571,142 @@ def _finalize_zero_wire_blocked(
     return {**result, "resumed": resumed}
 
 
+def _zero_wire_prepared_projection(
+    store: JournalStore,
+    root: Path,
+    *,
+    episode_id: str,
+    required_reservation_state: str,
+) -> tuple[dict[str, object], DurableReservationBook, str, str]:
+    attempt_id, client_order_id = _require_zero_wire_prepared_submission(
+        store,
+        episode_id=episode_id,
+    )
+    checkpoint = _require_initial_reconciliation_checkpoint(store)
+    economic = DurableProviderEconomicBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+    )
+    economic_events = JournalStore.load_events(
+        store,
+        "economic_book",
+        economic.book_id,
+    )
+    if len(economic_events) != 1:
+        raise ValueError(
+            "Prepared-only terminal projection requires exact seed economics only"
+        )
+    reservations = DurableReservationBook(
+        store,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+    )
+    reservation = reservations.get(_uuid("reservation", episode_id))
+    if reservation.state != required_reservation_state:
+        raise ValueError(
+            "Prepared-only terminal reservation disposition is inconsistent"
+        )
+    if any(amount != 0 for amount in reservation.consumed.values()):
+        raise ValueError(
+            "Prepared-only zero-wire recovery cannot coexist with consumed exposure"
+        )
+    result = {
+        "status": "BLOCKED",
+        "decision": "BUY",
+        "environment": ENVIRONMENT,
+        "episode_id": episode_id,
+        "reason": _PREPARED_ZERO_WIRE_REASON,
+        "cash": str(economic.cash("USD")),
+        "position": str(economic.position(INSTRUMENT)),
+        "reconciled": True,
+        "order_id": client_order_id,
+        "fill_id": None,
+        "reconciliation_event_id": checkpoint["event_id"],
+        "new_outbound_requests": 0,
+    }
+    return result, reservations, attempt_id, client_order_id
+
+
+def _finalize_zero_wire_prepared(
+    store: JournalStore,
+    root: Path,
+    *,
+    episode_id: str,
+    timestamp: str,
+    resumed: bool,
+) -> dict[str, object]:
+    result, reservations, attempt_id, client_order_id = (
+        _zero_wire_prepared_projection(
+            store,
+            root,
+            episode_id=episode_id,
+            required_reservation_state="WORKING",
+        )
+    )
+    journal_cut = JournalStore.current_journal_sequence(store)
+    terminal_plan = reservations.prepare_zero_wire_prepared_terminal_mutation(
+        event_key=_uuid("prepared-terminal-reservation-event", episode_id),
+        idempotency_key=_uuid("prepared-terminal-reservation-idempotency", episode_id),
+        reservation_id=_uuid("reservation", episode_id),
+        provider=PROVIDER,
+        attempt_id=attempt_id,
+        client_order_id=client_order_id,
+        committed_at=timestamp,
+    )
+    if terminal_plan.already_committed or terminal_plan.envelope is None:
+        raise ValueError(
+            "Prepared-only reservation terminal already exists without session terminal"
+        )
+    if (
+        JournalStore.next_aggregate_version(
+            store,
+            "canonical_simulation_session",
+            _AGGREGATE,
+        )
+        != 2
+    ):
+        raise ValueError("Prepared-only session terminal aggregate version is invalid")
+    completed = _event_envelope(
+        store,
+        "SimulationSessionCompleted",
+        episode_id,
+        result,
+        timestamp,
+        aggregate_version=2,
+    )
+    command_id = _uuid("prepared-terminal-command", episode_id)
+    JournalStore.commit_command(
+        store,
+        command_id=command_id,
+        actor="canonical-simulation",
+        environment=ENVIRONMENT,
+        idempotency_key=command_id,
+        request={
+            "episode_id": episode_id,
+            "attempt_id": attempt_id,
+            "reservation_id": _uuid("reservation", episode_id),
+            "terminal_reason": _PREPARED_ZERO_WIRE_REASON,
+            "transport_contract": TRANSPORT_SEND_CONTRACT,
+        },
+        result=result,
+        state_version=2,
+        events=[
+            (terminal_plan.envelope, None),
+            (completed, None),
+        ],
+        expected_journal_sequence=journal_cut,
+    )
+    reservations.refresh()
+    terminal = reservations.get(_uuid("reservation", episode_id))
+    if terminal.state != "REJECTED" or reservations.active():
+        raise RuntimeError(
+            "Prepared-only terminal commit did not release reservation authority"
+        )
+    return {**result, "resumed": resumed}
+
+
 def _risk_policy() -> RiskPolicy:
     return RiskPolicy.create(
         max_abs_position="10", max_single_notional="1000",
@@ -682,12 +871,33 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     or result["position"] != str(economic.position(INSTRUMENT))):
                 raise ValueError("completed simulation does not match durable economics")
             if result.get("status") == "BLOCKED":
-                expected, _, _, _ = _zero_wire_blocked_projection(
+                attempt_id = _uuid("attempt", episode_id)
+                attempt_events = JournalStore.load_events(
                     store,
-                    root,
-                    episode_id=episode_id,
-                    required_reservation_state="REJECTED",
+                    "submission_attempt",
+                    submission_attempt_aggregate_id(
+                        environment=ENVIRONMENT,
+                        account_id=ACCOUNT,
+                        attempt_id=attempt_id,
+                    ),
                 )
+                if (
+                    len(attempt_events) == 1
+                    and attempt_events[0].get("event_type") == "SubmissionPrepared"
+                ):
+                    expected, _, _, _ = _zero_wire_prepared_projection(
+                        store,
+                        root,
+                        episode_id=episode_id,
+                        required_reservation_state="REJECTED",
+                    )
+                else:
+                    expected, _, _, _ = _zero_wire_blocked_projection(
+                        store,
+                        root,
+                        episode_id=episode_id,
+                        required_reservation_state="REJECTED",
+                    )
                 if result != expected:
                     raise ValueError(
                         "completed BLOCKED session does not match durable zero-wire facts"
@@ -736,6 +946,17 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 == ["SubmissionPrepared", "SubmissionBlocked"]
             ):
                 return _finalize_zero_wire_blocked(
+                    store,
+                    root,
+                    episode_id=episode_id,
+                    timestamp=timestamp,
+                    resumed=True,
+                )
+            if (
+                len(attempt_events) == 1
+                and attempt_events[0].get("event_type") == "SubmissionPrepared"
+            ):
+                return _finalize_zero_wire_prepared(
                     store,
                     root,
                     episode_id=episode_id,
@@ -950,6 +1171,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         },
         now=timestamp, authority_check=final_check,
         transport_send=provider.transport_send,
+        submission_scope={"transport_contract": TRANSPORT_SEND_CONTRACT},
     )
     if dispatch.status == "BLOCKED":
         if provider.outbound_request_count != 0:

@@ -418,7 +418,10 @@ def _authority_service_store_operations():
     callback that could reopen explicit __init__ re-entry.
     """
 
-    states: dict[int, tuple[weakref.ReferenceType, JournalStore | None, object | None]] = {}
+    states: dict[
+        int,
+        tuple[weakref.ReferenceType, JournalStore | None, object | None],
+    ] = {}
     state_lock = threading.RLock()
     missing = object()
 
@@ -1449,7 +1452,7 @@ class AuthorityService:
         # Reading "next version" from the shared DB here would let a stale
         # AuthorityService silently append after another process and make
         # decisions from obsolete confirmation/revocation state.
-        durable_next = _authority_store_call(self, "next_aggregate_version", 
+        durable_next = _authority_store_call(self, "next_aggregate_version",
             "authority_state", "canonical"
         )
         durable_version = durable_next - 1
@@ -1488,7 +1491,7 @@ class AuthorityService:
                 existing is not None
                 and existing["event_type"] == event_type
                 and existing["payload"] == payload
-                and _authority_store_call(self, "next_aggregate_version", 
+                and _authority_store_call(self, "next_aggregate_version",
                     "authority_state", "canonical"
                 ) - 1 == self._journal_version
             ):
@@ -1801,7 +1804,7 @@ class AuthorityService:
                 "historical financial retry policy identity is inconsistent"
             )
 
-        risk_events = _authority_store_call(self, "load_events", 
+        risk_events = _authority_store_call(self, "load_events",
             "risk_decision", record.risk_decision_id
         )
         if (
@@ -1968,7 +1971,7 @@ class AuthorityService:
                 environment=record.environment,
                 account_id=record.account_id,
             )
-            reservation_events = _authority_store_call(self, "load_events", 
+            reservation_events = _authority_store_call(self, "load_events",
                 "reservation_book",
                 reservation_book.scope_id,
             )
@@ -2147,7 +2150,7 @@ class AuthorityService:
                 "durable admitted record policy version is stale"
             )
 
-        risk_events = _authority_store_call(self, "load_events", 
+        risk_events = _authority_store_call(self, "load_events",
             "risk_decision", record.risk_decision_id
         )
         if len(risk_events) != 1 or risk_events[0]["event_type"] != "RiskDecisionRecorded":
@@ -2304,7 +2307,7 @@ class AuthorityService:
                 "durable reservation intent does not match admission"
             )
 
-        reservation_events = _authority_store_call(self, "load_events", 
+        reservation_events = _authority_store_call(self, "load_events",
             "reservation_book", reservation_book.scope_id
         )
         matching_reservations = [
@@ -3104,7 +3107,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "existing allocation admission lacks durable risk evidence"
                 )
-            events = _authority_store_call(self, "load_events", 
+            events = _authority_store_call(self, "load_events",
                 "risk_decision",
                 existing.risk_decision_id,
             )
@@ -3748,7 +3751,7 @@ class AuthorityService:
             normalized_max_age = _canonical_decimal_text(max_age)
 
             if existing is not None:
-                durable_risk_events = _authority_store_call(self, "load_events", 
+                durable_risk_events = _authority_store_call(self, "load_events",
                     "risk_decision", existing.risk_decision_id
                 )
                 if (
@@ -4236,7 +4239,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
-            durable_risk_events = _authority_store_call(self, "load_events", 
+            durable_risk_events = _authority_store_call(self, "load_events",
                 "risk_decision", existing.risk_decision_id
             )
             if (
@@ -4466,7 +4469,7 @@ class AuthorityService:
             ),
         }
         try:
-            _authority_store_call(self, "commit_command", 
+            _authority_store_call(self, "commit_command",
                 command_id=scoped_command_id,
                 actor="autotrade-financial-writer",
                 environment=env,
@@ -4588,7 +4591,7 @@ class AuthorityService:
                     account_id=record.account_id,
                 )
                 reservation = reservation_book.get(record.reservation_id)
-                risk_event = _authority_store_call(self, "load_events", 
+                risk_event = _authority_store_call(self, "load_events",
                     "risk_decision", record.risk_decision_id
                 )[0]
                 risk_payload = risk_event["payload"]

@@ -925,6 +925,169 @@ class TrustedChronologyCutTests(unittest.TestCase):
             ):
                 chronology._validate_prepared_event(event)
 
+    def test_measurement_requirement_executes_valid_exact_attempt_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+
+            requirement = chronology_measurement_requirement(attempt, measurement)
+
+            self.assertTrue(requirement.startswith("trusted-chronology:"))
+            self.assertEqual(len(requirement), len("trusted-chronology:") + 64)
+
+    def test_attempt_snapshot_rejects_nonexact_scope_without_property_dispatch(self):
+        class ExplosiveScope:
+            @property
+            def value(self):
+                raise AssertionError("hostile scope property must not execute")
+
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            object.__setattr__(attempt.challenge, "scope", ExplosiveScope())
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "scope must be exact ChronologyScope",
+            ):
+                chronology_measurement_requirement(attempt, measurement)
+
+    def test_cut_snapshot_rejects_equality_bearing_field_before_durable_compare(self):
+        class ExplosiveEquality:
+            def __eq__(self, other):
+                raise AssertionError("hostile equality must not execute")
+
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            object.__setattr__(cut, "owner_id", ExplosiveEquality())
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "owner_id must be canonical",
+            ):
+                self._require_current(
+                    store=store,
+                    recovery=recovery,
+                    cut=cut,
+                    accepted=accepted,
+                    artifact_store=artifacts,
+                    expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                )
+
+    def test_receipt_completed_at_cannot_predate_measurement_upper_bound(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = replace(
+                self._accepted(attempt, measurement),
+                completed_at="2026-10-03T14:00:00Z",
+            )
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "receipt predates authorized measurement",
+            ):
+                self._accept(
+                    store,
+                    recovery,
+                    attempt,
+                    measurement,
+                    accepted,
+                    artifacts,
+                )
+
+    def test_receipt_signed_at_cannot_predate_measurement_upper_bound(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = replace(
+                self._accepted(attempt, measurement),
+                signed_at="2026-10-03T14:00:00Z",
+            )
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "receipt predates authorized measurement",
+            ):
+                self._accept(
+                    store,
+                    recovery,
+                    attempt,
+                    measurement,
+                    accepted,
+                    artifacts,
+                )
+
+    def test_receipt_completion_equal_measurement_upper_bound_is_admitted(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+
+            self.assertEqual(cut.utc_upper_bound, "2026-10-03T14:00:01Z")
+
+    def test_durable_reverification_rejects_receipt_time_before_measurement(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            stale_acceptance = replace(
+                accepted,
+                completed_at="2026-10-03T14:00:00Z",
+            )
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "receipt predates authorized measurement",
+            ):
+                self._require_current(
+                    store=store,
+                    recovery=recovery,
+                    cut=cut,
+                    accepted=stale_acceptance,
+                    artifact_store=artifacts,
+                    expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                )
+
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")
         self.assertEqual(descriptor.domain_classification, NON_FINANCIAL)

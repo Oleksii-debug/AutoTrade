@@ -482,6 +482,48 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
             )
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_security_facade_rejects_polymorphic_scope_before_callbacks(self):
+        boundary = SecurityBoundary(
+            allowed_origins={"https://localhost"},
+            credential_vault=self.vault,
+            session_authorizer=lambda _subject, _role, _origin: True,
+            now=lambda: 100.0,
+        )
+        session = boundary.create_session(
+            subject="owner-1",
+            role="OWNER",
+            origin="https://localhost",
+        )
+        before = self.path.read_bytes()
+        for field, value in (
+            ("owner_identity", _HostileText("windows-user-1")),
+            ("account_id", _HostileText("paper-1")),
+            ("provider", _HostileText("BYBIT")),
+            ("environment", _HostileText("PAPER")),
+            ("purpose", _HostileText("TRADE")),
+        ):
+            arguments = {
+                "owner_identity": "windows-user-1",
+                "account_id": "paper-1",
+                "provider": "BYBIT",
+                "environment": "PAPER",
+                "provider_environment": "TESTNET",
+                "purpose": "TRADE",
+                "secret_value": "must-not-store",
+            }
+            arguments[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError,
+                "exact non-empty text",
+            ):
+                boundary.register_secret(
+                    session.token,
+                    origin="https://localhost",
+                    **arguments,
+                )
+            self.assertEqual(self.path.read_bytes(), before)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,7 @@ class CausalReplayError(ValueError):
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise CausalReplayError(f"{name} is required")
     return value.strip()
 
@@ -41,12 +41,12 @@ def _digest(value: str, *, name: str) -> str:
 
 
 def _utc(value: datetime | str, *, name: str) -> datetime:
-    if isinstance(value, str):
+    if type(value) is str:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as error:
             raise CausalReplayError(f"{name} must be an ISO timestamp") from error
-    elif isinstance(value, datetime):
+    elif type(value) is datetime:
         parsed = value
     else:
         raise TypeError(f"{name} must be a datetime or ISO timestamp")
@@ -56,7 +56,7 @@ def _utc(value: datetime | str, *, name: str) -> datetime:
 
 
 def _nonnegative_int(value: int, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise CausalReplayError(f"{name} must be a non-negative integer")
     return value
 
@@ -192,6 +192,17 @@ class CausalEvent:
         return "sha256:" + sha256(_canonical_bytes(payload)).hexdigest()
 
 
+def _snapshot_event(event: CausalEvent) -> CausalEvent:
+    if type(event) is not CausalEvent:
+        raise TypeError("events must contain only exact CausalEvent")
+    return CausalEvent(
+        event_id=event.event_id, kind=event.kind, event_time=event.event_time,
+        available_at=event.available_at, ingested_at=event.ingested_at,
+        source_priority=event.source_priority, source_sequence=event.source_sequence,
+        payload=event.payload,
+    )
+
+
 def _dataset_digest(manifest_sha256: str, events: Sequence[CausalEvent]) -> str:
     identity = {
         "ordering_policy_version": _ORDERING_POLICY_VERSION,
@@ -211,10 +222,9 @@ class CausalDataset:
 
     def __post_init__(self) -> None:
         manifest = _digest(self.manifest_sha256, name="manifest_sha256")
-        if not isinstance(self.events, tuple):
-            raise TypeError("events must be a tuple")
-        if any(not isinstance(item, CausalEvent) for item in self.events):
-            raise TypeError("events must contain only CausalEvent")
+        if type(self.events) is not tuple:
+            raise TypeError("events must be an exact tuple")
+        object.__setattr__(self, "events", tuple(_snapshot_event(item) for item in self.events))
         if self.events != tuple(sorted(self.events, key=lambda item: item.ordering_key)):
             raise CausalReplayError("events must already be in deterministic causal order")
         ids: set[str] = set()
@@ -243,9 +253,7 @@ class CausalDataset:
         manifest = _digest(manifest_sha256, name="manifest_sha256")
         if isinstance(events, (str, bytes, bytearray)):
             raise TypeError("events must be an iterable of CausalEvent")
-        materialized = tuple(events)
-        if any(not isinstance(item, CausalEvent) for item in materialized):
-            raise TypeError("events must contain only CausalEvent")
+        materialized = tuple(_snapshot_event(item) for item in events)
         ordered = tuple(sorted(materialized, key=lambda item: item.ordering_key))
         ids: set[str] = set()
         for item in ordered:
@@ -363,7 +371,7 @@ class CausalInputEvidence:
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
-            or not isinstance(self.schema_version, int)
+            or type(self.schema_version) is not int
             or self.schema_version != _VIEW_SCHEMA_VERSION
         ):
             raise CausalReplayError("unsupported input evidence schema_version")
@@ -498,6 +506,17 @@ def _prefix_digest(events: Sequence[CausalEvent], cursor: int) -> str:
     ).hexdigest()
 
 
+def _snapshot_dataset(dataset: CausalDataset) -> CausalDataset:
+    if type(dataset) is not CausalDataset:
+        raise TypeError("dataset must be exact CausalDataset")
+    # Revalidate the asserted digest over detached enrolled content. A digest
+    # computed before caller mutation must never identify changed source bytes.
+    return CausalDataset(
+        manifest_sha256=dataset.manifest_sha256, events=dataset.events,
+        dataset_sha256=dataset.dataset_sha256,
+    )
+
+
 class CausalFeeder:
     """Privileged deterministic feeder; strategy code should receive only view()."""
 
@@ -507,9 +526,7 @@ class CausalFeeder:
         *,
         start_time: datetime | str,
     ) -> None:
-        if not isinstance(dataset, CausalDataset):
-            raise TypeError("dataset must be CausalDataset")
-        self._dataset = dataset
+        self._dataset = _snapshot_dataset(dataset)
         self._clock = _utc(start_time, name="start_time")
         self._cursor = 0
         while (
@@ -525,10 +542,16 @@ class CausalFeeder:
         dataset: CausalDataset,
         checkpoint: FeederCheckpoint,
     ) -> "CausalFeeder":
-        if not isinstance(dataset, CausalDataset):
-            raise TypeError("dataset must be CausalDataset")
-        if not isinstance(checkpoint, FeederCheckpoint):
-            raise TypeError("checkpoint must be FeederCheckpoint")
+        dataset = _snapshot_dataset(dataset)
+        if type(checkpoint) is not FeederCheckpoint:
+            raise TypeError("checkpoint must be exact FeederCheckpoint")
+        checkpoint = FeederCheckpoint(
+            schema_version=checkpoint.schema_version,
+            manifest_sha256=checkpoint.manifest_sha256,
+            dataset_sha256=checkpoint.dataset_sha256,
+            simulation_time=checkpoint.simulation_time, cursor=checkpoint.cursor,
+            published_prefix_sha256=checkpoint.published_prefix_sha256,
+        )
         if checkpoint.manifest_sha256 != dataset.manifest_sha256:
             raise CausalReplayError("checkpoint manifest does not match dataset")
         if checkpoint.dataset_sha256 != dataset.dataset_sha256:
@@ -572,7 +595,7 @@ class CausalFeeder:
         while self._cursor < len(events) and events[self._cursor].available_at <= target:
             self._cursor += 1
         self._clock = target
-        return events[start:self._cursor]
+        return tuple(_snapshot_event(item) for item in events[start:self._cursor])
 
     def advance_next_time(self) -> tuple[CausalEvent, ...]:
         """Privileged runtime helper; do not expose it to strategy/research code."""

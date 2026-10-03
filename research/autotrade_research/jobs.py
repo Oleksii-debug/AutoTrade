@@ -185,6 +185,7 @@ def _verify_job_output_artifact(
         isinstance(metadata, dict)
         and metadata.get("artifact_kind") == "RESEARCH_JOB_RESULT"
         and metadata.get("job_id") == job_id
+        and type(metadata.get("job_generation")) is int
         and metadata.get("job_generation") == generation
         and manifest.get("source_refs") == input_hashes
     )
@@ -212,6 +213,7 @@ def _verify_job_checkpoint_artifact(
         isinstance(metadata, dict)
         and metadata.get("artifact_kind") == "RESEARCH_JOB_CHECKPOINT"
         and metadata.get("job_id") == job_id
+        and type(metadata.get("job_generation")) is int
         and metadata.get("job_generation") == generation
         and manifest.get("source_refs") == input_hashes
     )
@@ -887,6 +889,8 @@ class ResearchJobStore:
         generation: int,
         now: datetime,
     ) -> None:
+        if type(generation) is not int or generation < 1:
+            raise ValueError("generation must be a positive exact integer")
         if row is None:
             raise KeyError("job")
         if row["state"] != "RUNNING":
@@ -1026,6 +1030,56 @@ class ResearchJobStore:
             now=now,
         )
         return manifest, record
+
+    def read_checkpoint_bytes(
+        self, job_id: str, *, worker_id: str, generation: int,
+        now: datetime | None = None,
+    ) -> tuple[dict[str, Any], bytes] | None:
+        """Read the enrolled checkpoint for the current leased worker.
+
+        A resumed worker may consume a prior generation's frozen checkpoint.
+        The durable job pointer, exact job identity and immutable input hashes
+        remain authoritative; a future or foreign generation cannot supply state.
+        One authenticated read returns manifest and bytes together, under the
+        same job transaction that validates the live lease/cancellation fence.
+        Consumers must still validate their protocol/build/state payload schema.
+        """
+        if type(self) is not ResearchJobStore:
+            raise TypeError("checkpoint reader requires exact ResearchJobStore")
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        worker = _require_text(worker_id, "worker_id")
+        current = _utc(now or datetime.now(timezone.utc))
+        with ResearchJobStore._connect(self) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
+            ResearchJobStore._require_live_lease(row, worker, generation, current)
+            if bool(row["cancel_requested"]):
+                raise JobLeaseError("job cancellation is requested")
+            reference = row["checkpoint_ref"]
+            if reference is None:
+                connection.commit()
+                return None
+            snapshot = _authenticated_artifact_snapshot(
+                read_snapshot=ResearchJobStore._require_artifact_reader(self), reference=reference,
+            )
+            if snapshot is None:
+                raise JobConflictError("checkpoint bytes are absent or corrupt")
+            manifest, payload = snapshot
+            metadata = manifest.get("metadata")
+            source_generation = metadata.get("job_generation") if type(metadata) is dict else None
+            if (type(metadata) is not dict
+                    or metadata.get("artifact_kind") != "RESEARCH_JOB_CHECKPOINT"
+                    or metadata.get("job_id") != identifier
+                    or type(source_generation) is not int
+                    or not 1 <= source_generation <= generation
+                    or metadata.get("job_kind") not in (None, row["kind"])
+                    or manifest.get("source_refs") != json.loads(row["input_hashes_json"])):
+                raise JobConflictError("checkpoint does not match the enrolled job and inputs")
+            # Return detached data; retained reader state and job authority stay
+            # inside this canonical store, never on the worker-visible manifest.
+            detached_manifest = json.loads(_json(manifest))
+            connection.commit()
+        return detached_manifest, payload
 
     def pause(self, job_id: str, *, now: datetime | None = None) -> bool:
         """Pause retry-safe research work while fencing any live worker generation.
@@ -1177,6 +1231,8 @@ class ResearchJobStore:
         output_refs: list[str],
         now: datetime | None = None,
     ) -> bool:
+        if type(generation) is not int or generation < 1:
+            raise ValueError("generation must be a positive exact integer")
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
         if not isinstance(output_refs, list) or not output_refs:

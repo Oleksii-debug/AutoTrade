@@ -17,6 +17,7 @@ attestation, provider authority, economic edge, or trading authority.
 from __future__ import annotations
 
 from copy import copy
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from autotrade_runtime.artifacts import ArtifactStore
@@ -36,6 +37,7 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 
 if TYPE_CHECKING:
     from .production_host import ProductionHostRuntime
@@ -44,6 +46,29 @@ if TYPE_CHECKING:
         AcceptedChronologyBoundRuntimeTargetHostQualification,
     )
     from .trusted_chronology_cut import TrustedChronologyCut
+
+
+_ACCEPTED_TEXT_FIELDS = (
+    "attestation_id",
+    "attestation_digest",
+    "source_sha",
+    "scenario_id",
+    "spec_digest",
+    "configuration_hash",
+    "host_fingerprint",
+    "workload_profile_hash",
+    "journal_store_identity_digest",
+    "release_artifact_id",
+    "release_artifact_sha256",
+    "binding_artifact_id",
+    "binding_sha256",
+)
+_ACCEPTED_MAPPING_FIELDS = (
+    "evidence_sha256_by_kind",
+    "payload_artifact_id_by_kind",
+    "payload_sha256_by_kind",
+    "collector_by_kind",
+)
 
 
 def _snapshot_budget_spec(
@@ -120,6 +145,90 @@ def _snapshot_campaign_cut(
     return detached
 
 
+def _build_composed_acceptance_snapshotter(
+    *,
+    composed_type,
+    accepted_type,
+    composition_error_type,
+    mapping_proxy_type,
+    text_fields,
+    mapping_fields,
+):
+    """Detach verifier-owned acceptance before it becomes product authority."""
+
+    def exact_text(value: object, *, name: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise composition_error_type(f"{name} must remain exact non-empty text")
+        return value
+
+    def snapshot_map(value: object, *, name: str) -> dict[str, str]:
+        if type(value) is not mapping_proxy_type:
+            raise composition_error_type(
+                f"{name} must remain constructor-owned immutable mapping state"
+            )
+        detached = dict(value)
+        for key, item in detached.items():
+            if type(key) is not str or not key or type(item) is not str or not item:
+                raise composition_error_type(
+                    f"{name} must contain exact non-empty text pairs"
+                )
+        return detached
+
+    def snapshot(value):
+        if type(value) is not composed_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical accepted qualification"
+            )
+        accepted = value.qualification
+        if type(accepted) is not accepted_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical signed acceptance"
+            )
+        accepted_snapshot = accepted_type(
+            **{
+                field: exact_text(
+                    getattr(accepted, field),
+                    name=f"accepted target-host {field}",
+                )
+                for field in text_fields
+            },
+            **{
+                field: snapshot_map(
+                    getattr(accepted, field),
+                    name=f"accepted target-host {field}",
+                )
+                for field in mapping_fields
+            },
+        )
+        return composed_type(
+            qualification=accepted_snapshot,
+            target_host_measurement_digest=exact_text(
+                value.target_host_measurement_digest,
+                name="accepted target-host measurement digest",
+            ),
+            durable_financial_binding_digest=exact_text(
+                value.durable_financial_binding_digest,
+                name="accepted durable financial binding digest",
+            ),
+            projection_sha256_by_kind=snapshot_map(
+                value.projection_sha256_by_kind,
+                name="accepted target-host projection map",
+            ),
+        )
+
+    return snapshot
+
+
+_PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
+    composed_type=AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=AcceptedRuntimeTargetHostQualification,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    mapping_proxy_type=type(MappingProxyType({})),
+    text_fields=_ACCEPTED_TEXT_FIELDS,
+    mapping_fields=_ACCEPTED_MAPPING_FIELDS,
+)
+
+
 def _build_chronology_free_verifier(
     *,
     journal_store_type=JournalStore,
@@ -134,6 +243,7 @@ def _build_chronology_free_verifier(
     campaign_cut_type=RuntimeCampaignCut,
     snapshot_campaign_cut=_snapshot_campaign_cut,
     verify_composed=verify_composed_runtime_target_host_qualification,
+    acceptance_snapshotter=lambda value: value,
 ):
     """Capture the durable-plan/composed authority graph behind one private closure."""
 
@@ -196,18 +306,20 @@ def _build_chronology_free_verifier(
                     )
             if type(campaign_cut) is campaign_cut_type:
                 campaign_cut = snapshot_campaign_cut(campaign_cut)
-            accepted = verify_composed(
-                receipt,
-                evidence_store=evidence_store,
-                evidence_root=evidence_root,
-                journal_store=journal_store,
-                spec=spec,
-                campaign_plan=campaign_plan,
-                campaign_cut=campaign_cut,
-                declared_plan_id=plan.plan_id,
-                measurement=measurement,
-                expected_release_artifact_id=expected_release_artifact_id,
-                expected_release_artifact_sha256=expected_release_artifact_sha256,
+            accepted = acceptance_snapshotter(
+                verify_composed(
+                    receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    journal_store=journal_store,
+                    spec=spec,
+                    campaign_plan=campaign_plan,
+                    campaign_cut=campaign_cut,
+                    declared_plan_id=plan.plan_id,
+                    measurement=measurement,
+                    expected_release_artifact_id=expected_release_artifact_id,
+                    expected_release_artifact_sha256=expected_release_artifact_sha256,
+                )
             )
 
             final_plan = load_declared_plan(
@@ -237,12 +349,14 @@ def _build_chronology_free_verifier(
 
 
 # Canonical chronology-bound verification captures this closure during module
-# initialization. All authority-bearing dependencies are default-captured above,
-# so later module-global rebinding cannot redirect durable plan, JournalStore or
-# composed qualification authority. Focused tests use the private factory with
-# explicit injected doubles instead of rebinding production globals.
+# initialization. All authority-bearing dependencies are captured above, and the
+# verifier-owned result is detached before post-verification durable revalidation.
+# Focused tests build an injected verifier explicitly instead of rebinding the
+# production closure.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
-    _build_chronology_free_verifier()
+    _build_chronology_free_verifier(
+        acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+    )
 )
 
 
@@ -264,8 +378,6 @@ def _terminal_chronology_dispatch_authority():
     def dispatch(*args, **kwargs):
         nonlocal verifier
         if verifier is None:
-            # Import for initialization side effects only. The chronology module
-            # binds the canonical verifier into this closure exactly once.
             from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
 
             del _chronology_bound
@@ -371,10 +483,6 @@ verify_declared_plan_runtime_target_host_qualification = _build_product_verifier
     chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
 )
 
-# Complete canonical terminal-verifier binding during module import. Leaving this
-# until the first product call creates a pre-initialization window where external
-# code can invoke the otherwise write-once private binder with a forged verifier.
-# Importing here closes that window before this module becomes externally usable.
 from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
 
 del _chronology_bound

@@ -46,6 +46,7 @@ from .runtime_target_host_composed_qualification import (
 )
 from .runtime_target_host_durable_financial import DurableTargetHostFinancialBinding
 from .runtime_target_host_durable_financial_authority import (
+    _build_module_authority_guard,
     bind_sealed_release_bound_durable_financial_latency_to_target_host_measurement,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
@@ -313,6 +314,7 @@ def _build_composed_production_verifier(
     signed_campaign_matcher,
     projection_digest_builder,
     composed_type,
+    signed_dependency_guard=None,
 ):
     """Build a composed verifier whose direct dependencies are immutable captures."""
 
@@ -358,6 +360,8 @@ def _build_composed_production_verifier(
             )
         durable_plan_matcher(durable_binding, measurement_authority)
 
+        if signed_dependency_guard is not None:
+            signed_dependency_guard()
         accepted = signed_verifier(
             receipt,
             evidence_store=evidence_store,
@@ -374,6 +378,11 @@ def _build_composed_production_verifier(
             expected_release_artifact_id=expected_release_artifact_id,
             expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
+        # The signed verifier crosses canonical trust and authenticated-evidence
+        # callbacks. Recheck its same-module executable graph immediately after it
+        # returns, before any accepted value can become composed product authority.
+        if signed_dependency_guard is not None:
+            signed_dependency_guard()
         if type(accepted) is not accepted_type:
             raise composition_error_type(
                 "signed target-host verifier returned non-canonical acceptance"
@@ -396,6 +405,11 @@ def _build_composed_production_verifier(
                     f"signed {kind} raw payload does not bind canonical target-host measurement"
                 )
 
+        # Signed-campaign re-read/parsing/budget evaluation also crosses callback-
+        # capable trust boundaries. No mutation of the signed verifier's executable
+        # graph may survive that phase into the composed return boundary either.
+        if signed_dependency_guard is not None:
+            signed_dependency_guard()
         return composed_type(
             qualification=accepted,
             target_host_measurement_digest=measurement_authority.digest,
@@ -432,6 +446,11 @@ _PRODUCTION_PROJECTION_DIGEST_BUILDER = _build_projection_digest_builder(
     mapping_proxy_factory=MappingProxyType,
     composition_error_type=RuntimeTargetHostCompositionError,
 )
+_PRODUCTION_SIGNED_VERIFIER_GUARD = _build_module_authority_guard(
+    root=verify_runtime_target_host_qualification,
+    error_type=RuntimeTargetHostCompositionError,
+    label="signed target-host verifier",
+)
 
 verify_sealed_composed_runtime_target_host_qualification = (
     _build_composed_production_verifier(
@@ -450,5 +469,6 @@ verify_sealed_composed_runtime_target_host_qualification = (
         signed_campaign_matcher=_PRODUCTION_SIGNED_CAMPAIGN_MATCHER,
         projection_digest_builder=_PRODUCTION_PROJECTION_DIGEST_BUILDER,
         composed_type=AcceptedComposedRuntimeTargetHostQualification,
+        signed_dependency_guard=_PRODUCTION_SIGNED_VERIFIER_GUARD,
     )
 )

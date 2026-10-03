@@ -735,5 +735,33 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+    def test_forged_exact_domain_objects_missing_fields_fail_closed(self):
+        empty_quote = object.__new__(FxQuote)
+        empty_policy = object.__new__(FxRoundingPolicy)
+
+        with self.assertRaisesRegex(FxValuationError, "quote is missing required field"):
+            value_amount(
+                "1",
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=empty_quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        with self.assertRaisesRegex(
+            FxValuationError, "rounding_policy is missing required field"
+        ):
+            value_amount(
+                "1",
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=eurusd(bid="1.1", ask="1.1"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=empty_policy,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

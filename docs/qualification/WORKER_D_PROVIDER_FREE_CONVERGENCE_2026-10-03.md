@@ -22,6 +22,9 @@ The candidate carries path-scoped semantic results from existing owners:
 | #1325 | dc87a55b62aefbe4f78da75300c1326c1ed3d4e7 | shared provider-environment normalizer |
 | #1318 | 5f72e8bbbc121b8626f9e0a541cac74d09a9a756 | trusted scientific evidence graph and semantic-owner interlock |
 | #1249 | 749a6a9e1bbdadd6b23e74f06f1a0b394b92ef07 | Python socket/DNS-denial design, promoted to the ZERO loop |
+| #1350 | b75fd106052357d6e04aeaedf8e12bef4df8be5f | prepared OMS event composed into existing atomic financial barrier |
+| #1348 | ae4c12b0ce253c666dc469771831b53a99f3438d | racing-fill-safe replace rejection, policy-content freeze, sendmsg/sendfile denial |
+| #1341 | 535656516ae69023ec32577bb0146def8d2cae5d | exact source-package build-identity helpers only |
 
 No stale ancestry or old ablation files are replayed. Main's merged #1279 exact
 ablation authority is retained. #1134 remains a separate research strategy
@@ -39,6 +42,22 @@ existing allocator -> exact hard risk -> AuthorityService admission and durable
 reservation -> GuardedDispatcher and durable canonical OMS -> deterministic
 SimulatedProvider fill evidence -> canonical financial posting and reservation
 consumption -> reconciliation -> durable portfolio checkpoint -> next decision.
+
+The loop uses #1350's prepare-only OMS mutation and existing atomic financial
+barrier so RECORD_FILL, economics and reservation consumption commit together.
+The original four atomic tests required a fixture repair: `parent_intent_id`
+refers to an existing parent order, so an invented `intent-1` parent was removed.
+Production parent validation was retained. Crash before shared commit leaves all
+three projections unchanged; acknowledgement loss replays all three exactly once;
+pre-existing partial OMS/financial state fails closed. #1348 adds rejected replace
+resolution without discarding racing fills or changing original quantity, and
+freezes canonical RiskPolicy content before both protocol and registration.
+
+Autonomous protocol v3 consumes #1341's exact executable-package build identity,
+account/provider/environment and explicit strategy parameters. Changed build,
+policy, fees or chronology rejects completed/UNKNOWN resume before mutation;
+operator reads cannot relabel earlier builds. Historical v1/v2 journals are not
+silently migrated.
 
 The simulator's restart image is carried in the canonical JournalStore, never
 in a competing ledger. Restore checks simulator cash/positions against the
@@ -127,12 +146,18 @@ A targeted 221-test integration packet passed after these repairs. A further
 108-test cash replay, qualification and scientific packet passed. Verification
 uses an isolated temporary parent outside any source checkout so competing
 ArtifactStore processes and packaged-source tests retain their real boundaries.
-The full exact-head run and remote CI status remain recorded in the PR.
+Exact remote predecessor `83195a2fe6c836638880807e9cfa8262a18650f4` passed all
+4,385 repository/research/MVP Python tests (51 skipped); `tools/verify.py` then
+stopped because `dotnet` is unavailable. This predecessor result does not qualify
+the later composed head. The 95-test composed OMS/atomic/build packet passed.
+The final exact-head run and remote CI status remain recorded in the PR.
 
 Remaining provider-free blockers preventing section closure:
 
-1. OMS fill projection and economic/reservation consumption are separate commits;
-   a crash between them stays UNKNOWN and requires explicit internal recovery.
+1. Canonical OMS fill, economic posting and reservation consumption now commit
+   atomically through the existing financial barrier. Interrupted episodes and
+   ambiguous sends still require explicit internal recovery before continuation;
+   automatic complete-episode recovery is not established.
 2. The loop is sequential, long-only, one synthetic registered cash-equity
    instrument; general settled/unsettled capital, multi-instrument allocation,
    inventory reservations and exact evidence-bound allocator admission still

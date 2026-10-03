@@ -8,6 +8,8 @@ cuts. Unfinished sends remain UNKNOWN and are never spontaneously retried.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import sys
 from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -51,6 +53,59 @@ _AGGREGATE = "single-episode"
 
 def _uuid(kind: str, episode_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"autotrade-canonical-simulation:{kind}:{episode_id}"))
+
+
+def _python_source_tree_digest(root: Path) -> str:
+    """Content identity for the exact Python source tree used by the simulator."""
+
+    files = tuple(sorted(path for path in root.rglob("*.py") if path.is_file()))
+    if not files:
+        raise RuntimeError("canonical simulation source tree is unavailable")
+    digest = sha256()
+    for path in files:
+        try:
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            source = path.read_text(encoding="utf-8")
+            content = (
+                source.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+            )
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RuntimeError(
+                "canonical simulation source identity cannot be established"
+            ) from error
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
+
+
+def _module_source_root(component) -> Path:
+    module = sys.modules.get(component.__module__)
+    raw_path = getattr(module, "__file__", None)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RuntimeError("canonical simulation dependency source is unavailable")
+    path = Path(raw_path).resolve()
+    if path.suffix in {".pyc", ".pyo"}:
+        source = path.with_suffix(".py")
+        if source.is_file():
+            path = source
+    return path.parent
+
+
+def _simulation_build_identity() -> str:
+    """Bind restart to the exact executable source packages, not only inputs."""
+
+    document = {
+        "mvp_source_tree": _python_source_tree_digest(Path(__file__).resolve().parent),
+        "shared_numeric_source_tree": _python_source_tree_digest(
+            _module_source_root(parse_bounded_exact_decimal)
+        ),
+        "research_artifact_source_tree": _python_source_tree_digest(
+            _module_source_root(ArtifactStore)
+        ),
+    }
+    return payload_digest(document)
 
 
 def _now(value: str | None) -> str:
@@ -452,7 +507,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 # Multi-episode orchestration shares the existing financial authorities and OMS.
 # It owns no ledger, risk engine, strategy, transport or allocation algorithm.
 _LOOP_AGGREGATE = "canonical_autonomous_simulation"
-_LOOP_PROTOCOL = "provider-free-zero-loop-v1"
+_LOOP_PROTOCOL = "provider-free-zero-loop-v3"
 
 
 def _loop_event(store, run_id, kind, key, payload, now):
@@ -501,6 +556,7 @@ def run_autonomous_simulation(
     DurableProviderEconomicBook. All evidence remains simulation-only.
     """
     from .zero_network import deny_python_network
+    from .risk_policy_authority import canonical_risk_policy, risk_policy_digest
 
     if type(run_id) is not str or not run_id or run_id != run_id.strip():
         raise ValueError("run_id must be canonical nonempty text")
@@ -517,10 +573,17 @@ def run_autonomous_simulation(
                         ("emergency_at_episode", emergency_at_episode)):
         if value is not None and (type(value) is not int or not 1 <= value <= len(values)):
             raise ValueError(f"{name} must be an exact episode index within the stream")
+    # Freeze quantitative content, not merely a reusable policy label. Resolve
+    # once so preflight and journal registration cannot select different limits.
+    selected_policy = canonical_risk_policy(_risk_policy())
     protocol = {
         "protocol": _LOOP_PROTOCOL, "run_id": run_id,
+        "source_build_identity": _simulation_build_identity(),
+        "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
+        "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",
+        "risk_policy_digest": risk_policy_digest(selected_policy),
         "strategy": "moving-average-2-3-long-only-target-1",
         "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(INITIAL_CASH),
         "fault_at_episode": fault_at_episode, "emergency_at_episode": emergency_at_episode,
@@ -531,10 +594,10 @@ def run_autonomous_simulation(
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
     with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
-        return _run_autonomous_locked(root, values, protocol, stop_after_episodes)
+        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
 
 
-def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
+def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_abs, exact_subtract, exact_sum, as_fraction, round_fraction_to_quantum
@@ -595,7 +658,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
         environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
     registry = DurableRiskPolicyRegistry(store)
-    policy = _risk_policy()
+    policy = selected_policy
     registry.register(scope=scope, policy_id="canonical-provider-free-risk-v1", version=1,
         policy=policy, committed_at=started_at)
     if not completed:
@@ -674,7 +737,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
         peak = max([INITIAL_CASH, equity, *previous_equities])
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
-        proposal = MovingAverageStrategy().decide(values[:episode], Decimal("1"))
+        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], Decimal("1"))
         target_quantity = Decimal("1") if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
         decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
@@ -800,15 +863,17 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
                     raise ValueError("ACK is not fill evidence")
                 fill = fresh_fills[0]
                 fill_id = fill["provider_execution_id"]
-                orders.record_fill(event_key=f"{key}:fill", client_order_id=order_id, fill_id=fill_id,
-                    provider_execution_id=fill_id, quantity=fill["last_quantity"]["value"], price=fill["last_price"],
-                    committed_at=timestamp, evidence_refs=fill["evidence"])
                 commit_economic_batch_with_reservation_consumption(economic, reservations,
                     command_id=_uuid("loop-fill-command", key), idempotency_key=_uuid("loop-fill-command", key),
                     reservation_id=reservation_id, usage={resource: required}, transactions=(book_equity_fill(
                         transaction_id=_uuid("loop-fill-transaction", key), cause_event_id=fill_id, instrument=INSTRUMENT,
                         settlement_currency="USD", side=fill["side"], quantity=fill["last_quantity"]["value"],
-                        price=fill["last_price"], fee=fill["fees"][0]["amount"], fee_currency="USD"),), committed_at=timestamp)
+                        price=fill["last_price"], fee=fill["fees"][0]["amount"], fee_currency="USD"),), committed_at=timestamp,
+                    order_projection=orders, order_fill={
+                        "event_key": f"{key}:fill", "client_order_id": order_id, "fill_id": fill_id,
+                        "provider_execution_id": fill_id, "quantity": fill["last_quantity"]["value"],
+                        "price": fill["last_price"], "provider_revision": None, "evidence_refs": fill["evidence"],
+                    })
                 if orders.order(order_id).state != "FILLED":
                     raise ValueError("canonical OMS has not confirmed complete fill")
                 status = "FILLED"

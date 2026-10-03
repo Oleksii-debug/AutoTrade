@@ -470,7 +470,7 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
 
 def _inspect_autonomous_loop(store, events, cut, history_limit):
     from .persistence import payload_digest
-    from .simulation_session import _LOOP_PROTOCOL
+    from .simulation_session import _LOOP_PROTOCOL, _simulation_build_identity
     from .simulated_provider import SimulatedProvider
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_multiply
@@ -485,6 +485,8 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
     protocol = first["payload"]["protocol"]
     if protocol["protocol"] != _LOOP_PROTOCOL or payload_digest(protocol) != first["payload"]["protocol_digest"]:
         raise ValueError("autonomous frozen protocol identity differs")
+    if protocol.get("source_build_identity") != _simulation_build_identity():
+        raise ValueError("autonomous source/build identity differs")
     completed = []
     active = None
     for event in loops[1:]:

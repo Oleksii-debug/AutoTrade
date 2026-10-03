@@ -76,7 +76,7 @@ def option_version(
     return InstrumentVersion(
         instrument_id=OPTION_ID,
         version=version,
-        provider_id="BYBIT",
+        provider_id="TEST_PROVIDER",
         venue_id="OPTIONS",
         provider_symbol="ABC-202612-C50",
         asset_class="OPTION",
@@ -116,10 +116,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.registry = InstrumentRegistry(versions=(option_version(),))
         self.book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         self._evidence = {}
         self.authority = self._authority(
@@ -199,7 +199,8 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         instrument_version,
         observed_at,
         permission_scope=LIFECYCLE_SCOPE,
-        provider_environment="TESTNET",
+        provider_environment="SIMULATION",
+        environment="SIMULATION",
     ):
         claim_time = observed_at - timedelta(minutes=2)
         expires_at = observed_at + timedelta(minutes=10)
@@ -209,7 +210,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 provider_id=provider_id,
                 account_id="paper-1",
                 entity_id="entity-1",
-                environment="PAPER",
+                environment=environment,
                 provider_environment=provider_environment,
                 instrument_version=instrument_version,
                 observed_at=claim_time,
@@ -248,11 +249,12 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         cash_settlement_amount: str | None = None,
         corrects_external_event_id: str | None = None,
         instrument_version: str = f"{OPTION_ID}@1",
-        provider_id: str = "BYBIT",
+        provider_id: str = "TEST_PROVIDER",
         venue_id: str = "OPTIONS",
         endpoint: str = LIFECYCLE_ENDPOINT,
         permission_scope: str = LIFECYCLE_SCOPE,
-        provider_environment: str = "TESTNET",
+        provider_environment: str = "SIMULATION",
+        environment: str = "SIMULATION",
     ) -> str:
         capability = self._capability(
             provider_id=provider_id,
@@ -260,6 +262,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             observed_at=observed_at,
             permission_scope=permission_scope,
             provider_environment=provider_environment,
+            environment=environment,
         )
         binding = prepare_authenticated_read_query(
             capability=capability,
@@ -311,12 +314,62 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             )
         )
 
-    def forged_observation(self) -> OptionLifecycleObservation:
-        return OptionLifecycleObservation(
+    def test_paper_lifecycle_rejects_test_injected_response_before_financial_mutation(self):
+        paper_book = DurableProviderEconomicBook(
+            self.store,
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
             provider_environment="TESTNET",
+        )
+        paper_book.append(
+            book_equity_fill(
+                transaction_id="paper-origin-firebreak-seed",
+                cause_event_id="paper-origin-firebreak-seed-cause",
+                instrument=f"{OPTION_ID}@1",
+                settlement_currency="USD",
+                side="BUY",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+            )
+        )
+        paper_authority = self._authority(
+            registry=self.registry,
+            economic_book=paper_book,
+        )
+        reference = self.evidence(
+            external_event_id="paper-test-injected-life",
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+            environment="PAPER",
+        )
+        before_lifecycle = tuple(
+            self.store.load_events("option_lifecycle", paper_authority.aggregate_id)
+        )
+        before_economic = tuple(paper_book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "durable PROVIDER_ORIGIN evidence",
+        ):
+            paper_authority.apply(reference)
+
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", paper_authority.aggregate_id)),
+            before_lifecycle,
+        )
+        self.assertEqual(tuple(paper_book.transactions), before_economic)
+        self.assertEqual(
+            paper_book.position(f"{OPTION_ID}@1"),
+            Decimal("1"),
+        )
+
+    def forged_observation(self) -> OptionLifecycleObservation:
+        return OptionLifecycleObservation(
+            provider_id="TEST_PROVIDER",
+            account_id="paper-1",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="forged-life",
@@ -330,10 +383,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         base = {
-            "provider_id": "BYBIT",
+            "provider_id": "TEST_PROVIDER",
             "account_id": "paper-1",
-            "environment": "PAPER",
-            "provider_environment": "TESTNET",
+            "environment": "SIMULATION",
+            "provider_environment": "SIMULATION",
             "venue_id": "OPTIONS",
             "instrument_version": f"{OPTION_ID}@1",
             "external_event_id": "hostile-life",
@@ -360,10 +413,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_lifecycle_decimal_identity_is_context_independent(self):
         observation = OptionLifecycleObservation(
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
             venue_id="OPTIONS",
             instrument_version=f"{OPTION_ID}@1",
             external_event_id="context-independent-life",
@@ -670,10 +723,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         restarted = self._authority(
             registry=self.registry,
@@ -814,10 +867,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         restarted = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         self.assertEqual(restarted.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(restarted.position("ABC"), Decimal("-200"))
@@ -831,10 +884,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -863,10 +916,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -896,10 +949,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -932,10 +985,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -989,10 +1042,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         authority = self._authority(
             registry=registry,
@@ -1039,10 +1092,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         competing_book.append(
             book_equity_fill(
@@ -1080,10 +1133,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.seed_option_position("1")
         competing_book = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         original_prepare = self.book.prepare_batch_mutation
         raced = False
@@ -1125,10 +1178,10 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         current = DurableProviderEconomicBook(
             self.store,
-            provider_id="BYBIT",
+            provider_id="TEST_PROVIDER",
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
+            environment="SIMULATION",
+            provider_environment="SIMULATION",
         )
         self.assertEqual(current.position(f"{OPTION_ID}@1"), Decimal("0"))
 

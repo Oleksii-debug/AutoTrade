@@ -316,3 +316,11 @@ def _build_product_verifier(terminal_chronology_dispatch):
 verify_declared_plan_runtime_target_host_qualification = _build_product_verifier(
     _terminal_chronology_dispatch
 )
+
+# Complete canonical terminal-verifier binding during module import. Leaving this
+# until the first product call creates a pre-initialization window where external
+# code can invoke the otherwise write-once private binder with a forged verifier.
+# Importing here closes that window before this module becomes externally usable.
+from . import runtime_target_host_chronology_bound_qualification as _chronology_bound
+
+del _chronology_bound

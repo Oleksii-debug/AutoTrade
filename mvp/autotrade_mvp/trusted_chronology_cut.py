@@ -9,8 +9,9 @@ be used by a terminal consumer.
 
 from __future__ import annotations
 
+import dis
 import sys
-from types import FunctionType
+from types import FunctionType, ModuleType
 
 from . import _trusted_chronology_cut_impl as _impl
 from .recovery import OwnerFence, RecoveryController
@@ -30,12 +31,6 @@ _original_parse_signed_qualification_attestation = (
 )
 
 
-# The compatibility facade intentionally publishes a small number of replacements
-# onto the implementation module below. Everything else in the implementation
-# namespace is part of the captured authority graph used by the original verifier
-# and horizon checker. Snapshot identity now, before publishing those replacements,
-# so later pre-call or callback-time rebinding fails closed instead of redirecting
-# a function object whose ``__globals__`` still points at the mutable impl module.
 _IMPL_SEAL_EXCLUDED_NAMES = frozenset(
     {
         "_build_callback_authority_wrappers",
@@ -218,7 +213,7 @@ def _build_impl_namespace_guard(
 
 
 def _build_external_function_graph_guard(*, root, label: str):
-    """Freeze one imported parser's same-module executable dependency graph."""
+    """Freeze one imported parser's reachable executable and direct module-attr graph."""
 
     if type(root) is not FunctionType:
         raise TypeError("external parser root must be exact Python function")
@@ -231,11 +226,48 @@ def _build_external_function_graph_guard(*, root, label: str):
     global_bindings: list[tuple[dict[str, object], str, object]] = []
     closure_bindings: list[tuple[object, object]] = []
     class_bindings: list[tuple[type, str, object]] = []
+    module_attribute_bindings: list[tuple[ModuleType, str, object]] = []
+    module_attribute_function_states: list[tuple[FunctionType, object, object, object]] = []
     seen_functions: set[int] = set()
     seen_classes: set[int] = set()
     seen_globals: set[tuple[int, str]] = set()
     seen_closures: set[int] = set()
     seen_class_bindings: set[tuple[int, str]] = set()
+    seen_module_attributes: set[tuple[int, str]] = set()
+    seen_module_attribute_functions: set[int] = set()
+
+    def capture_direct_module_attributes(function: FunctionType) -> None:
+        namespace = function.__globals__
+        instructions = tuple(dis.get_instructions(function))
+        for index, instruction in enumerate(instructions[:-1]):
+            if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+                continue
+            base = namespace.get(instruction.argval, missing)
+            if type(base) is not ModuleType:
+                continue
+            next_instruction = instructions[index + 1]
+            if next_instruction.opname not in {"LOAD_ATTR", "LOAD_METHOD"}:
+                continue
+            attribute_name = next_instruction.argval
+            if type(attribute_name) is not str or attribute_name not in base.__dict__:
+                continue
+            expected = base.__dict__[attribute_name]
+            key = (id(base), attribute_name)
+            if key not in seen_module_attributes:
+                seen_module_attributes.add(key)
+                module_attribute_bindings.append((base, attribute_name, expected))
+            if type(expected) is FunctionType and id(expected) not in seen_module_attribute_functions:
+                seen_module_attribute_functions.add(id(expected))
+                module_attribute_function_states.append(
+                    (
+                        expected,
+                        expected.__code__,
+                        expected.__defaults__,
+                        None
+                        if expected.__kwdefaults__ is None
+                        else dict(expected.__kwdefaults__),
+                    )
+                )
 
     def visit_function(function) -> None:
         if type(function) is not FunctionType or function.__module__ != module_name:
@@ -254,6 +286,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                 else dict(function.__kwdefaults__),
             )
         )
+        capture_direct_module_attributes(function)
         for cell in function.__closure__ or ():
             cell_identity = id(cell)
             if cell_identity in seen_closures:
@@ -312,6 +345,8 @@ def _build_external_function_graph_guard(*, root, label: str):
     frozen_global_bindings = tuple(global_bindings)
     frozen_closure_bindings = tuple(closure_bindings)
     frozen_class_bindings = tuple(class_bindings)
+    frozen_module_attribute_bindings = tuple(module_attribute_bindings)
+    frozen_module_attribute_function_states = tuple(module_attribute_function_states)
 
     def require_external_graph_sealed() -> None:
         for function, code, defaults, kwdefaults in frozen_function_states:
@@ -340,6 +375,24 @@ def _build_external_function_graph_guard(*, root, label: str):
                 raise RuntimeError(
                     label + " class executable changed: " + cls.__name__ + "." + name
                 )
+        for module, attribute_name, expected in frozen_module_attribute_bindings:
+            if module.__dict__.get(attribute_name, missing) is not expected:
+                raise RuntimeError(
+                    label
+                    + " module attribute changed: "
+                    + module.__name__
+                    + "."
+                    + attribute_name
+                )
+        for function, code, defaults, kwdefaults in frozen_module_attribute_function_states:
+            if function.__code__ is not code or function.__defaults__ is not defaults:
+                raise RuntimeError(label + " module function executable changed")
+            current_kwdefaults = function.__kwdefaults__
+            if kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise RuntimeError(label + " module function defaults changed")
+            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                raise RuntimeError(label + " module function defaults changed")
 
     return require_external_graph_sealed
 
@@ -397,11 +450,6 @@ def _build_callback_authority_wrappers(
     return guarded_canonical_verifier, guarded_authenticated_reader_factory
 
 
-# The canonical verifier, authenticated reader and imported parsers all execute
-# across module boundaries. Freeze both parser dependency graphs before the first
-# callback-capable operation. Callback returns must see both graphs intact before
-# chronology code can dispatch a parser, and parser dispatch itself rechecks the
-# same graph before and after successful execution.
 _measurement_parser_guard = _build_external_function_graph_guard(
     root=_original_parse_challenge_bound_measurement,
     label="trusted chronology measurement parser",
@@ -454,10 +502,6 @@ _impl.parse_challenge_bound_measurement = _guarded_parse_challenge_bound_measure
 _impl.parse_signed_qualification_attestation = (
     _guarded_parse_signed_qualification_attestation
 )
-
-# Setup required temporary exclusions while the four wrappers were being installed.
-# Rebuild the callback guard now against the finished runtime namespace so callback
-# code cannot replace the verifier, reader or either parser wrapper itself.
 _callback_impl_guard = _build_impl_namespace_guard(_impl.__dict__)
 _require_impl_namespace_sealed = _callback_impl_guard
 _require_recovery_owner_globals_sealed = _build_named_namespace_guard(
@@ -651,14 +695,7 @@ _require_current_trusted_chronology_cut_with_horizon = _build_current_cut_with_h
 
 
 def _build_test_current_cut_verifier():
-    """Build a focused verifier after test doubles are installed.
-
-    Production authority never calls this helper. Legacy chronology tests must
-    inject signer/evidence doubles without rebinding the already-sealed production
-    verifier. Capturing a fresh namespace guard here treats the explicit test
-    doubles as that verifier's baseline while still detecting any rebinding or
-    authority-type namespace mutation that occurs from inside a verifier callback.
-    """
+    """Build a focused verifier after test doubles are installed."""
 
     return _build_current_cut_with_horizon(
         require_current_cut=_original_require_current_trusted_chronology_cut,
@@ -669,8 +706,6 @@ def _build_test_current_cut_verifier():
 
 
 def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> None:
-    """Prevent caller-owned cuts from becoming standalone horizon authority."""
-
     raise PermissionError(
         "standalone chronology horizon is not authority; "
         "use require_current_trusted_chronology_cut with claimed_instants"
@@ -690,8 +725,4 @@ _impl.require_current_trusted_chronology_cut = (
 )
 _impl.require_chronology_horizon = _reject_standalone_chronology_horizon
 
-# Preserve the implementation module object so existing exact-head tests that
-# deliberately patch private verifier/time seams continue to exercise the real
-# implementation rather than a second copy of module globals. Production terminal
-# currentness above no longer dereferences those patched globals after construction.
 sys.modules[__name__] = _impl

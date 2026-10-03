@@ -26,6 +26,7 @@ from research.autotrade_research.artifacts.durable_publish import (
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_RESERVED_BASENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -278,6 +279,15 @@ def _open_stable_regular_file(path: Path, *, name: str):
     return stream
 
 
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Fail closed when a no-follow Windows stat identifies a reparse-backed file."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise InstallerManifestError("release bundle Windows file attributes are invalid")
+    return bool(attributes & _WINDOWS_REPARSE_POINT)
+
+
 def _assert_open_file_identity(
     path: Path,
     stream,
@@ -291,6 +301,8 @@ def _assert_open_file_identity(
         raise InstallerManifestError(
             f"{name} identity cannot be verified"
         ) from error
+    if _has_windows_reparse_point(opened) or _has_windows_reparse_point(current):
+        raise InstallerManifestError(f"{name} must not be a Windows reparse point")
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
     if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):

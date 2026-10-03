@@ -36,7 +36,7 @@ def _expected() -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id="financial-raced",
         event_type="RuntimeQualificationFinancialEvent",
-        aggregate_type="runtime_load_measurement_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="monotonic-race",
         aggregate_version=1,
     )
@@ -168,7 +168,7 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
             seed = ExpectedJournalEvent(
                 event_id="other-store-seed",
                 event_type="RuntimeQualificationFinancialEvent",
-                aggregate_type="runtime_load_measurement_fixture",
+                aggregate_type="risk_decision",
                 aggregate_id="other-store-seed",
                 aggregate_version=1,
             )

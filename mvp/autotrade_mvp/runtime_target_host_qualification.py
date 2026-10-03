@@ -478,7 +478,18 @@ def _read_artifact_bytes(
 def _read_bound_payload(
     reader: Callable[[str], tuple[dict[str, object], bytes]],
     provenance: RuntimeTargetHostProvenance,
+    *,
+    forbidden_artifact_ids: set[str],
+    forbidden_sha256: set[str],
 ) -> bytes:
+    if provenance.payload_artifact_id in forbidden_artifact_ids:
+        raise RuntimeTargetHostQualificationError(
+            f"retained raw payload artifact is not independent for {provenance.evidence_kind}"
+        )
+    if provenance.payload_sha256 in forbidden_sha256:
+        raise RuntimeTargetHostQualificationError(
+            f"retained raw payload bytes are not independent for {provenance.evidence_kind}"
+        )
     try:
         _manifest, raw = reader(provenance.payload_artifact_id)
     except (ArtifactIntegrityError, FileNotFoundError, OSError) as error:
@@ -664,7 +675,9 @@ def verify_runtime_target_host_qualification(
         HOST_INVENTORY_EVIDENCE_KIND: binding.host_inventory_evidence_sha256,
     }
     top_level_artifact_ids = {ref.artifact_id for ref in refs.values()}
+    top_level_sha256 = {ref.sha256 for ref in refs.values()}
     payload_artifact_ids: set[str] = set()
+    payload_sha256: set[str] = set()
     payload_id_by_kind: dict[str, str] = {}
     payload_digest_by_kind: dict[str, str] = {}
     collectors: dict[str, str] = {}
@@ -685,16 +698,18 @@ def verify_runtime_target_host_qualification(
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance identity conflicts for {kind}"
             )
-        if provenance.payload_artifact_id in top_level_artifact_ids:
-            raise RuntimeTargetHostQualificationError(
-                f"raw payload artifact aliases signed envelope for {kind}"
-            )
-        if provenance.payload_artifact_id in payload_artifact_ids:
-            raise RuntimeTargetHostQualificationError(
-                f"raw payload artifact is reused across evidence families: {kind}"
-            )
-        _read_bound_payload(reader, provenance)
+        _read_bound_payload(
+            reader,
+            provenance,
+            forbidden_artifact_ids=(
+                top_level_artifact_ids | payload_artifact_ids | {release_artifact_id}
+            ),
+            forbidden_sha256=(
+                top_level_sha256 | payload_sha256 | {release_artifact_sha256}
+            ),
+        )
         payload_artifact_ids.add(provenance.payload_artifact_id)
+        payload_sha256.add(provenance.payload_sha256)
         payload_id_by_kind[kind] = provenance.payload_artifact_id
         payload_digest_by_kind[kind] = provenance.payload_sha256
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"

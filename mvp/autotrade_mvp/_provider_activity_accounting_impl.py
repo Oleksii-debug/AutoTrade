@@ -2617,10 +2617,10 @@ def commit_order_fill_with_reservation_consumption(
     normalized_fill = _text(fill_id, name="fill_id")
     transaction_batch = tuple(transactions)
 
-    if economic_book.environment in {"PAPER", "LIVE"} and provider_fill_binding is None:
+    if economic_book.environment in {"PAPER", "LIVE"}:
         raise AccountingConflict(
-            "PAPER/LIVE OMS fill financial composition requires "
-            "provider-derived financial binding"
+            "PAPER/LIVE OMS fill financial composition must use "
+            "the provider-evidence entrypoint"
         )
 
     if provider_fill_binding is not None:
@@ -3212,18 +3212,20 @@ def commit_provider_fill_with_reservation_consumption(
         raise AccountingConflict(
             "provider-evidenced OMS composition requires client_order_id"
         )
-    return commit_order_fill_with_reservation_consumption(
-        order_book,
-        economic_book,
-        reservation_book,
-        order_event_key=order_event_key,
+    order_plan = order_book.prepare_record_fill_mutation(
+        event_key=order_event_key,
         client_order_id=projected_fill.client_order_id,
         fill_id=projected_fill.fill_id,
         provider_execution_id=projected_fill.provider_execution_id,
         quantity=projected_fill.quantity,
         price=projected_fill.price,
         provider_revision=projected_fill.provider_revision,
-        order_evidence_refs=order_evidence_refs,
+        committed_at=when,
+        evidence_refs=order_evidence_refs,
+    )
+    return commit_economic_batch_with_reservation_consumption(
+        economic_book,
+        reservation_book,
         command_id=command_id,
         idempotency_key=f"{caller_idempotency}:provider-fill",
         reservation_id=rid,
@@ -3234,6 +3236,8 @@ def commit_provider_fill_with_reservation_consumption(
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,
         provider_fill_binding=binding,
+        _order_book=order_book,
+        _order_fill_plan=order_plan,
     )
 
 

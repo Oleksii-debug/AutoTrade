@@ -390,6 +390,69 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
         self.assertEqual(digest, "sha256:" + sha256(payload).hexdigest())
         self.assertEqual(size, len(payload))
 
+    def test_windows_split_identity_survives_stage_and_durable_publish(self):
+        source = self.root / "split-stage.exe"
+        staged = self.root / "split-stage-copy.exe"
+        published = self.root / "split-stage-published.exe"
+        payload = b"stable output bytes carried by exact digest"
+        source.write_bytes(payload)
+        expected_digest = "sha256:" + sha256(payload).hexdigest()
+        original_metadata = velopack_module._nonreparse_path_metadata
+
+        def split_metadata(path, *, name):
+            observed = original_metadata(path, name=name)
+            if Path(path) in {source, staged}:
+                class StatProxy:
+                    def __getattr__(self, field):
+                        return getattr(observed, field)
+
+                    st_dev = observed.st_dev + 29
+                    st_ino = observed.st_ino + 307
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns
+                    st_ctime_ns = observed.st_ctime_ns
+
+                return StatProxy()
+            return observed
+
+        with (
+            patch.object(
+                velopack_module,
+                "_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY",
+                True,
+            ),
+            patch.object(
+                velopack_module,
+                "_nonreparse_path_metadata",
+                side_effect=split_metadata,
+            ),
+        ):
+            velopack_module._stage_validated_vpk_output(
+                source,
+                staged,
+                expected_digest=expected_digest,
+                expected_size=len(payload),
+            )
+            published_digest, published_size = velopack_module._publish_file(
+                staged,
+                published,
+                expected_digest=expected_digest,
+                expected_size=len(payload),
+            )
+
+        self.assertEqual(staged.read_bytes(), payload)
+        self.assertEqual(published.read_bytes(), payload)
+        self.assertEqual(published_digest, expected_digest)
+        self.assertEqual(published_size, len(payload))
+        self.assertEqual(
+            published.with_suffix(published.suffix + ".sha256")
+            .read_text(encoding="utf-8")
+            .split()[0],
+            expected_digest.removeprefix("sha256:"),
+        )
+
     def test_output_becoming_reparse_after_read_fails_validation(self):
         output = self.root / "becomes-reparse.exe"
         output.write_bytes(b"stable")

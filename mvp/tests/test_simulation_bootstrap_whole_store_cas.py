@@ -252,6 +252,75 @@ class SimulationBootstrapWholeStoreCasTests(unittest.TestCase):
                 1,
             )
 
+    def test_foreign_command_before_hold_completed_blocks_terminal_append(self):
+        episode_id = "cas-before-hold-completed"
+        real_append = JournalStore.append_event
+        injected = False
+
+        def race_append(store, envelope, **kwargs):
+            nonlocal injected
+            if (
+                not injected
+                and envelope.get("event_type") == "SimulationSessionCompleted"
+            ):
+                injected = True
+                _foreign_command(store, "hold-completed")
+            return real_append(store, envelope, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                JournalStore,
+                "append_event",
+                new=race_append,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "whole-store state changed after bootstrap validation",
+                ):
+                    run_canonical_simulation(
+                        HOLD,
+                        directory,
+                        episode_id=episode_id,
+                        now=NOW,
+                    )
+
+            store = self._store(directory)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events(
+                        "canonical_simulation_session",
+                        "single-episode",
+                    )
+                ],
+                ["SimulationSessionStarted"],
+            )
+            self.assertEqual(store.pending_outbox_count(), 0)
+            self.assertEqual(
+                store.whole_store_state_counts()["command_dedupe"],
+                2,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "HOLD terminal durable state is not exact",
+            ):
+                run_canonical_simulation(
+                    HOLD,
+                    directory,
+                    episode_id=episode_id,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events(
+                        "canonical_simulation_session",
+                        "single-episode",
+                    )
+                ],
+                ["SimulationSessionStarted"],
+            )
+
     def test_clean_bootstrap_still_completes_and_replays(self):
         episode_id = "cas-clean-bootstrap"
         with TemporaryDirectory() as directory:

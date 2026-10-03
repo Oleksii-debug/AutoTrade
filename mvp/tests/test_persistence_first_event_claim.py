@@ -120,6 +120,28 @@ class FirstEventClaimTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("test_store_owner"), []
             )
 
+    def test_global_projection_only_state_blocks_claim(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="global-test-projection",
+                    journal_sequence=0,
+                    state={"empty_cut": True},
+                )
+            )
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+            with self.assertRaisesRegex(ValueError, "durable business state"):
+                JournalStore.claim_first_event(
+                    store, owner_event("owner-1", "session-1")
+                )
+
+            self.assertEqual(store.current_journal_sequence(), 0)
+            self.assertEqual(
+                store.load_events_by_aggregate_type("test_store_owner"), []
+            )
+
     def test_noncanonical_aggregate_version_fails_before_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

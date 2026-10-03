@@ -537,8 +537,8 @@ class RuntimeCampaignEvidence:
         )
 
     def to_observation(self, spec: RuntimeBudgetSpec) -> RuntimeLoadObservation:
-        if type(spec) is not RuntimeBudgetSpec:
-            raise TypeError("spec must be RuntimeBudgetSpec")
+        self = _snapshot_runtime_campaign_evidence(self)
+        spec = _snapshot_runtime_budget_spec(spec)
         if (
             spec.digest != self.spec_digest
             or spec.release_sha != self.release_sha
@@ -564,6 +564,84 @@ class RuntimeCampaignEvidence:
             observed_duration_us=self.observed_duration_us,
         )
 
+
+
+def _snapshot_runtime_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
+    if type(value) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    return RuntimeBudgetSpec(
+        scenario_id=value.scenario_id,
+        release_sha=value.release_sha,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        strategy_horizon_us=value.strategy_horizon_us,
+        max_p95_financial_latency_us=value.max_p95_financial_latency_us,
+        max_financial_staleness_us=value.max_financial_staleness_us,
+        max_research_interference_us=value.max_research_interference_us,
+        min_financial_samples=value.min_financial_samples,
+        min_research_samples=value.min_research_samples,
+    )
+
+
+def _snapshot_runtime_campaign_plan(value: RuntimeCampaignPlan) -> RuntimeCampaignPlan:
+    if type(value) is not RuntimeCampaignPlan:
+        raise TypeError("plan must be exact RuntimeCampaignPlan")
+    return RuntimeCampaignPlan(
+        scenario_id=value.scenario_id,
+        spec_digest=value.spec_digest,
+        release_sha=value.release_sha,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        workload_profile_hash=value.workload_profile_hash,
+        declared_duration_ms=value.declared_duration_ms,
+        expected_financial_event_ids=value.expected_financial_event_ids,
+        financial_aggregate_types=value.financial_aggregate_types,
+        release_artifact_id=value.release_artifact_id,
+        release_artifact_sha256=value.release_artifact_sha256,
+        journal_taxonomy_digest=value.journal_taxonomy_digest,
+    )
+
+
+def _snapshot_runtime_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
+    if type(value) is not RuntimeCampaignCut:
+        raise TypeError("cut must be exact RuntimeCampaignCut")
+    return RuntimeCampaignCut(
+        plan_digest=value.plan_digest,
+        spec_digest=value.spec_digest,
+        start_journal_sequence=value.start_journal_sequence,
+        started_monotonic_ns=value.started_monotonic_ns,
+        _token=_CUT_TOKEN,
+    )
+
+
+def _snapshot_runtime_campaign_evidence(
+    value: RuntimeCampaignEvidence,
+) -> RuntimeCampaignEvidence:
+    if type(value) is not RuntimeCampaignEvidence:
+        raise TypeError("evidence must be exact RuntimeCampaignEvidence")
+    return RuntimeCampaignEvidence(
+        plan_digest=value.plan_digest,
+        spec_digest=value.spec_digest,
+        release_sha=value.release_sha,
+        configuration_hash=value.configuration_hash,
+        host_fingerprint=value.host_fingerprint,
+        declared_duration_us=value.declared_duration_us,
+        observed_duration_us=value.observed_duration_us,
+        start_journal_sequence=value.start_journal_sequence,
+        end_journal_sequence=value.end_journal_sequence,
+        expected_financial_event_ids=value.expected_financial_event_ids,
+        recovered_financial_event_bindings=value.recovered_financial_event_bindings,
+        financial_latency_us=value.financial_latency_us,
+        financial_staleness_us=value.financial_staleness_us,
+        research_interference_us=value.research_interference_us,
+        reconnect_backlog_remaining=value.reconnect_backlog_remaining,
+        resource_evidence_hash=value.resource_evidence_hash,
+        resource_metrics=value.resource_metrics,
+        release_artifact_id=value.release_artifact_id,
+        release_artifact_sha256=value.release_artifact_sha256,
+        journal_taxonomy_digest=value.journal_taxonomy_digest,
+        _token=_EVIDENCE_TOKEN,
+    )
 
 
 def _campaign_current_journal_sequence(
@@ -608,10 +686,8 @@ def begin_runtime_campaign(
         journal,
         subject="runtime campaign JournalStore",
     )
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be RuntimeBudgetSpec")
-    if type(plan) is not RuntimeCampaignPlan:
-        raise TypeError("plan must be RuntimeCampaignPlan")
+    spec = _snapshot_runtime_budget_spec(spec)
+    plan = _snapshot_runtime_campaign_plan(plan)
     if (
         plan.scenario_id != spec.scenario_id
         or plan.spec_digest != spec.digest
@@ -654,12 +730,9 @@ def collect_runtime_campaign_evidence(
         journal,
         subject="runtime campaign JournalStore",
     )
-    if type(spec) is not RuntimeBudgetSpec:
-        raise TypeError("spec must be RuntimeBudgetSpec")
-    if type(plan) is not RuntimeCampaignPlan:
-        raise TypeError("plan must be RuntimeCampaignPlan")
-    if type(cut) is not RuntimeCampaignCut:
-        raise TypeError("cut must be RuntimeCampaignCut")
+    spec = _snapshot_runtime_budget_spec(spec)
+    plan = _snapshot_runtime_campaign_plan(plan)
+    cut = _snapshot_runtime_campaign_cut(cut)
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
@@ -757,6 +830,6 @@ def evaluate_runtime_campaign(
     spec: RuntimeBudgetSpec,
     evidence: RuntimeCampaignEvidence,
 ) -> RuntimeBudgetDecision:
-    if type(evidence) is not RuntimeCampaignEvidence:
-        raise TypeError("evidence must be RuntimeCampaignEvidence")
+    spec = _snapshot_runtime_budget_spec(spec)
+    evidence = _snapshot_runtime_campaign_evidence(evidence)
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

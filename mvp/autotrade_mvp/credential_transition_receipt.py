@@ -1,10 +1,10 @@
 """Vault-issued non-secret TRADE credential transition receipts for WP-49.
 
 This module deliberately reuses the exact ``ProtectedCredentialVault`` file,
-protector and inter-process lock.  It does not create a second secret store,
+protector and inter-process lock. It does not create a second secret store,
 recovery controller, sender lease, or terminal takeover authority.
 
-Receipts are useful only as one controlled-transfer input.  Recovery must still
+Receipts are useful only as one controlled-transfer input. Recovery must still
 prove that the exact old process incarnation exited before the credential
 transition and must keep UNKNOWN/provider reconciliation independent.
 """
@@ -19,6 +19,7 @@ import os
 from time import time_ns
 from uuid import uuid4
 
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .windows_secrets import (
     PersistentCredentialHandle,
     ProtectedCredentialVault,
@@ -30,7 +31,7 @@ from .windows_secrets import (
 
 
 _AUTHORITY_KEY = "credential_transition_authority"
-_SCHEMA_VERSION = "1.0.0"
+_SCHEMA_VERSION = "2.0.0"
 _RECEIPT_FIELDS = {
     "schema_version",
     "receipt_id",
@@ -39,6 +40,7 @@ _RECEIPT_FIELDS = {
     "account_id",
     "provider",
     "environment",
+    "provider_environment",
     "purpose",
     "prior_generation",
     "successor_generation",
@@ -78,7 +80,7 @@ def _text_digest(value: str) -> str:
 class CredentialTransitionReceipt:
     """Detached public metadata for one exact committed TRADE transition.
 
-    The receipt contains no secret/ciphertext/raw owner identity.  It is not
+    The receipt contains no secret/ciphertext/raw owner identity. It is not
     self-authenticating: ``verify_trade_credential_transition_receipt`` must
     re-open the selected canonical vault and validate the internally retained
     protector seal plus exact current credential state.
@@ -91,6 +93,7 @@ class CredentialTransitionReceipt:
     account_id: str
     provider: str
     environment: str
+    provider_environment: str
     purpose: str
     prior_generation: int
     successor_generation: int | None
@@ -107,7 +110,13 @@ class CredentialTransitionReceipt:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt schema is unsupported"
             )
-        for name in ("handle_id", "account_id", "provider", "environment"):
+        for name in (
+            "handle_id",
+            "account_id",
+            "provider",
+            "environment",
+            "provider_environment",
+        ):
             value = getattr(self, name)
             if type(value) is not str or not value:
                 raise CredentialTransitionReceiptError(
@@ -120,6 +129,20 @@ class CredentialTransitionReceipt:
         if self.environment != self.environment.upper():
             raise CredentialTransitionReceiptError(
                 "credential transition receipt environment is not canonical"
+            )
+        try:
+            normalized_provider_environment = normalize_provider_environment(
+                provider_id=self.provider,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CredentialTransitionReceiptError(
+                "credential transition receipt provider_environment is invalid"
+            ) from error
+        if normalized_provider_environment != self.provider_environment:
+            raise CredentialTransitionReceiptError(
+                "credential transition receipt provider_environment is not canonical"
             )
         if self.purpose != "TRADE":
             raise CredentialTransitionReceiptError(
@@ -355,9 +378,9 @@ def _next_sequence(
     vault: ProtectedCredentialVault,
     section: dict[str, object],
     *,
-    handle_id: str,
+    handle: PersistentCredentialHandle,
 ) -> tuple[int, str | None]:
-    previous = section["latest_by_handle"].get(handle_id)
+    previous = section["latest_by_handle"].get(handle.handle_id)
     if previous is None:
         return 1, None
 
@@ -374,6 +397,17 @@ def _next_sequence(
     if parsed.vault_authority_sha256 != expected_authority:
         raise CredentialTransitionReceiptError(
             "prior credential transition receipt vault authority is invalid"
+        )
+    if (
+        parsed.handle_id != handle.handle_id
+        or parsed.account_id != handle.account_id
+        or parsed.provider != handle.provider
+        or parsed.environment != handle.environment
+        or parsed.provider_environment != handle.provider_environment
+        or parsed.purpose != handle.purpose
+    ):
+        raise CredentialTransitionReceiptError(
+            "prior credential transition receipt scope does not match current credential"
         )
     try:
         sealed = b64decode(previous["seal_b64"], validate=True)
@@ -404,6 +438,10 @@ def _issue_locked(
         raise CredentialTransitionReceiptError(
             "READ credentials cannot issue sender-fence transition receipts"
         )
+    if prior_handle.provider_environment != current_handle.provider_environment:
+        raise CredentialTransitionReceiptError(
+            "credential transition cannot change provider_environment"
+        )
     record = state["records"].get(current_handle.handle_id)
     if record is None:
         raise CredentialTransitionReceiptError(
@@ -418,7 +456,7 @@ def _issue_locked(
     sequence, previous_receipt_id = _next_sequence(
         vault,
         section,
-        handle_id=current_handle.handle_id,
+        handle=current_handle,
     )
     subject = {
         "schema_version": _SCHEMA_VERSION,
@@ -427,6 +465,7 @@ def _issue_locked(
         "account_id": current_handle.account_id,
         "provider": current_handle.provider,
         "environment": current_handle.environment,
+        "provider_environment": current_handle.provider_environment,
         "purpose": current_handle.purpose,
         "prior_generation": prior_handle.generation,
         "successor_generation": (
@@ -510,6 +549,7 @@ def rotate_trade_credential_with_receipt(
             account_id=current.account_id,
             provider=current.provider,
             environment=current.environment,
+            provider_environment=current.provider_environment,
             purpose=current.purpose,
             generation=current.generation + 1,
         )
@@ -519,6 +559,7 @@ def rotate_trade_credential_with_receipt(
             account_id=next_handle.account_id,
             provider=next_handle.provider,
             environment=next_handle.environment,
+            provider_environment=next_handle.provider_environment,
             purpose=next_handle.purpose,
             generation=next_handle.generation,
         )
@@ -640,6 +681,7 @@ def verify_trade_credential_transition_receipt(
             or current.account_id != receipt.account_id
             or current.provider != receipt.provider
             or current.environment != receipt.environment
+            or current.provider_environment != receipt.provider_environment
             or current.purpose != receipt.purpose
         ):
             raise CredentialTransitionReceiptError(

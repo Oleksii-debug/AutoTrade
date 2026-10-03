@@ -28,6 +28,7 @@ EVIDENCE = {
     "sha256": "sha256:" + "a" * 64,
     "observed_at": "2026-09-24T16:00:00Z",
 }
+TEST_ADAPTER_VERSION = "autotrade-test-market-adapter@1"
 
 
 def at(month=9, day=24, hour=16, minute=0, second=0):
@@ -83,6 +84,7 @@ def raw(
     stream=None,
     generation=None,
     evidence=None,
+    adapter_version=TEST_ADAPTER_VERSION,
 ):
     available = available or (source + timedelta(milliseconds=100))
     ingested = ingested or (available + timedelta(milliseconds=100))
@@ -90,6 +92,8 @@ def raw(
         provider_id="provider-a",
         venue_id="venue-a",
         provider_symbol="ABC-USD",
+        adapter_version=TEST_ADAPTER_VERSION,
+        adapter_version=adapter_version,
         kind=kind,
         source_event_at=source,
         available_at=available,
@@ -147,8 +151,10 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         UUID(event.event_id)
         self.assertEqual(event.instrument_version, f"{IID}:1")
+        self.assertEqual(event.adapter_version, TEST_ADAPTER_VERSION)
         self.assertEqual(event.payload, {"price": "100.01", "quantity": "1.25", "side": "BUY"})
         contract = event.to_contract_dict()
+        self.assertEqual(contract["adapter_version"], TEST_ADAPTER_VERSION)
         self.assertEqual(contract["source_sequence"], "1")
         self.assertEqual(contract["revision"], "0")
         self.assertEqual(contract["quality_flags"], [])
@@ -2954,6 +2960,7 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_id=base.provider_id,
                 venue_id=base.venue_id,
                 provider_symbol=base.provider_symbol,
+                adapter_version=base.adapter_version,
                 kind=base.kind,
                 source_event_at=base.source_event_at,
                 available_at=base.available_at,
@@ -2968,6 +2975,7 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_id=base.provider_id,
                 venue_id=base.venue_id,
                 provider_symbol=base.provider_symbol,
+                adapter_version=base.adapter_version,
                 kind=base.kind,
                 source_event_at=base.source_event_at,
                 available_at=base.available_at,
@@ -2982,6 +2990,7 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_id=base.provider_id,
                 venue_id=base.venue_id,
                 provider_symbol=base.provider_symbol,
+                adapter_version=base.adapter_version,
                 kind=base.kind,
                 source_event_at=base.source_event_at,
                 available_at=base.available_at,
@@ -3060,6 +3069,7 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=at(),
                 available_at=at() - timedelta(seconds=1),
@@ -3279,6 +3289,170 @@ class MarketNormalizationTests(unittest.TestCase):
             ),
             "GAPPED",
         )
+
+    def test_adapter_version_is_exact_bounded_canonical_build_identity(self):
+        class TextSubclass(str):
+            pass
+
+        invalid = (
+            "",
+            " adapter@1",
+            "adapter version",
+            "a" * 129,
+            TextSubclass(TEST_ADAPTER_VERSION),
+        )
+        for value in invalid:
+            with self.subTest(adapter_version=value), self.assertRaisesRegex(
+                MarketDataError,
+                "adapter_version",
+            ):
+                raw(
+                    "TRADE",
+                    {"price": "100", "quantity": "1"},
+                    adapter_version=value,
+                )
+
+    def test_adapter_build_is_part_of_deterministic_event_identity(self):
+        first = MarketNormalizer(registry()).normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=71,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        replay = MarketNormalizer(registry()).normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=71,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        rebuilt = MarketNormalizer(registry()).normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=71,
+                adapter_version="autotrade-test-market-adapter@2",
+            )
+        )
+        self.assertEqual(first.event_id, replay.event_id)
+        self.assertNotEqual(first.event_id, rebuilt.event_id)
+        self.assertEqual(
+            rebuilt.to_contract_dict()["adapter_version"],
+            "autotrade-test-market-adapter@2",
+        )
+
+    def test_adapter_build_change_within_book_generation_fails_before_mutation(self):
+        normalizer = MarketNormalizer(registry())
+        first = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=10,
+                stream="book",
+                generation=1,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        self.assertEqual(first.adapter_version, TEST_ADAPTER_VERSION)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "adapter_version changed within active stream generation",
+        ):
+            normalizer.normalize(
+                raw(
+                    "BOOK_DELTA",
+                    {"bids": [["99.98", "1"]], "asks": []},
+                    sequence=11,
+                    stream="book",
+                    generation=1,
+                    adapter_version="autotrade-test-market-adapter@2",
+                )
+            )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+        replacement = normalizer.normalize(
+            raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.97", "2"]], "asks": [["100.02", "2"]]},
+                sequence=1,
+                stream="book",
+                generation=2,
+                adapter_version="autotrade-test-market-adapter@2",
+            )
+        )
+        self.assertEqual(
+            replacement.adapter_version,
+            "autotrade-test-market-adapter@2",
+        )
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "READY",
+        )
+
+    def test_adapter_build_change_cannot_cross_revision_authority(self):
+        normalizer = MarketNormalizer(registry())
+        original = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=72,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        correction = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "101", "quantity": "1"},
+                sequence=72,
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=2),
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        self.assertEqual(original.adapter_version, correction.adapter_version)
+        self.assertIn("CORRECTION", correction.quality_flags)
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "adapter_version changed within active stream generation",
+        ):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "102", "quantity": "1"},
+                    sequence=72,
+                    revision=2,
+                    available=at() + timedelta(seconds=2),
+                    ingested=at() + timedelta(seconds=3),
+                    adapter_version="autotrade-test-market-adapter@2",
+                )
+            )
 
     def test_stream_generation_is_exact_and_part_of_contract_and_event_identity(self):
         first = MarketNormalizer(registry()).normalize(

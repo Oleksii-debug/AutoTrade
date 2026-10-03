@@ -104,6 +104,7 @@ _DESCRIPTORS = (
     _descriptor("FUTURES_VARIATION_MARGIN", FINANCIAL, QUALIFICATION_FINANCIAL),
     _descriptor("HOST_CONTROL", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
     _descriptor("account_reconciliation", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
+    _descriptor("alpaca_option_lifecycle_obligation", FINANCIAL, QUALIFICATION_FINANCIAL),
     _descriptor("authority_state", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("canonical_simulation_session", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
     _descriptor("capability_history", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),

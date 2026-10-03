@@ -198,6 +198,7 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
 
     error_type = RuntimeTargetHostRunnerError
     namespace = globals()
+    missing = object()
     journal_store_type = JournalStore
     threading_module = threading
     time_module = time
@@ -243,6 +244,48 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
         (name, namespace[name], _capture_python_function_state(namespace[name]))
         for name in names
     )
+
+    def executable_members(raw: object) -> tuple[FunctionType, ...]:
+        if type(raw) is FunctionType:
+            return (raw,)
+        if isinstance(raw, staticmethod):
+            return (raw.__func__,)
+        if isinstance(raw, classmethod):
+            return (raw.__func__,)
+        if isinstance(raw, property):
+            return tuple(
+                function
+                for function in (raw.fget, raw.fset, raw.fdel)
+                if type(function) is FunctionType
+            )
+        return ()
+
+    type_states: list[tuple[object, ...]] = []
+    seen_types: set[int] = set()
+    for label, expected, _state in captured + campaign_to_observation_dependencies:
+        if not isinstance(expected, type) or id(expected) in seen_types:
+            continue
+        seen_types.add(id(expected))
+        type_namespace = expected.__dict__
+        executable_states = tuple(
+            (
+                member_name,
+                function,
+                _capture_python_function_state(function),
+            )
+            for member_name, raw in type_namespace.items()
+            for function in executable_members(raw)
+        )
+        type_states.append(
+            (
+                label,
+                expected,
+                frozenset(type_namespace),
+                tuple(type_namespace.items()),
+                executable_states,
+            )
+        )
+    frozen_type_states = tuple(type_states)
     resource_bindings = (
         (
             "JournalStore.current_journal_sequence",
@@ -316,6 +359,27 @@ def _build_runner_callback_authority_guard(*, monotonic_ns: object):
                 function_state=state,
                 error_prefix=dependency_prefix,
             )
+        for (
+            type_label,
+            expected_type,
+            expected_names,
+            expected_members,
+            executable_states,
+        ) in frozen_type_states:
+            current_namespace = expected_type.__dict__
+            if frozenset(current_namespace) != expected_names:
+                raise error_type(prefix + type_label)
+            for member_name, expected_member in expected_members:
+                if current_namespace.get(member_name, missing) is not expected_member:
+                    raise error_type(prefix + type_label + "." + member_name)
+            for member_name, function, state in executable_states:
+                require_binding(
+                    label=type_label + "." + member_name,
+                    current=function,
+                    expected=function,
+                    function_state=state,
+                    error_prefix=prefix,
+                )
         current_resource_values = (
             journal_store_type.current_journal_sequence,
             journal_store_type.pending_outbox_count,

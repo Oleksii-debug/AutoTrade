@@ -239,7 +239,7 @@ def _verify_authenticated_snapshot_bytes(
     *,
     artifact_digest: str,
 ) -> None:
-    if not isinstance(data, bytes):
+    if type(data) is not bytes:
         raise FinancingError("authenticated financing evidence bytes are required")
     actual = "sha256:" + sha256(data).hexdigest()
     if actual != artifact_digest:

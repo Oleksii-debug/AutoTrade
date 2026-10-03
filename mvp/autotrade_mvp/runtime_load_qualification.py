@@ -78,6 +78,14 @@ def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     )
 
 
+def _snapshot_metric_series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
+    """Copy only inert built-in metric containers before campaign journal I/O."""
+
+    if type(values) not in (tuple, list):
+        raise RuntimeBudgetError(f"{name} must be an exact tuple or list")
+    return _series(values, name=name)
+
+
 def _sorted_unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise RuntimeBudgetError(f"{name} must be a sequence")
@@ -626,12 +634,15 @@ def collect_runtime_campaign_evidence(
     spec = replace(spec)
     plan = replace(plan)
     cut = replace(cut, _token=_CUT_TOKEN)
-    financial_latency_us = _series(financial_latency_us, name="financial_latency_us")
-    financial_staleness_us = _series(
+    financial_latency_us = _snapshot_metric_series(
+        financial_latency_us,
+        name="financial_latency_us",
+    )
+    financial_staleness_us = _snapshot_metric_series(
         financial_staleness_us,
         name="financial_staleness_us",
     )
-    research_interference_us = _series(
+    research_interference_us = _snapshot_metric_series(
         research_interference_us,
         name="research_interference_us",
     )
@@ -639,8 +650,8 @@ def collect_runtime_campaign_evidence(
         resource_evidence_hash,
         name="resource_evidence_hash",
     )
-    if not isinstance(resource_metrics, Mapping):
-        raise RuntimeBudgetError("resource_metrics must be a mapping")
+    if type(resource_metrics) is not dict:
+        raise RuntimeBudgetError("resource_metrics must be an exact dict")
     resource_metrics = dict(resource_metrics)
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")

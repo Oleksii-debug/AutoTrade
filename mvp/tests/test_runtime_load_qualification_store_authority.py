@@ -344,6 +344,55 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                 ("fin-expected", "fin-extra"),
             )
 
+    def test_collect_rejects_executable_metric_container_before_terminal_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
+
+            class InjectingMetricList(list[int]):
+                def __init__(self) -> None:
+                    super().__init__([100])
+                    self.iterated = False
+
+                def __iter__(self):
+                    self.iterated = True
+                    journal.append_event(_envelope("fin-expected"))
+                    return super().__iter__()
+
+            hostile = InjectingMetricList()
+            before_sequence = JournalStore.current_journal_sequence(journal)
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "financial_latency_us must be an exact tuple or list",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=hostile,
+                    financial_staleness_us=(),
+                    research_interference_us=(),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 1},
+                )
+
+            self.assertFalse(hostile.iterated)
+            self.assertEqual(
+                JournalStore.current_journal_sequence(journal),
+                before_sequence,
+            )
+
     def test_terminal_clock_shadow_cannot_hide_undeclared_financial_event(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

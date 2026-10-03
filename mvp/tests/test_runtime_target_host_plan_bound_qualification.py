@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.runtime_load_plan import (
     RuntimeLoadPlanError,
     declare_runtime_event_plan,
 )
+from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as plan_bound_module
 from mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification import (
     verify_declared_plan_runtime_target_host_qualification,
 )
@@ -110,6 +111,64 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                 args.kwargs["expected_release_artifact_sha256"],
                 RELEASE_SHA,
             )
+
+    def test_caller_owned_spec_is_detached_before_durable_plan_read(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="terminal-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            original_loader = plan_bound_module.load_declared_runtime_event_plan
+            accepted = object()
+
+            def mutating_loader(current_store, *, plan_id, spec):
+                self.assertIsNot(spec, caller_spec)
+                object.__setattr__(
+                    caller_spec,
+                    "configuration_hash",
+                    "sha256:" + ("9" * 64),
+                )
+                return original_loader(
+                    current_store,
+                    plan_id=plan_id,
+                    spec=spec,
+                )
+
+            caller_spec = spec
+            with patch.object(
+                plan_bound_module,
+                "load_declared_runtime_event_plan",
+                side_effect=mutating_loader,
+            ), patch.object(
+                plan_bound_module,
+                "verify_runtime_target_host_qualification",
+                return_value=accepted,
+            ) as terminal:
+                result = verify_declared_plan_runtime_target_host_qualification(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=store,
+                    plan_id=plan.plan_id,
+                    spec=caller_spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                )
+
+            self.assertIs(result, accepted)
+            self.assertEqual(
+                terminal.call_args.kwargs["expected_configuration_hash"],
+                CONFIG,
+            )
+            self.assertEqual(
+                terminal.call_args.kwargs["expected_source_sha"],
+                SOURCE_SHA,
+            )
+            self.assertNotEqual(caller_spec.configuration_hash, CONFIG)
 
     def test_changed_spec_cannot_rebind_existing_durable_plan(self) -> None:
         with TemporaryDirectory() as directory:

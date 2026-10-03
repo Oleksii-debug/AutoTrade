@@ -1701,26 +1701,6 @@ class MarketNormalizer:
                 raise MarketDataError(
                     "adapter_version changed within active stream generation"
                 )
-            if (
-                current_adapter_version is None
-                and book_kind
-                and update.kind != "BOOK_SNAPSHOT"
-            ):
-                prior_adapter_versions = {
-                    version
-                    for key, version in (
-                        self._adapter_version_by_stream_generation.items()
-                    )
-                    if key[:4] == stream_key
-                }
-                if (
-                    prior_adapter_versions
-                    and update.adapter_version not in prior_adapter_versions
-                ):
-                    raise MarketDataError(
-                        "adapter build transition requires a new-generation "
-                        "BOOK_SNAPSHOT"
-                    )
         bound_streams = {
             bound_stream
             for (provider_id, venue_id, bound_stream) in self._book_stream_policies

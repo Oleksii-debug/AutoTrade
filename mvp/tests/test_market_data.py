@@ -92,7 +92,6 @@ def raw(
         provider_id="provider-a",
         venue_id="venue-a",
         provider_symbol="ABC-USD",
-        adapter_version=TEST_ADAPTER_VERSION,
         adapter_version=adapter_version,
         kind=kind,
         source_event_at=source,
@@ -3391,11 +3390,32 @@ class MarketNormalizationTests(unittest.TestCase):
             "READY",
         )
 
+        first_new_generation = normalizer.normalize(
+            raw(
+                "BOOK_DELTA",
+                {"bids": [["99.97", "2"]], "asks": []},
+                sequence=1,
+                stream="book",
+                generation=2,
+                adapter_version="autotrade-test-market-adapter@2",
+            )
+        )
+        self.assertIn("BOOK_UNUSABLE", first_new_generation.quality_flags)
+        self.assertEqual(
+            normalizer.book_state(
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+                stream="book",
+            ),
+            "GAPPED",
+        )
+
         replacement = normalizer.normalize(
             raw(
                 "BOOK_SNAPSHOT",
                 {"bids": [["99.97", "2"]], "asks": [["100.02", "2"]]},
-                sequence=1,
+                sequence=2,
                 stream="book",
                 generation=2,
                 adapter_version="autotrade-test-market-adapter@2",

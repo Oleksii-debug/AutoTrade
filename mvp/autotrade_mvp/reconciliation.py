@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_abs,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+)
 from .securities_borrow import BorrowAvailabilityEvidence
 
 
@@ -22,12 +28,9 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -724,6 +727,252 @@ def _snapshot_provider_fill(fill: ProviderFillEvidence) -> ProviderFillEvidence:
     return snapshot
 
 
+def _snapshot_provider_working_order(
+    order: ProviderWorkingOrderEvidence,
+) -> ProviderWorkingOrderEvidence:
+    """Detach one caller-owned working order before financial reconciliation."""
+
+    if type(order) is not ProviderWorkingOrderEvidence:
+        raise TypeError(
+            "provider_working_orders must contain exact ProviderWorkingOrderEvidence"
+        )
+    raw_state = object.__getattribute__(order, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("provider working-order state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_order_id",
+        "client_order_id",
+        "instrument",
+        "remaining_quantity",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("provider working order contains unexpected state fields")
+
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_order_id",
+        "instrument",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"provider working order {name} must be exact str")
+    if state["client_order_id"] is not None and type(state["client_order_id"]) is not str:
+        raise TypeError(
+            "provider working order client_order_id must be exact str or None"
+        )
+    if type(state["remaining_quantity"]) is not Decimal:
+        raise TypeError(
+            "provider working order remaining_quantity must be exact Decimal"
+        )
+
+    snapshot = ProviderWorkingOrderEvidence(
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        provider_order_id=state["provider_order_id"],
+        client_order_id=state["client_order_id"],
+        instrument=state["instrument"],
+        remaining_quantity=state["remaining_quantity"],
+    )
+    observed = (
+        state["provider_id"],
+        state["account_id"],
+        state["environment"],
+        state["provider_order_id"],
+        state["client_order_id"],
+        state["instrument"],
+        state["remaining_quantity"],
+    )
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.provider_order_id,
+        snapshot.client_order_id,
+        snapshot.instrument,
+        snapshot.remaining_quantity,
+    )
+    if observed != canonical:
+        raise ValueError(
+            "provider working-order evidence changed from canonical normalized state"
+        )
+    return snapshot
+
+
+def _snapshot_provider_activity(
+    activity: ProviderActivityEvidence,
+) -> ProviderActivityEvidence:
+    """Detach one caller-owned provider activity before financial reconciliation."""
+
+    if type(activity) is not ProviderActivityEvidence:
+        raise TypeError(
+            "provider_activities must contain exact ProviderActivityEvidence"
+        )
+    raw_state = object.__getattribute__(activity, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("provider activity state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "provider_id",
+        "account_id",
+        "environment",
+        "activity_id",
+        "activity_type",
+        "origin",
+        "occurred_at",
+        "instrument",
+        "currency",
+        "client_order_id",
+        "provider_order_id",
+        "provider_execution_id",
+        "signed_amount",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("provider activity contains unexpected state fields")
+
+    for name in (
+        "provider_id",
+        "account_id",
+        "environment",
+        "activity_id",
+        "activity_type",
+        "origin",
+        "occurred_at",
+    ):
+        if type(state[name]) is not str:
+            raise TypeError(f"provider activity {name} must be exact str")
+    for name in (
+        "instrument",
+        "currency",
+        "client_order_id",
+        "provider_order_id",
+        "provider_execution_id",
+    ):
+        if state[name] is not None and type(state[name]) is not str:
+            raise TypeError(f"provider activity {name} must be exact str or None")
+    if state["signed_amount"] is not None and type(state["signed_amount"]) is not Decimal:
+        raise TypeError(
+            "provider activity signed_amount must be exact Decimal or None"
+        )
+
+    snapshot = ProviderActivityEvidence(
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        activity_id=state["activity_id"],
+        activity_type=state["activity_type"],
+        origin=state["origin"],
+        occurred_at=state["occurred_at"],
+        instrument=state["instrument"],
+        currency=state["currency"],
+        client_order_id=state["client_order_id"],
+        provider_order_id=state["provider_order_id"],
+        provider_execution_id=state["provider_execution_id"],
+        signed_amount=state["signed_amount"],
+    )
+    observed = (
+        state["provider_id"],
+        state["account_id"],
+        state["environment"],
+        state["activity_id"],
+        state["activity_type"],
+        state["origin"],
+        state["occurred_at"],
+        state["instrument"],
+        state["currency"],
+        state["client_order_id"],
+        state["provider_order_id"],
+        state["provider_execution_id"],
+        state["signed_amount"],
+    )
+    canonical = (
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.activity_id,
+        snapshot.activity_type,
+        snapshot.origin,
+        snapshot.occurred_at,
+        snapshot.instrument,
+        snapshot.currency,
+        snapshot.client_order_id,
+        snapshot.provider_order_id,
+        snapshot.provider_execution_id,
+        snapshot.signed_amount,
+    )
+    if observed != canonical:
+        raise ValueError(
+            "provider activity evidence changed from canonical normalized state"
+        )
+    return snapshot
+
+
+def _snapshot_unknown_submission(
+    submission: UnknownSubmission,
+) -> UnknownSubmission:
+    """Detach one caller-owned UNKNOWN submission before later resolution."""
+
+    if type(submission) is not UnknownSubmission:
+        raise TypeError(
+            "unknown_submissions must contain exact UnknownSubmission"
+        )
+    raw_state = object.__getattribute__(submission, "__dict__")
+    if type(raw_state) is not dict:
+        raise TypeError("unknown submission state must use exact dict storage")
+    state = raw_state.copy()
+    expected_fields = {
+        "attempt_id",
+        "intent_id",
+        "client_order_id",
+        "provider_id",
+        "account_id",
+        "environment",
+        "started_at",
+    }
+    if set(state) != expected_fields:
+        raise TypeError("unknown submission contains unexpected state fields")
+    if any(type(state[name]) is not str for name in expected_fields):
+        raise TypeError("unknown submission fields must be exact str")
+
+    snapshot = UnknownSubmission(
+        attempt_id=state["attempt_id"],
+        intent_id=state["intent_id"],
+        client_order_id=state["client_order_id"],
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        started_at=state["started_at"],
+    )
+    observed = tuple(state[name] for name in (
+        "attempt_id",
+        "intent_id",
+        "client_order_id",
+        "provider_id",
+        "account_id",
+        "environment",
+        "started_at",
+    ))
+    canonical = (
+        snapshot.attempt_id,
+        snapshot.intent_id,
+        snapshot.client_order_id,
+        snapshot.provider_id,
+        snapshot.account_id,
+        snapshot.environment,
+        snapshot.started_at,
+    )
+    if observed != canonical:
+        raise ValueError(
+            "unknown submission changed from canonical normalized state"
+        )
+    return snapshot
+
+
 def _provider_fill_reconciliation_ingress_errors(
     fill: ProviderFillEvidence,
 ) -> tuple[str, ...]:
@@ -1173,10 +1422,7 @@ def reconcile_account(
     provider_working_by_id: dict[str, ProviderWorkingOrderEvidence] = {}
     provider_working_by_client_id: dict[str, ProviderWorkingOrderEvidence] = {}
     for order in provider_working_orders:
-        if not isinstance(order, ProviderWorkingOrderEvidence):
-            raise TypeError(
-                "provider_working_orders must contain ProviderWorkingOrderEvidence"
-            )
+        order = _snapshot_provider_working_order(order)
         if order.provider_id != provider_scope:
             raise ValueError("provider working-order evidence provider_id mismatch")
         if order.account_id != account_scope:
@@ -1327,10 +1573,10 @@ def reconcile_account(
 
     borrow_differences: dict[str, Decimal] = {}
     for resource in sorted(set(local_borrowed) | set(provider_borrowed)):
-        difference = provider_borrowed.get(
-            resource,
-            Decimal("0"),
-        ) - local_borrowed.get(resource, Decimal("0"))
+        difference = exact_subtract(
+            provider_borrowed.get(resource, Decimal("0")),
+            local_borrowed.get(resource, Decimal("0")),
+        )
         if difference != 0:
             borrow_differences[resource] = difference
 
@@ -1382,28 +1628,33 @@ def reconcile_account(
             ("PAYABLE", local_payable, provider_payable),
         ):
             for currency in sorted(set(local_map) | set(provider_map)):
-                difference = provider_map.get(currency, Decimal("0")) - local_map.get(currency, Decimal("0"))
+                difference = exact_subtract(
+                    provider_map.get(currency, Decimal("0")),
+                    local_map.get(currency, Decimal("0")),
+                )
                 if difference != 0:
                     settlement_differences[f"{prefix}:{currency}"] = difference
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
-        difference = provider_cash_map.get(currency, Decimal("0")) - local_cash_map.get(
-            currency, Decimal("0")
+        difference = exact_subtract(
+            provider_cash_map.get(currency, Decimal("0")),
+            local_cash_map.get(currency, Decimal("0")),
         )
         tolerance = cash_tol.get(currency, Decimal("0"))
-        if abs(difference) > tolerance:
+        if exact_abs(difference) > tolerance:
             cash_differences[currency] = difference
 
     position_differences: dict[str, Decimal] = {}
     for instrument in sorted(
         set(local_position_map) | set(provider_position_map)
     ):
-        difference = provider_position_map.get(
-            instrument, Decimal("0")
-        ) - local_position_map.get(instrument, Decimal("0"))
+        difference = exact_subtract(
+            provider_position_map.get(instrument, Decimal("0")),
+            local_position_map.get(instrument, Decimal("0")),
+        )
         tolerance = pos_tol.get(instrument, Decimal("0"))
-        if abs(difference) > tolerance:
+        if exact_abs(difference) > tolerance:
             position_differences[instrument] = difference
 
     local_activity_ids = tuple(
@@ -1433,10 +1684,7 @@ def reconcile_account(
     if activity_account is not None and activity_account != account_scope:
         raise ValueError("provider activity scope differs from reconciliation account_id")
     for activity in provider_activities:
-        if not isinstance(activity, ProviderActivityEvidence):
-            raise TypeError(
-                "provider_activities must contain ProviderActivityEvidence"
-            )
+        activity = _snapshot_provider_activity(activity)
         if activity.provider_id != provider_scope:
             raise ValueError("provider activity evidence provider_id mismatch")
         if activity.account_id != account_scope:
@@ -1507,8 +1755,7 @@ def reconcile_account(
     unknown_by_attempt: dict[str, UnknownSubmission] = {}
     unknown_by_client_order_id: dict[str, UnknownSubmission] = {}
     for submission in unknown_submissions:
-        if not isinstance(submission, UnknownSubmission):
-            raise TypeError("unknown_submissions must contain UnknownSubmission")
+        submission = _snapshot_unknown_submission(submission)
         if (
             submission.provider_id != provider_scope
             or submission.account_id != account_scope
@@ -1755,6 +2002,8 @@ def reconcile_account(
         and activity_coverage_complete
         and not unexpected_activities
         and not missing_local_activities
+        and not borrow_differences
+        and not active_recalls
         and not cash_differences
         and not position_differences
         and (

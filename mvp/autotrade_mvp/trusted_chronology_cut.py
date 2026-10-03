@@ -215,6 +215,12 @@ def _exact_nonnegative_int(value: object, *, name: str) -> int:
     return value
 
 
+def _exact_positive_int(value: object, *, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise TrustedChronologyError(f"{name} must be a positive exact int")
+    return value
+
+
 def _runtime_environment(value: object) -> str:
     if type(value) is not str or value not in {
         "REPLAY",
@@ -475,6 +481,93 @@ def _cut_id(challenge_digest: str, attestation_id: str) -> str:
     )
 
 
+def _snapshot_challenge(challenge: ChronologyChallenge) -> ChronologyChallenge:
+    """Reconstruct a challenge only from exact inert scalar fields."""
+
+    if type(challenge) is not ChronologyChallenge:
+        raise TypeError("attempt challenge must be exact ChronologyChallenge")
+    if type(challenge.scope) is not ChronologyScope:
+        raise TrustedChronologyError("attempt challenge scope must be exact ChronologyScope")
+
+    release_id = challenge.release_artifact_id
+    if release_id is not None:
+        release_id = _uuid_text(release_id, name="release_artifact_id")
+    release_sha = challenge.release_artifact_sha256
+    if release_sha is not None:
+        release_sha = _digest(release_sha, name="release_artifact_sha256")
+    runtime_host_id = challenge.runtime_host_id
+    if runtime_host_id is not None:
+        runtime_host_id = _token(runtime_host_id, name="runtime_host_id")
+    runtime_occurrence_id = challenge.runtime_occurrence_id
+    if runtime_occurrence_id is not None:
+        runtime_occurrence_id = _uuid_text(
+            runtime_occurrence_id,
+            name="runtime_occurrence_id",
+        )
+    runtime_occurrence_version = challenge.runtime_occurrence_version
+    if runtime_occurrence_version is not None:
+        runtime_occurrence_version = _exact_positive_int(
+            runtime_occurrence_version,
+            name="runtime_occurrence_version",
+        )
+    runtime_occurrence_sequence = challenge.runtime_occurrence_journal_sequence
+    if runtime_occurrence_sequence is not None:
+        runtime_occurrence_sequence = _exact_positive_int(
+            runtime_occurrence_sequence,
+            name="runtime_occurrence_journal_sequence",
+        )
+
+    payload = {
+        "clock_incident_generation": str(
+            _exact_nonnegative_int(
+                challenge.clock_incident_generation,
+                name="clock_incident_generation",
+            )
+        ),
+        "journal_sequence": str(
+            _exact_nonnegative_int(
+                challenge.journal_sequence,
+                name="journal_sequence",
+            )
+        ),
+        "owner_epoch": str(
+            _exact_positive_int(challenge.owner_epoch, name="owner_epoch")
+        ),
+        "owner_id": _token(challenge.owner_id, name="owner_id"),
+        "owner_scope": _token(challenge.owner_scope, name="owner_scope"),
+        "release_artifact_id": release_id,
+        "release_artifact_sha256": release_sha,
+        "runtime_host_id": runtime_host_id,
+        "runtime_occurrence_id": runtime_occurrence_id,
+        "runtime_occurrence_journal_sequence": (
+            None
+            if runtime_occurrence_sequence is None
+            else str(runtime_occurrence_sequence)
+        ),
+        "runtime_occurrence_version": (
+            None
+            if runtime_occurrence_version is None
+            else str(runtime_occurrence_version)
+        ),
+        "request_nonce": _token(challenge.request_nonce, name="request_nonce"),
+        "runtime_environment": _runtime_environment(challenge.runtime_environment),
+        "schema_version": _token(challenge.schema_version, name="schema_version"),
+        "scope": challenge.scope.value,
+        "source_sha": _git_sha(challenge.source_sha),
+        "store_identity_digest": _digest(
+            challenge.store_identity_digest,
+            name="store_identity_digest",
+        ),
+    }
+    return _challenge_from_payload(
+        payload,
+        expected_digest=_digest(
+            challenge.challenge_digest,
+            name="challenge_digest",
+        ),
+    )
+
+
 def _snapshot_attempt(
     attempt: DurableChronologyAttempt,
 ) -> DurableChronologyAttempt:
@@ -482,18 +575,7 @@ def _snapshot_attempt(
 
     if type(attempt) is not DurableChronologyAttempt:
         raise TypeError("attempt must be exact DurableChronologyAttempt")
-    challenge = attempt.challenge
-    if type(challenge) is not ChronologyChallenge:
-        raise TypeError("attempt challenge must be exact ChronologyChallenge")
-
-    # frozen=True blocks ordinary assignment only.  Detach first, then re-admit
-    # through the canonical 1.1 durable challenge parser so a mixed/tampered
-    # caller snapshot cannot cross the accepted-cut boundary.
-    challenge = replace(challenge)
-    challenge = _challenge_from_payload(
-        challenge.canonical_payload(),
-        expected_digest=challenge.challenge_digest,
-    )
+    challenge = _snapshot_challenge(attempt.challenge)
     prepared_event_id = _uuid_text(
         attempt.prepared_event_id,
         name="prepared_event_id",
@@ -525,7 +607,149 @@ def _snapshot_cut(cut: TrustedChronologyCut) -> TrustedChronologyCut:
 
     if type(cut) is not TrustedChronologyCut:
         raise TypeError("cut must be exact TrustedChronologyCut")
-    return replace(cut)
+    if type(cut.scope) is not ChronologyScope:
+        raise TrustedChronologyError("cut scope must be exact ChronologyScope")
+
+    release_id = cut.release_artifact_id
+    if release_id is not None:
+        release_id = _uuid_text(release_id, name="release_artifact_id")
+    release_sha = cut.release_artifact_sha256
+    if release_sha is not None:
+        release_sha = _digest(release_sha, name="release_artifact_sha256")
+    runtime_host_id = cut.runtime_host_id
+    if runtime_host_id is not None:
+        runtime_host_id = _token(runtime_host_id, name="runtime_host_id")
+    runtime_occurrence_id = cut.runtime_occurrence_id
+    if runtime_occurrence_id is not None:
+        runtime_occurrence_id = _uuid_text(
+            runtime_occurrence_id,
+            name="runtime_occurrence_id",
+        )
+    runtime_occurrence_version = cut.runtime_occurrence_version
+    if runtime_occurrence_version is not None:
+        runtime_occurrence_version = _exact_positive_int(
+            runtime_occurrence_version,
+            name="runtime_occurrence_version",
+        )
+    runtime_occurrence_sequence = cut.runtime_occurrence_journal_sequence
+    if runtime_occurrence_sequence is not None:
+        runtime_occurrence_sequence = _exact_positive_int(
+            runtime_occurrence_sequence,
+            name="runtime_occurrence_journal_sequence",
+        )
+
+    covered_utc, covered = _instant(cut.covered_utc, name="covered_utc")
+    lower_utc, lower = _instant(cut.utc_lower_bound, name="utc_lower_bound")
+    upper_utc, upper = _instant(cut.utc_upper_bound, name="utc_upper_bound")
+    if covered_utc != lower_utc or covered != lower or upper < lower:
+        raise TrustedChronologyError("trusted chronology cut UTC bounds are invalid")
+
+    if cut.scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if any(
+            value is not None
+            for value in (
+                release_id,
+                release_sha,
+                runtime_host_id,
+                runtime_occurrence_id,
+                runtime_occurrence_version,
+                runtime_occurrence_sequence,
+            )
+        ):
+            raise TrustedChronologyError(
+                "source chronology cut cannot carry release/runtime identity"
+            )
+    elif any(
+        value is None
+        for value in (
+            release_id,
+            release_sha,
+            runtime_host_id,
+            runtime_occurrence_id,
+            runtime_occurrence_version,
+            runtime_occurrence_sequence,
+        )
+    ):
+        raise TrustedChronologyError(
+            "release chronology cut must carry complete release/runtime identity"
+        )
+
+    return TrustedChronologyCut(
+        cut_id=_uuid_text(cut.cut_id, name="cut_id"),
+        challenge_digest=_digest(cut.challenge_digest, name="challenge_digest"),
+        scope=cut.scope,
+        source_sha=_git_sha(cut.source_sha),
+        store_identity_digest=_digest(
+            cut.store_identity_digest,
+            name="store_identity_digest",
+        ),
+        owner_scope=_token(cut.owner_scope, name="owner_scope"),
+        owner_id=_token(cut.owner_id, name="owner_id"),
+        owner_epoch=_exact_positive_int(cut.owner_epoch, name="owner_epoch"),
+        clock_incident_generation=_exact_nonnegative_int(
+            cut.clock_incident_generation,
+            name="clock_incident_generation",
+        ),
+        runtime_environment=_runtime_environment(cut.runtime_environment),
+        release_artifact_id=release_id,
+        release_artifact_sha256=release_sha,
+        runtime_host_id=runtime_host_id,
+        runtime_occurrence_id=runtime_occurrence_id,
+        runtime_occurrence_version=runtime_occurrence_version,
+        runtime_occurrence_journal_sequence=runtime_occurrence_sequence,
+        covered_utc=covered_utc,
+        utc_lower_bound=lower_utc,
+        utc_upper_bound=upper_utc,
+        external_authority_id=_token(
+            cut.external_authority_id,
+            name="external_authority_id",
+        ),
+        external_protocol_id=_token(
+            cut.external_protocol_id,
+            name="external_protocol_id",
+        ),
+        external_protocol_version=_token(
+            cut.external_protocol_version,
+            name="external_protocol_version",
+        ),
+        external_response_id=_token(
+            cut.external_response_id,
+            name="external_response_id",
+        ),
+        measurement_artifact_id=_uuid_text(
+            cut.measurement_artifact_id,
+            name="measurement_artifact_id",
+        ),
+        measurement_sha256=_digest(
+            cut.measurement_sha256,
+            name="measurement_sha256",
+        ),
+        measurement_requirement_id=_token(
+            cut.measurement_requirement_id,
+            name="measurement_requirement_id",
+        ),
+        accepted_attestation_id=_uuid_text(
+            cut.accepted_attestation_id,
+            name="accepted_attestation_id",
+        ),
+        accepted_attestation_digest=_digest(
+            cut.accepted_attestation_digest,
+            name="accepted_attestation_digest",
+        ),
+        accepted_policy_id=_digest(
+            cut.accepted_policy_id,
+            name="accepted_policy_id",
+        ),
+        accepted_trust_root_id=_digest(
+            cut.accepted_trust_root_id,
+            name="accepted_trust_root_id",
+        ),
+        accepted_journal_sequence=_exact_positive_int(
+            cut.accepted_journal_sequence,
+            name="accepted_journal_sequence",
+        ),
+        cut_digest=_digest(cut.cut_digest, name="cut_digest"),
+    )
 
 
 def _cut_digest(payload: dict[str, object]) -> str:
@@ -946,6 +1170,7 @@ def _require_accepted_binding(
     challenge: ChronologyChallenge,
     measurement_sha256: str,
     dynamic_requirement: str,
+    measurement_upper_bound: str,
 ) -> EvidenceArtifactRef:
     if type(accepted) is not AcceptedQualificationAttestation:
         raise TrustedChronologyError(
@@ -958,6 +1183,22 @@ def _require_accepted_binding(
     if accepted.result != "PASS" or accepted.unresolved_limits:
         raise TrustedChronologyError(
             "trusted chronology requires PASS with no unresolved limits"
+        )
+    _upper_text, measurement_completed = _instant(
+        measurement_upper_bound,
+        name="measurement_upper_bound",
+    )
+    _completed_text, completed_at = _instant(
+        accepted.completed_at,
+        name="accepted completed_at",
+    )
+    _signed_text, signed_at = _instant(
+        accepted.signed_at,
+        name="accepted signed_at",
+    )
+    if completed_at < measurement_completed or signed_at < measurement_completed:
+        raise TrustedChronologyError(
+            "accepted chronology receipt predates authorized measurement"
         )
     if (
         accepted.source_sha != challenge.source_sha
@@ -1049,6 +1290,7 @@ def _verify_receipt(
     challenge: ChronologyChallenge,
     measurement_sha256: str,
     dynamic_requirement: str,
+    measurement_upper_bound: str,
     evidence_store: ArtifactStore,
     evidence_root: str | Path,
 ) -> tuple[AcceptedQualificationAttestation, EvidenceArtifactRef]:
@@ -1071,6 +1313,7 @@ def _verify_receipt(
         challenge=challenge,
         measurement_sha256=measurement_sha256,
         dynamic_requirement=dynamic_requirement,
+        measurement_upper_bound=measurement_upper_bound,
     )
     return accepted, ref
 
@@ -1471,6 +1714,7 @@ def accept_trusted_chronology_cut(
             challenge=attempt.challenge,
             measurement_sha256=measurement_sha256,
             dynamic_requirement=dynamic_requirement,
+            measurement_upper_bound=transcript.utc_upper_bound,
             evidence_store=evidence_store,
             evidence_root=evidence_root,
         )
@@ -1558,6 +1802,10 @@ def _reverify_durable_acceptance(
         challenge=challenge,
         measurement_sha256=measurement_sha256,
         dynamic_requirement=dynamic_requirement,
+        measurement_upper_bound=_token(
+            payload.get("utc_upper_bound"),
+            name="utc_upper_bound",
+        ),
         evidence_store=evidence_store,
         evidence_root=evidence_root,
     )

@@ -253,6 +253,29 @@ def _build_external_function_graph_guard(*, root, label: str):
             )
         return ()
 
+    def capture_function_dependencies(function: FunctionType) -> None:
+        dependency_namespace = function.__globals__
+        for dependency_name in function.__code__.co_names:
+            if dependency_name not in dependency_namespace:
+                continue
+            expected_dependency = dependency_namespace[dependency_name]
+            dependency_key = (id(dependency_namespace), dependency_name)
+            if dependency_key not in seen_globals:
+                seen_globals.add(dependency_key)
+                global_bindings.append(
+                    (dependency_namespace, dependency_name, expected_dependency)
+                )
+        for cell in function.__closure__ or ():
+            cell_identity = id(cell)
+            if cell_identity in seen_closures:
+                continue
+            seen_closures.add(cell_identity)
+            try:
+                expected_cell_value = cell.cell_contents
+            except ValueError:
+                expected_cell_value = missing
+            closure_bindings.append((cell, expected_cell_value))
+
     def capture_external_type(cls: type) -> None:
         identity = id(cls)
         if identity in seen_external_types:
@@ -264,31 +287,7 @@ def _build_external_function_graph_guard(*, root, label: str):
         executable_states = []
         for member_name, raw in members:
             for function in executable_members(raw):
-                dependency_namespace = function.__globals__
-                for dependency_name in function.__code__.co_names:
-                    if dependency_name not in dependency_namespace:
-                        continue
-                    expected_dependency = dependency_namespace[dependency_name]
-                    dependency_key = (id(dependency_namespace), dependency_name)
-                    if dependency_key not in seen_globals:
-                        seen_globals.add(dependency_key)
-                        global_bindings.append(
-                            (
-                                dependency_namespace,
-                                dependency_name,
-                                expected_dependency,
-                            )
-                        )
-                for cell in function.__closure__ or ():
-                    cell_identity = id(cell)
-                    if cell_identity in seen_closures:
-                        continue
-                    seen_closures.add(cell_identity)
-                    try:
-                        expected_cell_value = cell.cell_contents
-                    except ValueError:
-                        expected_cell_value = missing
-                    closure_bindings.append((cell, expected_cell_value))
+                capture_function_dependencies(function)
                 executable_states.append(
                     (
                         member_name,
@@ -326,6 +325,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                 module_attribute_bindings.append((base, attribute_name, expected))
             if type(expected) is FunctionType and id(expected) not in seen_module_attribute_functions:
                 seen_module_attribute_functions.add(id(expected))
+                capture_function_dependencies(expected)
                 module_attribute_function_states.append(
                     (
                         expected,

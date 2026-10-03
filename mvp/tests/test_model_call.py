@@ -763,6 +763,38 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 ["ModelCallPrepared", "ModelCallNotSent"],
             )
 
+    def test_prepared_restart_rejects_pricing_at_exact_expiry(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            first = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            request = request_for(first, call_spec)
+            prepare_only(first, budget, call_spec, request)
+
+            clock.advance(3600)
+            restarted = orchestrator_for(budget=budget, clock=clock)
+            calls = []
+            outcome = restarted.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request,
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=clock.value,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(
+                outcome.reason,
+                "pricing_evidence_expired_before_call_boundary",
+            )
+            self.assertEqual(calls, [])
+            self.assertIsNone(
+                budget.active_reservation(restarted.attempt_id(call_spec))
+            )
+
     def test_call_boundary_rechecks_expiry_after_cancellation_probe(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

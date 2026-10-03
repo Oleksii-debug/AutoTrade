@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -22,20 +23,285 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify event base is still live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
+          test -n "$live_line"
+          read -r live_sha _ <<< "$live_line"
+          test -n "$live_sha"
+          test "$live_sha" = "$BASE_SHA"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"
-          test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
-          git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
-          git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
+          set -euo pipefail
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+      - name: Resolve one-time trusted exact-head mutation scope
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import urllib.parse
+          import urllib.request
+
+          MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+          SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+          def canonical_path(value: object) -> str:
+              if not isinstance(value, str) or not value:
+                  raise RuntimeError("approved scope path must be non-empty text")
+              if (
+                  value.startswith("/")
+                  or "\\" in value
+                  or ":" in value
+                  or any(ch in value for ch in ("\x00", "\n", "\r"))
+              ):
+                  raise RuntimeError(
+                      "approved scope path must be canonical repository-relative text"
+                  )
+              if any(part in {"", ".", ".."} for part in value.split("/")):
+                  raise RuntimeError("approved scope path contains invalid segment")
+              return value
+
+          def parse_record(body: object, expected_head: str):
+              if not isinstance(body, str):
+                  return None
+              lines = body.splitlines()
+              if not lines or lines[0].strip() != MARKER:
+                  return None
+              if not SHA40.fullmatch(expected_head):
+                  raise RuntimeError("event head is not lowercase 40-hex")
+              if len(lines) < 2 or not lines[1].startswith("head: "):
+                  raise RuntimeError("scope approval requires exact head line")
+              approved_head = lines[1].removeprefix("head: ").strip()
+              if not SHA40.fullmatch(approved_head):
+                  raise RuntimeError("approved head must be lowercase 40-hex")
+              if approved_head != expected_head:
+                  return None
+              if len(lines) < 3:
+                  raise RuntimeError("current-head approval requires at least one path")
+              paths = []
+              for line in lines[2:]:
+                  if not line.startswith("path: "):
+                      raise RuntimeError(
+                          "current-head approval permits only path lines after head"
+                      )
+                  paths.append(
+                      canonical_path(line.removeprefix("path: ").strip())
+                  )
+              if len(set(paths)) != len(paths):
+                  raise RuntimeError(
+                      "current-head approval must not repeat exact paths"
+                  )
+              return tuple(paths)
+
+          repository = os.environ["REPOSITORY"]
+          pr_number = os.environ["PR_NUMBER"]
+          head_sha = os.environ["HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+          target = Path(os.environ["APPROVED_SCOPE_FILE"])
+          approved = []
+          seen = set()
+          page = 1
+          while True:
+              query = urllib.parse.urlencode({"per_page": 100, "page": page})
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments?{query}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  comments = json.load(response)
+              if not isinstance(comments, list):
+                  raise RuntimeError("GitHub issue comments response must be a list")
+              for comment in comments:
+                  if comment.get("author_association") != "OWNER":
+                      continue
+                  parsed = parse_record(comment.get("body"), head_sha)
+                  if parsed is not None:
+                      for path in parsed:
+                          if path not in seen:
+                              seen.add(path)
+                              approved.append(path)
+              if len(comments) < 100:
+                  break
+              page += 1
+
+          target.write_text(
+              "".join(f"{path}\n" for path in approved),
+              encoding="utf-8",
+          )
+          print(f"Resolved {len(approved)} exact current-head scope path(s).")
+          PY
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
         shell: bash
-        run: >-
-          python -m control.tools.reconvergence_integrity
-          --base "${{ github.event.pull_request.base.sha }}"
-          --head "${{ github.event.pull_request.head.sha }}"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
+        run: |
+          set -euo pipefail
+          args=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          while IFS= read -r scope; do
+            test -n "$scope"
+            args+=(--allowed-scope "$scope")
+          done < "$APPROVED_SCOPE_FILE"
+          python -m control.tools.reconvergence_integrity "${args[@]}"
       - name: Run trusted guard regression tests
         run: python -m unittest tests.Control.test_reconvergence_integrity -v
+      - name: Reverify one-time trusted exact-head mutation scope
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
+          RECHECK_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes-recheck.txt
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import urllib.parse
+          import urllib.request
+
+          MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+          SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+          def canonical_path(value: object) -> str:
+              if not isinstance(value, str) or not value:
+                  raise RuntimeError("approved scope path must be non-empty text")
+              if (
+                  value.startswith("/")
+                  or "\\" in value
+                  or ":" in value
+                  or any(ch in value for ch in ("\x00", "\n", "\r"))
+              ):
+                  raise RuntimeError(
+                      "approved scope path must be canonical repository-relative text"
+                  )
+              if any(part in {"", ".", ".."} for part in value.split("/")):
+                  raise RuntimeError("approved scope path contains invalid segment")
+              return value
+
+          def parse_record(body: object, expected_head: str):
+              if not isinstance(body, str):
+                  return None
+              lines = body.splitlines()
+              if not lines or lines[0].strip() != MARKER:
+                  return None
+              if not SHA40.fullmatch(expected_head):
+                  raise RuntimeError("event head is not lowercase 40-hex")
+              if len(lines) < 2 or not lines[1].startswith("head: "):
+                  raise RuntimeError("scope approval requires exact head line")
+              approved_head = lines[1].removeprefix("head: ").strip()
+              if not SHA40.fullmatch(approved_head):
+                  raise RuntimeError("approved head must be lowercase 40-hex")
+              if approved_head != expected_head:
+                  return None
+              if len(lines) < 3:
+                  raise RuntimeError("current-head approval requires at least one path")
+              paths = []
+              for line in lines[2:]:
+                  if not line.startswith("path: "):
+                      raise RuntimeError(
+                          "current-head approval permits only path lines after head"
+                      )
+                  paths.append(
+                      canonical_path(line.removeprefix("path: ").strip())
+                  )
+              if len(set(paths)) != len(paths):
+                  raise RuntimeError(
+                      "current-head approval must not repeat exact paths"
+                  )
+              return tuple(paths)
+
+          repository = os.environ["REPOSITORY"]
+          pr_number = os.environ["PR_NUMBER"]
+          head_sha = os.environ["HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+          original = Path(os.environ["APPROVED_SCOPE_FILE"])
+          target = Path(os.environ["RECHECK_SCOPE_FILE"])
+          approved = []
+          seen = set()
+          page = 1
+          while True:
+              query = urllib.parse.urlencode({"per_page": 100, "page": page})
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments?{query}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  comments = json.load(response)
+              if not isinstance(comments, list):
+                  raise RuntimeError("GitHub issue comments response must be a list")
+              for comment in comments:
+                  if comment.get("author_association") != "OWNER":
+                      continue
+                  parsed = parse_record(comment.get("body"), head_sha)
+                  if parsed is not None:
+                      for path in parsed:
+                          if path not in seen:
+                              seen.add(path)
+                              approved.append(path)
+              if len(comments) < 100:
+                  break
+              page += 1
+
+          target.write_text(
+              "".join(f"{path}\n" for path in approved),
+              encoding="utf-8",
+          )
+          if target.read_bytes() != original.read_bytes():
+              raise RuntimeError(
+                  "trusted exact-head mutation scope changed during guard run"
+              )
+          print(f"Reverified {len(approved)} unchanged scope path(s).")
+          PY
+      - name: Reverify event base is still live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
+          test -n "$live_line"
+          read -r live_sha _ <<< "$live_line"
+          test -n "$live_sha"
+          test "$live_sha" = "$BASE_SHA"

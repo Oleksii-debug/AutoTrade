@@ -229,6 +229,27 @@ def canonical_json(value: Any) -> str:
     )
 
 
+def _validate_digest_map(
+    name: str,
+    value: object,
+    expected_ids: Iterable[str],
+) -> None:
+    if type(value) is not dict:
+        raise ValueError(f"{name} must be an exact object")
+    expected = set(expected_ids)
+    if set(value) != expected:
+        raise ValueError(f"{name} keys must exactly match linked identities")
+    for identity, digest in value.items():
+        if (
+            not isinstance(identity, str)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or digest != digest.lower()
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise ValueError(f"{name} must contain lowercase SHA-256 digests")
+
+
 def _hash_record(record: dict[str, Any]) -> str:
     payload = {key: value for key, value in record.items() if key != "record_hash"}
     return sha256(canonical_json(payload).encode("utf-8")).hexdigest()
@@ -335,6 +356,13 @@ class DecisionTraceStore:
             if len(event_ids) != len(set(event_ids)):
                 raise ValueError("event_ids must not contain duplicates")
 
+        evidence_digests = trace.get("evidence_digests")
+        if evidence_digests is not None:
+            _validate_digest_map("evidence_digests", evidence_digests, refs)
+        event_digests = trace.get("event_digests")
+        if event_digests is not None:
+            _validate_digest_map("event_digests", event_digests, event_ids or [])
+
         attributes = trace.get("attributes")
         if attributes is not None and not isinstance(attributes, dict):
             raise ValueError("attributes must be an object")
@@ -413,10 +441,25 @@ class DecisionTraceStore:
         *,
         expected_source_sha: str,
         expected_build_id: str,
-        available_event_ids: Iterable[str],
-        available_evidence_ids: Iterable[str],
+        available_event_digests: Mapping[str, str],
+        available_evidence_digests: Mapping[str, str],
     ) -> dict[str, Any]:
-        """Reconstruct only when durable links and exact source/build identity match."""
+        """Reconstruct only when links, content digests and source/build identity match."""
+
+        if type(available_event_digests) is not dict:
+            raise ValueError("available_event_digests must be an exact object")
+        if type(available_evidence_digests) is not dict:
+            raise ValueError("available_evidence_digests must be an exact object")
+        _validate_digest_map(
+            "available_event_digests",
+            available_event_digests,
+            available_event_digests.keys(),
+        )
+        _validate_digest_map(
+            "available_evidence_digests",
+            available_evidence_digests,
+            available_evidence_digests.keys(),
+        )
 
         candidate = {
             "trace_id": "identity-check",
@@ -432,13 +475,24 @@ class DecisionTraceStore:
         self._validate_input(candidate)
         record = self.reconstruct(
             trace_id,
-            available_event_ids=available_event_ids,
-            available_evidence_ids=available_evidence_ids,
+            available_event_ids=available_event_digests.keys(),
+            available_evidence_ids=available_evidence_digests.keys(),
         )
         if record.get("source_sha") != expected_source_sha:
             raise ValueError("trace source identity mismatch")
         if record.get("build_id") != expected_build_id:
             raise ValueError("trace build identity mismatch")
+
+        stored_event_digests = record.get("event_digests")
+        stored_evidence_digests = record.get("evidence_digests")
+        if type(stored_event_digests) is not dict or type(stored_evidence_digests) is not dict:
+            raise ValueError("trace evidence digest identity missing")
+        for identity in record.get("event_ids", []):
+            if available_event_digests.get(identity) != stored_event_digests.get(identity):
+                raise ValueError("trace event digest mismatch")
+        for identity in record["evidence_refs"]:
+            if available_evidence_digests.get(identity) != stored_evidence_digests.get(identity):
+                raise ValueError("trace evidence digest mismatch")
         return record
 
     def accessible_export(self, trace_id: str) -> str:
@@ -468,10 +522,22 @@ class DecisionTraceStore:
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])
-        lines.extend(f"- {item}" for item in event_ids) if event_ids else lines.append("- none")
+        event_digests = record.get("event_digests", {})
+        if event_ids:
+            for item in event_ids:
+                digest = event_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Evidence:")
-        lines.extend(f"- {item}" for item in record["evidence_refs"]) if record["evidence_refs"] else lines.append("- none")
+        evidence_digests = record.get("evidence_digests", {})
+        if record["evidence_refs"]:
+            for item in record["evidence_refs"]:
+                digest = evidence_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Attributes:")
         attributes = record.get("attributes", {})

@@ -5,7 +5,11 @@ import unittest
 from uuid import UUID
 
 from mvp.autotrade_mvp.futures import settle_and_book_inverse_variation_margin
-from mvp.autotrade_mvp.instruments import InstrumentRegistryError, InstrumentVersion
+from mvp.autotrade_mvp.instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    InstrumentVersion,
+)
 from mvp.autotrade_mvp.settlement_convention import (
     SettlementConvention,
     SettlementConventionError,
@@ -97,6 +101,38 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
             settlement_convention(rounding="CEILING")
         with self.assertRaises(SettlementConventionError):
             settlement_convention(instrument_version=True)
+
+    def test_instrument_registry_rejects_version_subclass_before_virtual_reads(self):
+        calls = []
+
+        class HostileInstrumentVersion(InstrumentVersion):
+            def __getattribute__(self, name):
+                if name in {
+                    "calendar_id",
+                    "timezone_id",
+                    "instrument_id",
+                    "version",
+                    "provider_id",
+                    "venue_id",
+                    "provider_symbol",
+                    "effective_from",
+                    "effective_to",
+                }:
+                    calls.append(name)
+                return super().__getattribute__(name)
+
+        base = inverse_future()
+        hostile = HostileInstrumentVersion(**base.__dict__)
+        calls.clear()
+
+        with self.assertRaisesRegex(TypeError, "exact InstrumentVersion"):
+            InstrumentRegistry().add(hostile)
+        self.assertEqual(calls, [])
+
+        calls.clear()
+        with self.assertRaisesRegex(TypeError, "exact InstrumentVersion"):
+            InstrumentRegistry(versions=(hostile,))
+        self.assertEqual(calls, [])
 
     def test_inverse_future_contract_has_versioned_settlement_convention_field(self):
         names = {field.name for field in fields(InstrumentVersion)}

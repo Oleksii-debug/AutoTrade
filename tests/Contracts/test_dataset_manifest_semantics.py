@@ -1,4 +1,5 @@
 import json
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -21,6 +22,7 @@ SCHEMAS = ROOT / "contracts" / "jsonschema"
 FIXTURES = ROOT / "contracts" / "fixtures"
 CONTRACT_MANIFEST = ROOT / "contracts" / "manifest.json"
 VALIDATOR_ID = "dataset-manifest-content-authority-v1"
+PACKAGE_VERSION = "0.0.2"
 
 
 class DatasetManifestSemanticContractTests(unittest.TestCase):
@@ -62,6 +64,16 @@ class DatasetManifestSemanticContractTests(unittest.TestCase):
         self.assertEqual(
             declarations[0]["installed_bindings"]["python"],
             "autotrade_numeric/dataset_manifest.py",
+        )
+        root_package = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        research_package = tomllib.loads(
+            (ROOT / "research" / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(root_package["project"]["name"], "autotrade-exact-numeric")
+        self.assertEqual(root_package["project"]["version"], PACKAGE_VERSION)
+        self.assertIn(
+            f"autotrade-exact-numeric=={PACKAGE_VERSION}",
+            research_package["project"]["dependencies"],
         )
 
     def test_canonical_fixture_passes_structure_and_semantics(self):

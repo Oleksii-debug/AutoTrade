@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "research/pyproject.toml"
       - "contracts/**"
       - "tests/Contracts/**"
       - "tests/Contracts.DotNet/**"
@@ -23,6 +25,8 @@ on:
   pull_request:
     paths:
       - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "research/pyproject.toml"
       - "contracts/**"
       - "tests/Contracts/**"
       - "tests/Contracts.DotNet/**"

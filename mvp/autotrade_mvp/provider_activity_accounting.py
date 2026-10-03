@@ -1,10 +1,9 @@
-"""Provider-accounting facade with a fresh legacy-correction authority fence.
+"""Provider-accounting facade with fresh provider-fill authority fences.
 
 The retained facade owns the already-qualified provider cash replay bridge. This
-layer changes no financial authority: it only prevents the generic historical
-correction entrypoint from publishing a *fresh* correction for a transaction
-already owned by the current provider-fill financial-binding authority without
-the reservation-aware correction binding.
+layer changes no financial authority: it prevents generic historical entrypoints
+from publishing fresh provider-fill financial effects without the current
+reservation/evidence bindings while preserving exact legacy retries.
 """
 
 from __future__ import annotations
@@ -196,4 +195,55 @@ def commit_economic_correction_with_settlement_replacement(
         reservation_book=reservation_book,
         reservation_id=reservation_id,
         provider_fill_correction_binding=provider_fill_correction_binding,
+    )
+
+
+def commit_economic_batch_with_reservation_consumption(
+    economic_book: _impl.DurableProviderEconomicBook,
+    reservation_book: _impl.DurableReservationBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reservation_id: str,
+    usage: Mapping[str, object],
+    transactions: Iterable[_impl.JournalTransaction],
+    reservation_expected_snapshot_digest: str | None = None,
+    committed_at: str | None = None,
+    settlement_book: _impl.DurableSettlementBook | None = None,
+    settlement_obligations: Iterable[_impl.SettlementObligation] = (),
+    provider_fill_binding: _impl.PreparedProviderFillBinding | None = None,
+) -> bool:
+    """Fence public generic publication of provider-fill-bound financial effects.
+
+    The retained generic barrier remains available for its legacy non-provider
+    callers. A provider fill, however, must enter through
+    ``commit_provider_fill_with_reservation_consumption``. That canonical
+    entrypoint derives both the economic transaction and reservation usage from
+    the same independently evidenced fill and admission-bound reservation cut.
+
+    Accepting a caller-supplied ``PreparedProviderFillBinding`` here would let a
+    generic caller pair descriptive provider evidence with independently chosen
+    ``usage``/``transactions``. The implementation's private provider-fill
+    entrypoint still calls the underlying atomic barrier directly after deriving
+    those values, so this facade fence does not weaken or duplicate authority.
+    """
+
+    if provider_fill_binding is not None:
+        raise _impl.AccountingConflict(
+            "provider-fill-bound atomic commit requires evidence-derived provider fill entrypoint"
+        )
+
+    return _impl.commit_economic_batch_with_reservation_consumption(
+        economic_book,
+        reservation_book,
+        command_id=command_id,
+        idempotency_key=idempotency_key,
+        reservation_id=reservation_id,
+        usage=usage,
+        transactions=transactions,
+        reservation_expected_snapshot_digest=reservation_expected_snapshot_digest,
+        committed_at=committed_at,
+        settlement_book=settlement_book,
+        settlement_obligations=settlement_obligations,
+        provider_fill_binding=None,
     )

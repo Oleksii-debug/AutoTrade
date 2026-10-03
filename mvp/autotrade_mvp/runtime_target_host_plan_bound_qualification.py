@@ -51,6 +51,25 @@ def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
     )
 
 
+def _canonical_sha256_text(value: object, *, name: str) -> str:
+    """Return one inert canonical sha256 identity without invoking caller operators."""
+
+    if type(value) is not str:
+        raise RuntimeTargetHostCompositionError(
+            f"{name} must remain exact canonical sha256 text"
+        )
+    if (
+        not value.startswith("sha256:")
+        or len(value) != 71
+        or value != value.lower()
+        or any(char not in "0123456789abcdef" for char in value[7:])
+    ):
+        raise RuntimeTargetHostCompositionError(
+            f"{name} must remain exact canonical sha256 text"
+        )
+    return value
+
+
 def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
     """Detach one issued cut before composed code performs any caller-visible work."""
 
@@ -120,22 +139,32 @@ def verify_declared_plan_runtime_target_host_qualification(
                 "terminal WP-65 qualification requires composed target-host measurement authority"
             )
         # The durable pre-run declaration remains the workload identity authority.
-        # Exact typed terminal inputs may not substitute a parallel campaign or
-        # measurement workload hash before the composed durable binder runs.
-        if (
-            type(campaign_plan) is RuntimeCampaignPlan
-            and campaign_plan.workload_profile_hash != plan.digest
-        ):
-            raise RuntimeTargetHostCompositionError(
-                "campaign workload identity does not match durable pre-run plan"
+        # Frozen dataclasses are still mutable through object.__setattr__, so no
+        # caller-owned field participates in equality until exact inert SHA-256
+        # text has been validated. This prevents hostile __eq__/__ne__ execution
+        # while the JournalStore authority scope is active.
+        durable_plan_digest = _canonical_sha256_text(
+            plan.digest,
+            name="durable pre-run plan digest",
+        )
+        if type(campaign_plan) is RuntimeCampaignPlan:
+            campaign_workload = _canonical_sha256_text(
+                campaign_plan.workload_profile_hash,
+                name="campaign workload identity",
             )
-        if (
-            type(measurement) is TargetHostMeasurementArtifact
-            and measurement.workload_profile_hash != plan.digest
-        ):
-            raise RuntimeTargetHostCompositionError(
-                "measurement workload identity does not match durable pre-run plan"
+            if campaign_workload != durable_plan_digest:
+                raise RuntimeTargetHostCompositionError(
+                    "campaign workload identity does not match durable pre-run plan"
+                )
+        if type(measurement) is TargetHostMeasurementArtifact:
+            measurement_workload = _canonical_sha256_text(
+                measurement.workload_profile_hash,
+                name="measurement workload identity",
             )
+            if measurement_workload != durable_plan_digest:
+                raise RuntimeTargetHostCompositionError(
+                    "measurement workload identity does not match durable pre-run plan"
+                )
         # ``RuntimeCampaignCut`` is a frozen issued object but Python callers can
         # still abuse ``object.__setattr__``. Detach its inert scalar state before
         # the composed verifier reaches measurement/campaign-window prechecks.

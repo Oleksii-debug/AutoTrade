@@ -834,17 +834,17 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
     )
     measurement.require_evidence_match(evidence)
 
-    campaign_end_upper_ns = cut.started_monotonic_ns + evidence.observed_duration_us * 1_000
+    campaign_end_ns = evidence.ended_monotonic_ns
     for sample in measurement.financial_samples:
         if sample.latency_start_monotonic_ns < cut.started_monotonic_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial latency sample starts before campaign monotonic cut"
             )
-        if sample.latency_end_monotonic_ns > campaign_end_upper_ns:
+        if sample.latency_end_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial latency sample ends after campaign monotonic cut"
             )
-        if sample.staleness_observed_monotonic_ns > campaign_end_upper_ns:
+        if sample.staleness_observed_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "financial staleness observation occurs after campaign end"
             )
@@ -853,12 +853,12 @@ def collect_runtime_campaign_evidence_from_measurement_artifact(
             raise RuntimeTargetHostMeasurementError(
                 "research sample starts before campaign monotonic cut"
             )
-        if sample.end_monotonic_ns > campaign_end_upper_ns:
+        if sample.end_monotonic_ns > campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "research sample ends after campaign monotonic cut"
             )
     for sample in measurement.resource_samples:
-        if not cut.started_monotonic_ns <= sample.monotonic_ns <= campaign_end_upper_ns:
+        if not cut.started_monotonic_ns <= sample.monotonic_ns <= campaign_end_ns:
             raise RuntimeTargetHostMeasurementError(
                 "resource sample lies outside campaign monotonic cut"
             )

@@ -286,7 +286,10 @@ def _static_error(status: int, code: str) -> TransportResponse:
         status=status,
         content_type="application/json; charset=utf-8",
         body=body,
-        headers=(("Cache-Control", "no-store"),),
+        headers=(
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+        ),
     )
 
 
@@ -366,6 +369,7 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
                 ("Cross-Origin-Resource-Policy", "same-origin"),
                 ("Referrer-Policy", "no-referrer"),
                 ("X-Frame-Options", "DENY"),
+                ("X-Content-Type-Options", "nosniff"),
                 ("X-AutoTrade-Web-Bundle", self.web_bundle.bundle_sha256),
                 ("X-AutoTrade-Source-Revision", self.web_bundle.source_revision),
                 (

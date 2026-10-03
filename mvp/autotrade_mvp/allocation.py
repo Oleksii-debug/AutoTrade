@@ -2248,6 +2248,10 @@ def allocate_evidence_bound_objective_targets(
         instrument_versions[symbol] = instrument_version
         capability_snapshot_ids[symbol] = capability_snapshot_id
         forecast_horizon_ends[symbol] = forecast_horizon_end
+    if len(set(forecast_horizon_ends.values())) > 1:
+        raise ValueError(
+            "objective candidates must share one forecast horizon before portfolio utility aggregation"
+        )
     if len(provider_ids) != 1:
         raise ValueError("market evidence candidates must share one provider_id")
     if len(account_ids) != 1:

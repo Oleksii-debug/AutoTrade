@@ -58,6 +58,58 @@ class RuntimeTargetHostPlanBoundAuthoritySealTests(unittest.TestCase):
 
             forged.assert_not_called()
 
+    def test_production_path_ignores_rebound_plan_and_store_authority_globals(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="captured-authority-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            forged_loader = Mock(
+                side_effect=AssertionError("rebound durable plan loader ran")
+            )
+            forged_store_authority = Mock(
+                side_effect=AssertionError("rebound store authority ran")
+            )
+            forged_scope = Mock(
+                side_effect=AssertionError("rebound store authority scope ran")
+            )
+
+            class ForgedJournalStore:
+                pass
+
+            with (
+                patch.object(plan_bound, "JournalStore", ForgedJournalStore),
+                patch.object(plan_bound, "load_declared_runtime_event_plan", forged_loader),
+                patch.object(
+                    plan_bound,
+                    "require_exact_journal_store_authority",
+                    forged_store_authority,
+                ),
+                patch.object(plan_bound, "journal_store_authority_scope", forged_scope),
+                self.assertRaises((TypeError, RuntimeTargetHostCompositionError)),
+            ):
+                plan_bound.verify_declared_plan_runtime_target_host_qualification(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=store,
+                    plan_id=plan.plan_id,
+                    spec=spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
+
+            forged_loader.assert_not_called()
+            forged_store_authority.assert_not_called()
+            forged_scope.assert_not_called()
+
     def test_detached_acceptance_survives_verifier_owned_post_pass_mutation(self) -> None:
         retained = RuntimeTargetHostChronologyBoundTests._qualification()
         detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)

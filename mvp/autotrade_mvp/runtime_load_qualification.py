@@ -718,6 +718,10 @@ def collect_runtime_campaign_evidence(
             raise RuntimeBudgetError(
                 "monotonic clock moved backwards during runtime campaign"
             )
+        if JournalStore.current_journal_sequence(journal) != end_sequence:
+            raise RuntimeBudgetError(
+                "campaign journal changed while sampling terminal state"
+            )
         elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
         observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
         declared_duration_us = plan.declared_duration_ms * 1000

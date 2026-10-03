@@ -801,6 +801,33 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertFalse(state["called"])
         self.assertEqual(fitted.dataset_id, self.dataset_id)
 
+    def test_caller_owned_registry_path_shadow_cannot_replace_manifest_path(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        state = {"called": False}
+
+        def hostile_path(*_args, **_kwargs):
+            state["called"] = True
+            raise AssertionError("caller-owned registry path override executed")
+
+        self.registry._path = hostile_path
+        try:
+            fitted = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+        finally:
+            del self.registry._path
+
+        self.assertFalse(state["called"])
+        self.assertEqual(fitted.dataset_id, self.dataset_id)
+
     def test_caller_constructed_frozen_population_cannot_cross_authority_seam(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)

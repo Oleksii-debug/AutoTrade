@@ -39,6 +39,8 @@ def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environm
 
 def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
     return ProviderFillEvidence.create(
+               side="BUY",
+               evidence_refs=("test:normalized-fill",),
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
@@ -193,6 +195,7 @@ class ReconciliationJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             wrong_scope_fill = ProviderFillEvidence.create(
+                                   evidence_refs=("test:normalized-fill",),
                 provider_id="OTHER_PROVIDER",
                 account_id="test-account",
                 environment="PAPER",
@@ -262,7 +265,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(first["event_id"], second["event_id"])
             self.assertEqual(
                 first["payload"]["cash_differences"]["USD"],
-                "-0.50",
+                "-0.5",
             )
             self.assertEqual(
                 first["payload"]["resource_availability"],

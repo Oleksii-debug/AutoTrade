@@ -112,7 +112,8 @@ def _require_complete_reconciliation(event: dict, *, cash, position, fill_id) ->
         if (type(amounts) is not dict or set(amounts) - permitted
                 or any(_decimal(value) != 0 for value in amounts.values())):
             raise ValueError("simulation reconciliation differences remain")
-    if evidence.get("matched_execution_ids") != ([] if fill_id is None else [fill_id]):
+    expected_ids = list(fill_id) if type(fill_id) is tuple else ([] if fill_id is None else [fill_id])
+    if evidence.get("matched_execution_ids") != expected_ids:
         raise ValueError("simulation reconciled executions differ")
     provider_cash = evidence.get("provider_cash")
     provider_positions = evidence.get("provider_positions")
@@ -238,6 +239,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         if store.current_journal_sequence() != cut:
             raise SimulationStateChanging("journal changed during operator read")
         return None
+    if any(event["aggregate_type"] == "canonical_autonomous_simulation" for event in events):
+        return _inspect_autonomous_loop(store, events, cut, history_limit)
     for event in events:
         if event["aggregate_type"] == "reservation_book":
             payload = event["payload"]
@@ -462,4 +465,80 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         ]
     if store.current_journal_sequence() != cut:
         raise SimulationStateChanging("journal changed during operator read")
+    return {"status": status, "economic_report": report}
+
+
+def _inspect_autonomous_loop(store, events, cut, history_limit):
+    from .persistence import payload_digest
+    from .simulation_session import _LOOP_PROTOCOL
+    from .simulated_provider import SimulatedProvider
+    from .durable_order_projection import DurableOrderBookProjection
+    from .exact_decimal import exact_multiply
+
+    loops = [event for event in events if event["aggregate_type"] == "canonical_autonomous_simulation"]
+    first = loops[0]
+    if first["event_type"] != "AutonomousSimulationStarted":
+        raise ValueError("autonomous protocol owner is missing")
+    run_id = first["aggregate_id"]
+    if any(event["aggregate_id"] != run_id or event.get("environment") != ENVIRONMENT for event in loops):
+        raise ValueError("autonomous simulation scope conflicts")
+    protocol = first["payload"]["protocol"]
+    if protocol["protocol"] != _LOOP_PROTOCOL or payload_digest(protocol) != first["payload"]["protocol_digest"]:
+        raise ValueError("autonomous frozen protocol identity differs")
+    completed = []
+    active = None
+    for event in loops[1:]:
+        payload = event["payload"]
+        if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
+            raise ValueError("autonomous episode protocol identity differs")
+        if event["event_type"] == "AutonomousEpisodeStarted" and active is None and payload["episode"] == len(completed) + 1:
+            active = payload
+        elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
+            completed.append(payload)
+            active = None
+        else:
+            raise ValueError("autonomous episode chronology conflicts")
+    economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
+    cash, position = economic.cash("USD"), economic.position(INSTRUMENT)
+    reservations = DurableReservationBook(store, account_id=ACCOUNT, environment=ENVIRONMENT)
+    oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
+        environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    status = {"status": "needs_recovery" if active is not None else "running",
+        "session_status": "UNKNOWN" if active is not None else "COMPLETED" if len(completed) == len(protocol["prices"]) else "PAUSED",
+        "state_format": "canonical_journal", "environment": ENVIRONMENT, "mode": "ZERO", "episode_id": run_id,
+        "completed_episodes": len(completed), "total_episodes": len(protocol["prices"]),
+        "cash": canonical_decimal_text(cash), "position": canonical_decimal_text(position),
+        "initial_cash": protocol["initial_cash"], "symbol": INSTRUMENT, "journal_sequence": cut,
+        "replay_verified": active is None, "evidence_count": len(completed),
+        "active_reservations": [{"state": item.state, "remaining": {k: canonical_decimal_text(v) for k,v in item.remaining.items()}}
+                                for item in reservations.active()],
+        "history": [{k: event[k] for k in ("event_id", "event_type", "aggregate_type", "journal_sequence")}
+                    for event in events[-history_limit:]] if history_limit else []}
+    report = None
+    if active is None and completed:
+        latest = completed[-1]
+        provider = SimulatedProvider.from_state(latest["provider_state"])
+        if cash != provider.cash or position != provider.positions.get(INSTRUMENT, Decimal("0")):
+            raise ValueError("autonomous provider/economic cut differs")
+        if _decimal(latest["cash"]) != cash or _decimal(latest["position"]) != position:
+            raise ValueError("autonomous result differs from canonical economics")
+        if any(order.state != "FILLED" for order in oms.snapshots):
+            raise ValueError("autonomous OMS obligations remain unresolved")
+        checkpoint = next((e for e in events if e["event_id"] == latest["reconciliation_event_id"]), None)
+        if checkpoint is None:
+            raise ValueError("autonomous reconciliation is missing")
+        _require_complete_reconciliation(checkpoint, cash=cash, position=position,
+            fill_id=tuple(sorted(f["provider_execution_id"] for f in provider.activity_fills())))
+        price = _decimal(protocol["prices"][len(completed)-1])
+        equity = exact_sum((cash, exact_multiply(position, price)))
+        if _decimal(latest["equity"]) != equity:
+            raise ValueError("autonomous portfolio valuation differs")
+        report = {"evidence_class": "SIMULATION", "final_equity": canonical_decimal_text(equity),
+            "net_pnl": canonical_decimal_text(exact_subtract(equity, _decimal(protocol["initial_cash"]))),
+            "total_fees": canonical_decimal_text(economic.fee_expense("USD")),
+            "turnover": canonical_decimal_text(exact_sum(exact_multiply(_decimal(f["last_quantity"]["value"]), _decimal(f["last_price"]))
+                                                       for f in provider.activity_fills())),
+            "reconciled": True, "economic_edge_status": "INCONCLUSIVE"}
+    if store.current_journal_sequence() != cut:
+        raise SimulationStateChanging("autonomous journal changed during operator read")
     return {"status": status, "economic_report": report}

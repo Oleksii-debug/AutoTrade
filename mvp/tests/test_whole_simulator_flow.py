@@ -336,6 +336,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
 
             snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
+                                side=fill["side"],
+                                evidence_refs=("test:normalized-fill",),
                 provider_id="SIMULATED",
                 account_id="sim-account",
                 environment="SIMULATION",

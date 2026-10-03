@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
 from typing import Mapping, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -72,15 +73,13 @@ def _instant(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
+
 
 
 def _decimal_text(value, *, name: str) -> str:

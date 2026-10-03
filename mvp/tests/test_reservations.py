@@ -1,4 +1,10 @@
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 import unittest
 
 from mvp.autotrade_mvp.reservations import (
@@ -9,6 +15,93 @@ from mvp.autotrade_mvp.reservations import (
 
 
 class ReservationFoundationTests(unittest.TestCase):
+    _CONTEXTS = (
+        (6, ROUND_FLOOR),
+        (10, ROUND_CEILING),
+        (28, ROUND_HALF_EVEN),
+        (80, ROUND_HALF_EVEN),
+    )
+
+    def test_capacity_admission_is_exact_under_hostile_decimal_contexts(self):
+        huge = "1000000000000000000000000000000"
+        tiny = "0.000000000000000000000000000001"
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    book = ReservationBook()
+                    book.reserve(
+                        reservation_id="r-huge",
+                        intent_id="i-huge",
+                        requirements={"CASH:USD": huge},
+                        available={"CASH:USD": huge},
+                    )
+                    with self.assertRaises(InsufficientAvailable):
+                        book.reserve(
+                            reservation_id="r-tiny",
+                            intent_id="i-tiny",
+                            requirements={"CASH:USD": tiny},
+                            available={"CASH:USD": huge},
+                        )
+                    total = book.total_reserved("CASH:USD")
+                self.assertEqual(total, Decimal(huge))
+                self.assertEqual(
+                    [item.reservation_id for item in book.active()],
+                    ["r-huge"],
+                )
+
+    def test_consume_and_total_reserved_are_exact_under_hostile_decimal_contexts(self):
+        original = "100000.0000001"
+        tiny = "0.0000001"
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    book = ReservationBook()
+                    book.reserve(
+                        reservation_id="r-exact",
+                        intent_id="i-exact",
+                        requirements={"CASH:USD": original},
+                        available={"CASH:USD": "200000"},
+                    )
+                    snapshot = book.consume(
+                        "r-exact",
+                        {"CASH:USD": tiny},
+                    )
+                    total = book.total_reserved("CASH:USD")
+                self.assertEqual(
+                    snapshot.remaining["CASH:USD"],
+                    Decimal("100000"),
+                )
+                self.assertEqual(
+                    snapshot.consumed["CASH:USD"],
+                    Decimal(tiny),
+                )
+                self.assertEqual(total, Decimal("100000"))
+
+    def test_reservation_ingress_rejects_decimal_subclass_and_oversized_value(self):
+        class HostileDecimal(Decimal):
+            pass
+
+        book = ReservationBook()
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.reserve(
+                reservation_id="r-too-large",
+                intent_id="i-too-large",
+                requirements={"CASH:USD": "1e1000"},
+                available={"CASH:USD": "1e1000"},
+            )
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.reserve(
+                reservation_id="r-subclass",
+                intent_id="i-subclass",
+                requirements={"CASH:USD": HostileDecimal("1")},
+                available={"CASH:USD": "10"},
+            )
+        self.assertEqual(book.active(), ())
+
     def test_two_concurrent_intents_cannot_double_spend_cash(self):
         book = ReservationBook()
         book.reserve(
@@ -25,6 +118,36 @@ class ReservationFoundationTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+    def test_returned_snapshot_mutation_cannot_release_private_capacity(self):
+        book = ReservationBook()
+        returned = book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "70"},
+            available={"CASH:USD": "100"},
+        )
+
+        object.__setattr__(returned, "state", "CANCELED")
+        object.__setattr__(returned, "remaining", {"CASH:USD": Decimal("0")})
+
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        current = book.get("r1")
+        self.assertIsNot(current, returned)
+        self.assertEqual(current.state, "WORKING")
+        self.assertEqual(current.remaining["CASH:USD"], Decimal("70"))
+
+        active = book.active()[0]
+        object.__setattr__(active, "state", "REJECTED")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+        with self.assertRaises(InsufficientAvailable):
+            book.reserve(
+                reservation_id="r2",
+                intent_id="i2",
+                requirements={"CASH:USD": "40"},
+                available={"CASH:USD": "100"},
+            )
 
     def test_partial_fill_reduces_reservation_and_cancel_releases_remainder(self):
         book = ReservationBook()

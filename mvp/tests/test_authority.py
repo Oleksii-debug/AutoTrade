@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
@@ -31,6 +32,7 @@ from mvp.autotrade_mvp.risk import (
     RiskIntent,
     RiskPolicy,
     RiskRuleResult,
+    RISK_ARITHMETIC_POLICY_ID,
     bind_risk_decision,
 )
 
@@ -89,6 +91,7 @@ def bound_risk_decision(
                 reason="fixture",
             ),
         ),
+        arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
     )
     return bind_risk_decision(
         raw,
@@ -1581,21 +1584,14 @@ class AuthorityTests(unittest.TestCase):
         )
 
     def test_public_financial_admission_commit_failure_leaves_transaction_a_clean(self):
-        class FailingFinancialJournalStore(JournalStore):
-            def __init__(self, path):
-                super().__init__(path)
-                self.prepared_event_types = ()
-
-            def commit_command(self, **kwargs):
-                self.prepared_event_types = tuple(
-                    envelope["event_type"]
-                    for envelope, _topic in kwargs["events"]
-                )
-                raise RuntimeError("injected financial commit failure")
+        prepared_event_types = []
+        def fail_commit(_store, **kwargs):
+            prepared_event_types.extend(envelope["event_type"] for envelope, _topic in kwargs["events"])
+            raise RuntimeError("injected financial commit failure")
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            store = FailingFinancialJournalStore(path)
+            store = JournalStore(path)
             authority = authority_service(store)
             item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
@@ -1634,7 +1630,7 @@ class AuthorityTests(unittest.TestCase):
                 **public_financial_kwargs(store),
             )
 
-            with self.assertRaisesRegex(
+            with patch.object(JournalStore, "commit_command", fail_commit), self.assertRaisesRegex(
                 RuntimeError,
                 "injected financial commit failure",
             ):
@@ -1644,7 +1640,7 @@ class AuthorityTests(unittest.TestCase):
                 )
 
             self.assertEqual(
-                store.prepared_event_types,
+                tuple(prepared_event_types),
                 (
                     "RiskDecisionRecorded",
                     "ReservationMutationCommitted",
@@ -2564,6 +2560,13 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(first.outcome, "ADMITTED")
             self.assertTrue(first.risk_decision_id.startswith("risk:sha256:"))
             self.assertEqual(first.reservation_id, "reservation-public")
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["arithmetic_policy_id"],
+                RISK_ARITHMETIC_POLICY_ID,
+            )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
                 Decimal("100"),

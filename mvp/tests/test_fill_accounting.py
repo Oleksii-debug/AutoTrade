@@ -1423,6 +1423,63 @@ class FillAccountingTests(unittest.TestCase):
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
 
+    def test_unexpected_derivative_position_identity_fails_closed_before_mutation(self):
+        cases = (
+            (None, "OPEN"),
+            (None, "REDUCE"),
+            ("BOTH", None),
+            ("BOTH", "OPEN"),
+        )
+        for position_side, position_effect in cases:
+            with (
+                self.subTest(
+                    position_side=position_side,
+                    position_effect=position_effect,
+                ),
+                TemporaryDirectory() as directory,
+            ):
+                store = JournalStore(directory + "/journal.sqlite3")
+                fill = self._unexpected_fill(
+                    position_side=position_side,
+                    position_effect=position_effect,
+                )
+                checkpoint_event_id = self._record_unexpected_checkpoint(
+                    store,
+                    fill=fill,
+                )
+                book = DurableProviderEconomicBook(
+                    store,
+                    provider_id="PROVIDER-A",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+                before_transactions = book.transactions
+                before_digest = book.audit_digest()
+
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "leg-aware economic accounting",
+                ):
+                    book_unexpected_provider_fill(
+                        store=store,
+                        checkpoint_event_id=checkpoint_event_id,
+                        book=book,
+                        provider_fill=fill,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                    )
+
+                self.assertEqual(book.transactions, before_transactions)
+                self.assertEqual(book.audit_digest(), before_digest)
+                restarted = DurableProviderEconomicBook(
+                    JournalStore(directory + "/journal.sqlite3"),
+                    provider_id="PROVIDER-A",
+                    account_id="acct-1",
+                    environment="PAPER",
+                )
+                self.assertEqual(restarted.transactions, ())
+                self.assertEqual(restarted.audit_digest(), before_digest)
+
     def test_unexpected_provider_fill_must_match_checkpoint_bound_identity_before_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(directory + "/journal.sqlite3")

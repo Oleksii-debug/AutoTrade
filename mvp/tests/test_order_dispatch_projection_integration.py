@@ -46,6 +46,8 @@ def projection(store: JournalStore) -> DurableOrderBookProjection:
 def fill_evidence(fill, client_order_id: str) -> ProviderFillEvidence:
     fee = fill["fees"][0]
     return ProviderFillEvidence.create(
+               side=fill["side"],
+               evidence_refs=("test:normalized-fill",),
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment="SIMULATION",

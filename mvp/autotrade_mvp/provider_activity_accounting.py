@@ -13,7 +13,9 @@ from uuid import NAMESPACE_URL, uuid5
 
 from . import _provider_activity_accounting_impl as _impl
 from ._provider_activity_accounting_impl import *  # noqa: F401,F403
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore, journal_store_authority_scope, require_exact_journal_store_authority,
+)
 
 
 def __getattr__(name: str):
@@ -43,10 +45,14 @@ def book_external_provider_cash_activity(
     a partial financial effect.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(activity, _impl.ProviderActivityEvidence):
-        raise TypeError("activity must be ProviderActivityEvidence")
+    store_identity = require_exact_journal_store_authority(
+        store, subject="provider cash JournalStore",
+    )
+    activity = _impl._snapshot_external_cash_activity(activity)
+
+    def durable_call(method, *args, **kwargs):
+        with journal_store_authority_scope(store, store_identity):
+            return method(store, *args, **kwargs)
 
     provider = _impl._text(provider_id, name="provider_id").upper()
     account = _impl._text(account_id, name="account_id")
@@ -197,7 +203,7 @@ def book_external_provider_cash_activity(
 
     def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
         try:
-            snapshot = store.load_command_event_batch(
+            snapshot = durable_call(JournalStore.load_command_event_batch,
                 command_id=command_identity,
                 actor=actor,
                 environment=scope,
@@ -292,7 +298,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        saved_result, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -322,10 +328,10 @@ def book_external_provider_cash_activity(
     if resolved is not None:
         return resolved
 
-    activity_version = store.next_aggregate_version(
+    activity_version = durable_call(JournalStore.next_aggregate_version,
         "provider_activity", identity
     )
-    book_version = store.next_aggregate_version("economic_book", book_id)
+    book_version = durable_call(JournalStore.next_aggregate_version,"economic_book", book_id)
 
     imported_payload = {
         **request,
@@ -364,7 +370,7 @@ def book_external_provider_cash_activity(
     }
 
     try:
-        saved_result, inserted, _ = store.commit_command(
+        saved_result, inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,

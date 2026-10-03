@@ -919,6 +919,91 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertLess(operations, history)
         self.assertLess(operations, portfolio)
 
+    def test_stale_operation_failure_is_suppressed_after_scope_change(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshOperation(operationId)"):
+            js.index("function renderHostEvent")
+        ]
+        request = refresh.index("await jsonFetch(")
+        catch = refresh.index("} catch (error) {", request)
+        null_return = refresh.index("return null;", catch)
+        rethrow = refresh.index("throw error;", null_return)
+        self.assertLess(request, catch)
+        self.assertLess(catch, null_return)
+        self.assertLess(null_return, rethrow)
+        self.assertIn("scopeEpoch !== state.scopeEpoch", refresh[catch:rethrow])
+        self.assertIn(
+            "renderedAccountId !== state.renderedAccountId",
+            refresh[catch:rethrow],
+        )
+        self.assertIn(
+            "renderedEnvironment !== state.renderedEnvironment",
+            refresh[catch:rethrow],
+        )
+
+    def test_superseded_snapshot_failure_does_not_poison_newer_refresh(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh = js[
+            js.index("async function refreshSnapshot(options = {})"):
+            js.index("function eventMessage")
+        ]
+        request = refresh.index("await jsonFetch(")
+        catch = refresh.index("} catch (error) {", request)
+        stale = refresh.index("if (refreshEpoch !== state.scopeEpoch)", catch)
+        false_return = refresh.index("return false;", stale)
+        rethrow = refresh.index("throw error;", false_return)
+        self.assertLess(request, catch)
+        self.assertLess(catch, stale)
+        self.assertLess(stale, false_return)
+        self.assertLess(false_return, rethrow)
+
+    def test_event_poll_failure_cannot_invalidate_newer_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("let pollEpoch = null", poll)
+        self.assertIn("let pollRenderedAccountId = null", poll)
+        self.assertIn("let pollRenderedEnvironment = null", poll)
+        catch = poll.rindex("} catch (error) {")
+        stale = poll.index("pollEpoch !== state.scopeEpoch", catch)
+        early_return = poll.index("return;", stale)
+        invalidation = poll.index("state.snapshotReady = false", early_return)
+        self.assertLess(catch, stale)
+        self.assertLess(stale, early_return)
+        self.assertLess(early_return, invalidation)
+
+    def test_event_operation_id_is_canonical_uuid_before_route_use(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        canonical = poll.index(
+            'const operationId = canonicalId(\n            payload.operation_id'
+        )
+        refresh = poll.index("await refreshOperation(operationId)", canonical)
+        self.assertLess(canonical, refresh)
+        self.assertNotIn(
+            'const operationId = requiredText(\n            payload.operation_id',
+            poll,
+        )
+
+    def test_event_batch_must_be_canonical_json_array(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("if (!Array.isArray(response))", poll)
+        self.assertIn(
+            "Host event response must be a canonical JSON array",
+            poll,
+        )
+        self.assertNotIn("response.events || []", poll)
+
     def test_async_operation_reads_cannot_repopulate_a_changed_scope(self):
         js = APP.read_text(encoding="utf-8")
         refresh = js[

@@ -240,8 +240,22 @@ class EmbeddedWebTests(unittest.TestCase):
             )
 
     def test_runtime_host_api_contract_version_matches_canonical_openapi(self):
+        root = Path(__file__).resolve().parents[2]
+        generated = (root / "mvp" / "autotrade_mvp" / "_generated_common_scalars.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "from ._generated_common_scalars import CONTRACT_VERSION as HOST_API_CONTRACT_VERSION",
+            (root / "mvp" / "autotrade_mvp" / "embedded_web.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        marker = 'CONTRACT_VERSION = "'
+        generated_version = generated.split(marker, 1)[1].split('"', 1)[0]
+        self.assertEqual(HOST_API_CONTRACT_VERSION, generated_version)
+
         openapi = (
-            Path(__file__).resolve().parents[2]
+            root
             / "contracts"
             / "openapi"
             / "host-api.yaml"

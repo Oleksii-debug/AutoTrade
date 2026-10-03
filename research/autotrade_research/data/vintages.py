@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
+from autotrade_research.artifacts import ArtifactStore
 from autotrade_research.artifacts.durable_publish import atomic_write_json, durable_path_lock
 from autotrade_research.io.strict_json import strict_json_loads
 
@@ -26,6 +27,9 @@ class HistoricalDataError(ValueError):
 
 class HistoricalConflict(HistoricalDataError):
     pass
+
+
+_MARKET_POPULATION_MEDIA_TYPE = "application/vnd.autotrade.market-event-population+json"
 
 
 def _text(value: Any, name: str) -> str:
@@ -151,6 +155,7 @@ class FrozenMarketPopulation:
     version: int
     manifest_digest: str
     cutoff: datetime
+    source_artifact_id: str
     source_content_digest: str
     visible_event_json: tuple[str, ...]
     fingerprint: str
@@ -164,6 +169,11 @@ class FrozenMarketPopulation:
             _digest(self.manifest_digest, "manifest_digest"),
         )
         object.__setattr__(self, "cutoff", _utc(self.cutoff, "cutoff"))
+        object.__setattr__(
+            self,
+            "source_artifact_id",
+            _uuid(self.source_artifact_id, "source_artifact_id"),
+        )
         object.__setattr__(
             self,
             "source_content_digest",
@@ -214,6 +224,26 @@ def _evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         result["source_uri"] = _text(value["source_uri"], "source_uri")
     if "rights_id" in value:
         result["rights_id"] = _text(value["rights_id"], "rights_id")
+    return result
+
+
+def _content_ref(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one ordered binding to the canonical ArtifactStore."""
+
+    if not isinstance(value, Mapping):
+        raise HistoricalDataError("content reference must be an object")
+    required = {"ordinal", "role", "artifact_id", "sha256"}
+    allowed = required | {"rights_id"}
+    if not required.issubset(value) or set(value) - allowed:
+        raise HistoricalDataError("content reference fields are not canonical")
+    result: dict[str, Any] = {
+        "ordinal": _sequence(value["ordinal"], "content ordinal"),
+        "role": _text(value["role"], "content role"),
+        "artifact_id": _uuid(value["artifact_id"], "content artifact_id"),
+        "sha256": _digest(value["sha256"], "content sha256"),
+    }
+    if "rights_id" in value:
+        result["rights_id"] = _text(value["rights_id"], "content rights_id")
     return result
 
 
@@ -492,9 +522,10 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "source_evidence",
         "created_at",
     }
-    if set(manifest) != required:
+    allowed = required | {"content_refs"}
+    if not required.issubset(manifest) or set(manifest) - allowed:
         missing = required - set(manifest)
-        unknown = set(manifest) - required
+        unknown = set(manifest) - allowed
         raise HistoricalDataError(
             f"dataset manifest keys differ; missing={sorted(missing)}, unknown={sorted(unknown)}"
         )
@@ -505,6 +536,26 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     hashes = [_digest(value, "content hash") for value in content_hashes]
     if len(set(hashes)) != len(hashes):
         raise HistoricalDataError("content_hashes must be unique")
+
+    content_refs: list[dict[str, Any]] | None = None
+    if "content_refs" in manifest:
+        raw_refs = manifest["content_refs"]
+        if not isinstance(raw_refs, list) or not raw_refs:
+            raise HistoricalDataError("content_refs must be a non-empty list")
+        content_refs = [_content_ref(item) for item in raw_refs]
+        if [item["ordinal"] for item in content_refs] != list(
+            range(1, len(content_refs) + 1)
+        ):
+            raise HistoricalDataError(
+                "content_refs ordinals must be contiguous and start at 1"
+            )
+        artifact_ids = [item["artifact_id"] for item in content_refs]
+        if len(artifact_ids) != len(set(artifact_ids)):
+            raise HistoricalDataError("content_refs artifact identities must be unique")
+        if [item["sha256"] for item in content_refs] != hashes:
+            raise HistoricalDataError(
+                "content_hashes must exactly match ordered content_refs digests"
+            )
 
     source_evidence = manifest["source_evidence"]
     if not isinstance(source_evidence, list) or not source_evidence:
@@ -571,7 +622,7 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if missingness["invented_count"] != 0:
         raise HistoricalDataError("historical dataset cannot invent missing observations")
 
-    return {
+    normalized = {
         "dataset_id": _uuid(manifest["dataset_id"], "dataset_id"),
         "version": str(_sequence(manifest["version"], "version")),
         "content_hashes": hashes,
@@ -591,6 +642,9 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "source_evidence": evidence,
         "created_at": _utc_text(created_at),
     }
+    if content_refs is not None:
+        normalized["content_refs"] = content_refs
+    return normalized
 
 
 class HistoricalVintageRegistry:
@@ -654,17 +708,20 @@ class HistoricalVintageRegistry:
         version: int,
         *,
         manifest_digest: str,
-        events: Iterable[Mapping[str, Any]],
+        artifact_store: ArtifactStore,
         cutoff: datetime,
+        events: Iterable[Mapping[str, Any]] | None = None,
     ) -> FrozenMarketPopulation:
-        """Resolve one manifest-authenticated point-in-time market population.
+        """Resolve one ArtifactStore-authenticated point-in-time market population.
 
-        The complete raw event population must hash to an exact content hash in
-        the registered dataset manifest. Only then is the causal cutoff applied.
-        This makes caller-supplied event objects assertions of registered bytes,
-        not an independent source of scientific truth.
+        The dataset manifest must bind an ordered canonical ArtifactStore object
+        with role market_event_population. Authenticated object bytes are source
+        authority. Optional caller events are only a cache/assertion and must
+        canonicalize to those exact authenticated bytes before use.
         """
 
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
         canonical_id = _uuid(dataset_id, "dataset_id")
         canonical_version = _sequence(version, "version")
         expected_manifest_digest = _digest(manifest_digest, "manifest_digest")
@@ -685,20 +742,87 @@ class HistoricalVintageRegistry:
                 "population cutoff exceeds registered dataset availability cutoff"
             )
 
-        detached: list[dict[str, Any]] = []
-        for raw in events:
+        content_refs = manifest.get("content_refs")
+        if not isinstance(content_refs, list) or not content_refs:
+            raise HistoricalDataError(
+                "dataset manifest lacks authoritative content references"
+            )
+        population_refs = [
+            item
+            for item in content_refs
+            if item.get("role") == "market_event_population"
+        ]
+        if len(population_refs) != 1:
+            raise HistoricalDataError(
+                "dataset manifest must bind exactly one market_event_population artifact"
+            )
+        population_ref = population_refs[0]
+        artifact_manifest, raw_population = artifact_store.read_authenticated_snapshot(
+            population_ref["artifact_id"]
+        )
+        if artifact_manifest.get("sha256") != population_ref["sha256"]:
+            raise HistoricalConflict(
+                "market population artifact digest differs from dataset binding"
+            )
+        if artifact_manifest.get("media_type") != _MARKET_POPULATION_MEDIA_TYPE:
+            raise HistoricalDataError(
+                "market population artifact media type is not canonical"
+            )
+        expected_rights_id = population_ref.get("rights_id")
+        if (
+            expected_rights_id is not None
+            and artifact_manifest.get("rights", {}).get("rights_id")
+            != expected_rights_id
+        ):
+            raise HistoricalConflict(
+                "market population artifact rights identity differs from dataset binding"
+            )
+        source_content_digest = "sha256:" + sha256(raw_population).hexdigest()
+        if source_content_digest != population_ref["sha256"]:
+            raise HistoricalConflict(
+                "market population authenticated bytes differ from dataset binding"
+            )
+
+        try:
+            population_document = strict_json_loads(raw_population.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError) as error:
+            raise HistoricalDataError(
+                "market population artifact is not valid canonical UTF-8 JSON"
+            ) from error
+        if (
+            not isinstance(population_document, Mapping)
+            or set(population_document)
+            != {"artifact_type", "events", "schema_version"}
+            or population_document.get("artifact_type")
+            != "AUTOTRADE_MARKET_EVENT_POPULATION"
+            or population_document.get("schema_version") != "1.0.0"
+            or not isinstance(population_document.get("events"), list)
+            or not population_document["events"]
+        ):
+            raise HistoricalDataError("market population artifact contract is invalid")
+
+        authoritative_events = population_document["events"]
+        canonical_population = canonical_market_event_population_bytes(
+            authoritative_events
+        )
+        if canonical_population != raw_population:
+            raise HistoricalConflict(
+                "market population artifact bytes are not canonical"
+            )
+        detached = []
+        for raw in authoritative_events:
             if not isinstance(raw, Mapping):
                 raise HistoricalDataError("market event population must contain objects")
-            # Canonical JSON round-trip detaches caller-owned nested mappings and
-            # simultaneously rejects non-JSON/non-canonical numeric input.
             detached.append(
                 dict(strict_json_loads(_canonical_bytes(dict(raw)).decode("utf-8")))
             )
-        source_content_digest = market_event_population_digest(detached)
-        if source_content_digest not in manifest["content_hashes"]:
-            raise HistoricalConflict(
-                "market event population digest is not registered by dataset manifest"
-            )
+
+        if events is not None:
+            asserted_population = canonical_market_event_population_bytes(events)
+            if asserted_population != raw_population:
+                raise HistoricalConflict(
+                    "caller market event cache differs from authenticated artifact bytes"
+                )
 
         visible_history = causal_market_event_history(detached, point)
         visible_json = tuple(
@@ -731,17 +855,19 @@ class HistoricalVintageRegistry:
                     ).hexdigest(),
                 }
             )
-        # The causal-population fingerprint deliberately excludes the full
-        # source_content_digest. The complete raw population is authenticated
-        # against the immutable manifest before selection, while later/future
-        # revisions outside this cutoff must not rewrite the identity of the
-        # information that was actually knowable at this cut.
         material = {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "dataset_id": canonical_id,
             "version": canonical_version,
             "manifest_digest": actual_manifest_digest,
             "cutoff": _utc_text(point),
+            "source_artifact": dict(population_ref),
+            "source_content_digest": source_content_digest,
+            "instrument_universe_version": manifest["instrument_universe_version"],
+            "calendar_version": manifest["calendar_version"],
+            "normalization_version": manifest["normalization_version"],
+            "availability_policy": manifest["availability_policy"],
+            "revision_policy": manifest["revision_policy"],
             "visible_event_revisions": visible_identities,
         }
         fingerprint = "sha256:" + sha256(_canonical_bytes(material)).hexdigest()
@@ -750,6 +876,7 @@ class HistoricalVintageRegistry:
             version=canonical_version,
             manifest_digest=actual_manifest_digest,
             cutoff=point,
+            source_artifact_id=population_ref["artifact_id"],
             source_content_digest=source_content_digest,
             visible_event_json=visible_json,
             fingerprint=fingerprint,

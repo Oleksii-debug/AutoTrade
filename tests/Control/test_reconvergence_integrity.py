@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
+import textwrap
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -301,6 +303,29 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 changes=[Change(status="M", path="web/src/app.js")],
                 protected_sentinels=frozenset(),
                 allowed_scopes=("web/*",),
+            )
+
+    def test_bootstrap_workflow_embedded_python_is_syntax_valid(self):
+        workflow = Path(
+            ".github/workflows/reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+        blocks = re.findall(
+            r"          python - <<'PY'\\n(.*?)\\n          PY",
+            workflow,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(len(blocks), 2)
+        for index, block in enumerate(blocks):
+            source = textwrap.dedent(block)
+            compile(
+                source,
+                f"<reconvergence-bootstrap-inline-{index}>",
+                "exec",
+            )
+            self.assertIn("frozen_authority_paths", source)
+            self.assertIn(
+                "non-bootstrap trust authority is frozen until terminal guard integration",
+                source,
             )
 
     def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):

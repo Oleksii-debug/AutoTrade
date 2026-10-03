@@ -96,6 +96,22 @@ class ArtifactStore:
         for path in (self.objects, self.manifests, self.staging):
             path.mkdir(parents=True, exist_ok=True)
 
+    def _assert_no_instance_method_shadows(self) -> None:
+        state = object.__getattribute__(self, "__dict__")
+        shadowed = tuple(
+            sorted(
+                name
+                for name in state
+                if name in ArtifactStore.__dict__
+                and callable(getattr(ArtifactStore, name, None))
+            )
+        )
+        if shadowed:
+            raise ArtifactIntegrityError(
+                "artifact store instance shadows canonical methods: "
+                + ", ".join(shadowed)
+            )
+
     @staticmethod
     def _artifact_id(value: str) -> str:
         try:
@@ -141,7 +157,7 @@ class ArtifactStore:
         return self.objects / digest[:2] / digest
 
     def _manifest_path(self, artifact_id: str) -> Path:
-        return self.manifests / f"{self._artifact_id(artifact_id)}.json"
+        return self.manifests / f"{ArtifactStore._artifact_id(artifact_id)}.json"
 
     def _validate_staging_namespace(self) -> None:
         try:
@@ -176,7 +192,7 @@ class ArtifactStore:
             )
 
     def _validate_manifest_entry(self, manifest_path: Path) -> os.stat_result:
-        self._validate_manifest_namespace(manifest_path)
+        ArtifactStore._validate_manifest_namespace(self, manifest_path)
         try:
             entry = os.stat(manifest_path, follow_symlinks=False)
         except FileNotFoundError:
@@ -185,7 +201,7 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest cannot be inspected"
             ) from error
-        self._reject_reparse_point(entry, subject="artifact manifest")
+        ArtifactStore._reject_reparse_point(entry, subject="artifact manifest")
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact manifest must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -215,14 +231,14 @@ class ArtifactStore:
             )
 
     def _validate_object_entry(self, object_path: Path) -> os.stat_result:
-        self._validate_object_namespace(object_path)
+        ArtifactStore._validate_object_namespace(self, object_path)
         try:
             entry = os.stat(object_path, follow_symlinks=False)
         except FileNotFoundError:
             raise ArtifactIntegrityError("artifact object is missing")
         except OSError as error:
             raise ArtifactIntegrityError("artifact object cannot be inspected") from error
-        self._reject_reparse_point(entry, subject="artifact object")
+        ArtifactStore._reject_reparse_point(entry, subject="artifact object")
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact object must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -251,7 +267,7 @@ class ArtifactStore:
         ):
             raise ArtifactIntegrityError("manifest byte count is invalid")
         digest = digest_value.removeprefix("sha256:")
-        return self._object_path(digest), digest, expected_bytes
+        return ArtifactStore._object_path(self, digest), digest, expected_bytes
 
     @staticmethod
     def _same_filesystem_entry(
@@ -287,7 +303,7 @@ class ArtifactStore:
         *,
         expected_bytes: int,
     ) -> tuple[int, os.stat_result]:
-        before = self._validate_object_entry(object_path)
+        before = ArtifactStore._validate_object_entry(self, object_path)
         if before.st_size != expected_bytes:
             raise ArtifactIntegrityError("artifact object size mismatch")
 
@@ -314,7 +330,7 @@ class ArtifactStore:
 
         try:
             opened = os.fstat(descriptor)
-            self._reject_reparse_point(
+            ArtifactStore._reject_reparse_point(
                 opened,
                 subject="artifact object descriptor",
             )
@@ -328,10 +344,10 @@ class ArtifactStore:
                 )
             if opened.st_size != expected_bytes:
                 raise ArtifactIntegrityError("artifact object size mismatch")
-            current = self._validate_object_entry(object_path)
+            current = ArtifactStore._validate_object_entry(self, object_path)
             if (
-                not self._same_filesystem_entry(before, opened)
-                or not self._same_filesystem_entry(opened, current)
+                not ArtifactStore._same_filesystem_entry(before, opened)
+                or not ArtifactStore._same_filesystem_entry(opened, current)
             ):
                 raise ArtifactIntegrityError(
                     "artifact object changed before descriptor read"
@@ -355,7 +371,7 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact object descriptor could not be revalidated"
             ) from error
-        self._reject_reparse_point(
+        ArtifactStore._reject_reparse_point(
             after_descriptor,
             subject="artifact object descriptor",
         )
@@ -363,13 +379,13 @@ class ArtifactStore:
             not stat.S_ISREG(after_descriptor.st_mode)
             or after_descriptor.st_nlink != 1
             or after_descriptor.st_size != expected_bytes
-            or not self._same_filesystem_entry(opened, after_descriptor)
+            or not ArtifactStore._same_filesystem_entry(opened, after_descriptor)
         ):
             raise ArtifactIntegrityError(
                 "artifact object changed during descriptor read"
             )
-        current = self._validate_object_entry(object_path)
-        if not self._same_filesystem_entry(after_descriptor, current):
+        current = ArtifactStore._validate_object_entry(self, object_path)
+        if not ArtifactStore._same_filesystem_entry(after_descriptor, current):
             raise ArtifactIntegrityError(
                 "artifact object path changed during descriptor read"
             )
@@ -533,7 +549,7 @@ class ArtifactStore:
         self,
         manifest_path: Path,
     ) -> tuple[int, os.stat_result]:
-        before = self._validate_manifest_entry(manifest_path)
+        before = ArtifactStore._validate_manifest_entry(self, manifest_path)
         try:
             if os.name == "nt":
                 descriptor = _open_read_only_descriptor(manifest_path)
@@ -557,7 +573,7 @@ class ArtifactStore:
 
         try:
             opened = os.fstat(descriptor)
-            self._reject_reparse_point(
+            ArtifactStore._reject_reparse_point(
                 opened,
                 subject="artifact manifest descriptor",
             )
@@ -569,10 +585,10 @@ class ArtifactStore:
                 raise ArtifactIntegrityError(
                     "artifact manifest descriptor must not have hard-link aliases"
                 )
-            current = self._validate_manifest_entry(manifest_path)
+            current = ArtifactStore._validate_manifest_entry(self, manifest_path)
             if (
-                not self._same_filesystem_entry(before, opened)
-                or not self._same_filesystem_entry(opened, current)
+                not ArtifactStore._same_filesystem_entry(before, opened)
+                or not ArtifactStore._same_filesystem_entry(opened, current)
                 or before.st_size != opened.st_size
                 or opened.st_size != current.st_size
             ):
@@ -596,21 +612,21 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest descriptor could not be revalidated"
             ) from error
-        self._reject_reparse_point(
+        ArtifactStore._reject_reparse_point(
             after_descriptor,
             subject="artifact manifest descriptor",
         )
         if (
             not stat.S_ISREG(after_descriptor.st_mode)
             or after_descriptor.st_nlink != 1
-            or not self._same_filesystem_entry(opened, after_descriptor)
-            or self._manifest_descriptor_snapshot(after_descriptor)
-            != self._manifest_descriptor_snapshot(opened)
+            or not ArtifactStore._same_filesystem_entry(opened, after_descriptor)
+            or ArtifactStore._manifest_descriptor_snapshot(after_descriptor)
+            != ArtifactStore._manifest_descriptor_snapshot(opened)
         ):
             raise ArtifactIntegrityError("artifact manifest changed during read")
-        current = self._validate_manifest_entry(manifest_path)
+        current = ArtifactStore._validate_manifest_entry(self, manifest_path)
         if (
-            not self._same_filesystem_entry(after_descriptor, current)
+            not ArtifactStore._same_filesystem_entry(after_descriptor, current)
             or after_descriptor.st_size != current.st_size
         ):
             raise ArtifactIntegrityError("artifact manifest changed during read")
@@ -638,7 +654,7 @@ class ArtifactStore:
             copied += len(chunk)
             remaining -= len(chunk)
 
-        self._revalidate_manifest_descriptor(
+        ArtifactStore._revalidate_manifest_descriptor(self, 
             manifest_path,
             descriptor,
             opened,
@@ -682,7 +698,7 @@ class ArtifactStore:
                 f"unsupported artifact manifest: {path.name}"
             )
         authenticated = _verify_manifest_integrity(value, required=False)
-        self._validate_manifest_contract(value, authenticated=authenticated)
+        ArtifactStore._validate_manifest_contract(value, authenticated=authenticated)
         return value
 
     def load_manifest(self, artifact_id: str) -> dict[str, Any]:
@@ -837,9 +853,9 @@ class ArtifactStore:
 
     def _read_verified_object_bytes(self, manifest: dict[str, Any]) -> bytes:
         object_path, expected_digest, expected_bytes = (
-            self._manifest_object_contract(manifest)
+            ArtifactStore._manifest_object_contract(self, manifest)
         )
-        descriptor, opened = self._open_object_descriptor(
+        descriptor, opened = ArtifactStore._open_object_descriptor(self, 
             object_path,
             expected_bytes=expected_bytes,
         )
@@ -847,14 +863,14 @@ class ArtifactStore:
             chunks: list[bytes] = []
             copied = 0
             copied_hash = sha256()
-            for chunk in self._bounded_descriptor_chunks(
+            for chunk in ArtifactStore._bounded_descriptor_chunks(
                 descriptor,
                 expected_bytes,
             ):
                 chunks.append(chunk)
                 copied += len(chunk)
                 copied_hash.update(chunk)
-            self._revalidate_object_descriptor(
+            ArtifactStore._revalidate_object_descriptor(self, 
                 object_path,
                 descriptor,
                 opened,
@@ -870,16 +886,17 @@ class ArtifactStore:
         self,
         artifact_id: str,
     ) -> tuple[dict[str, Any], bytes]:
-        normalized_id = self._artifact_id(artifact_id)
-        manifest_path = self._manifest_path(normalized_id)
-        descriptor, opened = self._open_manifest_descriptor(manifest_path)
+        ArtifactStore._assert_no_instance_method_shadows(self)
+        normalized_id = ArtifactStore._artifact_id(artifact_id)
+        manifest_path = ArtifactStore._manifest_path(self, normalized_id)
+        descriptor, opened = ArtifactStore._open_manifest_descriptor(\n            self, manifest_path\n        )
         try:
-            raw_bytes = self._read_manifest_descriptor(
+            raw_bytes = ArtifactStore._read_manifest_descriptor(self, 
                 manifest_path,
                 descriptor,
                 opened,
             )
-            manifest = self._decode_manifest_bytes(
+            manifest = ArtifactStore._decode_manifest_bytes(self, 
                 manifest_path,
                 raw_bytes,
             )
@@ -888,18 +905,20 @@ class ArtifactStore:
                     "manifest artifact identity mismatch"
                 )
             _verify_manifest_integrity(manifest, required=True)
-            data = self._read_verified_object_bytes(manifest)
-            self._revalidate_manifest_descriptor(
+            data = ArtifactStore._read_verified_object_bytes(self, manifest)
+            ArtifactStore._revalidate_manifest_descriptor(
+                self,
                 manifest_path,
                 descriptor,
                 opened,
             )
+            ArtifactStore._assert_no_instance_method_shadows(self)
             return manifest, data
         finally:
             os.close(descriptor)
 
     def read_bytes(self, artifact_id: str) -> bytes:
-        _manifest, data = self.read_authenticated_snapshot(artifact_id)
+        _manifest, data = ArtifactStore.read_authenticated_snapshot(self, artifact_id)
         return data
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:

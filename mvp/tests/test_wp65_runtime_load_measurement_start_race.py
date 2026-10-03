@@ -58,6 +58,11 @@ def _append(store: JournalStore, expected: ExpectedJournalEvent) -> None:
     )
 
 
+def _rebind_store(target: JournalStore, source: JournalStore) -> None:
+    target.path = source.path
+    target._store_identity = source.store_identity
+
+
 class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
     def test_event_committed_only_while_sampling_end_clock_is_not_attributed_to_operation(self):
         with tempfile.TemporaryDirectory() as root:
@@ -148,6 +153,51 @@ class RuntimeLoadMeasurementStartRaceTests(unittest.TestCase):
                 "a financial event committed before monotonic_start_ns was "
                 "accepted as durable latency evidence for the measured operation"
             )
+
+    def test_operation_cannot_rebind_measurement_to_another_journal_generation(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JournalStore(Path(root) / "runtime-load-measurement-a.sqlite")
+            other = JournalStore(Path(root) / "runtime-load-measurement-b.sqlite")
+            expected = _expected()
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-store-generation-race",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            seed = ExpectedJournalEvent(
+                event_id="other-store-seed",
+                event_type="RuntimeQualificationFinancialEvent",
+                aggregate_type="runtime_load_measurement_fixture",
+                aggregate_id="other-store-seed",
+                aggregate_version=1,
+            )
+            _append(other, seed)
+
+            def operation() -> str:
+                _rebind_store(store, other)
+                _append(store, expected)
+                return "done"
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                    side_effect=(1_000_000, 1_000_100),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "journal operation authority changed before connection",
+                ),
+            ):
+                measure_declared_financial_operation(
+                    store,
+                    _spec(),
+                    plan_id=plan.plan_id,
+                    event_id=expected.event_id,
+                    operation=operation,
+                )
+
+            self.assertIsNone(JournalStore.get_event(other, expected.event_id))
 
 
 if __name__ == "__main__":

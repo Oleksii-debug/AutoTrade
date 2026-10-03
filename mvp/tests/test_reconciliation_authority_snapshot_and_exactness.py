@@ -2,8 +2,10 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.reconciliation import (
+    CoverageSurfaceEvidence,
     ProviderActivityEvidence,
     ProviderWorkingOrderEvidence,
+    ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
     UnknownSubmission,
     reconcile_account,
@@ -86,6 +88,124 @@ class ReconciliationAuthoritySnapshotAndExactnessTests(unittest.TestCase):
         )
         values.update(overrides)
         return reconcile_account(**values)
+
+    def test_singleton_authority_is_frozen_before_sequence_callbacks(self):
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        )
+        availability = ResourceAvailabilityEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+            snapshot_id="snapshot-1",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+            valid_until="2026-09-24T19:05:00Z",
+            available_resources={"CASH:USD": Decimal("850")},
+            evidence_refs=("provider:snapshot-1",),
+        )
+        first = working("provider-order-1", "client-order-1")
+        second = working("provider-order-2", "client-order-2")
+
+        class MutatingSequence:
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                if index == 0:
+                    return first
+                if index == 1:
+                    object.__setattr__(
+                        snapshot,
+                        "query_started_at",
+                        "2026-09-24T20:00:00Z",
+                    )
+                    object.__setattr__(snapshot, "sequence_gap_detected", True)
+                    object.__setattr__(availability, "snapshot_id", "mutated")
+                    object.__setattr__(
+                        availability,
+                        "available_resources",
+                        {"CASH:USD": Decimal("999999")},
+                    )
+                    return second
+                raise IndexError
+
+        result = self.base(
+            local_working_client_order_ids=("client-order-1", "client-order-2"),
+            provider_working_orders=MutatingSequence(),
+            snapshot_consistency=snapshot,
+            resource_availability=availability,
+        )
+
+        self.assertTrue(snapshot.sequence_gap_detected)
+        self.assertEqual(availability.snapshot_id, "mutated")
+        self.assertTrue(result.snapshot_consistent)
+        self.assertEqual(
+            result.snapshot_query_started_at,
+            "2026-09-24T17:00:00Z",
+        )
+        self.assertIsNot(result.resource_availability, availability)
+        self.assertEqual(result.resource_availability.snapshot_id, "snapshot-1")
+        self.assertEqual(
+            result.resource_availability.available_resources["CASH:USD"],
+            Decimal("850"),
+        )
+
+    def test_absence_coverage_sequence_mutation_cannot_rewrite_proven_absence(self):
+        evidence = [
+            CoverageSurfaceEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                surface=surface,
+                coverage_start="2026-09-24T16:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                provider_semantics_exclude_execution=True,
+            )
+            for surface in (
+                "OPEN_ORDERS",
+                "ORDER_HISTORY",
+                "EXECUTIONS",
+                "ACTIVITIES",
+            )
+        ]
+
+        class MutatingCoverageSequence:
+            def __len__(self):
+                return 4
+
+            def __getitem__(self, index):
+                if index == 0:
+                    return evidence[0]
+                if index == 1:
+                    object.__setattr__(
+                        evidence[0],
+                        "provider_semantics_exclude_execution",
+                        False,
+                    )
+                if 0 <= index < 4:
+                    return evidence[index]
+                raise IndexError
+
+        result = self.base(
+            unknown_submissions=(unknown("attempt-absence", "missing-order"),),
+            searched_client_order_ids=("missing-order",),
+            absence_coverage=MutatingCoverageSequence(),
+        )
+
+        self.assertFalse(evidence[0].provider_semantics_exclude_execution)
+        self.assertEqual(
+            result.submission_resolutions[0].outcome,
+            "PROVEN_ABSENT",
+        )
+        self.assertTrue(result.complete)
 
     def test_working_order_sequence_mutation_cannot_rewrite_unknown_resolution(self):
         first = working("provider-order-1", "client-order-1")

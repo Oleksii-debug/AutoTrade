@@ -28,6 +28,87 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(dir(_impl)))
 
 
+_original_economic_store_load_command_event_batch = (
+    _impl._economic_store_load_command_event_batch
+)
+
+
+def _economic_store_load_command_event_batch(
+    economic_book: object,
+    **kwargs: Any,
+):
+    """Require an OMS-bound EVENT_BATCH to own the OMS event it names.
+
+    JournalStore authenticates the stored EVENT_BATCH descriptors and returns
+    their integrity-checked events. The atomic fill request/result also names
+    the canonical OMS event. Exact replay is authoritative only when those two
+    provenance statements join on the same durable event rather than merely on
+    command metadata that happens to mention its identifier.
+    """
+
+    authority = _original_economic_store_load_command_event_batch(
+        economic_book,
+        **kwargs,
+    )
+    if authority is None:
+        return None
+
+    request = kwargs.get("request")
+    if not isinstance(request, Mapping):
+        return authority
+    order_fill = request.get("order_fill")
+    if order_fill is None:
+        return authority
+    if not isinstance(order_fill, Mapping):
+        raise ValueError("atomic OMS command request has invalid order fill authority")
+
+    event_id = order_fill.get("event_id")
+    event_key = order_fill.get("event_key")
+    operation = order_fill.get("operation")
+    order_request = order_fill.get("request")
+    if (
+        not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(event_key, str)
+        or not event_key
+        or operation != "RECORD_FILL"
+        or not isinstance(order_request, Mapping)
+    ):
+        raise ValueError("atomic OMS command request has invalid order fill authority")
+
+    raw_events = authority.get("events")
+    if not isinstance(raw_events, tuple):
+        raise ValueError("atomic OMS command authority has invalid event batch")
+    matching = tuple(
+        event
+        for event in raw_events
+        if isinstance(event, Mapping) and event.get("event_id") == event_id
+    )
+    if len(matching) != 1:
+        raise ValueError("atomic OMS command authority does not own the OMS fill event")
+
+    event = matching[0]
+    payload = event.get("payload")
+    if (
+        event.get("event_type") != "OrderProjectionMutationCommitted"
+        or event.get("aggregate_type") != "order_projection_book"
+        or not isinstance(payload, Mapping)
+        or payload.get("event_key") != event_key
+        or payload.get("operation") != "RECORD_FILL"
+        or payload.get("request") != order_request
+    ):
+        raise ValueError("atomic OMS command authority has invalid OMS semantic owner")
+    return authority
+
+
+# The retained implementation's atomic fill replay resolves this helper through
+# its module globals. Install the stronger ownership join once at facade import
+# so provider-evidence and direct SIMULATION/REPLAY paths share one authority.
+_impl._economic_store_load_command_event_batch = (
+    _economic_store_load_command_event_batch
+)
+
+
 def book_external_provider_cash_activity(
     store: JournalStore,
     *,

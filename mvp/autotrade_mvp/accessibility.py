@@ -21,13 +21,20 @@ STATE_TEXT = {
 }
 
 
+def _safe_text(value: Any, default: str = "Unavailable") -> str:
+    """Render only JSON-like scalar values without invoking arbitrary objects."""
+
+    if value is None:
+        return default
+    if type(value) in {str, int, float, bool}:
+        return str(value)
+    return default
+
+
 def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable") -> str:
     if mapping is None:
         return default
-    value = mapping.get(key)
-    if value is None:
-        return default
-    return str(value)
+    return _safe_text(mapping.get(key), default)
 
 
 def _replay_verification_text(value: Any) -> str:
@@ -44,7 +51,7 @@ def format_accessible_status(
 ) -> str:
     """Render a stable, copyable, screen-reader-friendly status summary."""
 
-    state = str(status.get("status", "corrupt"))
+    state = _safe_text(status.get("status", "corrupt"), "corrupt")
     lines = [
         "AutoTrade status",
         "Mode: simulation only",
@@ -125,11 +132,22 @@ def format_accessible_status(
                         f"Reservation detail: unavailable; state: {state_text}; malformed remaining resources"
                     )
                     continue
-                valid_reservations += 1
+                reservation_readable = True
                 for resource, amount in remaining.items():
+                    resource_text = _safe_text(resource, "")
+                    amount_text = _safe_text(amount, "")
+                    if not resource_text or not amount_text:
+                        malformed_reservations = True
+                        reservation_readable = False
+                        reservation_lines.append(
+                            "Reservation resource detail: unavailable; malformed value"
+                        )
+                        continue
                     reservation_lines.append(
-                        f"Reserved {resource}: {amount}; state: {state_text}"
+                        f"Reserved {resource_text}: {amount_text}; state: {state_text}"
                     )
+                if reservation_readable:
+                    valid_reservations += 1
             if malformed_reservations:
                 lines.append(
                     "Active reservations: unavailable; one or more reservation entries are malformed"

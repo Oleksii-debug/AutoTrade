@@ -1142,6 +1142,132 @@ class SecurityBoundaryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.boundary.validate_session(old.token, origin=paired)
 
+    def test_session_revoke_cannot_cut_through_secret_registration(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_register = self.vault.register
+
+        def blocking_register(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential registration")
+            return original_register(*args, **kwargs)
+
+        self.vault.register = blocking_register
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            registering = pool.submit(
+                self.boundary.register_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                owner_identity="windows-user-1",
+                account_id="paper-register-race",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+                secret_value="register-race-secret",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through credential registration",
+            )
+            release.set()
+            registered = registering.result(timeout=5)
+            self.assertEqual(registered.account_id, "paper-register-race")
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_cannot_cut_through_secret_rotation(self):
+        handle = self._credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_rotate = self.vault.rotate
+
+        def blocking_rotate(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential rotation")
+            return original_rotate(*args, **kwargs)
+
+        self.vault.rotate = blocking_rotate
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rotating = pool.submit(
+                self.boundary.rotate_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="rotated-race-secret",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through credential rotation",
+            )
+            release.set()
+            rotated = rotating.result(timeout=5)
+            self.assertEqual(rotated.generation, handle.generation + 1)
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_cannot_cut_through_secret_revocation(self):
+        handle = self._credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_revoke = self.vault.revoke
+
+        def blocking_revoke(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential revocation")
+            return original_revoke(*args, **kwargs)
+
+        self.vault.revoke = blocking_revoke
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            revoking_secret = pool.submit(
+                self.boundary.revoke_secret,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking_session = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking_session.done(),
+                "session revocation must not cut through credential revocation",
+            )
+            release.set()
+            revoking_secret.result(timeout=5)
+            revoking_session.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
     def test_session_revoke_cannot_linearize_mid_secret_resolution(self):
         handle = self._credential()
         entered = threading.Event()

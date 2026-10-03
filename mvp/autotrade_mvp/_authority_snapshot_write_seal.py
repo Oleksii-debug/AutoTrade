@@ -22,10 +22,20 @@ def _install_authority_snapshot_write_seal() -> None:
         event_id: str,
         committed_at: str,
     ):
-        # Preserve the original writer's argument validation/error surface.  The
-        # preflight uses class-owned JournalStore methods so a subclass cannot
-        # manufacture the existence of canonical authority through overrides.
-        if not isinstance(store, JournalStore):
+        # Preserve the canonical writer's existing argument/composition error
+        # surface.  Only an otherwise valid fresh publication reaches the new
+        # legacy-read-only gate below.
+        if (
+            not isinstance(store, JournalStore)
+            or not isinstance(service, _persistence.AuthorityService)
+            or (service.store is not None and service.store is not store)
+            or not isinstance(authority_id, str)
+            or not authority_id.strip()
+            or not isinstance(event_id, str)
+            or not event_id.strip()
+            or not isinstance(committed_at, str)
+            or not committed_at.strip()
+        ):
             return original_persist(
                 store,
                 service,
@@ -34,7 +44,9 @@ def _install_authority_snapshot_write_seal() -> None:
                 committed_at=committed_at,
             )
 
-        existing = JournalStore.get_event(store, event_id)
+        # Class-owned reads prevent a JournalStore subclass from manufacturing
+        # canonical-history existence through method overrides at this fence.
+        existing = JournalStore.get_event(store, event_id.strip())
         if existing is None:
             canonical = JournalStore.load_events(
                 store,

@@ -100,6 +100,14 @@ def request(request_id="req-a", run_id="run-a", scope=None, mode="SOURCE_MUTATIO
     }
 
 
+def guard_fence(registry):
+    owner = registry["claims"][0]
+    return {
+        "claim_id": owner["claim_id"],
+        "claim_generation": owner["claim_generation"],
+    }
+
+
 class RegistryTests(unittest.TestCase):
     def test_claim_increments_generation(self):
         registry, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
@@ -664,9 +672,10 @@ class RegistryTests(unittest.TestCase):
             "semantic_key": "core-schemas",
             "mutation_scope": ["contracts/jsonschema"],
             "branch": "worker/run-a",
+            **guard_fence(first),
             "prior_head": "old",
             "current_head": "new",
-            "mutations": [{"head": "new", "run_id": "run-b", "parent_heads": ["old"]}],
+            "mutations": [{"head": "new", "run_id": "run-b", **guard_fence(first), "parent_heads": ["old"]}],
         }
         result = evaluate_guard(first, mutation, now=NOW)
         self.assertEqual(result["status"], "COLLISION")
@@ -678,9 +687,10 @@ class RegistryTests(unittest.TestCase):
             "semantic_key": "core-schemas",
             "mutation_scope": ["contracts/jsonschema"],
             "branch": "worker/run-a",
+            **guard_fence(first),
             "prior_head": "old",
             "current_head": "merge",
-            "mutations": [{"head": "merge", "run_id": "run-a", "parent_heads": ["old", "main-new"]}],
+            "mutations": [{"head": "merge", "run_id": "run-a", **guard_fence(first), "parent_heads": ["old", "main-new"]}],
         }
         result = evaluate_guard(first, mutation, now=NOW)
         self.assertEqual(result["status"], "OK")
@@ -692,9 +702,10 @@ class RegistryTests(unittest.TestCase):
             "semantic_key": "core-schemas",
             "mutation_scope": ["contracts/jsonschema"],
             "branch": "worker/run-a",
+            **guard_fence(first),
             "prior_head": "old",
             "current_head": "new",
-            "mutations": [{"head": "new", "run_id": "run-a"}],
+            "mutations": [{"head": "new", "run_id": "run-a", **guard_fence(first)}],
         }
         result = evaluate_guard(first, mutation, now=NOW)
         self.assertEqual(result["status"], "AMBIGUOUS")

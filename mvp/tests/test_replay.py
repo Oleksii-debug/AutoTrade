@@ -324,6 +324,119 @@ class CausalReplayTests(unittest.TestCase):
                 protocol_ref="protocol:sealed-v1",
             )
 
+    def test_runtime_authority_subclass_cannot_override_trusted_dispatch(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        callbacks = []
+
+        class ForgedAuthority(RuntimeStateAuthority):
+            def capture(self):
+                callbacks.append("capture")
+                return RuntimeStateSnapshot(
+                    cut_id="cut:forged",
+                    replay=replay.checkpoint(),
+                    runtime_components=components,
+                    authority_id="runtime:test",
+                    authority_seal="0" * 64,
+                )
+
+            def verify_snapshot(self, snapshot):
+                callbacks.append("verify")
+
+        authority = ForgedAuthority(
+            authority_id="runtime:test",
+            secret=b"runtime-test-authority-secret-0000000001",
+            cut_resolver=lambda: ("cut:unused", replay.checkpoint(), components),
+        )
+        with self.assertRaisesRegex(TypeError, "canonical RuntimeStateAuthority"):
+            replay.composite_checkpoint(
+                runtime_state_authority=authority,
+                build_sha="a" * 64,
+                protocol_ref="protocol:sealed-v1",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_instance_method_shadowing_cannot_bypass_runtime_authority_seal(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        components = self._runtime_components()
+        trusted = self._state_authority(
+            replay,
+            components,
+            cut_id="cut:sealed",
+            secret=b"runtime-test-authority-secret-0000000001",
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_authority=trusted,
+            build_sha="e" * 64,
+            protocol_ref="protocol:sealed-v1",
+        )
+        attacker = self._state_authority(
+            replay,
+            components,
+            cut_id=checkpoint.runtime_cut_id,
+            authority_id=checkpoint.runtime_authority_id,
+            secret=b"attacker-runtime-authority-secret-00000001",
+        )
+        attacker.verify_snapshot = lambda snapshot: None
+        attacker.capture = lambda: RuntimeStateSnapshot(
+            cut_id=checkpoint.runtime_cut_id,
+            replay=checkpoint.replay,
+            runtime_components=checkpoint.runtime_components,
+            authority_id=checkpoint.runtime_authority_id,
+            authority_seal=checkpoint.runtime_authority_seal,
+        )
+
+        with self.assertRaisesRegex(ReplayError, "authority seal mismatch"):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+                runtime_state_authority=attacker,
+                build_sha="e" * 64,
+                protocol_ref="protocol:sealed-v1",
+            )
+
+    def test_composite_checkpoint_subclass_cannot_override_verdict_identity(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        authority = self._state_authority(replay, components)
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_authority=authority,
+            build_sha="a" * 64,
+            protocol_ref="protocol:sealed-v1",
+        )
+
+        class ForgedCheckpoint(CompositeReplayCheckpoint):
+            @property
+            def fingerprint(self):
+                return checkpoint.fingerprint
+
+        forged = ForgedCheckpoint(
+            replay=checkpoint.replay,
+            runtime_components=checkpoint.runtime_components,
+            runtime_cut_id=checkpoint.runtime_cut_id,
+            runtime_authority_id=checkpoint.runtime_authority_id,
+            runtime_authority_seal=checkpoint.runtime_authority_seal,
+            build_sha="b" * 64,
+            protocol_ref="protocol:forged",
+        )
+        with self.assertRaisesRegex(TypeError, "canonical CompositeReplayCheckpoint"):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=forged,
+                runtime_state_authority=authority,
+                build_sha="b" * 64,
+                protocol_ref="protocol:forged",
+            )
+
     def test_composite_checkpoint_canonical_record_round_trips_and_resumes(self):
         events = [
             event(1, "2026-09-24T10:00:00Z", 1),

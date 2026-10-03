@@ -105,8 +105,10 @@ class RuntimeLoadCampaignTests(unittest.TestCase):
             self.assertEqual(len(observation.financial_latency_us), 3)
             self.assertEqual(observation.financial_staleness_us, ())
             self.assertEqual(observation.research_interference_us, ())
+            self.assertEqual(observation.reconnect_backlog_remaining, 3)
             decision = evaluate_runtime_budget(spec, observation)
-            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertIn("insufficient_staleness_samples", decision.reasons)
             self.assertIn("insufficient_research_interference_samples", decision.reasons)
 

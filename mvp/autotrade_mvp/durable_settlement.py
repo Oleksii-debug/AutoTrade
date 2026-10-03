@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from threading import RLock
+from weakref import WeakKeyDictionary
 from typing import Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -472,6 +474,30 @@ class PreparedSettlementMutation:
     already_committed: bool = False
 
 
+_DURABLE_SETTLEMENT_STORE_BINDINGS = WeakKeyDictionary()
+_DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK = RLock()
+
+
+def _bind_durable_settlement_store(
+    book: object,
+    store: JournalStore,
+    identity: object,
+) -> None:
+    with _DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK:
+        if book in _DURABLE_SETTLEMENT_STORE_BINDINGS:
+            raise RuntimeError("durable settlement JournalStore is already bound")
+        _DURABLE_SETTLEMENT_STORE_BINDINGS[book] = (store, identity)
+
+
+def _bound_durable_settlement_store(book: object) -> tuple[JournalStore, object]:
+    with _DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK:
+        binding = _DURABLE_SETTLEMENT_STORE_BINDINGS.get(book)
+    if binding is None:
+        raise SettlementConflict("durable settlement JournalStore binding is unavailable")
+    store, identity = binding
+    return store, identity
+
+
 class DurableSettlementBook:
     """JournalStore-backed provenance facade for the canonical SettlementBook."""
 
@@ -484,11 +510,12 @@ class DurableSettlementBook:
         environment: str,
         evidence_artifact_store: ArtifactStore,
     ) -> None:
-        self._store_identity = require_exact_journal_store_authority(
+        store_identity = require_exact_journal_store_authority(
             store,
             subject="durable settlement JournalStore",
         )
         self.store = store
+        _bind_durable_settlement_store(self, store, store_identity)
         if type(evidence_artifact_store) is not ArtifactStore:
             raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.evidence_artifact_store = evidence_artifact_store
@@ -502,12 +529,22 @@ class DurableSettlementBook:
         self._reload()
 
     def _selected_store(self):
-        store = self.store
+        store, bound_identity = _bound_durable_settlement_store(self)
+        try:
+            visible_store = object.__getattribute__(self, "store")
+        except AttributeError as error:
+            raise SettlementConflict(
+                "durable settlement JournalStore binding changed"
+            ) from error
+        if visible_store is not store:
+            raise SettlementConflict(
+                "durable settlement JournalStore binding changed"
+            )
         identity = require_exact_journal_store_authority(
             store,
             subject="durable settlement JournalStore",
         )
-        if identity != self._store_identity:
+        if identity != bound_identity:
             raise SettlementConflict(
                 "durable settlement JournalStore generation changed"
             )

@@ -591,6 +591,29 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
     }
 
 
+def _provider_fill_reconciliation_ingress_errors(
+    fill: ProviderFillEvidence,
+) -> tuple[str, ...]:
+    """Return structural reasons a provider fill cannot affect financial reconciliation.
+
+    This is deliberately narrower than provider-origin issuer authentication.
+    A non-empty evidence_refs tuple proves only that provenance was carried by
+    the normalized value; #652/#805/#697 still own authenticity/currentness of
+    those references before PAPER/LIVE financial readiness.
+    """
+
+    errors: list[str] = []
+    if fill.side not in {"BUY", "SELL"}:
+        errors.append("provider execution direction is not evidenced")
+    if not fill.evidence_refs:
+        errors.append("provider execution provenance reference is absent")
+    if fill.position_effect is not None and fill.position_side is None:
+        errors.append("provider position effect lacks position side")
+    if fill.position_side in {"LONG", "SHORT"} and fill.position_effect is None:
+        errors.append("provider hedge-leg position side lacks position effect")
+    return tuple(errors)
+
+
 @dataclass(frozen=True)
 class ProviderActivityEvidence:
     provider_id: str
@@ -957,7 +980,12 @@ def reconcile_account(
     if len(local_ids) != len(set(local_ids)):
         raise ValueError("local_execution_ids must be unique")
 
+    observed_provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_by_id: dict[str, ProviderFillEvidence] = {}
+    inadmissible_provider_by_id: dict[
+        str, tuple[ProviderFillEvidence, tuple[str, ...]]
+    ] = {}
+    inadmissible_provider_client_ids: set[str] = set()
     provider_client_ids: set[str] = set()
     provider_client_fill_times: dict[str, list[datetime]] = {}
     provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
@@ -970,14 +998,24 @@ def reconcile_account(
             raise ValueError("provider fill evidence account_id mismatch")
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
-        if fill.provider_execution_id in provider_by_id:
+        if fill.provider_execution_id in observed_provider_by_id:
             if (
                 provider_fill_identity_payload(
-                    provider_by_id[fill.provider_execution_id]
+                    observed_provider_by_id[fill.provider_execution_id]
                 )
                 != provider_fill_identity_payload(fill)
             ):
                 raise ValueError("provider execution id has conflicting observations")
+            continue
+        observed_provider_by_id[fill.provider_execution_id] = fill
+        ingress_errors = _provider_fill_reconciliation_ingress_errors(fill)
+        if ingress_errors:
+            inadmissible_provider_by_id[fill.provider_execution_id] = (
+                fill,
+                ingress_errors,
+            )
+            if fill.client_order_id is not None:
+                inadmissible_provider_client_ids.add(fill.client_order_id)
             continue
         provider_by_id[fill.provider_execution_id] = fill
         if fill.client_order_id is not None:
@@ -1411,6 +1449,15 @@ def reconcile_account(
         elif provider_working is not None:
             outcome = "UNKNOWN"
             reason = "provider_working_order_snapshot_not_causal_for_submission"
+        elif submission.client_order_id in inadmissible_provider_client_ids:
+            # Diagnostic/incomplete execution evidence cannot prove execution,
+            # but its presence also forbids proving the send absent.  Treat the
+            # contradiction as UNKNOWN until authoritative provider evidence
+            # resolves the execution identity.
+            outcome = "UNKNOWN"
+            reason = (
+                "matching_provider_execution_lacks_financial_reconciliation_authority"
+            )
         elif submission.client_order_id in provider_client_ids:
             outcome = "UNKNOWN"
             reason = "matching_provider_execution_outside_submission_window"
@@ -1485,6 +1532,13 @@ def reconcile_account(
     if not pagination_complete:
         blocking.add("ACCOUNT")
         reasons.append("provider activity pagination is incomplete")
+    if inadmissible_provider_by_id:
+        blocking.add("ACCOUNT")
+        for fill, _errors in inadmissible_provider_by_id.values():
+            blocking.add(f"INSTRUMENT:{fill.instrument}")
+        reasons.append(
+            "provider execution evidence lacks reconciliation financial direction/provenance authority"
+        )
     if unexpected:
         for execution_id in unexpected:
             fill = provider_by_id[execution_id]
@@ -1561,6 +1615,7 @@ def reconcile_account(
     complete = (
         snapshot_is_consistent
         and pagination_complete
+        and not inadmissible_provider_by_id
         and not unexpected
         and not missing
         and not unexpected_working

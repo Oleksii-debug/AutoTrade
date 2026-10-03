@@ -402,7 +402,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             )
         with self.assertRaises(TypeError):
             parse_name_status([HostileStr("M\tREADME.md")])
-        with self.assertRaises(ValueError):
+        self.assertIsNone(
             parse_trusted_scope_approval(
                 HostileStr(
                     "\n".join(
@@ -415,6 +415,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 ),
                 expected_head_sha="a" * 40,
             )
+        )
 
     def test_base_tree_paths_fail_closed_when_noncanonical(self):
         for path in ("../README.md", "/README.md", "dir//file.py", "dir\\file.py"):

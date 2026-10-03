@@ -533,9 +533,6 @@ class RecoveryController:
                 aggregate_id,
                 aggregate_events,
             )
-            sender_owner_epoch = self._validated_submission_sender_identity(
-                aggregate_events
-            )
             last = aggregate_events[-1]
 
             attempt_id = payload.get("attempt_id")
@@ -556,6 +553,9 @@ class RecoveryController:
             }:
                 continue
 
+            sender_owner_epoch = self._validated_submission_sender_identity(
+                aggregate_events
+            )
             attempt_id = payload.get("attempt_id")
             if not isinstance(attempt_id, str) or not attempt_id.strip():
                 opaque = "legacy_submission:" + aggregate_id

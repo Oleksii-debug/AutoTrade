@@ -204,6 +204,7 @@ def stage_windows_host(
     staging: Path,
     composition_path: Path,
     source_root: Path = ROOT,
+    expected_source_sha: str | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Stage the module-owned production-host dependency closure."""
 
@@ -212,6 +213,7 @@ def stage_windows_host(
         composition_path=composition_path,
         source_root=source_root,
         descriptors=_HOST_REQUIRED,
+        expected_source_sha=expected_source_sha,
     )
 
 
@@ -220,12 +222,14 @@ def main() -> int:
     parser.add_argument("--staging", required=True, type=Path)
     parser.add_argument("--composition", required=True, type=Path)
     parser.add_argument("--source-root", type=Path, default=ROOT)
+    parser.add_argument("--expected-source-sha")
     args = parser.parse_args()
     try:
         result = stage_windows_host(
             staging=args.staging,
             composition_path=args.composition,
             source_root=args.source_root,
+            expected_source_sha=args.expected_source_sha,
         )
     except FoundationStagingError as error:
         print(str(error), file=sys.stderr)

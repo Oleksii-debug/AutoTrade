@@ -29,14 +29,16 @@ internal static class HostSenderFenceAttestationEnvelope
             issuerSession.PublicKeySha256);
 
         ArrayBufferWriter<byte> buffer = new();
-        using Utf8JsonWriter writer = new(buffer);
-        writer.WriteStartObject();
-        writer.WriteString("schema", Schema);
-        writer.WritePropertyName("issuer_session");
-        WriteSession(writer, issuerSession);
-        writer.WritePropertyName("receipt");
-        WriteReceipt(writer, receipt);
-        writer.WriteEndObject();
+        using (Utf8JsonWriter writer = new(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schema", Schema);
+            writer.WritePropertyName("issuer_session");
+            WriteSession(writer, issuerSession);
+            writer.WritePropertyName("receipt");
+            WriteReceipt(writer, receipt);
+            writer.WriteEndObject();
+        }
         return buffer.WrittenSpan.ToArray();
     }
 

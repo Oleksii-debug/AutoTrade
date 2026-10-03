@@ -20,7 +20,7 @@ from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
 SOURCE_SHA = "a" * 40
 CONFIG = "sha256:" + "b" * 64
 HOST = "sha256:" + "c" * 64
-WORKLOAD = "sha256:" + "d" * 64
+OTHER_WORKLOAD = "sha256:" + "d" * 64
 RELEASE_ID = "60000000-0000-4000-8000-000000000001"
 RELEASE_SHA = "sha256:" + "e" * 64
 
@@ -65,7 +65,7 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
         )
         campaign_plan = RuntimeCampaignPlan.create(
             spec=spec,
-            workload_profile_hash=WORKLOAD,
+            workload_profile_hash=declared.digest,
             declared_duration_ms=1_000,
             expected_financial_event_ids=(event.event_id,),
             financial_aggregate_types=("risk_decision",),
@@ -142,6 +142,39 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
                 expected_release_artifact_id=RELEASE_ID,
                 expected_release_artifact_sha256=RELEASE_SHA,
                 campaign_plan=campaign_plan,
+                campaign_cut=cut,
+                measurement=object(),
+            )
+        verifier.assert_not_called()
+
+    def test_campaign_workload_substitution_fails_before_composed_dispatch(self):
+        root, store, spec, declared, campaign_plan, cut = self._prepared()
+        self.assertNotEqual(OTHER_WORKLOAD, declared.digest)
+        substituted = RuntimeCampaignPlan.create(
+            spec=spec,
+            workload_profile_hash=OTHER_WORKLOAD,
+            declared_duration_ms=campaign_plan.declared_duration_ms,
+            expected_financial_event_ids=campaign_plan.expected_financial_event_ids,
+            financial_aggregate_types=campaign_plan.financial_aggregate_types,
+            release_artifact_sha256=campaign_plan.release_artifact_sha256,
+        )
+        with patch.object(
+            terminal_module,
+            "verify_composed_runtime_target_host_qualification",
+        ) as verifier, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "campaign workload identity does not match durable pre-run plan",
+        ):
+            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root=root,
+                journal_store=store,
+                plan_id=declared.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=substituted,
                 campaign_cut=cut,
                 measurement=object(),
             )

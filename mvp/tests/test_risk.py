@@ -2,8 +2,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.risk import (
     _canonical_decimal_text,
@@ -50,6 +55,9 @@ class _LiquidationEvidenceStore:
 
     def read_bytes(self, artifact_id):
         return self._objects[artifact_id]
+
+    def read_authenticated_snapshot(self, artifact_id):
+        return (dict(self._manifests[artifact_id]), self._objects[artifact_id])
 
 
 def liquidation_evidence(
@@ -2021,6 +2029,94 @@ class IndependentRiskTests(unittest.TestCase):
         )
         self.assertFalse(tampered_rule.passed)
         self.assertEqual(tampered_rule.observed, "UNVERIFIED")
+
+    def test_liquidation_admission_consumes_only_one_authenticated_snapshot(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.50")
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        with (
+            patch.object(
+                store, "read_authenticated_snapshot",
+                wraps=store.read_authenticated_snapshot,
+            ) as snapshot_read,
+            patch.object(store, "load_manifest", side_effect=AssertionError("split read")),
+            patch.object(store, "read_bytes", side_effect=AssertionError("split read")),
+        ):
+            decision = evaluate_risk(
+                intent, context(**bound), configured, evidence_store=store,
+            )
+            self.assertEqual(snapshot_read.call_count, 1)
+            self.assertEqual(
+                snapshot_read.call_args.args,
+                (bound["liquidation_headroom_evidence"].artifact_id,),
+            )
+        self.assertTrue(
+            next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
+        )
+
+        with patch.object(
+            store,
+            "read_authenticated_snapshot",
+            side_effect=ValueError("artifact namespace changed"),
+        ):
+            rejected = evaluate_risk(
+                intent, context(**bound), configured, evidence_store=store,
+            )
+        rule = next(x for x in rejected.rules if x.rule == "liquidation_headroom")
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "UNVERIFIED")
+
+        store._manifests[bound["liquidation_headroom_evidence"].artifact_id][
+            "metadata"
+        ]["unqualified_extra"] = "must-not-be-authority"
+        extra = evaluate_risk(
+            intent, context(**bound), configured, evidence_store=store,
+        )
+        self.assertFalse(
+            next(x for x in extra.rules if x.rule == "liquidation_headroom").passed
+        )
+
+    def test_liquidation_scope_is_verified_with_real_artifact_snapshot(self):
+        with TemporaryDirectory() as directory:
+            fixture = _LiquidationEvidenceStore()
+            bound = liquidation_evidence(fixture, headroom="0.50")
+            artifact_id = bound["liquidation_headroom_evidence"].artifact_id
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            artifacts.publish_bytes(
+                artifact_id=artifact_id,
+                data=fixture._objects[artifact_id],
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                metadata=fixture._manifests[artifact_id]["metadata"],
+            )
+            intent = RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            )
+            configured = policy(min_liquidation_headroom="0.25")
+            with (
+                patch.object(
+                    artifacts, "load_manifest",
+                    side_effect=AssertionError("split read"),
+                ),
+                patch.object(
+                    artifacts, "read_bytes",
+                    side_effect=AssertionError("split read"),
+                ),
+            ):
+                decision = evaluate_risk(
+                    intent, context(**bound), configured, evidence_store=artifacts,
+                )
+            self.assertTrue(
+                next(
+                    x for x in decision.rules
+                    if x.rule == "liquidation_headroom"
+                ).passed
+            )
 
     def test_liquidation_evidence_identity_is_in_risk_fingerprint(self):
         intent = RiskIntent.create(

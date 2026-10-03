@@ -1113,10 +1113,20 @@ class DurableSettlementBook:
         return inserted
 
     def project(self, economic_book) -> SettlementBook:
-        """Rebuild cash availability from canonical economics plus durable provenance."""
+        """Rebuild cash availability from a fresh stable settlement-journal cut.
 
+        A second legitimate process/handle may advance settlement provenance on
+        the same canonical backing generation. Financial projection must not use
+        the construction-time cache after such a write. Read and replay one
+        quiescent global journal cut before composing with canonical economics.
+        Downstream irreversible admission still owns final cut revalidation.
+        """
+
+        events, _journal_sequence = self._events_at_stable_journal_cut()
+        current = self._replay(events)
+        self._book = current
         return SettlementBook.from_economic_book(
             economic_book=economic_book,
-            obligations=self.obligations,
-            settled_obligation_evidence=self.settled_obligation_evidence,
+            obligations=current.obligations,
+            settled_obligation_evidence=current.settled_obligation_evidence,
         )

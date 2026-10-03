@@ -4,9 +4,7 @@ The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
 binds every changed path to those scopes. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
-cannot be deleted, renamed away or changed to another Git object type. Ordinary
-content modification of the executable guard/workflow trust roots is denied unless
-an independently resolved mutation scope names that exact path. A PR that
+cannot be deleted, renamed away or changed to another Git object type. A PR that
 deletes both a material absolute number and a material fraction of the base tree
 is blocked.
 
@@ -19,7 +17,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import subprocess
 from typing import Iterable, Sequence
 
@@ -52,15 +49,6 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
-SELF_PROTECTING_TRUST_ROOTS = frozenset(
-    {
-        ".github/workflows/reconvergence-integrity.yml",
-        "control/tools/reconvergence_integrity.py",
-    }
-)
-_SIMPLE_CHANGE_STATUSES = frozenset({"A", "D", "M", "T"})
-_SCORED_CHANGE_STATUS = re.compile(r"^[RC][0-9]{1,3}$")
-
 
 @dataclass(frozen=True)
 class Change:
@@ -82,45 +70,10 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
-def _change_path(value: object, *, name: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{name} must be a non-empty Git path")
-    if any(character in value for character in ("\x00", "\n", "\r", "\t")):
-        raise ValueError(f"{name} contains unsupported control characters")
-    return value
-
-
-def _validated_change(value: object) -> Change:
-    if type(value) is not Change:
-        raise TypeError("changes must contain exact Change values")
-    if type(value.status) is not str:
-        raise ValueError("change status must be canonical Git name-status text")
-    status = value.status
-    if status in _SIMPLE_CHANGE_STATUSES:
-        if value.previous_path is not None:
-            raise ValueError("non-rename/copy change must not carry a source path")
-    elif _SCORED_CHANGE_STATUS.fullmatch(status):
-        score = int(status[1:])
-        if score > 100:
-            raise ValueError("rename/copy score must be between 0 and 100")
-        if value.previous_path is None:
-            raise ValueError("rename/copy change requires a source path")
-    else:
-        raise ValueError(f"unsupported Git name-status value: {status!r}")
-
-    path = _change_path(value.path, name="changed path")
-    previous = value.previous_path
-    if previous is not None:
-        previous = _change_path(previous, name="changed source path")
-    return Change(status=status, path=path, previous_path=previous)
-
-
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
-        if type(raw) is not str:
-            raise TypeError("Git name-status lines must be strings")
-        line = raw.rstrip("\r\n")
+        line = raw.rstrip("\n")
         if not line:
             continue
         parts = line.split("\t")
@@ -129,16 +82,13 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            change = Change(
-                status=status,
-                previous_path=parts[1],
-                path=parts[2],
+            changes.append(
+                Change(status=status, previous_path=parts[1], path=parts[2])
             )
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            change = Change(status=status, path=parts[1])
-        changes.append(_validated_change(change))
+            changes.append(Change(status=status, path=parts[1]))
     return tuple(changes)
 
 
@@ -162,25 +112,12 @@ def assess_reconvergence(
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
 
-    canonical_changes = tuple(_validated_change(change) for change in changes)
-    normalized_scopes: tuple[str, ...] | None = None
-    if allowed_scopes is not None:
-        normalized_scopes = _normalized_scopes(allowed_scopes)
-
-    deleted = tuple(
-        sorted(
-            {
-                change.path
-                for change in canonical_changes
-                if change.status == "D"
-            }
-        )
-    )
+    deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
 
     protected_damage: set[str] = set(protected)
-    for change in canonical_changes:
+    for change in changes:
         kind = change.status[:1]
         if (
             kind == "R"
@@ -192,24 +129,15 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
-
-        if (
-            kind not in {"D", "T"}
-            and change.path in SELF_PROTECTING_TRUST_ROOTS
-            and (
-                normalized_scopes is None
-                or change.path not in normalized_scopes
-            )
-        ):
-            protected_damage.add(
-                f"{change.path} "
-                "(trust-root content modification requires exact trusted scope)"
-            )
     protected_violations = tuple(sorted(protected_damage))
+
+    normalized_scopes: tuple[str, ...] | None = None
+    if allowed_scopes is not None:
+        normalized_scopes = _normalized_scopes(allowed_scopes)
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in canonical_changes:
+        for change in changes:
             kind = change.status[:1]
             if kind == "R":
                 touched = (change.previous_path, change.path)

@@ -1219,6 +1219,17 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 date(2026, 9, 25),
             )
 
+    def test_settlement_numeric_ingress_rejects_oversized_text(self):
+        with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
+            SettlementObligation(
+                "oversized",
+                "oversized-cause",
+                "USD",
+                "9" * 10_000,
+                date(2026, 9, 24),
+                date(2026, 9, 25),
+            )
+
     def test_settlement_accumulation_is_independent_of_ambient_decimal_context(self):
         huge = "1000000000000000000000000000000"
         tiny = "0.000000000000000000000000000001"

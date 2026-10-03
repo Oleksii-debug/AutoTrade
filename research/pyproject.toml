@@ -21,4 +21,4 @@ test = [
 
 [tool.setuptools.packages.find]
 where = [".", ".."]
-include = ["autotrade_research*", "autotrade_foundation*"]
+include = ["autotrade_research*", "autotrade_foundation*", "autotrade_runtime*"]

@@ -189,6 +189,10 @@ def _decode_measurement(
         payload.get("pre_operation_journal_sequence"),
         name="pre_operation_journal_sequence",
     )
+    if pre_sequence < plan.declared_journal_sequence:
+        raise RuntimeLoadMeasurementError(
+            "latency measurement pre-operation cut predates its durable plan"
+        )
     if type(event_sequence) is not int or event_sequence <= pre_sequence:
         raise RuntimeLoadMeasurementError(
             "measured financial event does not follow the pre-operation journal cut"

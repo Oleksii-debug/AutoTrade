@@ -13,7 +13,9 @@ exactly the digest of its projection. The signed campaign payload is separately
 parsed and required to match the same stable measurement cut, recovered financial
 identities and recomputable metric series. Momentary campaign values such as the
 terminal monotonic duration and reconnect backlog remain signed campaign evidence;
-they are not re-measured during later verification.
+they are not re-measured during later verification. They are, however, fed back
+through the repository's canonical runtime-budget evaluator before acceptance, so
+a signed PASS cannot override contradictory raw FAIL/INCONCLUSIVE semantics.
 
 This module does not create a signer, trust root, release authority, budget
 evaluator, provider/PAPER/LIVE authority, profitability claim, economic edge or
@@ -34,7 +36,12 @@ from autotrade_runtime.artifacts import (
     trusted_authenticated_reader,
 )
 
-from .performance_qualification import RuntimeBudgetSpec
+from .performance_qualification import (
+    RuntimeBudgetDecision,
+    RuntimeBudgetError,
+    RuntimeBudgetSpec,
+    evaluate_runtime_budget,
+)
 from .persistence import JournalStore
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
@@ -247,7 +254,8 @@ def _require_signed_campaign_match(
     evidence_root: str,
     measurement: TargetHostMeasurementArtifact,
     campaign_plan: RuntimeCampaignPlan,
-) -> None:
+    spec: RuntimeBudgetSpec | None = None,
+) -> RuntimeBudgetDecision | None:
     raw = _read_accepted_raw_payload(
         accepted,
         evidence_store=evidence_store,
@@ -301,6 +309,24 @@ def _require_signed_campaign_match(
         raise RuntimeTargetHostCompositionError(
             "signed campaign financial identities do not match canonical target-host measurement"
         )
+
+    if spec is None:
+        return None
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
+    try:
+        decision = evaluate_runtime_budget(spec, observation)
+    except RuntimeBudgetError as error:
+        raise RuntimeTargetHostCompositionError(
+            "signed campaign cannot be evaluated by canonical runtime budget policy"
+        ) from error
+    if decision.status != "PASS" or decision.reasons:
+        reasons = ",".join(decision.reasons) if decision.reasons else "none"
+        raise RuntimeTargetHostCompositionError(
+            "canonical runtime budget decision is not PASS: "
+            f"status={decision.status} reasons={reasons}"
+        )
+    return decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +416,7 @@ def verify_composed_runtime_target_host_qualification(
         evidence_root=evidence_root,
         measurement=measurement,
         campaign_plan=campaign_plan,
+        spec=spec,
     )
 
     projection_digests = target_host_measurement_projection_digests(measurement)

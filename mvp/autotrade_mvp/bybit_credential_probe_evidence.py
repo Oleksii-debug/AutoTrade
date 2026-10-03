@@ -36,11 +36,6 @@ _REST_BASE_BY_PROVIDER_ENVIRONMENT = {
     "TESTNET": "https://api-testnet.bybit.com",
     "DEMO": "https://api-demo.bybit.com",
 }
-_RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT = {
-    "MAINNET": "LIVE",
-    "TESTNET": "PAPER",
-    "DEMO": "PAPER",
-}
 _SUPPORTED_FAMILIES = frozenset(
     {
         "SPOT",
@@ -138,12 +133,9 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
             )
-        expected_runtime_environment = (
-            _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_environment]
-        )
-        if self.credential_handle.environment != expected_runtime_environment:
+        if self.credential_handle.provider_environment != provider_environment:
             raise ProviderCoreError(
-                "Bybit probe provider environment does not match credential environment"
+                "Bybit probe provider environment does not match credential provider domain"
             )
 
         source_uri = _exact_text(self.source_uri, name="source_uri")
@@ -230,6 +222,7 @@ def bybit_credential_probe_receipt_metadata(
         "credential_handle_id": handle.handle_id,
         "account_id": handle.account_id,
         "credential_environment": handle.environment,
+        "credential_provider_environment": handle.provider_environment,
         "credential_purpose": handle.purpose,
         "credential_generation": handle.generation,
         "source_uri": evidence.source_uri,

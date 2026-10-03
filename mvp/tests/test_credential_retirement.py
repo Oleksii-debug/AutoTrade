@@ -138,6 +138,34 @@ class CredentialRetirementTests(unittest.TestCase):
         ):
             require_retired_trade_credential_generation(self.vault, wrong_scope)
 
+    def test_provider_environment_substitution_cannot_reuse_retirement(self) -> None:
+        handle = self.vault.register(
+            handle_id="cred-wp49-bybit",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            purpose="TRADE",
+            secret_value="secret-v1",
+        )
+        self.vault.revoke(handle, execution_identity="windows-user-1")
+        wrong_scope = PersistentCredentialHandle(
+            handle_id=handle.handle_id,
+            account_id=handle.account_id,
+            provider=handle.provider,
+            environment=handle.environment,
+            provider_environment="DEMO",
+            purpose=handle.purpose,
+            generation=handle.generation,
+        )
+
+        with self.assertRaisesRegex(
+            CredentialRetirementError,
+            "scope does not match",
+        ):
+            require_retired_trade_credential_generation(self.vault, wrong_scope)
+
     def test_read_credential_retirement_cannot_satisfy_sender_fence(self) -> None:
         handle = self._register(purpose="READ")
         self.vault.revoke(handle, execution_identity="windows-user-1")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.credential_transition_journal as journal_module
 from mvp.autotrade_mvp.credential_transition_journal import (
     CredentialTransitionAnchorError,
     record_current_trade_credential_transition_anchor,
@@ -50,6 +52,7 @@ class CredentialTransitionJournalTests(unittest.TestCase):
             account_id="paper-1",
             provider="BYBIT",
             environment="PAPER",
+            provider_environment="TESTNET",
             purpose="TRADE",
             secret_value="secret-v1",
         )
@@ -96,6 +99,8 @@ class CredentialTransitionJournalTests(unittest.TestCase):
         )
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_id"], first_witness.event_id)
+        self.assertEqual(events[0]["payload"]["receipt_schema_version"], "2.0.0")
+        self.assertEqual(events[0]["payload"]["provider_environment"], "TESTNET")
         self.assertEqual(
             events[0]["journal_sequence"],
             first_witness.journal_sequence,
@@ -108,6 +113,71 @@ class CredentialTransitionJournalTests(unittest.TestCase):
             required.verified_journal_cut,
             self.store.current_journal_sequence(),
         )
+
+    def test_provider_domains_have_distinct_durable_aggregate_identity(self) -> None:
+        _second, testnet_receipt = self._rotate(self.first, "secret-v2")
+        testnet_witness = record_current_trade_credential_transition_anchor(
+            self.store,
+            self.vault,
+            testnet_receipt,
+        )
+
+        demo_path = self.vault_path.with_name("demo-credentials.json")
+        demo_vault = ProtectedCredentialVault(
+            demo_path,
+            protector=DeterministicProtector(),
+        )
+        demo_first = demo_vault.register(
+            handle_id="cred-wp49-anchor",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+            purpose="TRADE",
+            secret_value="demo-secret-v1",
+        )
+        _demo_second, demo_receipt = rotate_trade_credential_with_receipt(
+            demo_vault,
+            demo_first,
+            execution_identity="windows-user-1",
+            new_secret_value="demo-secret-v2",
+        )
+        demo_witness = record_current_trade_credential_transition_anchor(
+            self.store,
+            demo_vault,
+            demo_receipt,
+        )
+
+        self.assertNotEqual(testnet_witness.aggregate_id, demo_witness.aggregate_id)
+        self.assertEqual(testnet_receipt.provider_environment, "TESTNET")
+        self.assertEqual(demo_receipt.provider_environment, "DEMO")
+
+    def test_historical_receipt_content_identity_is_revalidated(self) -> None:
+        _second, receipt = self._rotate(self.first, "secret-v2")
+        forged = replace(
+            receipt,
+            completed_time_ns=receipt.completed_time_ns + 1,
+        )
+        self.assertEqual(forged.receipt_id, receipt.receipt_id)
+        aggregate_id = journal_module._aggregate_id(forged)
+        payload = journal_module._event_payload(forged)
+        event = {
+            "event_id": journal_module._event_id(aggregate_id, forged),
+            "event_type": "CredentialTransitionAnchored",
+            "aggregate_type": "credential_transition_anchor",
+            "aggregate_id": aggregate_id,
+            "aggregate_version": 1,
+            "payload": payload,
+            "payload_hash": journal_module.payload_digest(payload),
+            "journal_sequence": 1,
+        }
+
+        with self.assertRaisesRegex(
+            CredentialTransitionAnchorError,
+            "receipt content identity mismatch",
+        ):
+            journal_module._validate_chain(aggregate_id, [event])
 
     def test_vault_only_rollback_cannot_roll_back_newer_journal_anchor(self) -> None:
         second, receipt_one = self._rotate(self.first, "secret-v2")

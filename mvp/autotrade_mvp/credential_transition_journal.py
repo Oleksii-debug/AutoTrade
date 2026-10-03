@@ -12,7 +12,7 @@ successor readiness.  Terminal recovery must compose those independent facts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -37,11 +37,13 @@ _EVENT_TYPE = "CredentialTransitionAnchored"
 _PAYLOAD_FIELDS = frozenset(
     {
         "receipt_id",
+        "receipt_schema_version",
         "operation",
         "handle_id",
         "account_id",
         "provider",
         "environment",
+        "provider_environment",
         "purpose",
         "prior_generation",
         "successor_generation",
@@ -122,6 +124,7 @@ def _aggregate_id(receipt: CredentialTransitionReceipt) -> str:
     logical_scope = {
         "account_id": receipt.account_id,
         "environment": receipt.environment,
+        "provider_environment": receipt.provider_environment,
         "handle_id": receipt.handle_id,
         "provider": receipt.provider,
         "purpose": receipt.purpose,
@@ -133,11 +136,13 @@ def _aggregate_id(receipt: CredentialTransitionReceipt) -> str:
 def _event_payload(receipt: CredentialTransitionReceipt) -> dict[str, object]:
     return {
         "receipt_id": receipt.receipt_id,
+        "receipt_schema_version": receipt.schema_version,
         "operation": receipt.operation,
         "handle_id": receipt.handle_id,
         "account_id": receipt.account_id,
         "provider": receipt.provider,
         "environment": receipt.environment,
+        "provider_environment": receipt.provider_environment,
         "purpose": receipt.purpose,
         "prior_generation": receipt.prior_generation,
         "successor_generation": receipt.successor_generation,
@@ -178,13 +183,14 @@ def _receipt_from_payload(
         )
     try:
         return CredentialTransitionReceipt(
-            schema_version="1.0.0",
+            schema_version=payload["receipt_schema_version"],
             receipt_id=payload["receipt_id"],
             operation=payload["operation"],
             handle_id=payload["handle_id"],
             account_id=payload["account_id"],
             provider=payload["provider"],
             environment=payload["environment"],
+            provider_environment=payload["provider_environment"],
             purpose=payload["purpose"],
             prior_generation=payload["prior_generation"],
             successor_generation=payload["successor_generation"],
@@ -224,6 +230,16 @@ def _validate_chain(
             )
         payload = event.get("payload")
         receipt = _receipt_from_payload(payload)
+        receipt_subject = asdict(receipt)
+        receipt_subject.pop("receipt_id")
+        expected_receipt_id = (
+            "credential-transition/sha256:"
+            + sha256(_canonical_bytes(receipt_subject)).hexdigest()
+        )
+        if receipt.receipt_id != expected_receipt_id:
+            raise CredentialTransitionAnchorError(
+                "credential transition anchor receipt content identity mismatch"
+            )
         if _aggregate_id(receipt) != aggregate_id:
             raise CredentialTransitionAnchorError(
                 "credential transition anchor logical scope changed"

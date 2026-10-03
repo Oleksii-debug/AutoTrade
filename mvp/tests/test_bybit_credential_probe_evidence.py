@@ -31,7 +31,10 @@ def _handle(
     environment="LIVE",
     purpose="TRADE",
     generation=7,
+    provider_environment=None,
 ):
+    if provider_environment is None:
+        provider_environment = "MAINNET" if environment == "LIVE" else "TESTNET"
     return PersistentCredentialHandle(
         handle_id="bybit-trade-primary",
         account_id="acct-17",
@@ -39,6 +42,7 @@ def _handle(
         environment=environment,
         purpose=purpose,
         generation=generation,
+        provider_environment=provider_environment,
     )
 
 
@@ -94,7 +98,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         for provider_environment, source_uri in cases:
             with self.subTest(provider_environment=provider_environment):
                 evidence = _capture(
-                    handle=_handle(environment="PAPER"),
+                    handle=_handle(
+                        environment="PAPER",
+                        provider_environment=provider_environment,
+                    ),
                     provider_environment=provider_environment,
                     source_uri=source_uri,
                 )
@@ -113,8 +120,31 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ProviderCoreError, "environment"):
             _capture(
-                handle=_handle(environment="PAPER"),
+                handle=_handle(
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
                 provider_environment="MAINNET",
+            )
+
+    def test_same_paper_runtime_cannot_alias_testnet_and_demo_domains(self):
+        with self.assertRaisesRegex(ProviderCoreError, "provider domain"):
+            _capture(
+                handle=_handle(
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
+                provider_environment="DEMO",
+                source_uri="https://api-demo.bybit.com/v5/user/query-api",
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "provider domain"):
+            _capture(
+                handle=_handle(
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                ),
+                provider_environment="TESTNET",
+                source_uri="https://api-testnet.bybit.com/v5/user/query-api",
             )
 
     def test_only_exact_bybit_trade_handles_are_admitted(self):
@@ -289,6 +319,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "credential_handle_id": "bybit-trade-primary",
                 "account_id": "acct-17",
                 "credential_environment": "LIVE",
+                "credential_provider_environment": "MAINNET",
                 "credential_purpose": "TRADE",
                 "credential_generation": 23,
                 "source_uri": "https://api.bybit.com/v5/user/query-api",

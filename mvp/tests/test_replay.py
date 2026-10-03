@@ -608,6 +608,49 @@ class CausalReplayTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             record["replay"]["clock"] = "2026-09-25T00:00:00Z"
 
+    def test_checkpoint_authority_seal_rejects_rehashed_build_or_protocol_tamper(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        components = self._runtime_components()
+        trusted = self._state_authority(replay, components)
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_authority=trusted,
+            build_sha="a" * 64,
+            protocol_ref="protocol:sealed-v1",
+        )
+
+        for build_sha, protocol_ref in (
+            ("b" * 64, checkpoint.protocol_ref),
+            (checkpoint.build_sha, "protocol:tampered-v2"),
+        ):
+            with self.subTest(build_sha=build_sha, protocol_ref=protocol_ref):
+                tampered = CompositeReplayCheckpoint(
+                    replay=checkpoint.replay,
+                    runtime_components=checkpoint.runtime_components,
+                    runtime_cut_id=checkpoint.runtime_cut_id,
+                    runtime_authority_id=checkpoint.runtime_authority_id,
+                    runtime_authority_seal=checkpoint.runtime_authority_seal,
+                    build_sha=build_sha,
+                    protocol_ref=protocol_ref,
+                )
+                self.assertNotEqual(tampered.fingerprint, checkpoint.fingerprint)
+                with self.assertRaisesRegex(
+                    ReplayError,
+                    "checkpoint authority seal mismatch",
+                ):
+                    resume_from_composite_checkpoint(
+                        events,
+                        start_at="2026-09-24T09:59:00Z",
+                        checkpoint=tampered,
+                        runtime_state_authority=trusted,
+                        build_sha=build_sha,
+                        protocol_ref=protocol_ref,
+                    )
+
     def test_composite_checkpoint_rejects_build_or_protocol_drift(self):
         events = [event(1, "2026-09-24T10:00:00Z", 1)]
         replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")

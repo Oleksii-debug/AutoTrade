@@ -20,7 +20,6 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_completion_evidence_receipt,
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
-    verify_settlement_rule_evidence,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
@@ -35,10 +34,7 @@ from mvp.autotrade_mvp.settlement import (
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
 )
-from research.autotrade_research.artifacts.store import (
-    ArtifactIntegrityError,
-    ArtifactStore,
-)
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 PROVIDER = "PROVIDER-A"
@@ -246,6 +242,128 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_settlement_evidence_uses_one_authenticated_artifact_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            selected = artifact_store_for(store)
+
+            def legacy_split_read_forbidden(*_args, **_kwargs):
+                raise AssertionError("legacy split read must not be used")
+
+            selected.load_manifest = legacy_split_read_forbidden
+            selected.read_bytes = legacy_split_read_forbidden
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_store=selected,
+            )
+            item = obligation(store)
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="snapshot-rule",
+                    idempotency_key="snapshot-rule",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            self.assertTrue(
+                settlements.apply_settlement(
+                    evidence,
+                    as_of=date(2026, 9, 26),
+                    command_id="snapshot-completion",
+                    idempotency_key="snapshot-completion",
+                    committed_at="2026-09-26T15:00:01Z",
+                )
+            )
+
+    def test_artifact_store_subclass_cannot_mint_settlement_rule_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            item = obligation(store)
+
+            class HostileArtifactStore(ArtifactStore):
+                called = False
+
+                def read_authenticated_snapshot(self, artifact_id):
+                    type(self).called = True
+                    return super().read_authenticated_snapshot(artifact_id)
+
+            hostile = HostileArtifactStore(
+                Path(store.path).parent / "settlement-evidence"
+            )
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_store=hostile,
+            )
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "requires trusted ArtifactStore",
+            ):
+                settlements.register_obligations(
+                    (item,),
+                    command_id="hostile-rule",
+                    idempotency_key="hostile-rule",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            self.assertFalse(HostileArtifactStore.called)
+            self.assertEqual(settlements.obligations, ())
+
+    def test_snapshot_oserror_fails_before_rule_or_completion_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlements = durable(store)
+            item = obligation(store)
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("simulated snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.register_obligations(
+                        (item,),
+                        command_id="rule-oserror",
+                        idempotency_key="rule-oserror",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+            self.assertEqual(settlements.obligations, ())
+
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="rule-ok",
+                    idempotency_key="rule-ok",
+                    committed_at="2026-09-25T09:00:03Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("simulated completion snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.apply_settlement(
+                        evidence,
+                        as_of=date(2026, 9, 26),
+                        command_id="completion-oserror",
+                        idempotency_key="completion-oserror",
+                        committed_at="2026-09-26T15:00:01Z",
+                    )
+            self.assertEqual(settlements.settled_obligation_evidence, {})
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -305,129 +423,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                     idempotency_key="changed",
                     committed_at="2026-09-25T09:00:03Z",
                 )
-
-    def test_rule_verification_uses_one_canonical_snapshot_path(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            item = obligation(store)
-            artifact_store = artifact_store_for(store)
-            original_snapshot = ArtifactStore.read_authenticated_snapshot
-            snapshot_calls = []
-
-            def counted_snapshot(instance, artifact_id):
-                snapshot_calls.append(artifact_id)
-                return original_snapshot(instance, artifact_id)
-
-            with (
-                patch.object(
-                    ArtifactStore,
-                    "read_authenticated_snapshot",
-                    new=counted_snapshot,
-                ),
-                patch.object(
-                    ArtifactStore,
-                    "load_manifest",
-                    side_effect=AssertionError("legacy manifest read used"),
-                ),
-                patch.object(
-                    ArtifactStore,
-                    "read_bytes",
-                    side_effect=AssertionError("legacy object read used"),
-                ),
-            ):
-                verified = verify_settlement_rule_evidence(
-                    item.rule_binding,
-                    artifact_store,
-                    trade_date=item.trade_date,
-                    expected_settlement_date=item.settlement_date,
-                )
-            self.assertEqual(verified, (item.rule_binding.evidence_refs[-1],))
-            self.assertEqual(len(snapshot_calls), 1)
-
-    def test_artifact_store_subclass_cannot_mint_settlement_authority(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            item = obligation(store)
-            root = Path(store.path).parent / "hostile-settlement-evidence"
-
-            class HostileArtifactStore(ArtifactStore):
-                def read_authenticated_snapshot(self, artifact_id):
-                    raise AssertionError("hostile artifact reader must not run")
-
-            hostile = HostileArtifactStore(root)
-            with self.assertRaisesRegex(
-                SettlementConflict,
-                "requires canonical ArtifactStore",
-            ):
-                verify_settlement_rule_evidence(
-                    item.rule_binding,
-                    hostile,
-                    trade_date=item.trade_date,
-                    expected_settlement_date=item.settlement_date,
-                )
-
-    def test_snapshot_integrity_failure_cannot_release_receivable(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            economic = economics(store)
-            economic.append(
-                book_external_cash_flow(
-                    transaction_id="deposit-snapshot-failure",
-                    cause_event_id="deposit-event-snapshot-failure",
-                    currency="USD",
-                    amount="1000",
-                )
-            )
-            sold = sell_transaction()
-            economic.append(sold)
-            target = obligation(store, sold)
-            settlements = durable(store)
-            settlements.register_obligations(
-                (target,),
-                command_id="register-snapshot-failure",
-                idempotency_key="register-snapshot-failure",
-                committed_at="2026-09-25T09:00:02Z",
-            )
-            evidence = bind_evidence(store, target)
-            completion_artifact_id = evidence.evidence_ref.split(":", 1)[1].split("@", 1)[0]
-            before_sequence = store.current_journal_sequence()
-            before_available = settlements.project(economic).available_to_spend("USD")
-            original_snapshot = ArtifactStore.read_authenticated_snapshot
-
-            def fail_completion(instance, artifact_id):
-                if artifact_id == completion_artifact_id:
-                    raise ArtifactIntegrityError("snapshot changed")
-                return original_snapshot(instance, artifact_id)
-
-            with (
-                patch.object(
-                    ArtifactStore,
-                    "read_authenticated_snapshot",
-                    new=fail_completion,
-                ),
-                self.assertRaisesRegex(
-                    SettlementConflict,
-                    "settlement completion artifact verification failed",
-                ),
-            ):
-                settlements.apply_settlement(
-                    evidence,
-                    as_of=date(2026, 9, 26),
-                    command_id="settle-snapshot-failure",
-                    idempotency_key="settle-snapshot-failure",
-                    committed_at="2026-09-26T15:00:01Z",
-                )
-
-            self.assertEqual(store.current_journal_sequence(), before_sequence)
-            self.assertEqual(
-                settlements.project(economic).available_to_spend("USD"),
-                before_available,
-            )
-            self.assertEqual(
-                settlements.project(economic).snapshot("USD").unsettled_receivable,
-                Decimal("100"),
-            )
 
     def test_provider_settlement_releases_cash_once_across_restart(self):
         with TemporaryDirectory() as directory:

@@ -2298,6 +2298,89 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 before_bindings,
             )
 
+            class HostileDict(dict):
+                def items(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+                def __iter__(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+                def keys(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+            canonical_second_projected = replace(
+                second_projected,
+                client_order_id=first_projected.client_order_id,
+            )
+            canonical_second_provider = replace(
+                second_provider,
+                client_order_id=first_provider.client_order_id,
+            )
+            canonical_second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=first_projected,
+                original_provider=first_provider,
+                corrected_projected=canonical_second_projected,
+                corrected_provider=canonical_second_provider,
+                correction_observed_at="2026-09-25T12:43:01Z",
+                obligation_id="settlement-correction-hostile-container",
+            )
+
+            def load_events_with_hostile_nested_container(
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(aggregate_type, aggregate_id)
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_projected_fill"] = HostileDict(
+                    request["corrected_projected_fill"]
+                )
+                return forged
+
+            store.load_events = load_events_with_hostile_nested_container
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "non-canonical JSON value",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-hostile-container-command",
+                        idempotency_key="correction-hostile-container-idempotency",
+                        original_projected_fill=first_projected,
+                        original_provider_fill=first_provider,
+                        corrected_projected_fill=canonical_second_projected,
+                        corrected_provider_fill=canonical_second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:43:01Z",
+                        settlement_obligations=(canonical_second_obligation,),
+                        committed_at="2026-09-25T12:43:02Z",
+                    )
+            finally:
+                store.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
+            )
+
     def test_correction_precommit_failure_leaves_all_financial_projections_unchanged(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

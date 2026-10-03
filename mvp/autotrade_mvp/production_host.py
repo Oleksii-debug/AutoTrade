@@ -67,8 +67,33 @@ _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 _RUNTIME_OCCURRENCE_SCHEMA_VERSION = "1.0.0"
 _RUNTIME_OCCURRENCE_AGGREGATE_TYPE = "production_host_runtime"
 _RUNTIME_OCCURRENCE_EVENT_TYPE = "ProductionHostRuntimeOccurrenceIssued"
-_RUNTIME_OCCURRENCE_BINDINGS = WeakKeyDictionary()
-_RUNTIME_OCCURRENCE_BINDINGS_LOCK = RLock()
+
+
+def _runtime_occurrence_binding_authority():
+    """Create one process-private runtime-object occurrence selector authority."""
+
+    bindings = WeakKeyDictionary()
+    lock = RLock()
+
+    def bind(runtime: object, occurrence_id: str) -> None:
+        if type(occurrence_id) is not str or not occurrence_id:
+            raise TypeError("runtime occurrence binding id must be exact non-empty str")
+        with lock:
+            if runtime in bindings:
+                raise RuntimeError("production host runtime occurrence is already bound")
+            bindings[runtime] = occurrence_id
+
+    def read(runtime: object) -> str | None:
+        with lock:
+            return bindings.get(runtime)
+
+    return bind, read
+
+
+_RUNTIME_OCCURRENCE_BIND, _RUNTIME_OCCURRENCE_READ = (
+    _runtime_occurrence_binding_authority()
+)
+
 _RUNTIME_OCCURRENCE_PAYLOAD_FIELDS = frozenset(
     {
         "account_id",
@@ -740,23 +765,24 @@ class ProductionHostRuntime:
     def _bind_runtime_occurrence(
         self,
         occurrence: ProductionHostRuntimeOccurrence,
+        *,
+        _bind=_RUNTIME_OCCURRENCE_BIND,
     ) -> None:
         if type(occurrence) is not ProductionHostRuntimeOccurrence:
             raise TypeError(
                 "runtime occurrence must be exact ProductionHostRuntimeOccurrence"
             )
-        # Keep the selector outside caller-writable runtime instance state.
-        # ProductionHostRuntime is a Python object, so frozen/private attributes
-        # are not an authority boundary against object.__setattr__().
-        with _RUNTIME_OCCURRENCE_BINDINGS_LOCK:
-            if self in _RUNTIME_OCCURRENCE_BINDINGS:
-                raise RuntimeError("production host runtime occurrence is already bound")
-            _RUNTIME_OCCURRENCE_BINDINGS[self] = occurrence.runtime_occurrence_id
+        # Keep the selector outside both caller-writable runtime instance state
+        # and replaceable module-global container state. The captured closure
+        # owns the one-shot runtime-object binding for this process.
+        _bind(self, occurrence.runtime_occurrence_id)
 
     @property
-    def runtime_occurrence(self) -> ProductionHostRuntimeOccurrence:
-        with _RUNTIME_OCCURRENCE_BINDINGS_LOCK:
-            occurrence_id = _RUNTIME_OCCURRENCE_BINDINGS.get(self)
+    def runtime_occurrence(
+        self,
+        _read=_RUNTIME_OCCURRENCE_READ,
+    ) -> ProductionHostRuntimeOccurrence:
+        occurrence_id = _read(self)
         if type(occurrence_id) is not str:
             raise RuntimeError("production host runtime occurrence is not bound")
         durable = _load_production_host_runtime_occurrences(

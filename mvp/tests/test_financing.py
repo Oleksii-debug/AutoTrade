@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
@@ -279,6 +279,53 @@ class FinancingTests(unittest.TestCase):
         self.assertEqual(
             transaction.postings[1].ledger_account,
             "FINANCING_EXPENSE:USD",
+        )
+
+
+    def test_financing_delta_and_postings_ignore_ambient_decimal_context(self):
+        book = FinancingRevisionBook()
+        first = FinancingEvent.create(
+            charge_id="high-significance",
+            revision=1,
+            kind="FINAL",
+            effective_at=BASE,
+            available_at=BASE,
+            unit="BTC",
+            amount="1000000000000000000000000000000",
+            source_account="BORROW_LIABILITY:BTC",
+            evidence_ref="artifact:high-r1",
+        )
+        second = FinancingEvent.create(
+            charge_id="high-significance",
+            revision=2,
+            kind="FINAL",
+            effective_at=BASE,
+            available_at=BASE + timedelta(seconds=1),
+            unit="BTC",
+            amount="1000000000000000000000000000000.00000000000000000001",
+            source_account="BORROW_LIABILITY:BTC",
+            evidence_ref="artifact:high-r2",
+        )
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_DOWN
+            book.record(first)
+            update = book.record(second)
+            transaction = book_financing_delta(
+                transaction_id="high-significance-r2",
+                cause_event_id="high-significance-event-r2",
+                unit="BTC",
+                source_account="BORROW_LIABILITY:BTC",
+                economic_delta=update.economic_delta,
+            )
+        self.assertEqual(update.economic_delta, Decimal("0.00000000000000000001"))
+        self.assertEqual(
+            transaction.postings[0].amount,
+            Decimal("-0.00000000000000000001"),
+        )
+        self.assertEqual(
+            transaction.postings[1].amount,
+            Decimal("0.00000000000000000001"),
         )
 
 

@@ -112,15 +112,8 @@ def _sha256(value, *, name: str) -> str:
 
 
 def _mapping(value, *, name: str) -> Mapping[str, object]:
-    if type(value) not in (dict, MappingProxyType):
-        raise AllocationValuationError(
-            f"{name} must be an exact dict or mappingproxy"
-        )
-    for key in value:
-        if type(key) is not str:
-            raise AllocationValuationError(
-                f"{name} keys must be exact built-in strings"
-            )
+    if not isinstance(value, Mapping):
+        raise AllocationValuationError(f"{name} must be a mapping")
     return value
 
 

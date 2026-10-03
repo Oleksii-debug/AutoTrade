@@ -502,6 +502,84 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(self.book.transactions, ())
 
+    def test_correction_reproves_quantity_grid_before_any_reversal(self):
+        self.seed_option_position("-2")
+        first = self.evidence(
+            external_event_id="assignment-grid-r1",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+        before_transactions = tuple(self.book.transactions)
+        before_position = self.book.position(f"{OPTION_ID}@1")
+        before_cash = self.book.cash("USD")
+
+        correction = self.evidence(
+            external_event_id="assignment-grid-r2",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1.5",
+            observed_at=utc(12, 18, 19, 2),
+            provider_revision="provider-r2",
+            corrects_external_event_id="assignment-grid-r1",
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity_step",
+        ):
+            self.authority.apply(correction)
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), before_position)
+        self.assertEqual(self.book.cash("USD"), before_cash)
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            1,
+        )
+
+    def test_retry_under_changed_quantity_grid_is_not_equivalent(self):
+        self.seed_option_position("1")
+        reference = self.evidence()
+        first = self.authority.apply(reference)
+        self.assertTrue(first.inserted)
+        before_transactions = tuple(self.book.transactions)
+
+        changed_registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.5",
+                    minimum_quantity="0.5",
+                ),
+            )
+        )
+        restarted_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        changed_authority = self._authority(
+            registry=changed_registry,
+            economic_book=restarted_book,
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "reused with changed evidence",
+        ):
+            changed_authority.apply(reference)
+
+        self.assertEqual(tuple(restarted_book.transactions), before_transactions)
+        self.assertEqual(
+            len(
+                self.store.load_events(
+                    "option_lifecycle",
+                    changed_authority.aggregate_id,
+                )
+            ),
+            1,
+        )
+
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):
         reference = self.evidence()
         with self.assertRaisesRegex(

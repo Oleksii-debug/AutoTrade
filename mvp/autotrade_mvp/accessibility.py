@@ -107,22 +107,40 @@ def format_accessible_status(
                 "Action required: inspect or restore reservation state before relying on exposure status"
             )
         else:
-            lines.append(f"Active reservations: {len(reservations)}")
+            malformed_reservations = False
+            valid_reservations = 0
+            reservation_lines: list[str] = []
             for item in reservations:
                 if not isinstance(item, dict):
-                    lines.append("Reservation detail: unavailable; malformed state")
+                    malformed_reservations = True
+                    reservation_lines.append(
+                        "Reservation detail: unavailable; malformed state"
+                    )
                     continue
                 remaining = item.get("remaining")
                 state_text = _value(item, "state")
                 if not isinstance(remaining, dict):
-                    lines.append(
+                    malformed_reservations = True
+                    reservation_lines.append(
                         f"Reservation detail: unavailable; state: {state_text}; malformed remaining resources"
                     )
                     continue
+                valid_reservations += 1
                 for resource, amount in remaining.items():
-                    lines.append(
+                    reservation_lines.append(
                         f"Reserved {resource}: {amount}; state: {state_text}"
                     )
+            if malformed_reservations:
+                lines.append(
+                    "Active reservations: unavailable; one or more reservation entries are malformed"
+                )
+                lines.append(f"Structurally readable reservation entries: {valid_reservations}")
+                lines.append(
+                    "Action required: inspect or restore reservation state before relying on exposure status"
+                )
+            else:
+                lines.append(f"Active reservations: {valid_reservations}")
+            lines.extend(reservation_lines)
         if state == "awaiting_order_reconciliation":
             lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
 

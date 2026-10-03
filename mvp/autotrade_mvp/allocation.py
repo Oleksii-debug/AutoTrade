@@ -1958,11 +1958,11 @@ class ImmutableAllocationEvidence:
         )
 
 
-def _allocation_payload_snapshot(
+def _verified_allocation_payload_owner(
     evidence: ImmutableAllocationEvidence,
     _sealed_lookup=_registered_allocation_payload,
-) -> dict[str, object]:
-    """Return a detached exact-dict snapshot only from this issuer's seal."""
+):
+    """Verify canonical issuer provenance before any payload mapping method."""
 
     if type(evidence) is not ImmutableAllocationEvidence:
         raise TypeError("allocation evidence must use the canonical evidence type")
@@ -1985,6 +1985,16 @@ def _allocation_payload_snapshot(
     )
     if expected_digest != object.__getattribute__(evidence, "digest"):
         raise ValueError("allocation evidence payload provenance digest mismatch")
+    return owner, decoded
+
+
+def _allocation_payload_snapshot(
+    evidence: ImmutableAllocationEvidence,
+    _verify=_verified_allocation_payload_owner,
+) -> dict[str, object]:
+    """Return a detached exact-dict snapshot only from this issuer's seal."""
+
+    _, decoded = _verify(evidence)
     return decoded
 
 
@@ -2041,6 +2051,7 @@ def _resolve_allocation_evidence(
 ) -> ImmutableAllocationEvidence:
     if type(evidence) is not ImmutableAllocationEvidence:
         raise TypeError("allocation evidence values must use the canonical evidence type")
+    _verified_allocation_payload_owner(evidence)
     if evidence.kind != expected_kind:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} has kind {evidence.kind}, "
@@ -2059,6 +2070,7 @@ def _resolve_allocation_evidence(
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} cannot be resolved authoritatively"
         )
+    _verified_allocation_payload_owner(resolved)
     if resolved.digest != evidence.digest:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} digest does not match authoritative content"

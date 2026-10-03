@@ -2,9 +2,9 @@
 
 The implementation remains byte-for-byte in ``_trusted_chronology_cut_impl``.
 This facade closes composition hazards around terminal chronology authority:
-caller-owned horizons are never standalone authority, and recovery/runtime
-currentness is re-read after signed evidence verification before a horizon can
-be used by a terminal consumer.
+caller-owned horizons are never standalone authority, and durable store,
+recovery/runtime currentness is re-read after signed evidence verification before
+a horizon can be used by a terminal consumer.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _require_post_verification_currentness(
     *,
     kwargs: dict[str, object],
 ) -> None:
-    """Re-read mutable durable/runtime fences after signed-evidence callbacks."""
+    """Re-read mutable durable/store/runtime fences after signed-evidence callbacks."""
 
     recovery = kwargs["recovery"]
     if type(recovery) is not RecoveryController:
@@ -48,6 +48,20 @@ def _require_post_verification_currentness(
     ):
         raise PermissionError("trusted chronology durable recovery owner changed")
 
+    store = kwargs["store"]
+    selected_identity = _impl._selected_store_identity(store)
+    if (
+        _impl.journal_store_identity_digest(selected_identity)
+        != durable.store_identity_digest
+    ):
+        raise PermissionError(
+            "trusted chronology JournalStore identity changed during verification"
+        )
+    if recovery.durable_owner_store_identity != selected_identity:
+        raise PermissionError(
+            "trusted chronology recovery JournalStore changed during verification"
+        )
+
     runtime = kwargs.get("runtime")
     if durable.scope is _impl.ChronologyScope.SOURCE_QUALIFICATION:
         if runtime is not None:
@@ -58,8 +72,6 @@ def _require_post_verification_currentness(
 
     if type(runtime) is not _impl.ProductionHostRuntime:
         raise TypeError("RELEASE_RUNTIME requires exact ProductionHostRuntime")
-    store = kwargs["store"]
-    selected_identity = _impl._selected_store_identity(store)
     runtime_identity = _impl.require_exact_journal_store_authority(
         runtime.journal,
         subject="trusted chronology production runtime JournalStore",

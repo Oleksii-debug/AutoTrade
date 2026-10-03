@@ -199,6 +199,8 @@ class FxQuote:
         source_id: str,
         evidence_sha256: str,
     ) -> "FxQuote":
+        if cls is not FxQuote:
+            raise FxValuationError("FxQuote.create requires the exact FxQuote class")
         base = _currency(base_currency, "base_currency")
         quote = _currency(quote_currency, "quote_currency")
         if base == quote:
@@ -209,7 +211,7 @@ class FxQuote:
             raise FxValuationError("FX bid and ask must be positive")
         if bid_value > ask_value:
             raise FxValuationError("FX bid cannot exceed ask")
-        return cls(
+        return FxQuote(
             base_currency=base,
             quote_currency=quote,
             bid=bid_value,

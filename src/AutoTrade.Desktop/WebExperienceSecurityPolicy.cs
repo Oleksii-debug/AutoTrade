@@ -28,7 +28,9 @@ public sealed class WebExperienceSecurityPolicy
     /// </summary>
     public bool AllowsTopLevelNavigation(Uri target)
     {
-        if (!IsSameHostOrigin(target) || !string.IsNullOrEmpty(target.Query))
+        if (!IsSameHostOrigin(target)
+            || !string.IsNullOrEmpty(target.Query)
+            || !string.IsNullOrEmpty(target.Fragment))
         {
             return false;
         }

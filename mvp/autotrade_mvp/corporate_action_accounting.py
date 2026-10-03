@@ -485,10 +485,12 @@ def commit_authoritative_corporate_action(
         raise TypeError(
             "evidence_store must be exact DurableCorporateActionEvidenceStore"
         )
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(corporate_book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError(
+            "economic_book must be exact DurableProviderEconomicBook"
+        )
+    if type(corporate_book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be exact CorporateActionBook")
     if type(accepted) is not AuthoritativeCorporateAction:
         raise TypeError(
             "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"

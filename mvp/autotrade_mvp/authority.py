@@ -1738,7 +1738,6 @@ class AuthorityService:
             raise AuthorityConflict(
                 "regenerated reservation availability is malformed"
             )
-        legacy_expected_availability_evidence: dict[str, Any] | None = None
         if borrow_resources:
             if (
                 not isinstance(raw_adjustments, Mapping)
@@ -1754,6 +1753,9 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "regenerated reservation availability is malformed"
                 )
+            canonical_borrow_instrument = self._canonical_instrument_version(
+                record.instrument_version
+            )
             adjusted_available = dict(regenerated_available)
             canonical_adjustments: dict[str, dict[str, str]] = {}
             for resource in borrow_resources:
@@ -1761,6 +1763,7 @@ class AuthorityService:
                 if not isinstance(raw_adjustment, Mapping) or set(
                     raw_adjustment
                 ) != {
+                    "quantity_unit",
                     "total_capacity",
                     "current_borrowed_quantity",
                     "reservable_capacity",
@@ -1794,7 +1797,9 @@ class AuthorityService:
                     name="borrow.reservation_requirement",
                 )
                 if (
-                    total_capacity < 0
+                    raw_adjustment.get("quantity_unit")
+                    != canonical_borrow_instrument.quantity_unit
+                    or total_capacity < 0
                     or current_borrowed < 0
                     or reservable_capacity < 0
                     or required_increment < 0
@@ -1810,16 +1815,13 @@ class AuthorityService:
                     )
                 adjusted_available[resource] = _canonical_decimal_text(reservable_capacity)
                 canonical_adjustments[resource] = {
+                    "quantity_unit": canonical_borrow_instrument.quantity_unit,
                     "total_capacity": _canonical_decimal_text(total_capacity),
                     "current_borrowed_quantity": _canonical_decimal_text(current_borrowed),
                     "reservable_capacity": _canonical_decimal_text(reservable_capacity),
                     "required_increment": _canonical_decimal_text(required_increment),
                 }
             reservation_expected_available = adjusted_available
-            legacy_expected_availability_evidence = {
-                **expected_availability_evidence,
-                "borrow_capacity_adjustments": canonical_adjustments,
-            }
             expected_availability_evidence["availability"] = adjusted_available
             expected_availability_evidence[
                 "borrow_capacity_adjustments"
@@ -1831,14 +1833,9 @@ class AuthorityService:
 
         durable_availability_evidence = dict(availability_evidence)
         if durable_availability_evidence != expected_availability_evidence:
-            if (
-                legacy_expected_availability_evidence is None
-                or durable_availability_evidence
-                != legacy_expected_availability_evidence
-            ):
-                raise AuthorityConflict(
-                    "durable reservation availability evidence is inconsistent"
-                )
+            raise AuthorityConflict(
+                "durable reservation availability evidence is inconsistent"
+            )
         if reservation_request.get("available") != reservation_expected_available:
             raise AuthorityConflict(
                 "durable reservation exceeds authoritative account availability"

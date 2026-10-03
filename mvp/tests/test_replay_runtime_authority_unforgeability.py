@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.replay import (
     ReplayEvent,
     RuntimeStateAuthority,
     RuntimeStateVerifier,
+    resume_from_composite_checkpoint,
 )
 
 
@@ -54,19 +55,23 @@ def _signer(secret):
     return sign
 
 
-def _trusted_verifier():
+def _signature_verifier(secret):
     def verify(material, signature):
         expected = hmac.new(
-            _TRUSTED_SECRET,
+            secret,
             material,
             hashlib.sha256,
         ).hexdigest()
         return hmac.compare_digest(expected, signature)
 
-    return RuntimeStateVerifier(
+    return verify
+
+
+def _trusted_verifier():
+    return RuntimeStateVerifier.select_product_trust(
         authority_id="runtime:production",
         verifier_id="host-trust:runtime-production-v1",
-        verify_signature=verify,
+        verify_signature=_signature_verifier(_TRUSTED_SECRET),
     )
 
 
@@ -90,9 +95,6 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             cut_resolver=forged_cut,
         )
 
-        # The verifier is a separate host-composition trust input.  The
-        # self-authored signer cannot validate its own output merely because it
-        # chose the same authority_id and controls the runtime-state resolver.
         with self.assertRaisesRegex(
             ReplayError,
             "snapshot authority signature mismatch",
@@ -103,6 +105,96 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
+
+    def test_attacker_signer_verifier_resolver_pair_cannot_mint_checkpoint(self):
+        events = [
+            _event(1, "2026-09-24T10:00:00Z", 1),
+            _event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        product_verifier = _trusted_verifier()
+        forged_components = _components(forged_rng=True)
+
+        def forged_cut():
+            return "cut:caller-minted", replay.checkpoint(), forged_components
+
+        attacker = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_ATTACKER_SECRET),
+            cut_resolver=forged_cut,
+        )
+        attacker_verifier = RuntimeStateVerifier(
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            verify_signature=_signature_verifier(_ATTACKER_SECRET),
+        )
+
+        self.assertEqual(product_verifier.authority_id, "runtime:production")
+        with self.assertRaisesRegex(
+            ReplayError,
+            "not the product-selected trust anchor",
+        ):
+            replay.composite_checkpoint(
+                runtime_state_authority=attacker,
+                runtime_state_verifier=attacker_verifier,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+        self.assertEqual(replay.cursor, 1)
+
+    def test_attacker_verifier_cannot_resume_product_checkpoint(self):
+        events = [
+            _event(1, "2026-09-24T10:00:00Z", 1),
+            _event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        replay.advance_to("2026-09-24T10:00:00Z")
+        components = _components()
+        product_verifier = _trusted_verifier()
+
+        def trusted_cut():
+            return "cut:trusted", replay.checkpoint(), components
+
+        trusted_authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=trusted_cut,
+        )
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_authority=trusted_authority,
+            runtime_state_verifier=product_verifier,
+            build_sha="a" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+
+        def forged_cut():
+            return checkpoint.runtime_cut_id, checkpoint.replay, dict(checkpoint.runtime_components)
+
+        attacker = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_ATTACKER_SECRET),
+            cut_resolver=forged_cut,
+        )
+        attacker_verifier = RuntimeStateVerifier(
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            verify_signature=_signature_verifier(_ATTACKER_SECRET),
+        )
+        with self.assertRaisesRegex(
+            ReplayError,
+            "not the product-selected trust anchor",
+        ):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+                runtime_state_authority=attacker,
+                runtime_state_verifier=attacker_verifier,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+        self.assertEqual(replay.cursor, 1)
 
     def test_runtime_trust_registries_expose_no_removal_callbacks(self):
         replay = CausalReplay(

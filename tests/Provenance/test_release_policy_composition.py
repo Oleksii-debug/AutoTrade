@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -7,7 +8,10 @@ from tools.build_provenance_manifest import (
     QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
     QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
     QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+    _trusted_git_environment,
+    _trusted_git_executable,
     qualification_trust_policy_composition,
+    qualification_trust_policy_digest_from_git_source,
     qualification_trust_policy_digest_from_source,
 )
 
@@ -144,6 +148,58 @@ class QualificationTrustPolicyPinSourceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unavailable or invalid"):
             qualification_trust_policy_digest_from_source(path)
+
+    def test_release_pin_is_read_from_selected_git_object_not_dirty_worktree(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        source = root / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n",
+            encoding="utf-8",
+        )
+
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        git("init")
+        git("config", "user.name", "AutoTrade Test")
+        git("config", "user.email", "autotrade-test@example.invalid")
+        git("add", "mvp/autotrade_mvp/qualification_attestation.py")
+        git("commit", "-m", "pin source")
+        source_sha = git("rev-parse", "HEAD")
+        expected_blob = git(
+            "rev-parse",
+            f"{source_sha}:mvp/autotrade_mvp/qualification_attestation.py",
+        )
+
+        # The working tree now advertises a different pin. Release provenance
+        # must remain tied to the selected source commit.
+        source.write_text(
+            "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+            + repr(DIGEST)
+            + "\n",
+            encoding="utf-8",
+        )
+        digest, blob_sha = qualification_trust_policy_digest_from_git_source(
+            source_root=root,
+            source_sha=source_sha,
+        )
+        self.assertIsNone(digest)
+        self.assertEqual(blob_sha, expected_blob)
 
 
 class QualificationTrustPolicyCompositionTests(unittest.TestCase):

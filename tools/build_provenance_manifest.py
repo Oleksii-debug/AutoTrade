@@ -7,7 +7,8 @@ import ast
 import dis
 from datetime import datetime, timezone
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -31,6 +32,136 @@ QUALIFICATION_TRUST_POLICY_COMPONENT_PATH = (
     "mvp/autotrade_mvp/qualification_trust_policy.json"
 )
 QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION = "source-controlled"
+QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH = (
+    "mvp/autotrade_mvp/qualification_attestation.py"
+)
+
+
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
+
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git independently of caller PATH and source-checkout content."""
+
+    resolved_source_root = source_root.resolve(strict=True)
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(resolved_source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise ValueError("trusted Git executable must not originate from source_root")
+    raise ValueError("trusted Git executable is unavailable at an OS-managed location")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Run exact-object reads without caller-selected Git/process authority."""
+
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
+def _trusted_git(
+    *args: str,
+    source_root: Path,
+    text: bool = False,
+) -> bytes | str:
+    """Execute one bounded Git object query under the canonical clean process cut."""
+
+    source_root = source_root.resolve(strict=True)
+    executable = _trusted_git_executable(source_root=source_root)
+    try:
+        completed = subprocess.run(
+            [executable, *args],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            encoding="utf-8" if text else None,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError("exact Git source query is unavailable") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() if text else completed.stderr.decode(
+            "utf-8", errors="replace"
+        ).strip()
+        raise ValueError(
+            f"exact Git source query failed: {detail or args[0]}"
+        )
+    return completed.stdout
+
+
+def _exact_git_blob(
+    *,
+    source_root: Path,
+    source_sha: str,
+    relative_path: str,
+) -> tuple[bytes, str]:
+    """Read one exact blob and its object id from the selected source commit."""
+
+    if GIT_SHA.fullmatch(source_sha) is None:
+        raise ValueError("source_sha must be a canonical 40-hex commit SHA")
+    pure = PurePosixPath(relative_path)
+    if (
+        pure.is_absolute()
+        or not pure.parts
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or pure.as_posix() != relative_path
+    ):
+        raise ValueError("Git source path must be canonical and repository-relative")
+
+    top = _trusted_git("rev-parse", "--show-toplevel", source_root=source_root, text=True)
+    assert isinstance(top, str)
+    try:
+        top_path = Path(top.strip()).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("Git source root cannot be verified") from error
+    if top_path != source_root.resolve(strict=True):
+        raise ValueError("source_root must be the exact Git top-level")
+
+    _trusted_git("cat-file", "-e", f"{source_sha}^{{commit}}", source_root=source_root)
+    object_id_raw = _trusted_git(
+        "rev-parse",
+        f"{source_sha}:{relative_path}",
+        source_root=source_root,
+        text=True,
+    )
+    assert isinstance(object_id_raw, str)
+    object_id = object_id_raw.strip()
+    if GIT_OBJECT_ID.fullmatch(object_id) is None:
+        raise ValueError("exact Git source lookup returned noncanonical object id")
+    object_type = _trusted_git("cat-file", "-t", object_id, source_root=source_root, text=True)
+    assert isinstance(object_type, str)
+    if object_type.strip() != "blob":
+        raise ValueError("exact Git source object is not a blob")
+    raw = _trusted_git("cat-file", "blob", object_id, source_root=source_root)
+    assert isinstance(raw, bytes)
+    return raw, object_id
 
 
 def release_evidence_document(
@@ -93,13 +224,19 @@ def release_evidence_document(
     return True, None
 
 
-def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
-    """Read the one literal packaged-policy pin without importing product code."""
+def qualification_trust_policy_digest_from_bytes(
+    raw: bytes,
+    *,
+    source_name: str = "qualification_attestation.py",
+) -> str | None:
+    """Parse the one literal packaged-policy pin without executing product code."""
 
+    if type(raw) is not bytes:
+        raise TypeError("qualification trust policy pin source must be exact bytes")
     try:
-        source = path.read_text(encoding="utf-8")
-        module = ast.parse(source, filename=str(path))
-    except (OSError, UnicodeDecodeError, SyntaxError) as error:
+        source = raw.decode("utf-8", errors="strict")
+        module = ast.parse(source, filename=source_name)
+    except (UnicodeDecodeError, SyntaxError) as error:
         raise ValueError(
             "qualification trust policy pin source is unavailable or invalid"
         ) from error
@@ -109,7 +246,7 @@ def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
     target_name = "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256"
 
     try:
-        module_code = compile(source, str(path), "exec")
+        module_code = compile(source, source_name, "exec")
     except (SyntaxError, ValueError, TypeError) as error:
         raise ValueError(
             "qualification trust policy pin source is unavailable or invalid"
@@ -173,6 +310,40 @@ def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
             "qualification trust policy pin must be None or canonical SHA-256"
         )
     return value
+
+
+def qualification_trust_policy_digest_from_source(path: Path) -> str | None:
+    """Parse a local source file for unit/source-checkout diagnostics only."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            "qualification trust policy pin source is unavailable or invalid"
+        ) from error
+    return qualification_trust_policy_digest_from_bytes(
+        raw,
+        source_name=str(path),
+    )
+
+
+def qualification_trust_policy_digest_from_git_source(
+    *,
+    source_root: Path,
+    source_sha: str,
+) -> tuple[str | None, str]:
+    """Load the pin from the exact release source object, never the working tree."""
+
+    raw, object_id = _exact_git_blob(
+        source_root=source_root,
+        source_sha=source_sha,
+        relative_path=QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH,
+    )
+    digest = qualification_trust_policy_digest_from_bytes(
+        raw,
+        source_name=f"{source_sha}:{QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH}",
+    )
+    return digest, object_id
 
 
 def qualification_trust_policy_composition(
@@ -502,18 +673,20 @@ def build_manifest() -> dict[str, object]:
     )
     release_source_sha: str | None = None
     release_policy_digest: str | None = None
+    release_policy_pin_blob_sha: str | None = None
     if composition_ok:
         composition_document = json.loads(
             composition.read_text(encoding="utf-8")
         )
         release_source_sha = composition_document["source_sha"]
 
-        qualification_pin_source = (
-            ROOT / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
-        )
         try:
-            expected_policy_digest = qualification_trust_policy_digest_from_source(
-                qualification_pin_source
+            (
+                expected_policy_digest,
+                release_policy_pin_blob_sha,
+            ) = qualification_trust_policy_digest_from_git_source(
+                source_root=ROOT,
+                source_sha=release_source_sha,
             )
         except ValueError:
             policy_ok = False
@@ -709,11 +882,12 @@ def build_manifest() -> dict[str, object]:
         "global_json_blob_sha": git_blob_sha(global_path),
     }
     if release_policy_digest is not None:
-        qualification_pin_source = (
-            ROOT / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
-        )
-        source_inventory["qualification_attestation_blob_sha"] = git_blob_sha(
-            qualification_pin_source
+        if release_policy_pin_blob_sha is None:
+            raise RuntimeError(
+                "qualified release policy lacks exact-source pin blob identity"
+            )
+        source_inventory["qualification_attestation_blob_sha"] = (
+            release_policy_pin_blob_sha
         )
         source_inventory["qualification_trust_policy_sha256"] = (
             release_policy_digest

@@ -34,7 +34,11 @@ from .performance_qualification import (
     RuntimeLoadObservation,
     evaluate_runtime_budget,
 )
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    require_exact_journal_store_authority,
+)
 
 
 _CUT_TOKEN = object()
@@ -43,14 +47,14 @@ _CURRENT_TAXONOMY_DIGEST = taxonomy_digest()
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
+    if type(value) is not str or not value.strip() or value != value.strip():
         raise RuntimeBudgetError(f"{name} must be canonical non-empty text")
     return value
 
 
 def _sha256_identity(value: object, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
     ):
         raise RuntimeBudgetError(f"{name} must be canonical sha256:<64 hex>")
@@ -135,7 +139,7 @@ class RuntimeCampaignPlan:
             self, "spec_digest", _sha256_identity(self.spec_digest, name="spec_digest")
         )
         if (
-            not isinstance(self.release_sha, str)
+            type(self.release_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.release_sha) is None
         ):
             raise RuntimeBudgetError("release_sha must be a canonical Git object id")
@@ -220,7 +224,7 @@ class RuntimeCampaignPlan:
         release_artifact_id: str | None = None,
         release_artifact_sha256: str | None = None,
     ) -> "RuntimeCampaignPlan":
-        if not isinstance(spec, RuntimeBudgetSpec):
+        if type(spec) is not RuntimeBudgetSpec:
             raise TypeError("spec must be RuntimeBudgetSpec")
         if (
             isinstance(expected_financial_event_ids, (str, bytes))
@@ -344,7 +348,7 @@ class RuntimeCampaignEvidence:
             self, "spec_digest", _sha256_identity(self.spec_digest, name="spec_digest")
         )
         if (
-            not isinstance(self.release_sha, str)
+            type(self.release_sha) is not str
             or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.release_sha) is None
         ):
             raise RuntimeBudgetError("release_sha must be a canonical Git object id")
@@ -533,7 +537,7 @@ class RuntimeCampaignEvidence:
         )
 
     def to_observation(self, spec: RuntimeBudgetSpec) -> RuntimeLoadObservation:
-        if not isinstance(spec, RuntimeBudgetSpec):
+        if type(spec) is not RuntimeBudgetSpec:
             raise TypeError("spec must be RuntimeBudgetSpec")
         if (
             spec.digest != self.spec_digest
@@ -561,6 +565,38 @@ class RuntimeCampaignEvidence:
         )
 
 
+
+def _campaign_current_journal_sequence(
+    journal: JournalStore,
+    store_identity: object,
+) -> int:
+    with journal_store_authority_scope(journal, store_identity):
+        return JournalStore.current_journal_sequence(journal)
+
+
+def _campaign_load_events_after_journal_sequence(
+    journal: JournalStore,
+    store_identity: object,
+    start_journal_sequence: int,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    with journal_store_authority_scope(journal, store_identity):
+        return JournalStore.load_events_after_journal_sequence(
+            journal,
+            start_journal_sequence,
+            limit=limit,
+        )
+
+
+def _campaign_pending_outbox_count(
+    journal: JournalStore,
+    store_identity: object,
+) -> int:
+    with journal_store_authority_scope(journal, store_identity):
+        return JournalStore.pending_outbox_count(journal)
+
+
 def begin_runtime_campaign(
     *,
     journal: JournalStore,
@@ -568,11 +604,13 @@ def begin_runtime_campaign(
     plan: RuntimeCampaignPlan,
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> RuntimeCampaignCut:
-    if not isinstance(journal, JournalStore):
-        raise TypeError("journal must be JournalStore")
-    if not isinstance(spec, RuntimeBudgetSpec):
+    store_identity = require_exact_journal_store_authority(
+        journal,
+        subject="runtime campaign JournalStore",
+    )
+    if type(spec) is not RuntimeBudgetSpec:
         raise TypeError("spec must be RuntimeBudgetSpec")
-    if not isinstance(plan, RuntimeCampaignPlan):
+    if type(plan) is not RuntimeCampaignPlan:
         raise TypeError("plan must be RuntimeCampaignPlan")
     if (
         plan.scenario_id != spec.scenario_id
@@ -592,7 +630,7 @@ def begin_runtime_campaign(
     return RuntimeCampaignCut(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
-        start_journal_sequence=journal.current_journal_sequence(),
+        start_journal_sequence=_campaign_current_journal_sequence(journal, store_identity),
         started_monotonic_ns=started_monotonic_ns,
         _token=_CUT_TOKEN,
     )
@@ -612,13 +650,15 @@ def collect_runtime_campaign_evidence(
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
     max_events: int = 100000,
 ) -> RuntimeCampaignEvidence:
-    if not isinstance(journal, JournalStore):
-        raise TypeError("journal must be JournalStore")
-    if not isinstance(spec, RuntimeBudgetSpec):
+    store_identity = require_exact_journal_store_authority(
+        journal,
+        subject="runtime campaign JournalStore",
+    )
+    if type(spec) is not RuntimeBudgetSpec:
         raise TypeError("spec must be RuntimeBudgetSpec")
-    if not isinstance(plan, RuntimeCampaignPlan):
+    if type(plan) is not RuntimeCampaignPlan:
         raise TypeError("plan must be RuntimeCampaignPlan")
-    if not isinstance(cut, RuntimeCampaignCut):
+    if type(cut) is not RuntimeCampaignCut:
         raise TypeError("cut must be RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
@@ -637,8 +677,10 @@ def collect_runtime_campaign_evidence(
     elapsed_ns = ended_monotonic_ns - cut.started_monotonic_ns
     observed_duration_us = max(1, (elapsed_ns + 999) // 1000)
     declared_duration_us = plan.declared_duration_ms * 1000
-    end_sequence = journal.current_journal_sequence()
-    events = journal.load_events_after_journal_sequence(
+    end_sequence = _campaign_current_journal_sequence(journal, store_identity)
+    events = _campaign_load_events_after_journal_sequence(
+        journal,
+        store_identity,
         cut.start_journal_sequence,
         limit=max_events,
     )
@@ -685,7 +727,7 @@ def collect_runtime_campaign_evidence(
         if str(event["event_id"]) in expected
     ]
 
-    backlog_remaining = journal.pending_outbox_count()
+    backlog_remaining = _campaign_pending_outbox_count(journal, store_identity)
     return RuntimeCampaignEvidence(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
@@ -715,6 +757,6 @@ def evaluate_runtime_campaign(
     spec: RuntimeBudgetSpec,
     evidence: RuntimeCampaignEvidence,
 ) -> RuntimeBudgetDecision:
-    if not isinstance(evidence, RuntimeCampaignEvidence):
+    if type(evidence) is not RuntimeCampaignEvidence:
         raise TypeError("evidence must be RuntimeCampaignEvidence")
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

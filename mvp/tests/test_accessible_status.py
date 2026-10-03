@@ -113,6 +113,38 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("malformed remaining resources", text)
         self.assertIn("Reserved USD: 25.00; state: HELD", text)
 
+    def test_hostile_reservation_values_cannot_crash_status_surface(self):
+        class HostileText:
+            def __str__(self):
+                raise AssertionError("malformed state must not execute __str__")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {
+                        "state": HostileText(),
+                        "remaining": {
+                            HostileText(): "25.00",
+                            "USD": HostileText(),
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertIn("Reservation resource detail: unavailable; malformed value", text)
+        self.assertIn("Economic edge: unproven", text)
+
     def test_cli_accessible_status_after_simulation(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

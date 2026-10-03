@@ -4,7 +4,7 @@ import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from hashlib import sha256
 
 from autotrade_research.evaluation.ablation import (
@@ -71,15 +71,30 @@ class ExactRationalAblationTests(unittest.TestCase):
         self.assertLess(below.decision_exact.lhs,below.decision_exact.rhs)
 
     def test_verdict_is_independent_of_ambient_decimal_context(self):
-        cases=[_pair("third-a","0"),_pair("third-b","0"),_pair("third-c","1")]
-        with localcontext() as context:
-            context.prec=6
-            low=evaluate_incremental_value("agent",cases,minimum_pairs=3,required_lower_bound=Decimal("-1"))
-        with localcontext() as context:
-            context.prec=80
-            high=evaluate_incremental_value("agent",cases,minimum_pairs=3,required_lower_bound=Decimal("-1"))
-        self.assertEqual(low,high)
-        self.assertEqual((low.decision_exact.mean.numerator,low.decision_exact.mean.denominator),(1,3))
+        cases = [_pair("third-a", "0"), _pair("third-b", "0"), _pair("third-c", "1")]
+        results = []
+        for precision, rounding in (
+            (6, ROUND_DOWN),
+            (10, ROUND_CEILING),
+            (28, ROUND_FLOOR),
+            (80, ROUND_HALF_EVEN),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                results.append(
+                    evaluate_incremental_value(
+                        "agent",
+                        cases,
+                        minimum_pairs=3,
+                        required_lower_bound=Decimal("-1"),
+                    )
+                )
+        self.assertTrue(all(result == results[0] for result in results[1:]))
+        self.assertEqual(
+            (results[0].decision_exact.mean.numerator, results[0].decision_exact.mean.denominator),
+            (1, 3),
+        )
 
     def test_locked_bundle_v2_authenticates_exact_decision_material(self):
         cases=[_pair("lock-a","0"),_pair("lock-b","2")]
@@ -91,8 +106,18 @@ class ExactRationalAblationTests(unittest.TestCase):
         self.assertTrue(verify_ablation_evidence_bundle(locked,cases))
 
     def test_out_of_envelope_economics_fail_before_scoring(self):
-        with self.assertRaisesRegex(ValueError,"shared exact numeric resource envelope"):
-            _pair("oversized","1E257")
+        with self.assertRaisesRegex(ValueError, "shared exact numeric resource envelope"):
+            _pair("oversized", "1E257")
+
+        cases = [_pair("multiplier-a", "1"), _pair("multiplier-b", "1")]
+        with self.assertRaisesRegex(ValueError, "shared exact numeric resource envelope"):
+            evaluate_incremental_value(
+                "agent",
+                cases,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("1E257"),
+            )
 
 
     def test_reporting_overflow_does_not_suppress_exact_terminal_decision(self):

@@ -880,7 +880,9 @@
     reapplyTableFilter("event-history-body");
   }
 
-  function resetNotificationsForScope() {
+  function resetNotificationsForScope(
+    emptyMessage = "No material notifications recorded in this account/environment session."
+  ) {
     if (state.announcementTimer !== null) {
       window.clearTimeout(state.announcementTimer);
       state.announcementTimer = null;
@@ -898,8 +900,7 @@
     if (!history) return;
     history.replaceChildren();
     const item = document.createElement("li");
-    item.textContent =
-      "No material notifications recorded in this account/environment session.";
+    item.textContent = emptyMessage;
     history.appendChild(item);
   }
 
@@ -921,27 +922,31 @@
     renderCommandValidationDetails([], "scope_changed");
   }
 
-  function resetOperationsForScope() {
+  function resetOperationsForScope(
+    emptyMessage = "No host operations loaded for this account/environment session."
+  ) {
     const body = byId("operations-body");
     if (!body) return;
     body.replaceChildren();
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 4;
-    cell.textContent = "No host operations loaded for this account/environment session.";
+    cell.textContent = emptyMessage;
     row.appendChild(cell);
     body.appendChild(row);
     reapplyTableFilter("operations-body");
   }
 
-  function resetEventHistoryForScope() {
+  function resetEventHistoryForScope(
+    emptyMessage = "No canonical host events received in this account/environment session."
+  ) {
     const body = byId("event-history-body");
     if (!body) return;
     body.replaceChildren();
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 4;
-    cell.textContent = "No canonical host events received in this account/environment session.";
+    cell.textContent = emptyMessage;
     row.appendChild(cell);
     body.appendChild(row);
     reapplyTableFilter("event-history-body");
@@ -955,6 +960,11 @@
     const scopeChanged = state.renderedAccountId !== null && (
       parsed.accountId !== state.renderedAccountId ||
       parsed.environment !== state.renderedEnvironment);
+    const priorCursor = state.cursor;
+    const skippedSameScopeEvents =
+      !scopeChanged &&
+      state.renderedAccountId !== null &&
+      parsed.cursor > priorCursor;
     if (scopeChanged) {
       state.scopeEpoch += 1;
       state.cursor = 0n;
@@ -967,6 +977,22 @@
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
+    }
+    if (skippedSameScopeEvents) {
+      const gap =
+        "Canonical snapshot advanced from event cursor " + priorCursor.toString() +
+        " to " + parsed.cursor.toString() +
+        " before those host events were received by this page.";
+      resetNotificationsForScope(
+        "Notification history was cleared because " + gap);
+      resetOperationsForScope(
+        "Current host operations were cleared because " + gap);
+      resetEventHistoryForScope(
+        "Received host-event history was cleared because " + gap);
+      announce(
+        gap +
+          " Event-derived operation, notification, and received-event views were cleared rather than shown as current.",
+        true);
     }
 
     state.version = parsed.version;

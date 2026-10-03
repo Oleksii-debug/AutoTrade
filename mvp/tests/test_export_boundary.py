@@ -323,5 +323,36 @@ class ExportBoundaryTests(unittest.TestCase):
             )
 
 
+    def test_prepare_rejects_invalid_utf8_and_oversized_integer_fail_closed(self):
+        invalid = "\ud800"
+        with self.assertRaisesRegex(ExportBoundaryError, "valid UTF-8 text"):
+            self.prepare({"text": invalid})
+        with self.assertRaisesRegex(ExportBoundaryError, "valid UTF-8 text"):
+            self.prepare({invalid: "value"})
+        with self.assertRaisesRegex(ExportBoundaryError, "numeric hard limit"):
+            self.prepare({"value": 1 << 4096})
+
+    def test_verifier_rejects_forged_oversized_integer_without_valueerror_escape(self):
+        export = self.prepare({"value": 1})
+        oversized_integer = b"9" * 2000
+        forged_data = b'{"value":' + oversized_integer + b"}\n"
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+
+    def test_verifier_rejects_json_surrogate_text_even_when_rehashed(self):
+        export = self.prepare({"value": "safe"})
+        forged_data = b'{"value":"\\ud800"}\n'
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+
+
 if __name__ == "__main__":
     unittest.main()

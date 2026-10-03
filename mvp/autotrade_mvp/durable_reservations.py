@@ -26,6 +26,7 @@ from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
+from .simulated_provider import TRANSPORT_SEND_CONTRACT
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -301,6 +302,16 @@ class DurableReservationBook:
                         client_order_id=request.get("client_order_id"),
                         resolution_evidence=request.get("resolution_evidence"),
                     )
+                elif operation == "MARK_ZERO_WIRE_PREPARED_TERMINAL":
+                    current = book.get(request.get("reservation_id"))
+                    self._verify_zero_wire_prepared(
+                        reservation_id=request.get("reservation_id"),
+                        intent_id=current.intent_id,
+                        provider=request.get("provider"),
+                        attempt_id=request.get("attempt_id"),
+                        client_order_id=request.get("client_order_id"),
+                        resolution_evidence=request.get("resolution_evidence"),
+                    )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -336,7 +347,7 @@ class DurableReservationBook:
             )
         if operation == "MARK_UNKNOWN":
             return book.mark_unknown(request["reservation_id"])
-        if operation in {"MARK_TERMINAL", "MARK_ZERO_WIRE_TERMINAL"}:
+        if operation in {"MARK_TERMINAL", "MARK_ZERO_WIRE_TERMINAL", "MARK_ZERO_WIRE_PREPARED_TERMINAL"}:
             return book.mark_terminal(
                 request["reservation_id"],
                 outcome=request["outcome"],
@@ -846,6 +857,96 @@ class DurableReservationBook:
             )
         return evidence
 
+    def _verify_zero_wire_prepared(
+        self,
+        *,
+        reservation_id: object,
+        intent_id: object,
+        provider: object,
+        attempt_id: object,
+        client_order_id: object,
+        resolution_evidence: object | None = None,
+    ) -> str:
+        """Prove exact canonical-simulated Prepared-only state is still pre-wire."""
+
+        _text(reservation_id, name="reservation_id")
+        intent = _text(intent_id, name="intent_id")
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        client = _text(client_order_id, name="client_order_id")
+        if self.environment != "SIMULATION" or provider_name != "SIMULATED":
+            raise ReservationConflict(
+                "Prepared-only zero-wire proof is limited to canonical simulation"
+            )
+        aggregate_id = submission_attempt_aggregate_id(
+            environment=self.environment,
+            account_id=self.account_id,
+            attempt_id=attempt,
+        )
+        attempt_events = self.store.load_events(
+            "submission_attempt",
+            aggregate_id,
+        )
+        if (
+            len(attempt_events) != 1
+            or attempt_events[0].get("event_type") != "SubmissionPrepared"
+            or attempt_events[0].get("aggregate_version") != 1
+        ):
+            raise ReservationConflict(
+                "Prepared-only zero-wire release requires exact Prepared chronology"
+            )
+        prepared = attempt_events[0]
+        prepared_payload = prepared.get("payload")
+        if type(prepared_payload) is not dict:
+            raise ReservationConflict(
+                "Prepared-only submission evidence payload is invalid"
+            )
+        scope = prepared_payload.get("submission_scope")
+        expected_scope = {"transport_contract": TRANSPORT_SEND_CONTRACT}
+        if (
+            prepared_payload.get("attempt_id") != attempt
+            or prepared_payload.get("intent_id") != intent
+            or prepared_payload.get("environment") != self.environment
+            or prepared_payload.get("account_id") != self.account_id
+            or _text(
+                prepared_payload.get("provider"),
+                name="submission provider",
+            ).upper()
+            != provider_name
+            or prepared_payload.get("client_order_id") != client
+            or type(scope) is not dict
+            or scope != expected_scope
+            or prepared_payload.get("submission_scope_hash")
+            != payload_digest(expected_scope)
+        ):
+            raise ReservationConflict(
+                "Prepared-only submission evidence does not match canonical transport scope"
+            )
+        prepared_event_id = _text(
+            prepared.get("event_id"),
+            name="prepared event_id",
+        )
+        prepared_payload_hash = _text(
+            prepared.get("payload_hash"),
+            name="prepared payload_hash",
+        )
+        evidence = (
+            f"journal:submission-prepared:{prepared_event_id}"
+            f"@{prepared_payload_hash}"
+        )
+        if (
+            resolution_evidence is not None
+            and _text(
+                resolution_evidence,
+                name="resolution_evidence",
+            )
+            != evidence
+        ):
+            raise ReservationConflict(
+                "Prepared-only resolution evidence does not match durable prepared event"
+            )
+        return evidence
+
     def prepare_zero_wire_blocked_terminal_mutation(
         self,
         *,
@@ -937,6 +1038,116 @@ class DurableReservationBook:
                 self.environment,
                 self.account_id,
                 "zero-wire-terminal-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def prepare_zero_wire_prepared_terminal_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        provider: str,
+        attempt_id: str,
+        client_order_id: str,
+        committed_at: str,
+    ) -> PreparedReservationMutation:
+        """Prepare REJECTED only for the exact canonical simulated pre-send cut."""
+
+        key = _text(idempotency_key, name="idempotency_key")
+        rid = _text(reservation_id, name="reservation_id")
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        client = _text(client_order_id, name="client_order_id")
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        current = candidate.get(rid)
+        evidence = self._verify_zero_wire_prepared(
+            reservation_id=rid,
+            intent_id=current.intent_id,
+            provider=provider_name,
+            attempt_id=attempt,
+            client_order_id=client,
+        )
+        request = {
+            "reservation_id": rid,
+            "outcome": "REJECTED",
+            "provider": provider_name,
+            "attempt_id": attempt,
+            "client_order_id": client,
+            "resolution_evidence": evidence,
+        }
+        existing = idempotency.get(key)
+        if existing is not None:
+            if existing[0] != payload_digest(request):
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            snapshot = candidate.get(rid)
+            snapshot_value = _snapshot_payload(snapshot)
+            if snapshot_value != existing[1]:
+                raise ReservationConflict(
+                    "committed Prepared-only terminal snapshot does not match replayed state"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=request,
+                aggregate_version=(
+                    0 if not events else int(events[-1]["aggregate_version"])
+                ),
+                already_committed=True,
+            )
+
+        if current.state != "WORKING":
+            raise ReservationConflict(
+                "Prepared-only zero-wire release requires a WORKING reservation"
+            )
+        if any(amount != 0 for amount in current.consumed.values()):
+            raise ReservationConflict(
+                "Prepared-only zero-wire release cannot erase consumed exposure"
+            )
+        snapshot = candidate.mark_terminal(
+            rid,
+            outcome="REJECTED",
+            resolution_evidence=evidence,
+        )
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = (
+            1 if not events else int(events[-1]["aggregate_version"]) + 1
+        )
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "MARK_ZERO_WIRE_PREPARED_TERMINAL",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "zero-wire-prepared-terminal-reservation-event",
                 _text(event_key, name="event_key"),
             ),
             "event_type": _EVENT_TYPE,

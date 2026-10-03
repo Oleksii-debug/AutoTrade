@@ -9,8 +9,9 @@ be used by a terminal consumer.
 
 from __future__ import annotations
 
+import dis
 import sys
-from types import FunctionType
+from types import FunctionType, ModuleType
 
 from . import _trusted_chronology_cut_impl as _impl
 from .recovery import OwnerFence, RecoveryController
@@ -24,17 +25,17 @@ _original_verify_canonical_qualification_attestation = (
     _impl.verify_canonical_qualification_attestation
 )
 _original_trusted_authenticated_reader = _impl.trusted_authenticated_reader
+_original_parse_challenge_bound_measurement = _impl.parse_challenge_bound_measurement
+_original_parse_signed_qualification_attestation = (
+    _impl.parse_signed_qualification_attestation
+)
 
 
-# The compatibility facade intentionally publishes a small number of replacements
-# onto the implementation module below. Everything else in the implementation
-# namespace is part of the captured authority graph used by the original verifier
-# and horizon checker. Snapshot identity now, before publishing those replacements,
-# so later pre-call or callback-time rebinding fails closed instead of redirecting
-# a function object whose ``__globals__`` still points at the mutable impl module.
 _IMPL_SEAL_EXCLUDED_NAMES = frozenset(
     {
         "_build_callback_authority_wrappers",
+        "_build_external_function_graph_guard",
+        "_build_guarded_parser",
         "_build_post_verification_currentness",
         "_build_current_cut_with_horizon",
         "_build_impl_namespace_guard",
@@ -200,12 +201,217 @@ def _build_impl_namespace_guard(
                 current_closure,
                 expected_closure,
             ):
-                if current_cell is not expected_cell or current_cell.cell_contents is not expected_value:
+                if (
+                    current_cell is not expected_cell
+                    or current_cell.cell_contents is not expected_value
+                ):
                     raise RuntimeError(
                         "trusted chronology implementation closure changed: " + name
                     )
 
     return require_impl_namespace_sealed
+
+
+def _build_external_function_graph_guard(*, root, label: str):
+    """Freeze one imported parser's reachable executable and direct module-attr graph."""
+
+    if type(root) is not FunctionType:
+        raise TypeError("external parser root must be exact Python function")
+    if type(label) is not str or not label:
+        raise TypeError("external parser label must be exact non-empty text")
+
+    module_name = root.__module__
+    missing = object()
+    function_states: list[tuple[object, ...]] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    closure_bindings: list[tuple[object, object]] = []
+    class_bindings: list[tuple[type, str, object]] = []
+    module_attribute_bindings: list[tuple[ModuleType, str, object]] = []
+    module_attribute_function_states: list[tuple[FunctionType, object, object, object]] = []
+    seen_functions: set[int] = set()
+    seen_classes: set[int] = set()
+    seen_globals: set[tuple[int, str]] = set()
+    seen_closures: set[int] = set()
+    seen_class_bindings: set[tuple[int, str]] = set()
+    seen_module_attributes: set[tuple[int, str]] = set()
+    seen_module_attribute_functions: set[int] = set()
+
+    def capture_direct_module_attributes(function: FunctionType) -> None:
+        namespace = function.__globals__
+        instructions = tuple(dis.get_instructions(function))
+        for index, instruction in enumerate(instructions[:-1]):
+            if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+                continue
+            base = namespace.get(instruction.argval, missing)
+            if type(base) is not ModuleType:
+                continue
+            next_instruction = instructions[index + 1]
+            if next_instruction.opname not in {"LOAD_ATTR", "LOAD_METHOD"}:
+                continue
+            attribute_name = next_instruction.argval
+            if type(attribute_name) is not str or attribute_name not in base.__dict__:
+                continue
+            expected = base.__dict__[attribute_name]
+            key = (id(base), attribute_name)
+            if key not in seen_module_attributes:
+                seen_module_attributes.add(key)
+                module_attribute_bindings.append((base, attribute_name, expected))
+            if type(expected) is FunctionType and id(expected) not in seen_module_attribute_functions:
+                seen_module_attribute_functions.add(id(expected))
+                module_attribute_function_states.append(
+                    (
+                        expected,
+                        expected.__code__,
+                        expected.__defaults__,
+                        None
+                        if expected.__kwdefaults__ is None
+                        else dict(expected.__kwdefaults__),
+                    )
+                )
+
+    def visit_function(function) -> None:
+        if type(function) is not FunctionType or function.__module__ != module_name:
+            return
+        identity = id(function)
+        if identity in seen_functions:
+            return
+        seen_functions.add(identity)
+        function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                None
+                if function.__kwdefaults__ is None
+                else dict(function.__kwdefaults__),
+            )
+        )
+        capture_direct_module_attributes(function)
+        for cell in function.__closure__ or ():
+            cell_identity = id(cell)
+            if cell_identity in seen_closures:
+                continue
+            seen_closures.add(cell_identity)
+            try:
+                expected = cell.cell_contents
+            except ValueError:
+                expected = missing
+            closure_bindings.append((cell, expected))
+
+        namespace = function.__globals__
+        for name in function.__code__.co_names:
+            if name not in namespace:
+                continue
+            expected = namespace[name]
+            key = (id(namespace), name)
+            if key not in seen_globals:
+                seen_globals.add(key)
+                global_bindings.append((namespace, name, expected))
+            if type(expected) is FunctionType and expected.__module__ == module_name:
+                visit_function(expected)
+            elif isinstance(expected, type) and expected.__module__ == module_name:
+                visit_class(expected)
+
+    def visit_class(cls: type) -> None:
+        identity = id(cls)
+        if identity in seen_classes:
+            return
+        seen_classes.add(identity)
+        for name, raw in cls.__dict__.items():
+            functions = ()
+            if type(raw) is FunctionType:
+                functions = (raw,)
+            elif isinstance(raw, staticmethod):
+                functions = (raw.__func__,)
+            elif isinstance(raw, classmethod):
+                functions = (raw.__func__,)
+            elif isinstance(raw, property):
+                functions = tuple(
+                    function
+                    for function in (raw.fget, raw.fset, raw.fdel)
+                    if function is not None
+                )
+            else:
+                continue
+            key = (id(cls), name)
+            if key not in seen_class_bindings:
+                seen_class_bindings.add(key)
+                class_bindings.append((cls, name, raw))
+            for function in functions:
+                visit_function(function)
+
+    visit_function(root)
+    frozen_function_states = tuple(function_states)
+    frozen_global_bindings = tuple(global_bindings)
+    frozen_closure_bindings = tuple(closure_bindings)
+    frozen_class_bindings = tuple(class_bindings)
+    frozen_module_attribute_bindings = tuple(module_attribute_bindings)
+    frozen_module_attribute_function_states = tuple(module_attribute_function_states)
+
+    def require_external_graph_sealed() -> None:
+        for function, code, defaults, kwdefaults in frozen_function_states:
+            if function.__code__ is not code:
+                raise RuntimeError(label + " executable changed")
+            if function.__defaults__ is not defaults:
+                raise RuntimeError(label + " defaults changed")
+            current_kwdefaults = function.__kwdefaults__
+            if kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise RuntimeError(label + " defaults changed")
+            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                raise RuntimeError(label + " defaults changed")
+        for namespace, name, expected in frozen_global_bindings:
+            if namespace.get(name, missing) is not expected:
+                raise RuntimeError(label + " dependency changed: " + name)
+        for cell, expected in frozen_closure_bindings:
+            try:
+                current = cell.cell_contents
+            except ValueError:
+                current = missing
+            if current is not expected:
+                raise RuntimeError(label + " closure changed")
+        for cls, name, expected in frozen_class_bindings:
+            if cls.__dict__.get(name, missing) is not expected:
+                raise RuntimeError(
+                    label + " class executable changed: " + cls.__name__ + "." + name
+                )
+        for module, attribute_name, expected in frozen_module_attribute_bindings:
+            if module.__dict__.get(attribute_name, missing) is not expected:
+                raise RuntimeError(
+                    label
+                    + " module attribute changed: "
+                    + module.__name__
+                    + "."
+                    + attribute_name
+                )
+        for function, code, defaults, kwdefaults in frozen_module_attribute_function_states:
+            if function.__code__ is not code or function.__defaults__ is not defaults:
+                raise RuntimeError(label + " module function executable changed")
+            current_kwdefaults = function.__kwdefaults__
+            if kwdefaults is None:
+                if current_kwdefaults is not None:
+                    raise RuntimeError(label + " module function defaults changed")
+            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                raise RuntimeError(label + " module function defaults changed")
+
+    return require_external_graph_sealed
+
+
+def _build_guarded_parser(*, parser, require_parser_authority):
+    """Dispatch one retained parser only while its external graph remains sealed."""
+
+    if type(parser) is not FunctionType:
+        raise TypeError("parser must be exact Python function")
+    if not callable(require_parser_authority):
+        raise TypeError("require_parser_authority must be callable")
+
+    def guarded_parser(*args, **kwargs):
+        require_parser_authority()
+        result = parser(*args, **kwargs)
+        require_parser_authority()
+        return result
+
+    return guarded_parser
 
 
 def _build_callback_authority_wrappers(
@@ -244,19 +450,34 @@ def _build_callback_authority_wrappers(
     return guarded_canonical_verifier, guarded_authenticated_reader_factory
 
 
-# The canonical verifier and authenticated reader are the two callback-capable
-# operations inside the durable chronology re-verification path. Seal every other
-# implementation binding first, then install wrappers that recheck that frozen
-# authority immediately when either callback returns. This closes the active-frame
-# interval before `_reverify_durable_acceptance()` can consume module-global hash,
-# parser, or dynamic-requirement authority changed by the callback.
-_callback_guard_exclusions = _IMPL_SEAL_EXCLUDED_NAMES | frozenset(
-    {"verify_canonical_qualification_attestation", "trusted_authenticated_reader"}
+_measurement_parser_guard = _build_external_function_graph_guard(
+    root=_original_parse_challenge_bound_measurement,
+    label="trusted chronology measurement parser",
 )
-_require_callback_authority_sealed = _build_impl_namespace_guard(
+_signed_receipt_parser_guard = _build_external_function_graph_guard(
+    root=_original_parse_signed_qualification_attestation,
+    label="trusted chronology signed receipt parser",
+)
+_callback_guard_exclusions = _IMPL_SEAL_EXCLUDED_NAMES | frozenset(
+    {
+        "verify_canonical_qualification_attestation",
+        "trusted_authenticated_reader",
+        "parse_challenge_bound_measurement",
+        "parse_signed_qualification_attestation",
+    }
+)
+_callback_impl_guard = _build_impl_namespace_guard(
     _impl.__dict__,
     excluded_names=_callback_guard_exclusions,
 )
+
+
+def _require_callback_authority_sealed() -> None:
+    _callback_impl_guard()
+    _measurement_parser_guard()
+    _signed_receipt_parser_guard()
+
+
 (
     _guarded_verify_canonical_qualification_attestation,
     _guarded_trusted_authenticated_reader,
@@ -265,15 +486,24 @@ _require_callback_authority_sealed = _build_impl_namespace_guard(
     authenticated_reader_factory=_original_trusted_authenticated_reader,
     require_callback_authority=_require_callback_authority_sealed,
 )
+_guarded_parse_challenge_bound_measurement = _build_guarded_parser(
+    parser=_original_parse_challenge_bound_measurement,
+    require_parser_authority=_measurement_parser_guard,
+)
+_guarded_parse_signed_qualification_attestation = _build_guarded_parser(
+    parser=_original_parse_signed_qualification_attestation,
+    require_parser_authority=_signed_receipt_parser_guard,
+)
 _impl.verify_canonical_qualification_attestation = (
     _guarded_verify_canonical_qualification_attestation
 )
 _impl.trusted_authenticated_reader = _guarded_trusted_authenticated_reader
-
-# Capture the complete implementation namespace only after the two guarded
-# callback seams are installed. The complete seal therefore also freezes the
-# wrappers themselves, including their executable code/defaults/closure cells.
-_require_impl_namespace_sealed = _build_impl_namespace_guard(_impl.__dict__)
+_impl.parse_challenge_bound_measurement = _guarded_parse_challenge_bound_measurement
+_impl.parse_signed_qualification_attestation = (
+    _guarded_parse_signed_qualification_attestation
+)
+_callback_impl_guard = _build_impl_namespace_guard(_impl.__dict__)
+_require_impl_namespace_sealed = _callback_impl_guard
 _require_recovery_owner_globals_sealed = _build_named_namespace_guard(
     RecoveryController.durable_owner_chain.__globals__,
     names=frozenset(
@@ -465,14 +695,7 @@ _require_current_trusted_chronology_cut_with_horizon = _build_current_cut_with_h
 
 
 def _build_test_current_cut_verifier():
-    """Build a focused verifier after test doubles are installed.
-
-    Production authority never calls this helper. Legacy chronology tests must
-    inject signer/evidence doubles without rebinding the already-sealed production
-    verifier. Capturing a fresh namespace guard here treats the explicit test
-    doubles as that verifier's baseline while still detecting any rebinding or
-    authority-type namespace mutation that occurs from inside a verifier callback.
-    """
+    """Build a focused verifier after test doubles are installed."""
 
     return _build_current_cut_with_horizon(
         require_current_cut=_original_require_current_trusted_chronology_cut,
@@ -483,8 +706,6 @@ def _build_test_current_cut_verifier():
 
 
 def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> None:
-    """Prevent caller-owned cuts from becoming standalone horizon authority."""
-
     raise PermissionError(
         "standalone chronology horizon is not authority; "
         "use require_current_trusted_chronology_cut with claimed_instants"
@@ -492,6 +713,8 @@ def _reject_standalone_chronology_horizon(*_args: object, **_kwargs: object) -> 
 
 
 _impl._build_callback_authority_wrappers = _build_callback_authority_wrappers
+_impl._build_external_function_graph_guard = _build_external_function_graph_guard
+_impl._build_guarded_parser = _build_guarded_parser
 _impl._build_post_verification_currentness = _build_post_verification_currentness
 _impl._build_current_cut_with_horizon = _build_current_cut_with_horizon
 _impl._build_impl_namespace_guard = _build_impl_namespace_guard
@@ -502,8 +725,4 @@ _impl.require_current_trusted_chronology_cut = (
 )
 _impl.require_chronology_horizon = _reject_standalone_chronology_horizon
 
-# Preserve the implementation module object so existing exact-head tests that
-# deliberately patch private verifier/time seams continue to exercise the real
-# implementation rather than a second copy of module globals. Production terminal
-# currentness above no longer dereferences those patched globals after construction.
 sys.modules[__name__] = _impl

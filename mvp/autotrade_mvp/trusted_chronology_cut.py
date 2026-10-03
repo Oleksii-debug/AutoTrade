@@ -160,6 +160,27 @@ _require_recovery_owner_globals_sealed = _build_named_namespace_guard(
     ),
     label="trusted chronology recovery",
 )
+_require_runtime_occurrence_globals_sealed = _build_named_namespace_guard(
+    _impl.require_current_production_host_runtime_occurrence.__globals__,
+    names=frozenset(
+        {
+            "JournalStore",
+            "ProductionHostConfig",
+            "ProductionHostRuntimeOccurrence",
+            "_RUNTIME_OCCURRENCE_AGGREGATE_TYPE",
+            "_RUNTIME_OCCURRENCE_EVENT_TYPE",
+            "_RUNTIME_OCCURRENCE_PAYLOAD_FIELDS",
+            "_RUNTIME_OCCURRENCE_SCHEMA_VERSION",
+            "_load_production_host_runtime_occurrences",
+            "_readmit_production_host_config",
+            "_runtime_occurrence_from_event",
+            "_runtime_occurrence_from_scoped_event",
+            "journal_store_authority_scope",
+            "require_exact_journal_store_authority",
+        }
+    ),
+    label="trusted chronology production runtime",
+)
 
 
 def _build_post_verification_currentness(
@@ -168,6 +189,7 @@ def _build_post_verification_currentness(
     owner_fence_type,
     durable_owner_chain,
     require_recovery_owner_globals_sealed,
+    require_runtime_occurrence_globals_sealed,
     chronology_scope_type,
     production_runtime_type,
     runtime_occurrence_type,
@@ -223,6 +245,7 @@ def _build_post_verification_currentness(
 
         if type(runtime) is not production_runtime_type:
             raise TypeError("RELEASE_RUNTIME requires exact ProductionHostRuntime")
+        require_runtime_occurrence_globals_sealed()
         runtime_identity = require_journal_authority(
             runtime.journal,
             subject="trusted chronology production runtime JournalStore",
@@ -232,12 +255,14 @@ def _build_post_verification_currentness(
                 "production runtime does not share trusted chronology JournalStore"
             )
         occurrence = runtime.runtime_occurrence
+        require_runtime_occurrence_globals_sealed()
         if type(occurrence) is not runtime_occurrence_type:
             raise TypeError("production runtime occurrence is not canonical")
         occurrence = require_current_runtime_occurrence(
             journal=store,
             occurrence=occurrence,
         )
+        require_runtime_occurrence_globals_sealed()
         if (
             occurrence.host_id != durable.runtime_host_id
             or occurrence.runtime_occurrence_id != durable.runtime_occurrence_id
@@ -264,6 +289,7 @@ _require_post_verification_currentness = _build_post_verification_currentness(
     owner_fence_type=OwnerFence,
     durable_owner_chain=RecoveryController.durable_owner_chain,
     require_recovery_owner_globals_sealed=_require_recovery_owner_globals_sealed,
+    require_runtime_occurrence_globals_sealed=_require_runtime_occurrence_globals_sealed,
     chronology_scope_type=_impl.ChronologyScope,
     production_runtime_type=_impl.ProductionHostRuntime,
     runtime_occurrence_type=_impl.ProductionHostRuntimeOccurrence,

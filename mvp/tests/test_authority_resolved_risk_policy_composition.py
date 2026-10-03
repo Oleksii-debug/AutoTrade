@@ -4,6 +4,7 @@ import unittest
 
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
+    AuthorityService,
     RiskAuthorityRequest,
 )
 
@@ -34,14 +35,37 @@ class AuthorityResolvedRiskPolicyCompositionTests(unittest.TestCase):
             str(snapshot_fields["resolved_risk_policy"].type),
         )
 
-    def test_request_and_snapshot_revalidate_registry_issuance(self):
+    def test_selected_provider_domain_dimensions_exist_on_both_sides_of_policy_cut(self):
+        request_fields = {field.name for field in fields(RiskAuthorityRequest)}
+        snapshot_fields = {field.name for field in fields(AuthoritativeRiskSnapshot)}
+        required = {
+            "provider_environment",
+            "entity_policy_id",
+            "instrument_family",
+        }
+
+        self.assertFalse(
+            required - request_fields,
+            "financial request needs exact selected provider-domain dimensions to cross-bind RiskPolicyScope",
+        )
+        self.assertFalse(
+            required - snapshot_fields,
+            "authoritative snapshot must retain the same policy/provider-domain scope",
+        )
+
+    def test_request_and_snapshot_revalidate_registry_issuance_and_scope(self):
         request_init = getsource(RiskAuthorityRequest.__post_init__)
         snapshot_init = getsource(AuthoritativeRiskSnapshot.__post_init__)
 
         self.assertIn("require_registry_issued_resolved_policy", request_init)
         self.assertIn("require_registry_issued_resolved_policy", snapshot_init)
+        for source in (request_init, snapshot_init):
+            self.assertIn("provider_environment", source)
+            self.assertIn("entity_policy_id", source)
+            self.assertIn("instrument_family", source)
+            self.assertIn("identity.scope", source)
 
-    def test_snapshot_identity_binds_durable_policy_activation_history(self):
+    def test_snapshot_identity_binds_durable_policy_activation_history_and_scope(self):
         identity_source = getsource(AuthoritativeRiskSnapshot._identity_payload)
 
         self.assertIn("resolved_risk_policy", identity_source)
@@ -54,16 +78,21 @@ class AuthorityResolvedRiskPolicyCompositionTests(unittest.TestCase):
         self.assertIn("registration_event_id", identity_source)
         self.assertIn("resolved_journal_sequence_cut", identity_source)
         self.assertIn("journal_store_identity_digest", identity_source)
+        for dimension in (
+            "provider_environment",
+            "entity_policy_id",
+            "instrument_family",
+        ):
+            self.assertIn(dimension, identity_source)
 
-    def test_service_cross_binds_request_and_snapshot_policy_authority(self):
+    def test_service_cross_binds_request_and_snapshot_policy_authority_and_scope(self):
         resolver_source = getsource(
-            RiskAuthorityRequest.__module__
-            and __import__(
-                RiskAuthorityRequest.__module__,
-                fromlist=["AuthorityService"],
-            ).AuthorityService._resolve_authoritative_risk_snapshot
+            AuthorityService._resolve_authoritative_risk_snapshot
         )
         self.assertIn("resolved_risk_policy", resolver_source)
+        self.assertIn("provider_environment", resolver_source)
+        self.assertIn("entity_policy_id", resolver_source)
+        self.assertIn("instrument_family", resolver_source)
 
 
 if __name__ == "__main__":

@@ -1162,6 +1162,50 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
 
+    def test_terminal_interlock_validates_inputs_without_resolving_authority(self):
+        authority = object.__new__(AblationQualificationAuthority)
+
+        def forbidden_resolve(*args, **kwargs):
+            raise AssertionError("persistent authority graph must not execute")
+
+        authority.resolve = forbidden_resolve
+        cases = [
+            pair("interlock-a", "2", population_unit="interlock-unit-a"),
+            pair("interlock-b", "2", population_unit="interlock-unit-b"),
+        ]
+
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            authority=authority,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "canonical_utility_cost_owner_evidence_unavailable",
+        )
+
+        with self.assertRaisesRegex(ValueError, "minimum_pairs"):
+            evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                minimum_pairs=1,
+                required_lower_bound=Decimal("0"),
+            )
+
+        with self.assertRaisesRegex(ValueError, "duplicate matched ablation case_id"):
+            evaluate_qualified_incremental_value(
+                "agent",
+                [cases[0], cases[0]],
+                authority=authority,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+
     def test_terminal_qualification_requires_persistent_protocol_population_and_artifacts(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1308,10 +1352,10 @@ class AblationTests(unittest.TestCase):
                 minimum_pairs=2,
                 required_lower_bound=Decimal("0"),
             )
-            self.assertEqual(result.status, "PASS")
+            self.assertEqual(result.status, "INCONCLUSIVE")
             self.assertEqual(
                 result.reason,
-                "qualified_registered_canonical_ablation_net_of_cost",
+                "canonical_utility_cost_owner_evidence_unavailable",
             )
 
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])

@@ -2281,12 +2281,13 @@ def commit_economic_batch_with_reservation_consumption(
         provider_execution_id = _order_fill_plan.request.get(
             "provider_execution_id"
         )
-        if not isinstance(provider_execution_id, str) or not any(
-            item.cause_event_id == provider_execution_id
+        if not isinstance(provider_execution_id, str) or any(
+            item.cause_event_id != provider_execution_id
             for item in economic_plan.transactions
         ):
             raise AccountingConflict(
-                "OMS fill provider execution is absent from the atomic economic batch"
+                "OMS fill provider execution is absent from or does not exclusively own "
+                "the atomic economic batch"
             )
 
     settlement_plan = None

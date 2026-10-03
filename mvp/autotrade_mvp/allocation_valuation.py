@@ -111,9 +111,11 @@ def _sha256(value, *, name: str) -> str:
     return text
 
 
-def _mapping(value, *, name: str) -> dict[str, object]:
-    if type(value) is not dict:
-        raise AllocationValuationError(f"{name} must be an exact dict")
+def _mapping(value, *, name: str) -> Mapping[str, object]:
+    if type(value) not in (dict, MappingProxyType):
+        raise AllocationValuationError(
+            f"{name} must be an exact dict or mappingproxy"
+        )
     for key in value:
         if type(key) is not str:
             raise AllocationValuationError(
@@ -134,7 +136,7 @@ def _optional_decimal_equal(actual, expected, *, name: str) -> None:
 
 
 def _validate_optional_rate_identity(
-    valuation: dict[str, object],
+    valuation: Mapping[str, object],
     *,
     symbol: str,
     numerator: int,
@@ -166,7 +168,7 @@ def _validate_optional_rate_identity(
 
 
 def _declared_fx_rounding_policy(
-    valuation: dict[str, object],
+    valuation: Mapping[str, object],
     *,
     symbol: str,
     reporting_currency: str,
@@ -252,8 +254,8 @@ class AllocationValuation:
 def normalize_allocation_valuation(
     *,
     symbol: str,
-    market_payload: dict[str, object],
-    valuation_payload: dict[str, object],
+    market_payload: Mapping[str, object],
+    valuation_payload: Mapping[str, object],
     source_price,
     expected_cost_rate,
     expected_capital_requirement_rate,

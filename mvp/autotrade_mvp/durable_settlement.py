@@ -98,13 +98,23 @@ def _verify_artifact(
     expected_metadata: Mapping[str, object],
     name: str,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise SettlementConflict(f"{name} requires trusted ArtifactStore")
+    # Settlement evidence can release durable capital.  Do not accept a
+    # caller-polymorphic ArtifactStore at this financial boundary: a subclass
+    # could manufacture self-consistent manifest/body evidence.  The canonical
+    # class is already root-fenced by the WP-06 artifact authority.
+    if type(artifact_store) is not ArtifactStore:
+        raise SettlementConflict(f"{name} requires canonical ArtifactStore")
     artifact_id, digest, canonical_ref = _artifact_ref(
         evidence_ref, name=f"{name} evidence_ref"
     )
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        # One authenticated snapshot is the complete storage observation for
+        # this decision.  Calling the class method deliberately avoids virtual
+        # dispatch after the exact-type fence above.
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -121,7 +131,6 @@ def _verify_artifact(
         rights = manifest.get("rights")
         if not isinstance(rights, dict) or rights.get("storage") is not True:
             raise ArtifactIntegrityError("settlement evidence lacks storage provenance")
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,

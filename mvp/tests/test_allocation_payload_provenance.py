@@ -159,6 +159,37 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         finally:
             allocation_module._registered_allocation_payload = original
 
+    def test_resolver_rejects_tampered_payload_before_callbacks(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        hostile = _HostileMapping()
+        object.__setattr__(evidence, "payload", MappingProxyType(hostile))
+        hostile.calls.clear()
+
+        with self.assertRaisesRegex(ValueError, "payload provenance is not sealed"):
+            allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence.evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+
+        self.assertEqual(hostile.calls, [])
+
+    def test_resolver_rechecks_sealed_payload_against_evidence_digest(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        owner = evidence._payload_owners[-1]
+        object.__setattr__(owner, "_canonical_json", '{"symbol":"BBB"}')
+
+        with self.assertRaisesRegex(ValueError, "provenance digest mismatch"):
+            allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence.evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+
     def test_mappingproxy_over_hostile_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileMapping()
         proxy = MappingProxyType(hostile)

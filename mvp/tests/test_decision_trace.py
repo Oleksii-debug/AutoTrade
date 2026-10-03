@@ -419,6 +419,37 @@ class DecisionTraceStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
                 store.append(bad_digest)
 
+    def test_benign_security_counter_names_cannot_hide_secret_values(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-benign-name-secret")
+            item["attributes"] = {
+                "token_budget": "Bearer SHOULD-NOT-PERSIST",
+                "api_secret_rotation_count": "ROTATION-SECRET",
+                "nested": {
+                    "token_budget": 8,
+                    "api_secret_rotation_count": 4,
+                },
+            }
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)
+
+            self.assertNotIn("SHOULD-NOT-PERSIST", raw)
+            self.assertNotIn("ROTATION-SECRET", raw)
+            self.assertEqual(persisted["attributes"]["token_budget"], "[REDACTED]")
+            self.assertEqual(
+                persisted["attributes"]["api_secret_rotation_count"],
+                "[REDACTED]",
+            )
+            self.assertEqual(persisted["attributes"]["nested"]["token_budget"], 8)
+            self.assertEqual(
+                persisted["attributes"]["nested"]["api_secret_rotation_count"],
+                4,
+            )
+
     def test_source_and_build_identity_validation_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

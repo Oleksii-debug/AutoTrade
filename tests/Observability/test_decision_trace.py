@@ -141,6 +141,39 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(structured["safe"], "ok")
             self.assertTrue(store.verify())
 
+    def test_benign_counter_aliases_only_bypass_redaction_for_exact_counts(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-benign-counter-shape")
+            item["attributes"].update(
+                {
+                    "token_budget": "TOKEN-BUDGET-SECRET",
+                    "api_secret_rotation_count": "ROTATION-COUNT-SECRET",
+                    "safe_counters": {
+                        "token_budget": 8,
+                        "api_secret_rotation_count": 4,
+                    },
+                }
+            )
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)["attributes"]
+            exported = store.accessible_export("decision-benign-counter-shape")
+
+            self.assertNotIn("TOKEN-BUDGET-SECRET", raw)
+            self.assertNotIn("ROTATION-COUNT-SECRET", raw)
+            self.assertNotIn("TOKEN-BUDGET-SECRET", exported)
+            self.assertNotIn("ROTATION-COUNT-SECRET", exported)
+            self.assertEqual(persisted["token_budget"], "[REDACTED]")
+            self.assertEqual(persisted["api_secret_rotation_count"], "[REDACTED]")
+            self.assertEqual(persisted["safe_counters"]["token_budget"], 8)
+            self.assertEqual(
+                persisted["safe_counters"]["api_secret_rotation_count"],
+                4,
+            )
+
     def test_conflicting_retry_compares_redacted_persisted_semantics(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

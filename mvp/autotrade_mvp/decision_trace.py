@@ -67,10 +67,9 @@ def _normalized_key(value: object) -> str:
     )
 
 
-# These are bounded non-secret diagnostic metrics whose names intentionally
-# mention a security concept. Keep the allowlist exact: broader suffix-based
-# exceptions could turn attacker-chosen credential/session counters into an
-# opaque secret escape.
+# These are non-secret diagnostic counters whose names intentionally mention a
+# security concept.  The key alone is never sufficient to bypass redaction:
+# only an exact non-negative integer value may use this narrow exemption.
 _BENIGN_DIAGNOSTIC_KEYS = {
     "api_secret_rotation_count",
     "token_budget",
@@ -90,8 +89,6 @@ _COMPOUND_SENSITIVE_KEY_PARTS = {
 
 def _is_sensitive_key(value: object) -> bool:
     normalized = _normalized_key(value)
-    if normalized in _BENIGN_DIAGNOSTIC_KEYS:
-        return False
     if normalized in _SENSITIVE_KEYS:
         return True
 
@@ -212,7 +209,16 @@ def _redact(value: Any) -> Any:
         for key, item in value.items():
             if type(key) is not str:
                 raise ValueError("diagnostic object keys must be exact strings")
-            result[key] = "[REDACTED]" if _is_sensitive_key(key) else _redact(item)
+            normalized = _normalized_key(key)
+            benign_counter = (
+                normalized in _BENIGN_DIAGNOSTIC_KEYS
+                and type(item) is int
+                and item >= 0
+            )
+            if _is_sensitive_key(key) and not benign_counter:
+                result[key] = "[REDACTED]"
+            else:
+                result[key] = _redact(item)
         return result
     if type(value) is list:
         return [_redact(item) for item in value]

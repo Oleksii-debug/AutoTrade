@@ -254,6 +254,50 @@ class ProtocolRegistration:
     created_at: str
 
 
+
+@dataclass(frozen=True)
+class TrialCompletenessEvidence:
+    """One immutable ScientificRegistry trial-population snapshot.
+
+    This value is descriptive evidence, not bearer authority: downstream
+    qualification must obtain it from the exact canonical ScientificRegistry at
+    use time rather than trusting a caller-constructed instance.
+    """
+
+    protocol_id: str
+    protocol_hash: str
+    trial_budget: int
+    recorded_trials: int
+    remaining_trial_budget: int
+    trial_log_hash: str
+    stopping_rules_hash: str
+    statuses: tuple[tuple[str, int], ...]
+    includes_non_successes: bool
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.recorded_trials == self.trial_budget
+            and self.remaining_trial_budget == 0
+        )
+
+    @property
+    def digest(self) -> str:
+        return _hash(
+            {
+                "protocol_id": self.protocol_id,
+                "protocol_hash": self.protocol_hash,
+                "trial_budget": self.trial_budget,
+                "recorded_trials": self.recorded_trials,
+                "remaining_trial_budget": self.remaining_trial_budget,
+                "trial_log_hash": self.trial_log_hash,
+                "stopping_rules_hash": self.stopping_rules_hash,
+                "statuses": [[name, count] for name, count in self.statuses],
+                "includes_non_successes": self.includes_non_successes,
+            }
+        )
+
+
 @dataclass(frozen=True)
 class LockedEvaluationEvidence:
     evaluation_id: str
@@ -909,17 +953,28 @@ class ScientificRegistry:
                 ) from error
         return evidence
 
-    def completeness(self, protocol_id: str) -> dict[str, Any]:
+    def trial_completeness_evidence(
+        self,
+        protocol_id: str,
+    ) -> TrialCompletenessEvidence:
+        """Read protocol + complete registered trial population from one DB cut."""
+
         protocol = _id(protocol_id)
         with self._connect() as con:
+            # An explicit read transaction pins both queries to one WAL snapshot.
+            # Without this, a concurrent record_trial() could commit between the
+            # protocol and trial reads and produce a mixed authority cut.
+            con.execute("BEGIN")
             p = con.execute(
-                "SELECT payload_json FROM protocols WHERE protocol_id=?",
+                """
+                SELECT protocol_hash,payload_json
+                FROM protocols
+                WHERE protocol_id=?
+                """,
                 (protocol,),
             ).fetchone()
             if p is None:
                 raise KeyError(protocol)
-            protocol_payload = json.loads(p["payload_json"])
-            budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """
                 SELECT trial_id,status,payload_hash,payload_json
@@ -929,9 +984,30 @@ class ScientificRegistry:
                 """,
                 (protocol,),
             ).fetchall()
+
+        try:
+            protocol_payload = json.loads(p["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            not isinstance(protocol_payload, dict)
+            or _canonical(protocol_payload) != p["payload_json"]
+            or _hash(protocol_payload) != p["protocol_hash"]
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        budget = protocol_payload.get("trial_budget")
+        if type(budget) is not int or budget < 1:
+            raise ProtocolViolation("registered trial budget is invalid")
+        if "stopping_rules" not in protocol_payload:
+            raise ProtocolViolation("registered stopping rules are missing")
+
+        allowed_statuses = {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
         log: list[dict[str, str]] = []
         counts: dict[str, int] = {}
         for row in trial_rows:
+            status = row["status"]
+            if type(status) is not str or status not in allowed_statuses:
+                raise ProtocolViolation("registered trial status is corrupt")
             try:
                 payload = json.loads(row["payload_json"])
             except json.JSONDecodeError as error:
@@ -949,21 +1025,41 @@ class ScientificRegistry:
             log.append(
                 {
                     "trial_id": row["trial_id"],
-                    "status": row["status"],
+                    "status": status,
                     "payload_hash": row["payload_hash"],
                 }
             )
-            counts[row["status"]] = counts.get(row["status"], 0) + 1
+            counts[status] = counts.get(status, 0) + 1
+
         total = len(trial_rows)
-        return {
-            "trial_budget": budget,
-            "recorded_trials": total,
-            "remaining_trial_budget": budget - total,
-            "trial_log_hash": _hash(log),
-            "stopping_rules_hash": _hash(protocol_payload["stopping_rules"]),
-            "statuses": counts,
-            "includes_non_successes": any(
+        if total > budget:
+            raise ProtocolViolation(
+                "registered trial population exceeds immutable trial budget"
+            )
+        statuses = tuple(sorted(counts.items()))
+        return TrialCompletenessEvidence(
+            protocol_id=protocol,
+            protocol_hash=p["protocol_hash"],
+            trial_budget=budget,
+            recorded_trials=total,
+            remaining_trial_budget=budget - total,
+            trial_log_hash=_hash(log),
+            stopping_rules_hash=_hash(protocol_payload["stopping_rules"]),
+            statuses=statuses,
+            includes_non_successes=any(
                 counts.get(value, 0)
                 for value in ("FAILED", "DISCARDED", "CANCELLED")
             ),
+        )
+
+    def completeness(self, protocol_id: str) -> dict[str, Any]:
+        evidence = self.trial_completeness_evidence(protocol_id)
+        return {
+            "trial_budget": evidence.trial_budget,
+            "recorded_trials": evidence.recorded_trials,
+            "remaining_trial_budget": evidence.remaining_trial_budget,
+            "trial_log_hash": evidence.trial_log_hash,
+            "stopping_rules_hash": evidence.stopping_rules_hash,
+            "statuses": dict(evidence.statuses),
+            "includes_non_successes": evidence.includes_non_successes,
         }

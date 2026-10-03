@@ -611,6 +611,10 @@ def _validate_prepared_event(
     sequence = event.get("journal_sequence")
     if type(sequence) is not int or sequence <= 0:
         raise TrustedChronologyError("trusted chronology prepared sequence is invalid")
+    if sequence != challenge.journal_sequence + 1:
+        raise TrustedChronologyError(
+            "trusted chronology prepared event is not the sole post-challenge write"
+        )
     return challenge, started_mono, started_wall, sequence
 
 

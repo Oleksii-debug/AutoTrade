@@ -112,7 +112,9 @@ class DurableCapabilityRegistry:
         self.store = store
         self._session_verified: dict[str, CapabilitySnapshot] = {}
 
-    def _history(self) -> CapabilityRegistry:
+    def _history_with_versions(
+        self,
+    ) -> tuple[CapabilityRegistry, dict[str, int]]:
         registry = CapabilityRegistry()
         events = self.store.load_events_by_aggregate_type(_AGGREGATE_TYPE)
         seen_versions: dict[str, int] = {}
@@ -132,6 +134,10 @@ class DurableCapabilityRegistry:
             if _identity_id(snapshot) != aggregate_id:
                 raise CapabilityError("durable capability aggregate identity mismatch")
             registry.add(snapshot)
+        return registry, seen_versions
+
+    def _history(self) -> CapabilityRegistry:
+        registry, _versions = self._history_with_versions()
         return registry
 
     def add(self, snapshot: CapabilitySnapshot) -> bool:
@@ -139,7 +145,8 @@ class DurableCapabilityRegistry:
             raise TypeError("snapshot must be exact CapabilitySnapshot")
         # Rebuild durable truth first so stale writers cannot append after a
         # newer refresh for the same identity.
-        registry = self._history()
+        registry, seen_versions = self._history_with_versions()
+        aggregate_id = _identity_id(snapshot)
         try:
             existing = registry.latest(
                 provider_id=snapshot.provider_id,
@@ -165,11 +172,7 @@ class DurableCapabilityRegistry:
 
         # Canonical in-memory registry owns ordering/content semantics.
         registry.add(snapshot)
-        aggregate_id = _identity_id(snapshot)
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            aggregate_id,
-        )
+        version = seen_versions.get(aggregate_id, 0) + 1
         payload = _payload(snapshot)
         envelope = {
             "event_id": f"capability-snapshot:{snapshot.snapshot_id}",

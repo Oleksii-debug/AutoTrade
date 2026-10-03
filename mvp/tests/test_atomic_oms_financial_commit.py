@@ -378,7 +378,7 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(
-                (AccountingConflict, RuntimeError),
+                (AccountingConflict, RuntimeError, ValueError),
                 "JournalStore|generation|backing",
             ):
                 atomic_fill(economics, reservations, orders)

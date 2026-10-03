@@ -1197,5 +1197,91 @@ class DeterministicStrategyTests(unittest.TestCase):
             )
 
 
+
+    def test_strategy_detaches_descriptor_from_later_caller_mutation(self):
+        descriptor = self.descriptor(horizon_seconds=3600)
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        original_fingerprint = strategy.descriptor.fingerprint
+        object.__setattr__(descriptor, "horizon_seconds", 1)
+        object.__setattr__(descriptor, "strategy_id", "retargeted")
+
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(strategy.descriptor.fingerprint, original_fingerprint)
+        self.assertEqual(proposal.horizon_seconds, 3600)
+        self.assertEqual(
+            proposal.strategy_version,
+            "return-threshold-baseline@1",
+        )
+
+    def test_no_trade_baseline_detaches_descriptor_from_caller(self):
+        descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        baseline = NoTradeBaseline(descriptor=descriptor)
+        original_fingerprint = baseline.descriptor.fingerprint
+        object.__setattr__(descriptor, "family", "DETERMINISTIC_RETURN_THRESHOLD")
+
+        proposal = baseline.propose(symbol="AAA", decision_time=BASE)
+        self.assertEqual(baseline.descriptor.fingerprint, original_fingerprint)
+        self.assertEqual(proposal.action, "HOLD")
+
+    def test_decision_projection_uses_readmitted_canonical_objects(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1.0",
+        )
+        # Semantically equivalent lexical mutation must be canonicalized by
+        # readmission and must not leak caller-owned bytes into the projection.
+        object.__setattr__(economics, "instrument_version", " instrument:aaa@1 ")
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaa@1",
+            economics_binding=economics,
+            exit_policy_ref="exit-policy:v1",
+            compute_cost_currency="USD",
+        )
+        canonical = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1.0",
+        )
+        self.assertEqual(
+            body["confidence_basis"]["strategy_economics_binding_sha256"],
+            canonical.fingerprint,
+        )
+        self.assertEqual(
+            body["expected_return_distribution_ref"],
+            canonical.after_cost_return_distribution_sha256,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

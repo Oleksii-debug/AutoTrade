@@ -441,8 +441,10 @@ class WhiteBitMarketRules:
 
     @classmethod
     def from_provider(cls, payload: Mapping[str, object]) -> "WhiteBitMarketRules":
-        if not isinstance(payload, Mapping):
-            raise TypeError("payload must be a mapping")
+        if type(payload) is not dict:
+            raise TypeError(
+                "payload must be an exact dict from bounded provider JSON"
+            )
         required = {
             "name",
             "type",
@@ -467,10 +469,8 @@ class WhiteBitMarketRules:
             raise WhiteBitAdapterError("isCollateral must be boolean")
         if type(payload["tradesEnabled"]) is not bool:
             raise WhiteBitAdapterError("tradesEnabled must be boolean")
-        step_raw = _text(str(payload["stepSize"]), name="stepSize")
-        tick_raw = _text(str(payload["tickSize"]), name="tickSize")
-        step = _decimal(step_raw, name="stepSize", positive=True)
-        tick = _decimal(tick_raw, name="tickSize", positive=True)
+        step = _decimal(payload["stepSize"], name="stepSize", positive=True)
+        tick = _decimal(payload["tickSize"], name="tickSize", positive=True)
         min_amount = _decimal(payload["minAmount"], name="minAmount", positive=True)
         min_total = _decimal(payload["minTotal"], name="minTotal", positive=True)
         max_raw = _decimal(payload["maxTotal"], name="maxTotal")
@@ -481,7 +481,7 @@ class WhiteBitMarketRules:
         if delisted is not None:
             if not isinstance(delisted, int) or isinstance(delisted, bool) or delisted < 0:
                 raise WhiteBitAdapterError("delistedAt must be a non-negative integer or null")
-        market_type = _text(str(payload["type"]), name="type").upper()
+        market_type = _text(payload["type"], name="type").upper()
         if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
             raise WhiteBitAdapterError("unsupported WhiteBIT market type")
         is_tradfi_futures = payload["isTradFiFutures"]
@@ -490,7 +490,7 @@ class WhiteBitMarketRules:
                 "isTradFiFutures must be true exactly for type=tradfiFutures"
             )
         return cls(
-            market=_text(str(payload["name"]), name="name").upper(),
+            market=_text(payload["name"], name="name").upper(),
             market_type=market_type,
             is_tradfi_futures=is_tradfi_futures,
             is_collateral=payload["isCollateral"],

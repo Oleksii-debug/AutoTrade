@@ -1170,6 +1170,24 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=False),
             )
 
+    def test_posix_windows_forbidden_staging_name_fails_before_bundle_publication(self):
+        if os.name == "nt":
+            self.skipTest("Windows cannot create the forbidden source filename")
+        forbidden = self.staging / "bad?.dll"
+        forbidden.write_bytes(b"forbidden-on-windows")
+        output = self.root / "forbidden-name.zip"
+        with self.assertRaisesRegex(BundleError, "Windows-forbidden"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_suffix(".zip.sha256").exists())
+
     def test_windows_reserved_and_trailing_dot_paths_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "reserved device name"):
             _windows_path_key("CON.txt")

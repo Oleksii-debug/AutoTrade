@@ -231,6 +231,20 @@ def _strict_json_loads_bytes(raw: bytes) -> object:
     )
 
 
+def _require_provenance_schema_1(
+    document: object,
+    *,
+    label: str,
+) -> dict[str, object]:
+    """Refuse to interpret unknown provenance schemas under 1.0 semantics."""
+
+    if type(document) is not dict:
+        raise ValueError(f"{label} must be a JSON object")
+    if document.get("schema_version") != "1.0.0":
+        raise ValueError(f"{label} schema_version must be exactly 1.0.0")
+    return document
+
+
 def release_evidence_snapshot(
     path: Path,
     *,
@@ -743,7 +757,10 @@ def build_manifest() -> dict[str, object]:
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
-    components_doc = _strict_json_loads_bytes(components_path.read_bytes())
+    components_doc = _require_provenance_schema_1(
+        _strict_json_loads_bytes(components_path.read_bytes()),
+        label="components provenance",
+    )
     global_doc = _strict_json_loads_bytes(global_path.read_bytes())
 
     components, unresolved_first_party = normalize_inspected_components(

@@ -83,6 +83,15 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
                     active["leaf"] = False
                     os.close(descriptor)
 
+            original_identity = installer_manifest._assert_open_file_identity
+            identity_cuts = []
+
+            def identity(path, stream, *, name):
+                self.assertTrue(active["parent"])
+                self.assertTrue(active["leaf"])
+                identity_cuts.append(name)
+                return original_identity(path, stream, name=name)
+
             def parser(stream, digest):
                 self.assertTrue(active["parent"])
                 self.assertTrue(active["leaf"])
@@ -105,12 +114,17 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
                 installer_manifest,
                 "_verify_release_bundle_stream",
                 side_effect=parser,
+            ), patch.object(
+                installer_manifest,
+                "_assert_open_file_identity",
+                side_effect=identity,
             ):
                 self.assertEqual(
                     installer_manifest.verify_release_bundle(bundle),
                     {"verified": True},
                 )
 
+            self.assertEqual(identity_cuts, ["release bundle", "release bundle"])
             self.assertFalse(active["parent"])
             self.assertFalse(active["leaf"])
 

@@ -40,7 +40,7 @@ def _event(event_id: str, version: int) -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id=event_id,
         event_type=EVENT_TYPE,
-        aggregate_type="runtime_load_plan_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="declared-journal-load",
         aggregate_version=version,
     )
@@ -175,7 +175,7 @@ class RuntimeLoadPlanTests(unittest.TestCase):
             changed = ExpectedJournalEvent(
                 event_id="financial-1",
                 event_type="DifferentFinancialEvent",
-                aggregate_type="runtime_load_plan_fixture",
+                aggregate_type="risk_decision",
                 aggregate_id="declared-journal-load",
                 aggregate_version=1,
             )

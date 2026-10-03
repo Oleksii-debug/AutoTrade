@@ -33,7 +33,7 @@ def _expected() -> ExpectedJournalEvent:
     return ExpectedJournalEvent(
         event_id="measurement-cut-financial-1",
         event_type="RuntimeQualificationFinancialEvent",
-        aggregate_type="measurement_cut_fixture",
+        aggregate_type="risk_decision",
         aggregate_id="measurement-cut",
         aggregate_version=1,
     )

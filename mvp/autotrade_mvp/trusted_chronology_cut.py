@@ -44,7 +44,7 @@ def _build_impl_namespace_guard(
     *,
     excluded_names: frozenset[str] = _IMPL_SEAL_EXCLUDED_NAMES,
 ):
-    """Return a closure that rejects rebinding of the captured impl namespace."""
+    """Reject module rebinding and shallow mutation of captured authority types."""
 
     if type(namespace) is not dict:
         raise TypeError("implementation namespace must be exact dict")
@@ -57,6 +57,16 @@ def _build_impl_namespace_guard(
         and not name.startswith("__")
         and name not in excluded_names
     )
+    captured_types = tuple(
+        (
+            name,
+            value,
+            frozenset(value.__dict__),
+            tuple(value.__dict__.items()),
+        )
+        for name, value in captured
+        if isinstance(value, type)
+    )
 
     def require_impl_namespace_sealed() -> None:
         for name, expected in captured:
@@ -64,6 +74,20 @@ def _build_impl_namespace_guard(
                 raise RuntimeError(
                     "trusted chronology implementation authority changed: " + name
                 )
+        for name, expected_type, expected_names, expected_members in captured_types:
+            current_namespace = expected_type.__dict__
+            if frozenset(current_namespace) != expected_names:
+                raise RuntimeError(
+                    "trusted chronology implementation type authority changed: " + name
+                )
+            for member_name, expected_member in expected_members:
+                if current_namespace.get(member_name) is not expected_member:
+                    raise RuntimeError(
+                        "trusted chronology implementation type authority changed: "
+                        + name
+                        + "."
+                        + member_name
+                    )
 
     return require_impl_namespace_sealed
 
@@ -213,8 +237,8 @@ def _build_test_current_cut_verifier():
     Production authority never calls this helper. Legacy chronology tests must
     inject signer/evidence doubles without rebinding the already-sealed production
     verifier. Capturing a fresh namespace guard here treats the explicit test
-    doubles as that verifier's baseline while still detecting any rebinding that
-    occurs from inside a verifier callback.
+    doubles as that verifier's baseline while still detecting any rebinding or
+    authority-type namespace mutation that occurs from inside a verifier callback.
     """
 
     return _build_current_cut_with_horizon(

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1140,6 +1141,112 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(PermissionError):
             self.boundary.validate_session(old.token, origin=paired)
+
+    def test_session_revoke_cannot_linearize_mid_secret_resolution(self):
+        handle = self._credential()
+        entered = threading.Event()
+        release = threading.Event()
+        original_resolve = self.vault.resolve
+
+        def blocking_resolve(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("timed out waiting to release credential resolution")
+            return original_resolve(*args, **kwargs)
+
+        self.vault.resolve = blocking_resolve
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            resolving = pool.submit(
+                self.boundary.resolve_for_execution,
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(entered.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "session revocation must not cut through an already-authorized vault call",
+            )
+            release.set()
+            self.assertEqual(resolving.result(timeout=5), "top-secret")
+            revoking.result(timeout=5)
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
+
+    def test_session_revoke_waits_only_for_credential_lease_acquisition(self):
+        handle = self._credential()
+        entering = threading.Event()
+        allow_enter = threading.Event()
+        in_use = threading.Event()
+        allow_finish = threading.Event()
+        original_lease = self.vault.lease
+
+        @contextmanager
+        def blocking_lease(*args, **kwargs):
+            entering.set()
+            if not allow_enter.wait(5):
+                raise AssertionError("timed out waiting to enter credential lease")
+            with original_lease(*args, **kwargs) as plaintext:
+                yield plaintext
+
+        self.vault.lease = blocking_lease
+
+        def use_credential():
+            with self.boundary.lease_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ) as plaintext:
+                in_use.set()
+                if not allow_finish.wait(5):
+                    raise AssertionError("timed out waiting to finish credential use")
+                return plaintext
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            using = pool.submit(use_credential)
+            self.assertTrue(entering.wait(5))
+            revoking = pool.submit(
+                self.boundary.revoke_session,
+                self.owner.token,
+            )
+            self.assertFalse(
+                revoking.done(),
+                "revocation must wait until the credential lease is acquired",
+            )
+
+            allow_enter.set()
+            self.assertTrue(in_use.wait(5))
+            revoking.result(timeout=5)
+            self.assertFalse(
+                using.done(),
+                "revocation must not wait for already-linearized terminal credential use",
+            )
+            allow_finish.set()
+            self.assertEqual(using.result(timeout=5), "top-secret")
+
+        with self.assertRaisesRegex(PermissionError, "Unknown session"):
+            self.boundary.validate_session(
+                self.owner.token,
+                origin=self.owner.origin,
+            )
 
     def test_owner_can_pair_new_origin_and_non_owner_cannot(self):
         new_origin = "https://paired.autotrade.invalid"

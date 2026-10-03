@@ -214,12 +214,18 @@ def load_immutable_web_bundle(
     # Detach the caller-owned body-key/value graph before any dict membership
     # lookup. A str subclass key can otherwise execute __eq__ during an exact
     # manifest-path lookup even though the manifest path itself is canonical.
+    total_body_bytes = 0
     for body_path, body_bytes in asset_bodies.items():
         if type(body_path) is not str:
             raise TypeError("web bundle body paths must be exact strings")
         _canonical_asset_path(body_path)
         if type(body_bytes) is not bytes:
             raise TypeError("web bundle asset body must be immutable bytes")
+        if len(body_bytes) > _MAX_ASSET_BYTES:
+            raise ValueError("web bundle asset body exceeds the release envelope")
+        total_body_bytes += len(body_bytes)
+        if total_body_bytes > _MAX_BUNDLE_BYTES:
+            raise ValueError("web bundle body set exceeds the release size envelope")
 
     def reject_duplicate_keys(
         pairs: list[tuple[str, object]],

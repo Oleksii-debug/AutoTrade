@@ -102,7 +102,7 @@ class CausalReplayTests(unittest.TestCase):
                 checkpoint=checkpoint,
             )
 
-    def test_checkpoint_may_preserve_visible_but_not_yet_consumed_event(self):
+    def test_checkpoint_rejects_visible_but_not_yet_consumed_event(self):
         events = [
             event(1, "2026-09-24T10:00:00Z", 1),
             event(2, "2026-09-24T10:01:00Z", 2),
@@ -112,15 +112,15 @@ class CausalReplayTests(unittest.TestCase):
             cursor=0,
             clock="2026-09-24T10:00:00Z",
         )
-        replay = CausalReplay(
-            events,
-            start_at="2026-09-24T09:59:00Z",
-            checkpoint=checkpoint,
-        )
-        self.assertEqual(
-            [item.sequence for item in replay.advance_to("2026-09-24T10:00:00Z")],
-            [1],
-        )
+        with self.assertRaisesRegex(
+            ReplayError,
+            "omits events already visible at checkpoint clock",
+        ):
+            CausalReplay(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+            )
 
     def _runtime_components(self, **overrides):
         names = (

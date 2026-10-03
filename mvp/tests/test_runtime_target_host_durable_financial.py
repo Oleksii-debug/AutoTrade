@@ -93,6 +93,7 @@ def target_measurement(
     cut,
     event_id,
     journal_sequence,
+    end_journal_sequence,
     latency_start_ns=1_100_000_000,
     latency_end_ns=1_100_100_000,
 ):
@@ -109,7 +110,7 @@ def target_measurement(
         journal_taxonomy_digest=current_plan.journal_taxonomy_digest,
         journal_store_identity_digest=cut.journal_store_identity_digest,
         start_journal_sequence=cut.start_journal_sequence,
-        end_journal_sequence=JournalStore.current_journal_sequence(cut.journal),
+        end_journal_sequence=end_journal_sequence,
         monotonic_clock_id="python-time.monotonic-perf-shared>=3.13",
         staleness_basis="host-monotonic-financial-state-age",
         research_interference_basis="host-monotonic-contention-delay",
@@ -178,15 +179,23 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             SimpleNamespace(major=3, minor=13),
         )
 
+    def _measurement(self, store, current_spec, current_plan, cut, durable, **overrides):
+        values = {
+            "current_spec": current_spec,
+            "current_plan": current_plan,
+            "cut": cut,
+            "event_id": durable.event_id,
+            "journal_sequence": durable.event_journal_sequence,
+            "end_journal_sequence": JournalStore.current_journal_sequence(store),
+        }
+        values.update(overrides)
+        return target_measurement(**values)
+
     def test_binding_retains_payload_hash_and_exact_durable_latency_identity(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)
-        measurement = target_measurement(
-            current_spec=current_spec,
-            current_plan=current_plan,
-            cut=cut,
-            event_id=durable.event_id,
-            journal_sequence=durable.event_journal_sequence,
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
         )
         with self._python_313():
             binding = bind_durable_financial_latency_to_target_host_measurement(
@@ -207,7 +216,10 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             binding.bindings[0].durable_latency_sample_digest,
             durable.digest,
         )
-        self.assertEqual(binding.payload_hash_by_event[durable.event_id], durable.event_payload_hash)
+        self.assertEqual(
+            binding.payload_hash_by_event[durable.event_id],
+            durable.event_payload_hash,
+        )
         self.assertTrue(binding.digest.startswith("sha256:"))
 
     def test_python_312_clock_domain_is_rejected_before_journal_read(self):
@@ -232,12 +244,12 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
     def test_target_latency_endpoint_substitution_is_rejected(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)
-        measurement = target_measurement(
-            current_spec=current_spec,
-            current_plan=current_plan,
-            cut=cut,
-            event_id=durable.event_id,
-            journal_sequence=durable.event_journal_sequence,
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
             latency_start_ns=1_100_000_001,
             latency_end_ns=1_100_100_001,
         )
@@ -255,11 +267,12 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
     def test_target_journal_sequence_substitution_is_rejected(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)
-        measurement = target_measurement(
-            current_spec=current_spec,
-            current_plan=current_plan,
-            cut=cut,
-            event_id=durable.event_id,
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
             journal_sequence=durable.measurement_journal_sequence,
         )
         with self._python_313(), self.assertRaisesRegex(
@@ -276,12 +289,13 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
     def test_target_event_identity_substitution_is_rejected(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
         self.addCleanup(temporary.cleanup)
-        measurement = target_measurement(
-            current_spec=current_spec,
-            current_plan=current_plan,
-            cut=cut,
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
             event_id="substituted-financial",
-            journal_sequence=durable.event_journal_sequence,
         )
         with self._python_313(), self.assertRaisesRegex(
             RuntimeTargetHostDurableFinancialError,
@@ -309,12 +323,8 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             min_financial_samples=1,
             min_research_samples=1,
         )
-        measurement = target_measurement(
-            current_spec=current_spec,
-            current_plan=current_plan,
-            cut=cut,
-            event_id=durable.event_id,
-            journal_sequence=durable.event_journal_sequence,
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
         )
         with self._python_313(), self.assertRaisesRegex(
             RuntimeTargetHostDurableFinancialError,

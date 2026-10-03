@@ -24,18 +24,67 @@ def _deposit() -> ProviderActivityEvidence:
     )
 
 
-def _book(store: JournalStore):
+def _book(store: JournalStore, activity=None):
     return book_external_provider_cash_activity(
         store,
         provider_id="ALPACA",
         account_id="acct-cash-authority",
         environment="PAPER",
-        activity=_deposit(),
+        activity=_deposit() if activity is None else activity,
         observed_at="2026-10-03T15:00:01Z",
     )
 
 
 class ProviderCashStoreAuthorityTests(unittest.TestCase):
+    def test_provider_activity_subclass_cannot_enter_external_cash_authority(self):
+        with TemporaryDirectory() as directory:
+            canonical = _deposit()
+
+            class ActivitySubclass(ProviderActivityEvidence):
+                pass
+
+            hostile = ActivitySubclass(
+                provider_id=canonical.provider_id,
+                account_id=canonical.account_id,
+                environment=canonical.environment,
+                activity_id=canonical.activity_id,
+                activity_type=canonical.activity_type,
+                origin=canonical.origin,
+                occurred_at=canonical.occurred_at,
+                instrument=canonical.instrument,
+                currency=canonical.currency,
+                client_order_id=canonical.client_order_id,
+                provider_order_id=canonical.provider_order_id,
+                provider_execution_id=canonical.provider_execution_id,
+                signed_amount=canonical.signed_amount,
+            )
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact ProviderActivityEvidence",
+            ):
+                _book(store, hostile)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "economic_book",
+                    "unused",
+                ),
+                [],
+            )
+
+    def test_hidden_provider_activity_state_cannot_enter_external_cash_authority(self):
+        with TemporaryDirectory() as directory:
+            activity = _deposit()
+            object.__setattr__(
+                activity,
+                "unreviewed_state",
+                "must-not-enter-financial-authority",
+            )
+            store = JournalStore(Path(directory) / "selected.sqlite3")
+            with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+                _book(store, activity)
+
     def test_journal_store_subclass_cannot_mint_external_cash_economics(self):
         with TemporaryDirectory() as directory:
             calls = []

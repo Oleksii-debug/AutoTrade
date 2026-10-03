@@ -807,12 +807,62 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn('reapplyTableFilter("permissions-body")', js)
+
+
+    def test_permission_and_operation_tables_share_keyboard_filter_copy_workflow(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in ("permissions", "operations"):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-filter-status"', html)
+        self.assertIn(
+            'Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter"',
+            js,
+        )
+        self.assertIn(
+            'Object.freeze({bodyId: "operations-body", filterId: "operations-filter"',
+            js,
+        )
+        render_operation = js[
+            js.index("function renderOperation(operation)"):
+            js.index("async function refreshOperation")
+        ]
+        self.assertIn('row.dataset.filterableRow = "true"', render_operation)
+        self.assertIn('reapplyTableFilter("operations-body")', render_operation)
+
+    def test_account_or_environment_scope_change_clears_operation_evidence(self):
+        js = APP.read_text(encoding="utf-8")
+        reset = js[
+            js.index("function resetOperationsForScope()"):
+            js.index("function resetEventHistoryForScope()")
+        ]
+        self.assertIn('const body = byId("operations-body")', reset)
+        self.assertIn("body.replaceChildren()", reset)
+        self.assertIn("cell.colSpan = 4", reset)
+        self.assertIn(
+            "No host operations loaded for this account/environment session.",
+            reset,
+        )
+        self.assertIn('reapplyTableFilter("operations-body")', reset)
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        filters = snapshot.index("resetTableFiltersForScopeChange();")
+        operations = snapshot.index("resetOperationsForScope();")
+        history = snapshot.index("resetEventHistoryForScope();")
+        portfolio = snapshot.index('renderProjection(\n      "portfolio-body"')
+        self.assertLess(filters, operations)
+        self.assertLess(operations, history)
+        self.assertLess(operations, portfolio)
 
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
@@ -873,7 +923,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         parser = _ElementParser()
         parser.feed(html)
         by_id = {attrs["id"]: (tag, attrs) for tag, attrs in parser.elements if "id" in attrs}
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             status_id = f"{prefix}-filter-status"
             tag, attrs = by_id[status_id]
             self.assertEqual(tag, "p", status_id)
@@ -896,7 +946,9 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_table_tool_focus_targets_survive_browser_page_restore(self):
         js = APP.read_text(encoding="utf-8")
         for target in (
+            "permissions-filter", "permissions-copy",
             "strategy-filter", "strategy-copy", "portfolio-filter", "portfolio-copy",
+            "operations-filter", "operations-copy",
             "risk-filter", "risk-copy", "jobs-filter", "jobs-copy",
             "event-history-filter", "event-history-copy",
         ):

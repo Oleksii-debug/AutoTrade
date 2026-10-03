@@ -28,8 +28,10 @@
   });
 
   const TABLE_TOOLS = Object.freeze([
+    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", statusId: "permissions-filter-status", label: "permission and capability"}),
     Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", statusId: "strategy-filter-status", label: "strategy and decision"}),
     Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", statusId: "operations-filter-status", label: "current host operation"}),
     Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", statusId: "risk-filter-status", label: "risk and authority"}),
     Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", statusId: "jobs-filter-status", label: "research and replay jobs"}),
     Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", statusId: "event-history-filter-status", label: "received host events"})
@@ -56,9 +58,13 @@
   const RESTORABLE_FOCUS_IDS = new Set([
     "main",
     "permissions-region",
+    "permissions-filter",
+    "permissions-copy",
     "strategy-region",
     "portfolio-region",
     "operations-region",
+    "operations-filter",
+    "operations-copy",
     "risk-region",
     "jobs-region",
     "event-history-region",
@@ -553,12 +559,14 @@
     if (permissionSummary.capabilities.length === 0) {
       appendProjectionRow(
         body, "Capabilities", "No capabilities reported by the host snapshot.");
+      reapplyTableFilter("permissions-body");
       return;
     }
     permissionSummary.capabilities.forEach((capability, index) => {
       appendProjectionRow(
         body, "Capability " + String(index + 1), capability);
     });
+    reapplyTableFilter("permissions-body");
   }
 
   function renderJobs(jobs) {
@@ -792,12 +800,14 @@
       body.appendChild(row);
     }
 
+    row.dataset.filterableRow = "true";
     row.children[0].textContent = operation.operationId;
     row.children[1].textContent = operation.phase;
     row.children[2].textContent = operation.updatedAt;
     row.children[3].textContent = operation.remainingUncertainty.length > 0
       ? operation.remainingUncertainty.join(", ")
       : "None reported";
+    reapplyTableFilter("operations-body");
   }
 
   async function refreshOperation(operationId) {
@@ -839,6 +849,19 @@
     reapplyTableFilter("event-history-body");
   }
 
+  function resetOperationsForScope() {
+    const body = byId("operations-body");
+    if (!body) return;
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "No host operations loaded for this account/environment session.";
+    row.appendChild(cell);
+    body.appendChild(row);
+    reapplyTableFilter("operations-body");
+  }
+
   function resetEventHistoryForScope() {
     const body = byId("event-history-body");
     if (!body) return;
@@ -861,6 +884,7 @@
       state.cursor = 0n;
       state.version = 0n;
       resetTableFiltersForScopeChange();
+      resetOperationsForScope();
       resetEventHistoryForScope();
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {

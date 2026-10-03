@@ -139,6 +139,66 @@ class ExecutionQualificationTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertGreater(result.fill_price, Decimal("101"))
 
+    def test_validation_uses_one_authenticated_snapshot_not_legacy_split_reads(self):
+        exec_model = model()
+        with (
+            patch.object(
+                ArtifactStore,
+                "load_manifest",
+                side_effect=AssertionError("legacy manifest read must not run"),
+            ),
+            patch.object(
+                ArtifactStore,
+                "read_bytes",
+                side_effect=AssertionError("legacy object read must not run"),
+            ),
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model)
+            )
+
+    def test_artifact_store_subclass_cannot_supply_execution_evidence_authority(self):
+        class DerivedArtifactStore(ArtifactStore):
+            pass
+
+        exec_model = model()
+        with TemporaryDirectory() as directory:
+            derived = DerivedArtifactStore(Path(directory) / "artifacts")
+            derived.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["protocol:wp13"],
+                metadata={"kind": "execution-qualification-evidence"},
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical ArtifactStore",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(
+                        exec_model,
+                        artifact_store=derived,
+                    )
+                )
+
+    def test_authenticated_snapshot_bytes_are_rehashed_against_manifest_digest(self):
+        exec_model = model()
+        manifest = self.store.load_manifest(ARTIFACT_ID)
+        with patch.object(
+            ArtifactStore,
+            "read_authenticated_snapshot",
+            return_value=(manifest, b"different execution evidence bytes"),
+        ):
+            with self.assertRaisesRegex(
+                ExecutionQualificationError,
+                "bytes do not match immutable artifact digest",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(exec_model)
+                )
+
     def test_cost_assumption_change_invalidates_qualification(self):
         qualified = model(slippage_bps="5")
         changed = model(slippage_bps="6")

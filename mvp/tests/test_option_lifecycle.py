@@ -305,6 +305,21 @@ class DurableOptionLifecycleTests(unittest.TestCase):
                 ):
                     OptionLifecycleObservation(**values)
 
+    def test_oversized_provider_numeric_text_fails_before_mutation(self):
+        reference = self.evidence(
+            external_event_id="oversized-life",
+            signed_contracts="1" * 2048,
+        )
+        self.assertEqual(self.book.transactions, ())
+        self.assertEqual(self.authority._events(), [])
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "invalid financial values",
+        ):
+            self.authority.apply(reference)
+        self.assertEqual(self.book.transactions, ())
+        self.assertEqual(self.authority._events(), [])
+
     def test_lifecycle_decimal_identity_is_context_independent(self):
         observation = OptionLifecycleObservation(
             provider_id="BYBIT",

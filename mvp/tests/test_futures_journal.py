@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.futures import (
     FuturesSettlementEvidence,
@@ -28,7 +29,7 @@ from mvp.autotrade_mvp.futures_journal import (
     variation_margin_aggregate_id,
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
@@ -555,6 +556,125 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(command_count, 0)
+
+
+    def test_linear_commit_fails_closed_if_global_journal_cut_moves(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "cut-race-linear", "105", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original_commit = JournalStore.commit_command
+
+            def raced_commit(instance, **kwargs):
+                payload = {"source": "unrelated-writer"}
+                JournalStore.append_event(
+                    instance,
+                    {
+                        "event_id": "unrelated-linear-cut-race",
+                        "event_type": "UnrelatedCommitted",
+                        "aggregate_type": "UNRELATED_TEST",
+                        "aggregate_id": "linear",
+                        "aggregate_version": "1",
+                        "committed_at": utc(1).isoformat(),
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                    },
+                )
+                return original_commit(instance, **kwargs)
+
+            with patch.object(JournalStore, "commit_command", new=raced_commit):
+                with self.assertRaisesRegex(
+                    FuturesError,
+                    "journal cut changed before commit",
+                ):
+                    commit_linear_variation_margin(
+                        store,
+                        opening,
+                        settlement,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                    )
+
+            self.assertEqual(
+                store.load_events(
+                    "FUTURES_VARIATION_MARGIN",
+                    variation_margin_aggregate_id(opening),
+                ),
+                [],
+            )
+            self.assertEqual(store.current_journal_sequence(), 1)
+
+    def test_inverse_commit_fails_closed_if_global_journal_cut_moves(self):
+        contract = self._contract(payoff="INVERSE")
+        opening = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(
+            contract,
+            "cut-race-inverse",
+            "11000",
+            sequence=1,
+        )
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original_commit = JournalStore.commit_command
+
+            def raced_commit(instance, **kwargs):
+                payload = {"source": "unrelated-writer"}
+                JournalStore.append_event(
+                    instance,
+                    {
+                        "event_id": "unrelated-inverse-cut-race",
+                        "event_type": "UnrelatedCommitted",
+                        "aggregate_type": "UNRELATED_TEST",
+                        "aggregate_id": "inverse",
+                        "aggregate_version": "1",
+                        "committed_at": utc(1).isoformat(),
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                    },
+                )
+                return original_commit(instance, **kwargs)
+
+            with patch.object(JournalStore, "commit_command", new=raced_commit):
+                with self.assertRaisesRegex(
+                    FuturesError,
+                    "journal cut changed before commit",
+                ):
+                    commit_inverse_variation_margin(
+                        store,
+                        opening,
+                        settlement,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                        settlement_quantum=Decimal("0.00000001"),
+                    )
+
+            self.assertEqual(
+                store.load_events(
+                    "FUTURES_VARIATION_MARGIN",
+                    variation_margin_aggregate_id(opening),
+                ),
+                [],
+            )
+            self.assertEqual(store.current_journal_sequence(), 1)
 
 
 if __name__ == "__main__":

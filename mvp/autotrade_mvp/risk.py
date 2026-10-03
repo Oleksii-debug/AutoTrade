@@ -328,7 +328,7 @@ def _normalize_scenario_digests(
         label = _identity_key(raw_label, name=name)
         if label in normalized:
             raise ValueError(f"{name} keys must be unique after normalization")
-        if not isinstance(raw_digest, str):
+        if type(raw_digest) is not str:
             raise TypeError(f"{name}[{label}] must be a SHA-256 string")
         digest = raw_digest.strip()
         if (
@@ -736,7 +736,7 @@ class RiskPolicy:
 
         normalized_tail_set_digest = None
         if required_tail_scenario_set_digest is not None:
-            if not isinstance(required_tail_scenario_set_digest, str):
+            if type(required_tail_scenario_set_digest) is not str:
                 raise TypeError(
                     "required_tail_scenario_set_digest must be a SHA-256 string"
                 )
@@ -1360,7 +1360,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
 
 
 def _risk_binding_instant(value: str, *, name: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -1372,7 +1372,7 @@ def _risk_binding_instant(value: str, *, name: str) -> datetime:
 
 
 def _risk_binding_text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -1392,8 +1392,8 @@ def bind_risk_decision(
 ) -> RiskDecision:
     """Bind a deterministic risk result to immutable admission evidence."""
 
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("decision must be a RiskDecision")
+    if type(decision) is not RiskDecision:
+        raise TypeError("decision must be an exact RiskDecision")
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
         raise ValueError(
             "risk decision must use the current exact arithmetic policy"
@@ -1411,20 +1411,17 @@ def bind_risk_decision(
         )
     )
     if (
-        not isinstance(state_version, int)
-        or isinstance(state_version, bool)
+        type(state_version) is not int
         or state_version < 0
     ):
         raise ValueError("state_version must be a non-negative integer")
     if (
-        not isinstance(policy_version, int)
-        or isinstance(policy_version, bool)
+        type(policy_version) is not int
         or policy_version < 1
     ):
         raise ValueError("policy_version must be a positive integer")
     if (
-        not isinstance(reservation_version, int)
-        or isinstance(reservation_version, bool)
+        type(reservation_version) is not int
         or reservation_version < 0
     ):
         raise ValueError("reservation_version must be a non-negative integer")
@@ -1456,8 +1453,8 @@ def bind_risk_decision(
 
 
 def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("risk_decision must be a RiskDecision")
+    if type(decision) is not RiskDecision:
+        raise TypeError("risk_decision must be an exact RiskDecision")
     if decision.decision_id is None:
         raise ValueError("risk_decision must be bound before admission")
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:

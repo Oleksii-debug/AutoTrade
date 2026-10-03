@@ -31,6 +31,9 @@ from .persistence import (
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_plan import load_declared_runtime_event_plan
 from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
+from .runtime_target_host_composed_authority import (
+    verify_sealed_composed_runtime_target_host_qualification,
+)
 from .runtime_target_host_composed_qualification import (
     AcceptedComposedRuntimeTargetHostQualification,
     RuntimeTargetHostCompositionError,
@@ -355,6 +358,7 @@ def _build_chronology_free_verifier(
 # production closure.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
     _build_chronology_free_verifier(
+        verify_composed=verify_sealed_composed_runtime_target_host_qualification,
         acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
     )
 )

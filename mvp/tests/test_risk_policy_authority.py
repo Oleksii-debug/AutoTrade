@@ -8,6 +8,7 @@ import weakref
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.risk import RiskPolicy
+from mvp.autotrade_mvp.store_identity import JournalStoreIdentity
 from mvp.autotrade_mvp import risk_policy_authority as authority
 from mvp.autotrade_mvp.risk_policy_authority import (
     DurableRiskPolicyRegistry,
@@ -58,6 +59,61 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_journal_store_identity_digest_uses_windows_handle_identity_not_path(self):
+        first = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=5,
+        )
+        spelling_alias = JournalStoreIdentity(
+            canonical_path="c:/AUTOTRADE/JOURNAL.SQLITE3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=5,
+        )
+        different_file = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=6,
+        )
+
+        self.assertEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(spelling_alias),
+        )
+        self.assertNotEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(different_file),
+        )
+
+    def test_journal_store_identity_digest_retains_posix_generation_path(self):
+        first = JournalStoreIdentity(
+            canonical_path="/srv/autotrade/journal.sqlite3",
+            filesystem_device=10,
+            filesystem_inode=20,
+        )
+        renamed = JournalStoreIdentity(
+            canonical_path="/srv/autotrade-renamed/journal.sqlite3",
+            filesystem_device=10,
+            filesystem_inode=20,
+        )
+
+        self.assertNotEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(renamed),
+        )
+
     def test_resolved_policy_cannot_be_forged_by_direct_construction(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

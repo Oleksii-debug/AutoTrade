@@ -815,7 +815,13 @@ class HistoricalVintageRegistry:
         canonical_id = _uuid(dataset_id, "dataset_id")
         canonical_version = _sequence(version, "version")
         expected_manifest_digest = _digest(manifest_digest, "manifest_digest")
-        manifest = self.load(canonical_id, canonical_version)
+        if type(self) is not HistoricalVintageRegistry:
+            raise TypeError("registry must be exact HistoricalVintageRegistry")
+        manifest = HistoricalVintageRegistry.load(
+            self,
+            canonical_id,
+            canonical_version,
+        )
         actual_manifest_digest = "sha256:" + sha256(
             _canonical_bytes(manifest)
         ).hexdigest()
@@ -843,8 +849,9 @@ class HistoricalVintageRegistry:
                 "through canonical source_evidence"
             )
         population_ref = population_refs[0]
-        artifact_manifest, raw_population = artifact_store.read_authenticated_snapshot(
-            population_ref["artifact_id"]
+        artifact_manifest, raw_population = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            population_ref["artifact_id"],
         )
         if artifact_manifest.get("artifact_id") != population_ref["artifact_id"]:
             raise HistoricalConflict(

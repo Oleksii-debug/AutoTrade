@@ -130,6 +130,24 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
                     protector=DeterministicProtector(),
                 )
 
+    def test_reattachment_manifest_preserves_provider_environment_without_authority(self):
+        handle = self._bybit(domain="TESTNET")
+        manifest = self.vault.export_reattachment_manifest()
+        requirements = ProtectedCredentialVault.validate_reattachment_manifest(manifest)
+
+        self.assertEqual(manifest["source_vault_format_version"], 3)
+        self.assertEqual(len(requirements), 1)
+        self.assertEqual(requirements[0].handle, handle)
+        self.assertEqual(requirements[0].handle.provider_environment, "TESTNET")
+        self.assertTrue(requirements[0].was_active)
+        self.assertFalse(manifest["contains_secrets"])
+
+        legacy = json.loads(json.dumps(manifest))
+        legacy["source_vault_format_version"] = 2
+        legacy["records"][0]["handle"].pop("provider_environment")
+        with self.assertRaises(SecretVaultError):
+            ProtectedCredentialVault.validate_reattachment_manifest(legacy)
+
     def test_transition_receipt_retains_exact_provider_environment(self):
         old = self._bybit(domain="TESTNET")
         current, receipt = rotate_trade_credential_with_receipt(

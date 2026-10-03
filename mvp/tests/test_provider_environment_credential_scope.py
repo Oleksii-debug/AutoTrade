@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.credential_transition_receipt import (
     rotate_trade_credential_with_receipt,
     verify_trade_credential_transition_receipt,
 )
+from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import (
     PersistentCredentialHandle,
     ProtectedCredentialVault,
@@ -147,6 +148,103 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
         legacy["records"][0]["handle"].pop("provider_environment")
         with self.assertRaises(SecretVaultError):
             ProtectedCredentialVault.validate_reattachment_manifest(legacy)
+
+    def test_security_boundary_preserves_domain_across_register_lease_rotate_and_revoke(self):
+        boundary = SecurityBoundary(
+            allowed_origins={"https://localhost"},
+            credential_vault=self.vault,
+            session_authorizer=lambda _subject, _role, _origin: True,
+            now=lambda: 100.0,
+        )
+        session = boundary.create_session(
+            subject="owner-1",
+            role="OWNER",
+            origin="https://localhost",
+        )
+        handle = boundary.register_secret(
+            session.token,
+            origin="https://localhost",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            purpose="TRADE",
+            secret_value="scoped-secret",
+        )
+        self.assertEqual(handle.provider_environment, "TESTNET")
+
+        with boundary.lease_for_execution(
+            session.token,
+            origin="https://localhost",
+            handle=handle,
+            execution_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            purpose="TRADE",
+            provider_environment="TESTNET",
+        ) as plaintext:
+            self.assertEqual(plaintext, "scoped-secret")
+
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            with boundary.lease_for_execution(
+                session.token,
+                origin="https://localhost",
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="DEMO",
+            ):
+                self.fail("wrong provider domain must not lease plaintext")
+
+        rotated = boundary.rotate_secret(
+            session.token,
+            origin="https://localhost",
+            handle_id=handle.handle_id,
+            owner_identity="windows-user-1",
+            new_secret_value="scoped-secret-v2",
+        )
+        self.assertEqual(rotated.provider_environment, "TESTNET")
+        boundary.revoke_secret(
+            session.token,
+            origin="https://localhost",
+            handle_id=rotated.handle_id,
+            owner_identity="windows-user-1",
+        )
+        self.assertEqual(
+            boundary.describe_handle(rotated.handle_id)["provider_environment"],
+            "TESTNET",
+        )
+
+    def test_security_boundary_cannot_guess_bybit_provider_domain(self):
+        boundary = SecurityBoundary(
+            allowed_origins={"https://localhost"},
+            credential_vault=self.vault,
+            session_authorizer=lambda _subject, _role, _origin: True,
+            now=lambda: 100.0,
+        )
+        session = boundary.create_session(
+            subject="owner-1",
+            role="OWNER",
+            origin="https://localhost",
+        )
+        before = self.path.read_bytes()
+        with self.assertRaises(SecretVaultError):
+            boundary.register_secret(
+                session.token,
+                origin="https://localhost",
+                owner_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value="must-not-store",
+            )
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_transition_receipt_retains_exact_provider_environment(self):
         old = self._bybit(domain="TESTNET")

@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tools.build_provenance_manifest import (
     QUALIFICATION_TRUST_POLICY_COMPONENT_ID,
@@ -11,9 +13,11 @@ from tools.build_provenance_manifest import (
     _QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES,
     _trusted_git_environment,
     _trusted_git_executable,
+    dependency_advisory_evidence_document,
     qualification_trust_policy_composition,
     qualification_trust_policy_digest_from_git_source,
     qualification_trust_policy_digest_from_source,
+    release_evidence_snapshot,
 )
 
 
@@ -30,6 +34,77 @@ def policy_component(*, digest: str = DIGEST, **overrides: object) -> dict[str, 
     }
     value.update(overrides)
     return value
+
+
+class ReleaseEvidenceSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def evidence_bytes(*, source_sha: str, dependency_graph: object | None = None) -> bytes:
+        value: dict[str, object] = {
+            "qualified": True,
+            "schema_version": "1.0.0",
+            "source_sha": source_sha,
+            "evidence_refs": [
+                {
+                    "artifact_id": "release-evidence",
+                    "sha256": "sha256:" + "2" * 64,
+                    "observed_at": "2026-10-03T23:00:00Z",
+                }
+            ],
+        }
+        if dependency_graph is not None:
+            value["dependency_graph"] = dependency_graph
+        return json.dumps(value, sort_keys=True).encode("utf-8")
+
+    def test_release_evidence_snapshot_reads_authority_bytes_once(self):
+        path = Path("release-composition.json")
+        first_sha = "a" * 40
+        forged_sha = "b" * 40
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[
+                self.evidence_bytes(source_sha=first_sha),
+                self.evidence_bytes(source_sha=forged_sha),
+            ],
+        ) as read_bytes:
+            qualified, reason, snapshot = release_evidence_snapshot(
+                path,
+                label="release composition",
+            )
+
+        self.assertTrue(qualified)
+        self.assertIsNone(reason)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["source_sha"], first_sha)
+        self.assertEqual(read_bytes.call_count, 1)
+
+    def test_dependency_advisory_uses_the_same_held_snapshot(self):
+        path = Path("dependency-advisory.json")
+        expected_graph = {"python": ["pinned-wheel"]}
+        forged_graph = {"python": ["different-wheel"]}
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=[
+                self.evidence_bytes(
+                    source_sha="a" * 40,
+                    dependency_graph=expected_graph,
+                ),
+                self.evidence_bytes(
+                    source_sha="a" * 40,
+                    dependency_graph=forged_graph,
+                ),
+            ],
+        ) as read_bytes:
+            qualified, reason = dependency_advisory_evidence_document(
+                path,
+                expected_dependency_graph=expected_graph,
+                expected_source_sha="a" * 40,
+            )
+
+        self.assertTrue(qualified)
+        self.assertIsNone(reason)
+        self.assertEqual(read_bytes.call_count, 1)
 
 
 class QualificationTrustPolicyPinSourceTests(unittest.TestCase):

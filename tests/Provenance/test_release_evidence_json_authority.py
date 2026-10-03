@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.build_provenance_manifest import (
+    _require_provenance_schema_1,
     _strict_json_loads_bytes,
     release_evidence_snapshot,
 )
@@ -48,6 +49,26 @@ class StrictProvenanceJsonTests(unittest.TestCase):
     def test_nonfinite_source_json_number_fails_closed(self):
         with self.assertRaises(ValueError):
             _strict_json_loads_bytes(b'{"metadata":{"number":NaN}}')
+
+    def test_components_schema_1_is_accepted_exactly(self):
+        document = {"schema_version": "1.0.0", "components": []}
+        self.assertIs(
+            _require_provenance_schema_1(document, label="components provenance"),
+            document,
+        )
+
+    def test_future_or_noncanonical_components_schema_fails_closed(self):
+        for schema_version in ("2.0.0", " 1.0.0 ", None):
+            with self.subTest(schema_version=schema_version):
+                with self.assertRaisesRegex(ValueError, "schema_version"):
+                    _require_provenance_schema_1(
+                        {"schema_version": schema_version, "components": []},
+                        label="components provenance",
+                    )
+
+    def test_nonobject_components_document_fails_closed_before_schema_use(self):
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            _require_provenance_schema_1([], label="components provenance")
 
 
 class ReleaseEvidenceJsonAuthorityTests(unittest.TestCase):

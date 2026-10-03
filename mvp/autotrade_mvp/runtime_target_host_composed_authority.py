@@ -91,8 +91,9 @@ def _build_signed_campaign_matcher(
     budget_error_type,
     composition_error_type,
     campaign_evidence_kind,
+    sha256_factory,
 ):
-    """Capture signed campaign re-read, parse, and budget policy authority."""
+    """Capture signed campaign re-read, parse, hash, and budget policy authority."""
 
     def require_match(
         accepted,
@@ -133,7 +134,7 @@ def _build_signed_campaign_matcher(
             raise composition_error_type(
                 f"signed {campaign_evidence_kind} raw payload is empty or non-bytes"
             )
-        if "sha256:" + sha256(raw).hexdigest() != expected_sha256:
+        if "sha256:" + sha256_factory(raw).hexdigest() != expected_sha256:
             raise composition_error_type(
                 f"signed {campaign_evidence_kind} raw payload changed after canonical verification"
             )
@@ -213,13 +214,17 @@ def _build_projection_digest_builder(
     staleness_kind,
     interference_kind,
     resource_kind,
+    json_dumps,
+    sha256_factory,
+    mapping_proxy_factory,
+    composition_error_type,
 ):
-    """Build canonical projection digests without composed-module helper lookups."""
+    """Build canonical projection digests without mutable module helper lookups."""
 
     kinds = frozenset({staleness_kind, interference_kind, resource_kind})
 
     def canonical_json(value: object) -> bytes:
-        return json.dumps(
+        return json_dumps(
             value,
             sort_keys=True,
             separators=(",", ":"),
@@ -252,7 +257,7 @@ def _build_projection_digest_builder(
 
     def projection_bytes(measurement, *, evidence_kind: str) -> bytes:
         if type(evidence_kind) is not str or evidence_kind not in kinds:
-            raise RuntimeTargetHostCompositionError(
+            raise composition_error_type(
                 "evidence_kind must be a canonical target-host measurement projection kind"
             )
         payload = projection_identity(measurement, evidence_kind=evidence_kind)
@@ -281,9 +286,9 @@ def _build_projection_digest_builder(
         return canonical_json(payload)
 
     def digests(measurement):
-        return MappingProxyType(
+        return mapping_proxy_factory(
             {
-                kind: "sha256:" + sha256(
+                kind: "sha256:" + sha256_factory(
                     projection_bytes(measurement, evidence_kind=kind)
                 ).hexdigest()
                 for kind in sorted(kinds)
@@ -415,12 +420,17 @@ _PRODUCTION_SIGNED_CAMPAIGN_MATCHER = _build_signed_campaign_matcher(
     budget_error_type=RuntimeBudgetError,
     composition_error_type=RuntimeTargetHostCompositionError,
     campaign_evidence_kind=CAMPAIGN_EVIDENCE_KIND,
+    sha256_factory=sha256,
 )
 _PRODUCTION_PROJECTION_DIGEST_BUILDER = _build_projection_digest_builder(
     projection_schema_version=PROJECTION_SCHEMA_VERSION,
     staleness_kind=STALENESS_EVIDENCE_KIND,
     interference_kind=INTERFERENCE_EVIDENCE_KIND,
     resource_kind=RESOURCE_EVIDENCE_KIND,
+    json_dumps=json.dumps,
+    sha256_factory=sha256,
+    mapping_proxy_factory=MappingProxyType,
+    composition_error_type=RuntimeTargetHostCompositionError,
 )
 
 verify_sealed_composed_runtime_target_host_qualification = (

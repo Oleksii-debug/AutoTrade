@@ -62,6 +62,18 @@ class SecurityBoundaryTests(unittest.TestCase):
             secret_value="top-secret",
         )
 
+    def _read_credential(self):
+        return self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="top-secret",
+        )
+
     def test_empty_identity_and_scope_are_rejected(self):
         for field, overrides in (
             ("owner_identity", {"owner_identity": ""}),
@@ -667,8 +679,39 @@ class SecurityBoundaryTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
-    def test_rotation_invalidates_old_generation(self):
-        old_handle = self._credential()
+    def test_trade_rotation_requires_external_fence_and_reconciliation(self):
+        handle = self._credential()
+        before = self.vault_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "sender-fence.*reconciliation",
+        ):
+            self.boundary.rotate_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="must-not-activate",
+            )
+
+        self.assertEqual(self.vault_path.read_bytes(), before)
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "top-secret",
+        )
+
+    def test_read_rotation_invalidates_old_generation(self):
+        old_handle = self._read_credential()
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,
@@ -686,7 +729,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 account_id="paper-1",
                 provider="SIMULATED",
                 environment="PAPER",
-                purpose="TRADE",
+                purpose="READ",
             )
         resolved = self.boundary.resolve_for_execution(
             self.owner.token,
@@ -696,7 +739,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             account_id="paper-1",
             provider="SIMULATED",
             environment="PAPER",
-            purpose="TRADE",
+            purpose="READ",
         )
         self.assertEqual(resolved, "rotated-secret")
 
@@ -1256,7 +1299,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             )
 
     def test_session_revoke_cannot_cut_through_secret_rotation(self):
-        handle = self._credential()
+        handle = self._read_credential()
         entered = threading.Event()
         release = threading.Event()
         original_rotate = self.vault.rotate
@@ -1530,7 +1573,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("[REDACTED]", repr(redacted))
 
     def test_rotated_and_revoked_secret_values_remain_redacted(self):
-        old_handle = self._credential()
+        old_handle = self._read_credential()
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,

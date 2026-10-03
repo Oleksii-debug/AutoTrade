@@ -481,26 +481,34 @@ def commit_authoritative_corporate_action(
         store,
         subject="corporate-action financial JournalStore",
     )
-    if not isinstance(evidence_store, DurableCorporateActionEvidenceStore):
+    if type(evidence_store) is not DurableCorporateActionEvidenceStore:
         raise TypeError(
-            "evidence_store must be DurableCorporateActionEvidenceStore"
+            "evidence_store must be exact DurableCorporateActionEvidenceStore"
         )
     if not isinstance(economic_book, DurableProviderEconomicBook):
         raise TypeError("economic_book must be DurableProviderEconomicBook")
     if not isinstance(corporate_book, CorporateActionBook):
         raise TypeError("corporate_book must be CorporateActionBook")
-    if not isinstance(accepted, AuthoritativeCorporateAction):
+    if type(accepted) is not AuthoritativeCorporateAction:
         raise TypeError(
-            "accepted must be AuthoritativeCorporateAction from sealed provider evidence"
+            "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"
         )
-    if evidence_store.store is not store or economic_book.store is not store:
+    (
+        evidence_journal,
+        _,
+        evidence_provider_id,
+        evidence_account_id,
+        evidence_environment,
+        _,
+    ) = DurableCorporateActionEvidenceStore._composition(evidence_store)
+    if evidence_journal is not store or economic_book.store is not store:
         raise ValueError(
             "corporate-action evidence and economics must share one JournalStore"
         )
     if (
-        evidence_store.provider_id != economic_book.provider_id
-        or evidence_store.account_id != economic_book.account_id
-        or evidence_store.environment != economic_book.environment
+        evidence_provider_id != economic_book.provider_id
+        or evidence_account_id != economic_book.account_id
+        or evidence_environment != economic_book.environment
     ):
         raise ValueError("corporate-action durable authorities have different scope")
 
@@ -523,7 +531,10 @@ def commit_authoritative_corporate_action(
     if activation_cut is None or activation_cut < effective_at:
         # Admission and activation are deliberately separate.  This preserves
         # causal provider truth without making a future-effective posting visible.
-        retained = evidence_store.record(accepted)
+        retained = DurableCorporateActionEvidenceStore.record(
+            evidence_store,
+            accepted,
+        )
         return CorporateActionFinancialResult(
             inserted=retained.inserted,
             source_event_id=retained.event_id,
@@ -534,7 +545,10 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
-    evidence_plan = evidence_store.prepare_record_mutation(accepted)
+    evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        evidence_store,
+        accepted,
+    )
     candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
 
@@ -588,7 +602,10 @@ def commit_authoritative_corporate_action(
 
     # Re-prepare after the captured cut so every mutable plan is derived from
     # the same attempted journal state.  Any later advance is rejected by CAS.
-    evidence_plan = evidence_store.prepare_record_mutation(accepted)
+    evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        evidence_store,
+        accepted,
+    )
     candidate, transition = _candidate_book(corporate_book, accepted)
     transactions = _economic_transactions(
         economic_book,

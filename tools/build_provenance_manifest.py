@@ -248,6 +248,8 @@ def release_evidence_snapshot(
     schema_version = value.get("schema_version")
     if type(schema_version) is not str or not schema_version.strip():
         return False, "missing_schema_version", None
+    if schema_version != "1.0.0":
+        return False, "unsupported_schema_version", None
     source_sha = value.get("source_sha")
     if type(source_sha) is not str or GIT_SHA.fullmatch(source_sha) is None:
         return False, "invalid_source_sha", None

@@ -16,22 +16,30 @@ from uuid import UUID
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError, canonical_decimal_text, exact_multiply, exact_subtract,
+    exact_sum, parse_bounded_exact_decimal,
+)
 
 
 class OptionError(ValueError):
     pass
 
 
+def _exact(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except ExactDecimalError as error:
+        raise OptionError("option arithmetic exceeds the supported exact resource envelope") from error
+
+
 def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise OptionError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionError(f"{name} must be a bounded exact decimal") from error
     if positive and result <= 0:
         raise OptionError(f"{name} must be positive")
     return result
@@ -175,8 +183,8 @@ def intrinsic_value_per_unit(
 ) -> Decimal:
     price = _decimal(underlying_price, "underlying_price", positive=True)
     if contract.right == "CALL":
-        return max(price - contract.strike, Decimal("0"))
-    return max(contract.strike - price, Decimal("0"))
+        return max(_exact(exact_subtract, price, contract.strike), Decimal("0"))
+    return max(_exact(exact_subtract, contract.strike, price), Decimal("0"))
 
 
 def expiration_cash_settlement(
@@ -189,7 +197,7 @@ def expiration_cash_settlement(
         raise OptionError("expiration_cash_settlement requires a cash-settled option")
     contracts = _decimal(signed_contracts, "signed_contracts")
     intrinsic = intrinsic_value_per_unit(contract, underlying_price)
-    return contracts * contract.multiplier * intrinsic
+    return _exact(exact_multiply, contracts, contract.multiplier, intrinsic)
 
 
 def expiration_pnl_after_premium(
@@ -204,7 +212,7 @@ def expiration_pnl_after_premium(
     if premium < 0:
         raise OptionError("premium_per_unit cannot be negative")
     intrinsic = intrinsic_value_per_unit(contract, underlying_price)
-    return contracts * contract.multiplier * (intrinsic - premium)
+    return _exact(exact_multiply, contracts, contract.multiplier, _exact(exact_subtract, intrinsic, premium))
 
 
 def physical_exercise_obligation(
@@ -225,14 +233,14 @@ def physical_exercise_obligation(
     if contracts == 0:
         raise OptionError("signed_contracts must be non-zero")
     right_direction = Decimal("1") if contract.right == "CALL" else Decimal("-1")
-    direction = contracts * right_direction
+    direction = _exact(exact_multiply, contracts, right_direction)
     assets = tuple(
-        (leg.asset_id, direction * leg.quantity_per_contract)
+        (leg.asset_id, _exact(exact_multiply, direction, leg.quantity_per_contract))
         for leg in contract.deliverable
     )
     if contract.exercise_cash_per_contract is None:
         raise OptionError("physical exercise cash is not evidenced")
-    cash = -(direction * contract.exercise_cash_per_contract)
+    cash = _exact(exact_subtract, Decimal("0"), _exact(exact_multiply, direction, contract.exercise_cash_per_contract))
     return ExerciseObligation(
         asset_quantities=assets,
         settlement_cash=cash,
@@ -249,7 +257,7 @@ def require_physical_resources(
     """Fail closed when a physical obligation needs resources not evidenced."""
 
     cash = _decimal(cash_balance, "cash_balance")
-    if obligation.settlement_cash < 0 and cash < -obligation.settlement_cash:
+    if obligation.settlement_cash < 0 and cash < _exact(exact_subtract, Decimal("0"), obligation.settlement_cash):
         raise OptionError("insufficient evidenced cash for physical option obligation")
     for asset_id, quantity in obligation.asset_quantities:
         if quantity >= 0:
@@ -257,7 +265,7 @@ def require_physical_resources(
         if asset_id not in asset_balances:
             raise OptionError(f"missing evidenced balance for deliverable asset {asset_id}")
         available = _decimal(asset_balances[asset_id], f"asset balance {asset_id}")
-        if available < -quantity:
+        if available < _exact(exact_subtract, Decimal("0"), quantity):
             raise OptionError(f"insufficient evidenced balance for deliverable asset {asset_id}")
 
 
@@ -298,7 +306,7 @@ def interim_multi_leg_reservation(
     if not atomic_package_guaranteed:
         if package_worst_case_loss is not None:
             raise OptionError("package loss cannot override non-atomic interim leg risk")
-        return sum(losses, Decimal("0"))
+        return _exact(exact_sum, losses)
     if package_worst_case_loss is None:
         raise OptionError("atomic package requires an explicitly evidenced package loss")
     package = _decimal(package_worst_case_loss, "package_worst_case_loss")
@@ -323,7 +331,7 @@ def book_cash_option_settlement(
         cause_event_id=_text(cause_event_id, "cause_event_id"),
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(f"OPTION_SETTLEMENT_PNL:{currency}", currency, -value),
+            posting(f"OPTION_SETTLEMENT_PNL:{currency}", currency, _exact(exact_subtract, Decimal("0"), value)),
         ),
     )
     validate_transaction(transaction)
@@ -341,7 +349,7 @@ def book_physical_option_settlement(
         postings.extend(
             (
                 posting(f"POSITION:{asset_id}", asset_id, quantity),
-                posting(f"OPTION_DELIVERY_CLEARING:{asset_id}", asset_id, -quantity),
+                posting(f"OPTION_DELIVERY_CLEARING:{asset_id}", asset_id, _exact(exact_subtract, Decimal("0"), quantity)),
             )
         )
     if obligation.settlement_cash != 0:
@@ -352,7 +360,7 @@ def book_physical_option_settlement(
                 posting(
                     f"OPTION_DELIVERY_CLEARING:{currency}",
                     currency,
-                    -obligation.settlement_cash,
+                    _exact(exact_subtract, Decimal("0"), obligation.settlement_cash),
                 ),
             )
         )

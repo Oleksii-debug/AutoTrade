@@ -40,6 +40,69 @@ def event(
 
 
 class CausalFeederTests(unittest.TestCase):
+    def test_dataset_detaches_original_event_before_identity_is_retained(self):
+        original = event("one")
+        dataset = CausalDataset.create(manifest_sha256=MANIFEST, events=[original])
+        digest = dataset.dataset_sha256
+        object.__setattr__(original, "available_at", datetime(2099, 1, 1, tzinfo=timezone.utc))
+        object.__setattr__(original, "payload", {"price": "999"})
+        feeder = CausalFeeder(dataset, start_time="2026-01-01T09:00:00Z")
+        published = feeder.advance_next_time()
+        self.assertEqual(published[0].payload["price"], "100.25")
+        self.assertEqual(feeder.checkpoint().dataset_sha256, digest)
+
+    def test_feeder_detaches_dataset_and_output_events(self):
+        dataset = CausalDataset.create(manifest_sha256=MANIFEST, events=[event("one"), event("two", available_at="2026-01-01T10:01:00Z")])
+        baseline = CausalFeeder(dataset, start_time="2026-01-01T09:00:00Z")
+        digest = dataset.dataset_sha256
+        object.__setattr__(dataset.events[0], "available_at", datetime(2099, 1, 1, tzinfo=timezone.utc))
+        object.__setattr__(dataset, "events", ())
+        object.__setattr__(dataset, "dataset_sha256", "sha256:" + "0" * 64)
+        output = baseline.advance_next_time()
+        self.assertEqual(len(output), 1)
+        object.__setattr__(output[0], "payload", {"price": "999"})
+        object.__setattr__(output[0], "event_id", "forged")
+        self.assertEqual(baseline.view().events[0].event_id, "one")
+        self.assertEqual(baseline.view().events[0].payload["price"], "100.25")
+        self.assertEqual(baseline.checkpoint().dataset_sha256, digest)
+        self.assertEqual(baseline.advance_next_time()[0].event_id, "two")
+
+    def test_mutated_dataset_content_is_rejected_at_initialization_and_restore(self):
+        dataset = CausalDataset.create(manifest_sha256=MANIFEST, events=[event("one")])
+        checkpoint = CausalFeeder(dataset, start_time="2026-01-01T09:00:00Z").checkpoint()
+        object.__setattr__(dataset.events[0], "payload", {"price": "999"})
+        with self.assertRaisesRegex(CausalReplayError, "does not match"):
+            CausalFeeder(dataset, start_time="2026-01-01T09:00:00Z")
+        with self.assertRaisesRegex(CausalReplayError, "does not match"):
+            CausalFeeder.restore(dataset=dataset, checkpoint=checkpoint)
+
+    def test_mutated_checkpoint_is_revalidated_before_cursor_comparison(self):
+        dataset = CausalDataset.create(manifest_sha256=MANIFEST, events=[event("one")])
+        feeder = CausalFeeder(dataset, start_time="2026-01-01T10:00:00Z")
+        for field in ("cursor", "schema_version"):
+            checkpoint = feeder.checkpoint()
+            object.__setattr__(checkpoint, field, True)
+            with self.subTest(field=field), self.assertRaises(CausalReplayError):
+                CausalFeeder.restore(dataset=dataset, checkpoint=checkpoint)
+
+    def test_hostile_event_dataset_and_checkpoint_subclasses_are_not_read(self):
+        class HostileEvent(CausalEvent):
+            def __getattribute__(self, name):
+                raise AssertionError("virtual event read")
+        class HostileDataset(CausalDataset):
+            def __getattribute__(self, name):
+                raise AssertionError("virtual dataset read")
+        class HostileCheckpoint(FeederCheckpoint):
+            def __getattribute__(self, name):
+                raise AssertionError("virtual checkpoint read")
+        dataset = CausalDataset.create(manifest_sha256=MANIFEST, events=[event("one")])
+        with self.assertRaisesRegex(TypeError, "exact CausalEvent"):
+            CausalDataset.create(manifest_sha256=MANIFEST, events=[object.__new__(HostileEvent)])
+        with self.assertRaisesRegex(TypeError, "exact CausalDataset"):
+            CausalFeeder(object.__new__(HostileDataset), start_time="2026-01-01T09:00:00Z")
+        with self.assertRaisesRegex(TypeError, "exact FeederCheckpoint"):
+            CausalFeeder.restore(dataset=dataset, checkpoint=object.__new__(HostileCheckpoint))
+
     def test_future_event_is_invisible_until_evidenced_availability(self):
         dataset = CausalDataset.create(
             manifest_sha256=MANIFEST,

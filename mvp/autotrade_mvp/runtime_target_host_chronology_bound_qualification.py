@@ -91,6 +91,40 @@ def _snapshot_signed_receipt(
         raise RuntimeTargetHostChronologyBindingError(
             "receipt unresolved_limits must remain an exact tuple"
         )
+    for field in (
+        "attestation_id",
+        "source_sha",
+        "domain",
+        "gate",
+        "package_id",
+        "protocol_id",
+        "protocol_version",
+        "producer_id",
+        "verifier_id",
+        "trust_root_id",
+        "runner_id",
+        "harness_version",
+        "started_at",
+        "completed_at",
+        "signed_at",
+        "result",
+        "schema_version",
+        "verification_method",
+    ):
+        if type(getattr(attestation, field)) is not str:
+            raise RuntimeTargetHostChronologyBindingError(
+                f"receipt {field} must remain exact inert text"
+            )
+    for field in ("release_artifact_id", "release_artifact_sha256"):
+        field_value = getattr(attestation, field)
+        if field_value is not None and type(field_value) is not str:
+            raise RuntimeTargetHostChronologyBindingError(
+                f"receipt {field} must remain exact inert text or None"
+            )
+    if type(value.signature_b64) is not str:
+        raise RuntimeTargetHostChronologyBindingError(
+            "receipt signature_b64 must remain exact inert text"
+        )
     snapshot = QualificationAttestation(
         attestation_id=attestation.attestation_id,
         source_sha=attestation.source_sha,

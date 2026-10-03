@@ -13,7 +13,6 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification import (
     AcceptedChronologyBoundRuntimeTargetHostQualification,
     RuntimeTargetHostChronologyBindingError,
-    verify_chronology_bound_runtime_target_host_qualification,
 )
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     AcceptedComposedRuntimeTargetHostQualification,
@@ -24,6 +23,12 @@ from mvp.autotrade_mvp.runtime_target_host_qualification import (
 from mvp.autotrade_mvp.trusted_chronology import ChronologyScope
 from mvp.autotrade_mvp.trusted_chronology_cut import TrustedChronologyCut
 import mvp.autotrade_mvp.runtime_target_host_chronology_bound_qualification as bound
+
+
+def verify_chronology_bound_runtime_target_host_qualification(*args, **kwargs):
+    """Focused tests inject seams explicitly; production verifier stays sealed."""
+
+    return bound._build_terminal_verifier_for_tests()(*args, **kwargs)
 
 
 SOURCE_SHA = "a" * 40

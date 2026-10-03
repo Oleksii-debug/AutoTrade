@@ -38,7 +38,7 @@ from .runtime_target_host_measurement import (
     snapshot_target_host_measurement,
 )
 from .runtime_target_host_plan_bound_qualification import (
-    _verify_declared_plan_runtime_target_host_qualification_without_chronology,
+    _verify_declared_plan_runtime_target_host_qualification_without_chronology as verify_declared_plan_runtime_target_host_qualification,
 )
 from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 from .trusted_chronology import ChronologyScope
@@ -281,7 +281,7 @@ def verify_chronology_bound_runtime_target_host_qualification(
         receipt.attestation.signed_at,
     )
 
-    qualification = _verify_declared_plan_runtime_target_host_qualification_without_chronology(
+    qualification = verify_declared_plan_runtime_target_host_qualification(
         receipt,
         evidence_store=evidence_store,
         evidence_root=evidence_root,

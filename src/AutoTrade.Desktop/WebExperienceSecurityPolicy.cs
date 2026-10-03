@@ -99,7 +99,7 @@ public sealed class WebExperienceSecurityPolicy
         }
 
         string value = query[prefix.Length..];
-        if (value.Length == 0 || value.Contains('&', StringComparison.Ordinal))
+        if (value.Length == 0 || value.Contains('&'))
         {
             return false;
         }

@@ -1033,27 +1033,61 @@ def evaluate_qualified_incremental_value(
     """Evaluate only evidence-bound, pre-registered, complete matched populations.
 
     The existing evaluate_incremental_value() remains a descriptive/statistical
-    primitive. A terminal PASS/FAIL is available only when an
-    AblationQualificationAuthority resolves the frozen protocol, complete
-    ExperienceMemory population and immutable outcome artifacts. Caller-authored
-    dataclasses may still be inspected through this function for diagnostic
-    incompatibilities, but they can never produce a terminal qualification.
+    primitive. Caller-authored dataclasses may still be inspected through this
+    function for diagnostic incompatibilities, but they can never produce a
+    terminal qualification. Authority-backed qualification currently fails
+    closed before persistent authority resolution until canonical utility/cost
+    owner evidence and one immutable historical economic cut are available.
     """
 
     selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
-        if not isinstance(authority, AblationQualificationAuthority):
-            raise TypeError("authority must be AblationQualificationAuthority or None")
-        if population is not None or tuple(canonical_outcomes):
+        if type(authority) is not AblationQualificationAuthority:
+            raise TypeError(
+                "authority must be the canonical AblationQualificationAuthority or None"
+            )
+        caller_outcomes = tuple(canonical_outcomes)
+        if population is not None or caller_outcomes:
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
-        population, trusted_outcomes = authority.resolve(
-            selected_input,
-            outcome_refs=tuple(outcome_refs),
+        refs = tuple(outcome_refs)
+        if any(type(reference) is not AblationOutcomeArtifactRef for reference in refs):
+            raise TypeError(
+                "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
+            )
+        if (
+            not isinstance(minimum_pairs, int)
+            or isinstance(minimum_pairs, bool)
+            or minimum_pairs < 2
+        ):
+            raise ValueError("minimum_pairs must be an integer >= 2")
+        required = _decimal(required_lower_bound, "required_lower_bound")
+        multiplier = _decimal(
+            uncertainty_multiplier,
+            "uncertainty_multiplier",
         )
-        canonical_outcomes = trusted_outcomes
+        if multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
+        target = (
+            target_component.strip()
+            if isinstance(target_component, str)
+            else target_component
+        )
+        _validate_pairs(target, selected_input)
+
+        # #718/#1097: the current authority can authenticate the outcome envelope
+        # but cannot independently resolve utility, cost, correction lineage, and
+        # one immutable historical economic cut from their canonical owners.
+        # Do not execute a caller-selected persistent authority and then treat
+        # hash-shaped fields in that envelope as terminal economic evidence.
+        return _qualified_inconclusive(
+            target_component=target,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            reason="canonical_utility_cost_owner_evidence_unavailable",
+        )
     else:
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
@@ -1100,7 +1134,6 @@ def evaluate_qualified_incremental_value(
             return inconclusive("duplicate_canonical_outcome_identity")
         evidence_index[key] = evidence
 
-    has_immature_outcome = False
     for pair in selected:
         for item in (pair.full, pair.ablated):
             evidence = evidence_index.get((item.case_id, item.variant))
@@ -1122,44 +1155,10 @@ def evaluate_qualified_incremental_value(
                 and evidence.superseded_at_utc <= population.evaluation_cutoff_utc
             ):
                 return inconclusive("stale_canonical_outcome_revision")
-            if evidence.outcome_available_utc > population.evaluation_cutoff_utc:
-                has_immature_outcome = True
-
-    # Caller-authored outcome dataclasses are never qualification authority.
-    # Reject them before their maturity can influence the diagnostic result;
-    # maturity is meaningful only for evidence resolved by the canonical authority.
-    if not trusted:
-        return inconclusive("untrusted_caller_authored_qualification_evidence")
-    if has_immature_outcome:
-        return inconclusive("canonical_outcome_not_mature_at_cutoff")
-
-    base = evaluate_incremental_value(
-        target,
-        selected,
-        minimum_pairs=minimum_pairs,
-        required_lower_bound=required,
-        uncertainty_multiplier=multiplier,
-    )
-    if base.status == "INCONCLUSIVE":
-        return base
-    if not trusted:
-        return _qualified_inconclusive(
-            target_component=base.target_component,
-            required_lower_bound=base.required_lower_bound,
-            uncertainty_multiplier=base.uncertainty_multiplier,
-            reason="untrusted_caller_authored_qualification_evidence",
-        )
-    return AblationEvaluation(
-        target_component=base.target_component,
-        pair_count=base.pair_count,
-        mean_net_incremental_value=base.mean_net_incremental_value,
-        sample_stddev=base.sample_stddev,
-        lower_bound=base.lower_bound,
-        required_lower_bound=base.required_lower_bound,
-        uncertainty_multiplier=base.uncertainty_multiplier,
-        status=base.status,
-        reason="qualified_registered_canonical_ablation_net_of_cost",
-    )
+    # Caller-authored outcome dataclasses are diagnostic evidence only.  The
+    # trusted branch has already failed closed above, so no terminal PASS/FAIL
+    # implementation remains reachable until the canonical operand owners land.
+    return inconclusive("untrusted_caller_authored_qualification_evidence")
 
 
 def build_ablation_evidence_bundle(

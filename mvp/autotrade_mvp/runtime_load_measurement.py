@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter_ns
+from types import FunctionType, MethodType
 from typing import Callable, Sequence, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
@@ -237,6 +238,206 @@ def _decode_measurement(
     )
 
 
+def _callable_authority_state(
+    value: object,
+) -> tuple[
+    object,
+    object | None,
+    object | None,
+    object | None,
+    tuple[tuple[object, object], ...] | None,
+]:
+    """Capture exact executable state for post-operation issuance authority."""
+
+    target = value.__func__ if type(value) is MethodType else value
+    if type(target) is not FunctionType:
+        return (target, None, None, None, None)
+    kwdefaults = target.__kwdefaults__
+    return (
+        target,
+        target.__code__,
+        target.__defaults__,
+        kwdefaults,
+        None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+    )
+
+
+def _require_callable_authority(
+    value: object,
+    state: tuple[
+        object,
+        object | None,
+        object | None,
+        object | None,
+        tuple[tuple[object, object], ...] | None,
+    ],
+    *,
+    name: str,
+    error_type: type[RuntimeLoadMeasurementError],
+) -> None:
+    target = value.__func__ if type(value) is MethodType else value
+    expected_target, code, defaults, kwdefaults, kwdefault_items = state
+    if target is not expected_target:
+        raise error_type(
+            f"{name} callable authority changed during measured operation"
+        )
+    if code is None:
+        return
+    if (
+        target.__code__ is not code
+        or target.__defaults__ is not defaults
+        or target.__kwdefaults__ is not kwdefaults
+        or (
+            kwdefaults is not None
+            and tuple(sorted(kwdefaults.items())) != kwdefault_items
+        )
+    ):
+        raise error_type(
+            f"{name} executable authority changed during measured operation"
+        )
+
+
+def _build_post_operation_authority_guard(
+    plan: DeclaredRuntimeEventPlan,
+    expected: ExpectedJournalEvent,
+) -> Callable[[], None]:
+    """Freeze authority consumed after caller-controlled financial work returns.
+
+    The operation may publish its predeclared financial event, but it cannot
+    retarget the readback, binding verification, evidence hash, durable append or
+    decode path that turns that event into a latency sample. The guard covers
+    both rebinding and same-object Python executable mutation before the first
+    post-operation readback occurs.
+    """
+
+    namespace = globals()
+    error_type = RuntimeLoadMeasurementError
+    journal_type = JournalStore
+    sample_type = DurableFinancialLatencySample
+    plan_type = type(plan)
+    expected_type = type(expected)
+
+    if plan_type is not DeclaredRuntimeEventPlan:
+        raise TypeError("loaded plan must be exact DeclaredRuntimeEventPlan")
+    if expected_type is not ExpectedJournalEvent:
+        raise TypeError("loaded expected event must be exact ExpectedJournalEvent")
+
+    constant_bindings = (
+        ("_MEASUREMENT_EVENT_TYPE", _MEASUREMENT_EVENT_TYPE),
+        ("_MEASUREMENT_AGGREGATE_TYPE", _MEASUREMENT_AGGREGATE_TYPE),
+        ("_MEASUREMENT_SCHEMA_VERSION", _MEASUREMENT_SCHEMA_VERSION),
+        ("datetime", datetime),
+        ("timezone", timezone),
+        ("JournalStore", journal_type),
+        ("DurableFinancialLatencySample", sample_type),
+        ("DeclaredRuntimeEventPlan", plan_type),
+        ("ExpectedJournalEvent", expected_type),
+        ("RuntimeLoadMeasurementError", error_type),
+    )
+
+    def member(owner: type, name: str) -> object:
+        return owner.__dict__.get(name)
+
+    callable_bindings = (
+        (
+            "financial event binding verifier",
+            lambda: namespace.get("_require_expected_event"),
+            _callable_authority_state(_require_expected_event),
+        ),
+        (
+            "financial event binding projection",
+            lambda: namespace.get("_actual_binding"),
+            _callable_authority_state(_actual_binding),
+        ),
+        (
+            "latency measurement decoder",
+            lambda: namespace.get("_decode_measurement"),
+            _callable_authority_state(_decode_measurement),
+        ),
+        (
+            "latency measurement id authority",
+            lambda: namespace.get("_measurement_event_id"),
+            _callable_authority_state(_measurement_event_id),
+        ),
+        (
+            "latency integer authority",
+            lambda: namespace.get("_non_negative_int"),
+            _callable_authority_state(_non_negative_int),
+        ),
+        (
+            "payload digest authority",
+            lambda: namespace.get("payload_digest"),
+            _callable_authority_state(payload_digest),
+        ),
+        (
+            "JournalStore event reader",
+            lambda: getattr(journal_type, "get_event", None),
+            _callable_authority_state(getattr(journal_type, "get_event", None)),
+        ),
+        (
+            "JournalStore event appender",
+            lambda: getattr(journal_type, "append_event", None),
+            _callable_authority_state(getattr(journal_type, "append_event", None)),
+        ),
+        (
+            "plan digest property",
+            lambda: member(plan_type, "digest").fget
+            if isinstance(member(plan_type, "digest"), property)
+            else None,
+            _callable_authority_state(
+                member(plan_type, "digest").fget
+                if isinstance(member(plan_type, "digest"), property)
+                else None
+            ),
+        ),
+        (
+            "expected event payload property",
+            lambda: member(expected_type, "payload").fget
+            if isinstance(member(expected_type, "payload"), property)
+            else None,
+            _callable_authority_state(
+                member(expected_type, "payload").fget
+                if isinstance(member(expected_type, "payload"), property)
+                else None
+            ),
+        ),
+        (
+            "latency sample constructor",
+            lambda: member(sample_type, "__init__"),
+            _callable_authority_state(member(sample_type, "__init__")),
+        ),
+    )
+    if any(state[0] is None for _name, _resolve, state in callable_bindings):
+        raise error_type("post-operation measurement authority is unavailable")
+
+    plan_digest_member = member(plan_type, "digest")
+    expected_payload_member = member(expected_type, "payload")
+
+    def require_post_operation_authority() -> None:
+        for name, expected_value in constant_bindings:
+            if namespace.get(name) is not expected_value:
+                raise error_type(
+                    f"{name} authority changed during measured operation"
+                )
+        if member(plan_type, "digest") is not plan_digest_member:
+            raise error_type(
+                "plan digest property authority changed during measured operation"
+            )
+        if member(expected_type, "payload") is not expected_payload_member:
+            raise error_type(
+                "expected event payload property authority changed during measured operation"
+            )
+        for name, resolve, state in callable_bindings:
+            _require_callable_authority(
+                resolve(),
+                state,
+                name=name,
+                error_type=error_type,
+            )
+
+    return require_post_operation_authority
+
+
 def measure_declared_financial_operation(
     store: JournalStore,
     spec: RuntimeBudgetSpec,
@@ -270,16 +471,30 @@ def measure_declared_financial_operation(
         plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
         expected_index, expected = _expected_for_id(plan, event_id)
         measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
-        if JournalStore.get_event(store, measurement_id) is not None:
+        get_event = JournalStore.get_event
+        append_event = JournalStore.append_event
+        require_expected_event = _require_expected_event
+        decode_measurement = _decode_measurement
+        digest_payload = payload_digest
+        datetime_type = datetime
+        timezone_type = timezone
+        event_type = _MEASUREMENT_EVENT_TYPE
+        aggregate_type = _MEASUREMENT_AGGREGATE_TYPE
+        schema_version = _MEASUREMENT_SCHEMA_VERSION
+        require_post_operation_authority = _build_post_operation_authority_guard(
+            plan,
+            expected,
+        )
+        if get_event(store, measurement_id) is not None:
             raise RuntimeLoadMeasurementError("financial latency was already measured")
-        if JournalStore.get_event(store, expected.event_id) is not None:
+        if get_event(store, expected.event_id) is not None:
             raise RuntimeLoadMeasurementError(
                 "predeclared financial event already exists before monotonic measurement"
             )
 
         pre_sequence = JournalStore.current_journal_sequence(store)
         start_ns = clock()
-        if JournalStore.get_event(store, expected.event_id) is not None:
+        if get_event(store, expected.event_id) is not None:
             raise RuntimeLoadMeasurementError(
                 "predeclared financial event appeared before monotonic measurement start"
             )
@@ -288,11 +503,12 @@ def measure_declared_financial_operation(
             raise RuntimeLoadMeasurementError(
                 "financial latency clock authority changed during measured operation"
             )
+        require_post_operation_authority()
         # Bind the expected durable event before sampling the terminal clock. If the
         # operation returned without publishing it, an unrelated commit racing with
         # end-clock sampling must not be attributed to the measured operation.
-        financial_event = _require_expected_event(
-            JournalStore.get_event(store, expected.event_id),
+        financial_event = require_expected_event(
+            get_event(store, expected.event_id),
             expected,
             after_sequence=pre_sequence,
         )
@@ -309,7 +525,7 @@ def measure_declared_financial_operation(
 
         latency_us = (end_ns - start_ns + 999) // 1_000
         payload = {
-            "schema_version": _MEASUREMENT_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "plan_id": plan.plan_id,
             "plan_digest": plan.digest,
             "spec_digest": plan.spec_digest,
@@ -321,23 +537,25 @@ def measure_declared_financial_operation(
             "monotonic_end_ns": end_ns,
             "latency_us": latency_us,
         }
-        JournalStore.append_event(
+        append_event(
             store,
             {
                 "event_id": measurement_id,
-                "event_type": _MEASUREMENT_EVENT_TYPE,
-                "aggregate_type": _MEASUREMENT_AGGREGATE_TYPE,
+                "event_type": event_type,
+                "aggregate_type": aggregate_type,
                 "aggregate_id": plan.plan_id,
                 "aggregate_version": str(expected_index + 1),
                 "payload": payload,
-                "payload_hash": payload_digest(payload),
-                "committed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "payload_hash": digest_payload(payload),
+                "committed_at": datetime_type.now(timezone_type.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
             },
         )
-        measurement_event = JournalStore.get_event(store, measurement_id)
+        measurement_event = get_event(store, measurement_id)
         if measurement_event is None:
             raise RuntimeLoadMeasurementError("durable latency measurement disappeared")
-        sample = _decode_measurement(
+        sample = decode_measurement(
             event=measurement_event,
             plan=plan,
             expected_index=expected_index,

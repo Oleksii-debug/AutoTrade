@@ -786,6 +786,77 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
             )
 
 
+    def test_paper_provider_entrypoint_rejects_finance_without_oms(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id=ACCOUNT,
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+            )
+            reservations.reserve(
+                command_id="paper-no-oms-reserve",
+                idempotency_key="paper-no-oms-reserve",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            projected = ProjectedFillEvidence.create(
+                fill_id="fill-1",
+                provider_execution_id="provider-execution-1",
+                intent_id="intent-1",
+                client_order_id="order-1",
+                side="BUY",
+                quantity="1",
+                price="100",
+            )
+            provider = ProviderFillEvidence.create(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+                provider_execution_id="provider-execution-1",
+                client_order_id="order-1",
+                instrument="ABC",
+                quantity="1",
+                price="100",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time=WHEN,
+                side="BUY",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "require atomic canonical order projection",
+            ):
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="paper-no-oms-fill",
+                    idempotency_key="paper-no-oms-fill",
+                    reservation_id="reservation-1",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    observed_at=WHEN,
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from hashlib import sha256
@@ -92,6 +93,129 @@ class ExactRationalAblationTests(unittest.TestCase):
     def test_out_of_envelope_economics_fail_before_scoring(self):
         with self.assertRaisesRegex(ValueError,"shared exact numeric resource envelope"):
             _pair("oversized","1E257")
+
+
+    def test_reporting_overflow_does_not_suppress_exact_terminal_decision(self):
+        cases = [_pair("overflow-a", "0"), _pair("overflow-b", "1E255")]
+        result = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1E255"),
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIsNotNone(result.decision_exact)
+        self.assertEqual(result.reporting_status, "UNAVAILABLE")
+        self.assertIsNone(result.mean_net_incremental_value)
+        self.assertIsNone(result.sample_stddev)
+        self.assertIsNone(result.lower_bound)
+
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="c" * 40,
+            protocol_digest=_digest("overflow-protocol"),
+            dataset_digest=_digest("overflow-dataset"),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1E255"),
+        )
+        decoded = json.loads(locked.payload)
+        self.assertEqual(decoded["evaluation"]["status"], "FAIL")
+        self.assertEqual(decoded["evaluation"]["reporting_status"], "UNAVAILABLE")
+        self.assertIsNone(decoded["evaluation"]["lower_bound"])
+        self.assertTrue(verify_ablation_evidence_bundle(locked, cases))
+
+    def test_exact_decision_tamper_is_rejected_even_with_rehashed_payload(self):
+        cases = [_pair("tamper-a", "0"), _pair("tamper-b", "2")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="7" * 40,
+            protocol_digest=_digest("tamper-protocol"),
+            dataset_digest=_digest("tamper-dataset"),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["evaluation"]["decision_exact"]["rhs"]["numerator"] = "2"
+        payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        digest = "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError,
+            "payload evaluation does not match bundle evaluation",
+        ):
+            replace(locked, payload=payload, content_digest=digest)
+
+    def test_coherently_rehashed_reporting_tamper_fails_rebuild_verification(self):
+        cases = [_pair("report-a", "0"), _pair("report-b", "2")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="8" * 40,
+            protocol_digest=_digest("report-protocol"),
+            dataset_digest=_digest("report-dataset"),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        tampered_evaluation = replace(
+            locked.evaluation,
+            lower_bound=Decimal("999"),
+            mean_net_incremental_value=Decimal("999"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["evaluation"]["lower_bound"] = "999"
+        decoded["evaluation"]["mean_net_incremental_value"] = "999"
+        payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        tampered = replace(
+            locked,
+            evaluation=tampered_evaluation,
+            payload=payload,
+            content_digest="sha256:" + sha256(payload.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(tampered.evaluation.status, locked.evaluation.status)
+        with self.assertRaisesRegex(ValueError, "locked ablation evidence"):
+            verify_ablation_evidence_bundle(tampered, cases)
+
+    def test_v1_bundle_metadata_cannot_be_reinterpreted_as_exact_authority(self):
+        cases = [_pair("legacy-a", "1"), _pair("legacy-b", "1")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="9" * 40,
+            protocol_digest=_digest("legacy-protocol"),
+            dataset_digest=_digest("legacy-dataset"),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["schema_version"] = "1.0.0"
+        payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        digest = "sha256:" + sha256(payload.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload metadata"):
+            replace(locked, payload=payload, content_digest=digest)
+
 
 
 if __name__ == "__main__":

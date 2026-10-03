@@ -50,6 +50,10 @@ assert importlib.import_module("autotrade_research.artifacts.resource_lock") is 
 import autotrade_research.io.strict_json as research_json
 import autotrade_runtime.strict_json as runtime_json
 assert research_json.strict_json_loads is runtime_json.strict_json_loads
+assert research_json.jsonl_bytes_are_blank is runtime_json.jsonl_bytes_are_blank
+assert research_json.DuplicateJsonKeyError is runtime_json.DuplicateJsonKeyError
+assert research_json.NonStandardJsonConstantError is runtime_json.NonStandardJsonConstantError
+assert research_json.InvalidJsonDomainError is runtime_json.InvalidJsonDomainError
 """,
         )
 

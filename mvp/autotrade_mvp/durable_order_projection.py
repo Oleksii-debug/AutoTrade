@@ -219,6 +219,7 @@ class PreparedOrderMutation:
     snapshot_payload: dict[str, object]
     event_id: str
     aggregate_version: int
+    journal_sequence_cut: int
     envelope: dict[str, object] | None
     outbox_topic: str | None
     already_committed: bool = False
@@ -578,6 +579,9 @@ class DurableOrderBookProjection:
             }
         )
 
+        # Freeze the durable global cut before reading OMS state. Recovery
+        # without a new OMS event uses this cursor as its commit-time CAS.
+        journal_sequence_cut = self.store.current_journal_sequence()
         events = self._events()
         candidate, idempotency = self._replay(events)
         prior = idempotency.get(key)
@@ -604,6 +608,7 @@ class DurableOrderBookProjection:
                 snapshot_payload=_snapshot_payload(prior[1]),
                 event_id=prior[2],
                 aggregate_version=int(matching[0]["aggregate_version"]),
+                journal_sequence_cut=journal_sequence_cut,
                 envelope=None,
                 outbox_topic=None,
                 already_committed=True,
@@ -656,6 +661,7 @@ class DurableOrderBookProjection:
             snapshot_payload=snapshot_payload,
             event_id=event_id,
             aggregate_version=next_version,
+            journal_sequence_cut=journal_sequence_cut,
             envelope=envelope,
             outbox_topic=_OUTBOX_TOPIC,
         )

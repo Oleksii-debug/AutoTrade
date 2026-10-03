@@ -201,6 +201,58 @@ class AtomicOmsFinancialCommitTests(unittest.TestCase):
             self.assert_complete(orders, economics, reservations)
             self.assertFalse(atomic_fill(orders, economics, reservations))
 
+    def test_oms_only_recovery_fences_post_evidence_order_change(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            seed(reservations, orders)
+            orders.record_fill(
+                event_key="fill-1",
+                client_order_id="order-1",
+                fill_id="fill-1",
+                provider_execution_id="provider-execution-1",
+                quantity="1",
+                price="100",
+                committed_at=WHEN,
+            )
+            original_prepare = DurableProviderEconomicBook.prepare_batch_mutation
+            injected = False
+
+            def race_after_oms_cut(selected_book, transactions, **kwargs):
+                nonlocal injected
+                if selected_book is economics and not injected:
+                    injected = True
+                    orders.request_cancel(
+                        event_key="post-fill-cancel",
+                        client_order_id="order-1",
+                        command_id="post-fill-cancel-command",
+                        committed_at=WHEN,
+                    )
+                return original_prepare(selected_book, transactions, **kwargs)
+
+            DurableProviderEconomicBook.prepare_batch_mutation = race_after_oms_cut
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed after financial evidence validation",
+                ):
+                    atomic_fill(orders, economics, reservations)
+            finally:
+                DurableProviderEconomicBook.prepare_batch_mutation = original_prepare
+
+            ro, re, rr = books(JournalStore(path))
+            self.assertTrue(ro.order("order-1").cancel_requested)
+            self.assertEqual(
+                ro.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(re.transactions, ())
+            self.assertEqual(
+                rr.get("reservation-1").consumed["CASH:USD"],
+                Decimal("0"),
+            )
+
     def test_finance_only_split_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

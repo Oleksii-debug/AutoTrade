@@ -2507,6 +2507,14 @@ def commit_economic_batch_with_reservation_consumption(
                 if _order_fill_plan is None
                 else _order_fill_plan.aggregate_version,
             ),
+            expected_journal_sequence=(
+                _order_fill_plan.journal_sequence_cut
+                if (
+                    _order_fill_plan is not None
+                    and _order_fill_plan.already_committed
+                )
+                else None
+            ),
             events=(
                 (
                     []

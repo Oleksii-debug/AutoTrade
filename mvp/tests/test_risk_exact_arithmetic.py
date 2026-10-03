@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.risk import (
     RiskIntent,
     RiskPolicy,
     RISK_ARITHMETIC_POLICY_ID,
+    bind_risk_decision,
     evaluate_risk,
     risk_decision_fingerprint,
     tail_scenario_set_digest,
@@ -95,6 +96,65 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 quantity="1",
                 price="1",
                 expected_state_version=7,
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+    def test_binding_rejects_polymorphic_decision_and_text_before_dispatch(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+
+        class HostileDecision(type(raw)):
+            reads = 0
+
+            def __getattribute__(self, name):
+                if name == "arithmetic_policy_id":
+                    type(self).reads += 1
+                    raise AssertionError("hostile decision read")
+                return super().__getattribute__(name)
+
+        hostile_decision = HostileDecision(**vars(raw))
+        with self.assertRaisesRegex(TypeError, "exact RiskDecision"):
+            bind_risk_decision(
+                hostile_decision,
+                intent_hash="intent",
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-03T20:00:00+00:00",
+                valid_until="2026-10-03T20:01:00+00:00",
+            )
+        self.assertEqual(HostileDecision.reads, 0)
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip")
+
+        hostile_text = HostileText("intent")
+        with self.assertRaisesRegex(ValueError, "intent_hash is required"):
+            bind_risk_decision(
+                raw,
+                intent_hash=hostile_text,
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-03T20:00:00+00:00",
+                valid_until="2026-10-03T20:01:00+00:00",
             )
         self.assertEqual(HostileText.calls, 0)
 

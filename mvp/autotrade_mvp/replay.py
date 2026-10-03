@@ -176,9 +176,55 @@ RuntimeStateCutResolver = Callable[
     [], tuple[str, "ReplayCheckpoint", Mapping[str, str]]
 ]
 
-# Ordinary callers may hold an authority token, but its signing key and resolver
-# remain module-owned process-TCB state rather than caller-reachable attributes.
-_RUNTIME_STATE_AUTHORITY_STATE = WeakKeyDictionary()
+def _runtime_authority_state_operations():
+    states = WeakKeyDictionary()
+
+    def register(
+        authority: "RuntimeStateAuthority",
+        authority_id: str,
+        secret: bytes,
+        cut_resolver: RuntimeStateCutResolver,
+    ) -> None:
+        states[authority] = (authority_id, bytes(secret), cut_resolver)
+
+    def authority_id(authority: "RuntimeStateAuthority") -> str:
+        try:
+            return states[authority][0]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
+
+    def resolve_cut(
+        authority: "RuntimeStateAuthority",
+    ) -> tuple[str, "ReplayCheckpoint", Mapping[str, str]]:
+        try:
+            resolver = states[authority][2]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
+        return resolver()
+
+    def seal(authority: "RuntimeStateAuthority", material: bytes) -> str:
+        try:
+            secret = states[authority][1]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
+        return hmac.new(secret, material, sha256).hexdigest()
+
+    return register, authority_id, resolve_cut, seal
+
+
+(
+    _register_runtime_state_authority,
+    _runtime_state_authority_id,
+    _resolve_runtime_authority_cut,
+    _seal_runtime_authority_material,
+) = _runtime_authority_state_operations()
+del _runtime_authority_state_operations
 
 
 class RuntimeStateAuthority:
@@ -203,26 +249,16 @@ class RuntimeStateAuthority:
             )
         if not callable(cut_resolver):
             raise TypeError("runtime cut_resolver must be callable")
-        _RUNTIME_STATE_AUTHORITY_STATE[self] = (
+        _register_runtime_state_authority(
+            self,
             authority_id,
-            bytes(secret),
+            secret,
             cut_resolver,
         )
 
-    @staticmethod
-    def _state(
-        authority: "RuntimeStateAuthority",
-    ) -> tuple[str, bytes, RuntimeStateCutResolver]:
-        try:
-            authority_id, secret, cut_resolver = _RUNTIME_STATE_AUTHORITY_STATE[authority]
-        except KeyError as error:
-            raise ReplayError("runtime state authority process state is unavailable") from error
-        return authority_id, secret, cut_resolver
-
     @property
     def authority_id(self) -> str:
-        authority_id, _, _ = RuntimeStateAuthority._state(self)
-        return authority_id
+        return _runtime_state_authority_id(self)
 
     @staticmethod
     def _binding_material(
@@ -257,17 +293,16 @@ class RuntimeStateAuthority:
         replay: "ReplayCheckpoint",
         runtime_components: Mapping[str, str],
     ) -> str:
-        authority_id, secret, _ = RuntimeStateAuthority._state(self)
-        return hmac.new(
-            secret,
+        authority_id = _runtime_state_authority_id(self)
+        return _seal_runtime_authority_material(
+            self,
             self._binding_material(
                 authority_id=authority_id,
                 cut_id=cut_id,
                 replay=replay,
                 runtime_components=runtime_components,
             ),
-            sha256,
-        ).hexdigest()
+        )
 
     @staticmethod
     def _checkpoint_binding_material(
@@ -316,9 +351,9 @@ class RuntimeStateAuthority:
         """Bind a verified common cut to the exact build and protocol identity."""
 
         RuntimeStateAuthority.verify_snapshot(self, snapshot)
-        authority_id, secret, _ = RuntimeStateAuthority._state(self)
-        return hmac.new(
-            secret,
+        authority_id = _runtime_state_authority_id(self)
+        return _seal_runtime_authority_material(
+            self,
             self._checkpoint_binding_material(
                 authority_id=authority_id,
                 cut_id=snapshot.cut_id,
@@ -327,8 +362,7 @@ class RuntimeStateAuthority:
                 build_sha=build_sha,
                 protocol_ref=protocol_ref,
             ),
-            sha256,
-        ).hexdigest()
+        )
 
     def verify_checkpoint_binding(
         self,
@@ -338,11 +372,11 @@ class RuntimeStateAuthority:
             raise ReplayError(
                 "runtime state authority must verify the canonical CompositeReplayCheckpoint"
             )
-        authority_id, secret, _ = RuntimeStateAuthority._state(self)
+        authority_id = _runtime_state_authority_id(self)
         if checkpoint.runtime_authority_id != authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
-        expected = hmac.new(
-            secret,
+        expected = _seal_runtime_authority_material(
+            self,
             self._checkpoint_binding_material(
                 authority_id=authority_id,
                 cut_id=checkpoint.runtime_cut_id,
@@ -351,15 +385,14 @@ class RuntimeStateAuthority:
                 build_sha=checkpoint.build_sha,
                 protocol_ref=checkpoint.protocol_ref,
             ),
-            sha256,
-        ).hexdigest()
+        )
         if not hmac.compare_digest(expected, checkpoint.runtime_authority_seal):
             raise ReplayError("runtime state checkpoint authority seal mismatch")
 
     def capture(self) -> RuntimeStateSnapshot:
-        authority_id, _, cut_resolver = RuntimeStateAuthority._state(self)
+        authority_id = _runtime_state_authority_id(self)
         try:
-            cut_id, replay, raw_components = cut_resolver()
+            cut_id, replay, raw_components = _resolve_runtime_authority_cut(self)
         except Exception as error:
             raise ReplayError("runtime state authority failed") from error
         if not isinstance(cut_id, str) or not cut_id.strip():
@@ -388,7 +421,7 @@ class RuntimeStateAuthority:
             raise ReplayError(
                 "runtime state authority must issue the canonical RuntimeStateSnapshot"
             )
-        authority_id, _, _ = RuntimeStateAuthority._state(self)
+        authority_id = _runtime_state_authority_id(self)
         if snapshot.authority_id != authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
         expected = self._seal(

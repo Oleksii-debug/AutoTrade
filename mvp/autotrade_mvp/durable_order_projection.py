@@ -102,26 +102,31 @@ def _canonical_evidence_refs(
 ) -> tuple[dict[str, str], ...]:
     if value is None:
         return ()
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise TypeError("evidence_refs must be a sequence of EvidenceRef mappings")
+    if type(value) is list:
+        evidence_items = tuple(list.copy(value))
+    elif type(value) is tuple:
+        evidence_items = value
+    else:
+        raise TypeError("evidence_refs must be an exact list or tuple of EvidenceRef mappings")
     normalized: list[dict[str, str]] = []
     seen_artifact_ids: set[str] = set()
     allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
-    for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"evidence_refs[{index}] must be a mapping")
-        unknown = set(raw) - allowed
+    for index, raw in enumerate(evidence_items):
+        if type(raw) is not dict:
+            raise TypeError(f"evidence_refs[{index}] must be an exact dict")
+        item = dict.copy(raw)
+        unknown = set(item) - allowed
         if unknown:
             raise ValueError(
                 "evidence ref contains unsupported fields: "
                 + ", ".join(sorted(str(item) for item in unknown))
             )
-        artifact_id = _text(raw.get("artifact_id"), name="artifact_id")
+        artifact_id = _text(item.get("artifact_id"), name="artifact_id")
         try:
             artifact_id = str(UUID(artifact_id))
         except ValueError as error:
             raise ValueError("artifact_id must be a UUID") from error
-        digest = _text(raw.get("sha256"), name="sha256")
+        digest = _text(item.get("sha256"), name="sha256")
         if (
             len(digest) != 71
             or not digest.startswith("sha256:")
@@ -131,11 +136,11 @@ def _canonical_evidence_refs(
         ref: dict[str, str] = {
             "artifact_id": artifact_id,
             "sha256": digest,
-            "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
+            "observed_at": _instant(item.get("observed_at"), name="observed_at"),
         }
         for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
+            if item.get(optional) is not None:
+                ref[optional] = _text(item.get(optional), name=optional)
         if artifact_id in seen_artifact_ids:
             raise ValueError("evidence_refs must have unique artifact_id values")
         seen_artifact_ids.add(artifact_id)

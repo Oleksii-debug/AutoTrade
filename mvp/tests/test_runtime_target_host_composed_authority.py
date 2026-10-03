@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from inspect import getclosurevars
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as plan_bound
+from mvp.autotrade_mvp import runtime_target_host_composed_authority as authority
 from mvp.autotrade_mvp import runtime_target_host_composed_qualification as composed
 from mvp.autotrade_mvp import runtime_target_host_durable_financial as durable
 from mvp.autotrade_mvp import runtime_target_host_qualification as signed
@@ -130,6 +132,73 @@ class RuntimeTargetHostComposedAuthorityTests(unittest.TestCase):
             after = getclosurevars(_PRODUCTION_SIGNED_CAMPAIGN_MATCHER).nonlocals
             self.assertIs(after["budget_evaluator"], original)
         forged.assert_not_called()
+
+    def test_adapter_local_helpers_remain_captured_after_module_rebind(self) -> None:
+        campaign_before = getclosurevars(_PRODUCTION_SIGNED_CAMPAIGN_MATCHER).nonlocals
+        projection_before = getclosurevars(
+            _PRODUCTION_PROJECTION_DIGEST_BUILDER
+        ).nonlocals
+        projection_bytes = projection_before["projection_bytes"]
+        projection_bytes_before = getclosurevars(projection_bytes).nonlocals
+        canonical_json = projection_bytes_before["canonical_json"]
+        json_before = getclosurevars(canonical_json).nonlocals
+
+        original_sha256 = authority.sha256
+        original_mapping_proxy = authority.MappingProxyType
+        original_error = authority.RuntimeTargetHostCompositionError
+        original_json_dumps = authority.json.dumps
+        self.assertIs(campaign_before["sha256_factory"], original_sha256)
+        self.assertIs(projection_before["sha256_factory"], original_sha256)
+        self.assertIs(
+            projection_before["mapping_proxy_factory"],
+            original_mapping_proxy,
+        )
+        self.assertIs(
+            projection_bytes_before["composition_error_type"],
+            original_error,
+        )
+        self.assertIs(json_before["json_dumps"], original_json_dumps)
+
+        forged_sha256 = Mock()
+        forged_mapping_proxy = Mock()
+        forged_json_dumps = Mock()
+        with (
+            patch.object(authority, "sha256", forged_sha256),
+            patch.object(authority, "MappingProxyType", forged_mapping_proxy),
+            patch.object(authority, "RuntimeTargetHostCompositionError", RuntimeError),
+            patch.object(
+                authority,
+                "json",
+                SimpleNamespace(dumps=forged_json_dumps),
+            ),
+        ):
+            campaign_after = getclosurevars(
+                _PRODUCTION_SIGNED_CAMPAIGN_MATCHER
+            ).nonlocals
+            projection_after = getclosurevars(
+                _PRODUCTION_PROJECTION_DIGEST_BUILDER
+            ).nonlocals
+            projection_bytes_after = getclosurevars(
+                projection_after["projection_bytes"]
+            ).nonlocals
+            json_after = getclosurevars(
+                projection_bytes_after["canonical_json"]
+            ).nonlocals
+            self.assertIs(campaign_after["sha256_factory"], original_sha256)
+            self.assertIs(projection_after["sha256_factory"], original_sha256)
+            self.assertIs(
+                projection_after["mapping_proxy_factory"],
+                original_mapping_proxy,
+            )
+            self.assertIs(
+                projection_bytes_after["composition_error_type"],
+                original_error,
+            )
+            self.assertIs(json_after["json_dumps"], original_json_dumps)
+
+        forged_sha256.assert_not_called()
+        forged_mapping_proxy.assert_not_called()
+        forged_json_dumps.assert_not_called()
 
     def test_sealed_projection_digests_match_canonical_public_projection(self) -> None:
         current = measurement()

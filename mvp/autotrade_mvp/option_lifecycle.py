@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import JournalTransaction, posting, reverse_transaction
+from .exact_decimal import ExactDecimalError, is_exact_decimal_multiple
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -40,6 +41,7 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _EVENT_KINDS = frozenset({"EXERCISE", "ASSIGNMENT", "EXPIRY"})
 _OPTION_LIFECYCLE_PARSER_ID = "autotrade.option-lifecycle.sealed-json"
 _OPTION_LIFECYCLE_PARSER_VERSION = "1.1.0"
+_OPTION_LIFECYCLE_QUANTITY_UNIT = "contract"
 _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
     {
         "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
@@ -421,6 +423,26 @@ def _bind_version(
         raise OptionLifecycleError("venue_id does not match instrument version")
     if version.asset_class != "OPTION":
         raise OptionLifecycleError("lifecycle event is not bound to an option")
+    if version.quantity_unit != _OPTION_LIFECYCLE_QUANTITY_UNIT:
+        raise OptionLifecycleError(
+            "provider lifecycle signed_contracts is only qualified for canonical "
+            "quantity_unit 'contract'; ambiguous lifecycle quantity units fail closed"
+        )
+    # Lifecycle events are not order entry: minimum/maximum order size must not
+    # be invented as assignment/exercise constraints.  The canonical quantity
+    # grid is still financial authority, and copy_abs avoids ambient Decimal
+    # context from rounding a signed provider quantity before divisibility.
+    quantity = Decimal.copy_abs(observation.signed_contracts)
+    try:
+        aligned = is_exact_decimal_multiple(quantity, version.quantity_step)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "signed_contracts exceeds the supported exact-decimal quantity envelope"
+        ) from error
+    if not aligned:
+        raise OptionLifecycleError(
+            "signed_contracts is not aligned to canonical instrument quantity_step"
+        )
     return version
 
 

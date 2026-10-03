@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
@@ -54,6 +54,9 @@ def option_version(
     settlement_method: str = "PHYSICAL",
     deliverable_quantity: str = "100",
     strike: str = "50",
+    quantity_unit: str = "contract",
+    quantity_step: str = "1",
+    minimum_quantity: str = "1",
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
@@ -65,11 +68,11 @@ def option_version(
         base_currency="ABC",
         quote_currency="USD",
         settlement_currency="USD",
-        quantity_unit="contract",
+        quantity_unit=quantity_unit,
         contract_multiplier=Decimal("100"),
         price_tick=Decimal("0.01"),
-        quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"),
+        quantity_step=Decimal(quantity_step),
+        minimum_quantity=Decimal(minimum_quantity),
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
         effective_from=effective_from,
@@ -417,6 +420,87 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             evidence["parser_contract_digest"],
             r"^sha256:[0-9a-f]{64}$",
         )
+
+    def test_fractional_lifecycle_quantity_off_canonical_grid_fails_before_mutation(self):
+        self.seed_option_position("0.5")
+        before_transactions = tuple(self.book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity_step",
+        ):
+            self.authority.apply(self.evidence(signed_contracts="0.5"))
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
+    def test_explicit_smaller_canonical_quantity_step_accepts_aligned_lifecycle_quantity(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.25",
+                    minimum_quantity="0.25",
+                ),
+            )
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("0.5")
+
+        result = authority.apply(self.evidence(signed_contracts="0.5"))
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("50"))
+
+    def test_ambiguous_non_contract_lifecycle_quantity_unit_fails_closed(self):
+        registry = InstrumentRegistry(
+            versions=(option_version(quantity_unit="share"),)
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("1")
+        before_transactions = tuple(self.book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "ambiguous lifecycle quantity units fail closed",
+        ):
+            authority.apply(self.evidence())
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", authority.aggregate_id),
+            [],
+        )
+
+    def test_quantity_grid_admission_is_independent_of_ambient_decimal_context(self):
+        # Built-in abs(Decimal) is context-sensitive. Under this precision the
+        # off-grid .5 tail would round away if ambient Decimal context were
+        # allowed to become financial authority.
+        off_grid = "100000000000000000000000000000.5"
+        with localcontext() as context:
+            context.prec = 2
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "canonical instrument quantity_step",
+            ):
+                self.authority.apply(
+                    self.evidence(signed_contracts=off_grid)
+                )
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(self.book.transactions, ())
 
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):
         reference = self.evidence()

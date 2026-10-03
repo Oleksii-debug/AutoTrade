@@ -15,12 +15,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import re
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import AccountingConflict, JournalTransaction, posting, reverse_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_multiply,
+    parse_bounded_exact_decimal,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -180,15 +186,12 @@ def _text(value: str, name: str) -> str:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise OptionLifecycleError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionLifecycleError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionLifecycleError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -204,10 +207,12 @@ def _utc_text(value: datetime) -> str:
 def _decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    if value == 0:
-        return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "lifecycle decimal exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -279,6 +284,12 @@ class OptionLifecycleObservation:
             underlying = _decimal(underlying, "underlying_price")
             if underlying <= 0:
                 raise OptionLifecycleError("underlying_price must be positive")
+        cash_settlement = self.cash_settlement_amount
+        if cash_settlement is not None:
+            cash_settlement = _decimal(
+                cash_settlement,
+                "cash_settlement_amount",
+            )
         correction = self.corrects_external_event_id
         if correction is not None:
             correction = _text(correction, "corrects_external_event_id")
@@ -297,6 +308,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "provider_revision", revision)
         object.__setattr__(self, "underlying_price", underlying)
+        object.__setattr__(self, "cash_settlement_amount", cash_settlement)
         object.__setattr__(self, "corrects_external_event_id", correction)
 
 
@@ -356,7 +368,12 @@ def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
         raise OptionLifecycleError(
             "adjusted physical deliverable requires explicit canonical exercise cash evidence"
         )
-    return version.strike * version.contract_multiplier
+    try:
+        return exact_multiply(version.strike, version.contract_multiplier)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "physical exercise cash exceeds exact-decimal resource authority"
+        ) from error
 
 
 def _contract_from_version(version: InstrumentVersion) -> OptionContract:

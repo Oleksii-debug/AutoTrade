@@ -5,7 +5,11 @@ import unittest
 from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
+from mvp.autotrade_mvp import runtime_target_host_composed_authority as composed_authority
 from mvp.autotrade_mvp import runtime_target_host_qualification as qualification
+from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
+    RuntimeTargetHostCompositionError,
+)
 from mvp.tests.test_runtime_target_host_qualification import (
     CONFIG,
     HOST,
@@ -47,6 +51,28 @@ class RuntimeTargetHostReadIntegrityAuthorityTests(unittest.TestCase):
     @staticmethod
     def _ref(evidence_refs, kind):
         return next(ref for ref in evidence_refs if ref.evidence_kind == kind)
+
+    def test_composed_guard_rejects_pre_call_sha256_poisoning(self) -> None:
+        original = qualification.sha256
+        forged_calls = 0
+
+        def forged(raw):
+            nonlocal forged_calls
+            forged_calls += 1
+            return original(raw)
+
+        qualification.sha256 = forged
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                r"signed target-host verifier sealed dependency changed: sha256",
+            ):
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD()
+        finally:
+            qualification.sha256 = original
+
+        self.assertEqual(forged_calls, 0)
+        composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD()
 
     def test_top_level_read_uses_retained_hash_not_self_restoring_global(self) -> None:
         raw_by_id, evidence_refs, signed, retained = self._fixture()

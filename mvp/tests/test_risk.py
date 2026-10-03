@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.risk import (
     RiskIntent,
     RiskPolicy,
     RISK_ARITHMETIC_POLICY_ID,
+    evaluate_bound_risk,
     evaluate_risk,
     risk_decision_fingerprint,
     stress_scenario_digest,
@@ -2030,6 +2031,54 @@ class IndependentRiskTests(unittest.TestCase):
         )
         self.assertFalse(tampered_rule.passed)
         self.assertEqual(tampered_rule.observed, "UNVERIFIED")
+
+    def test_bound_risk_rejects_caller_selected_liquidation_evidence_store(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.50")
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        binding = dict(
+            intent_hash="sha256:" + "a" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "100"},
+            capability_snapshot_id="cap-snapshot-1",
+            evaluated_at="2026-01-01T00:01:00Z",
+            valid_until="2026-01-01T00:05:00Z",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "caller-selected evidence_store cannot bind financial risk",
+        ):
+            evaluate_bound_risk(
+                intent,
+                context(**bound),
+                configured,
+                evidence_store=store,
+                **binding,
+            )
+
+        fail_closed = evaluate_bound_risk(
+            intent,
+            context(**bound),
+            configured,
+            **binding,
+        )
+        liquidation_rule = next(
+            item
+            for item in fail_closed.rules
+            if item.rule == "liquidation_headroom"
+        )
+        self.assertFalse(fail_closed.admitted)
+        self.assertFalse(liquidation_rule.passed)
+        self.assertEqual(liquidation_rule.observed, "UNVERIFIED")
 
     def test_liquidation_admission_consumes_only_one_authenticated_snapshot(self):
         store = _LiquidationEvidenceStore()

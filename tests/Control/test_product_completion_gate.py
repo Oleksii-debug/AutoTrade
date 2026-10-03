@@ -374,9 +374,23 @@ class BlockResearch(importlib.abc.MetaPathFinder):
             raise ImportError("research package is unavailable in installed runtime")
         return None
 
+preloaded = sorted(
+    name for name in sys.modules
+    if name == "research" or name.startswith("research.")
+)
+if preloaded:
+    raise AssertionError(f"research package preloaded: {preloaded}")
+
 sys.meta_path.insert(0, BlockResearch())
 import tools.check_nvda_qualification
 import tools.check_product_completion
+
+leaked = sorted(
+    name for name in sys.modules
+    if name == "research" or name.startswith("research.")
+)
+if leaked:
+    raise AssertionError(f"terminal qualification imported research package: {leaked}")
 """
         result = subprocess.run(
             [sys.executable, "-c", script],

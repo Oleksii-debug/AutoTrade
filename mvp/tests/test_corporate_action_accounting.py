@@ -219,12 +219,14 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             durable_evidence = evidence_store(store)
             economics = economic_book(store)
             accepted = resolve_action(sealed_action())
-            original = store.commit_command
+            original = JournalStore.commit_command
 
-            def fail(**kwargs):
-                raise RuntimeError("injected atomic corporate action failure")
+            def fail(selected_store, **kwargs):
+                if kwargs.get("actor") == "corporate-action-financial-integration":
+                    raise RuntimeError("injected atomic corporate action failure")
+                return original(selected_store, **kwargs)
 
-            store.commit_command = fail
+            JournalStore.commit_command = fail
             try:
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     commit_authoritative_corporate_action(
@@ -235,11 +237,12 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                         accepted=accepted,
                     )
             finally:
-                store.commit_command = original
+                JournalStore.commit_command = original
 
             reopened = JournalStore(path)
             self.assertEqual(
-                reopened.load_events(
+                JournalStore.load_events(
+                    reopened,
                     "corporate_action_evidence",
                     evidence_store(reopened).aggregate_id,
                 ),

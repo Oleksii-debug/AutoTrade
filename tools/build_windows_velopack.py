@@ -661,12 +661,7 @@ def _publish_file(
 ) -> tuple[str, int]:
     digest_path = destination.with_suffix(destination.suffix + ".sha256")
     name = f"Velopack output {source.name}"
-    _nonreparse_path_metadata(source, name=name)
-
-    try:
-        input_stream = _open_stable_regular_file(source, name=name)
-    except InstallerManifestError as error:
-        raise VelopackPackagingError(str(error)) from error
+    input_stream = _open_vpk_output_snapshot(source, name=name)
 
     try:
         before = os.fstat(input_stream.fileno())
@@ -684,15 +679,13 @@ def _publish_file(
                 observed_digest.update(chunk)
                 observed_size += len(chunk)
 
-            try:
-                after = _assert_open_file_identity(source, input_stream, name=name)
-                after_path = _nonreparse_path_metadata(source, name=name)
-            except InstallerManifestError as error:
-                raise VelopackPackagingError(str(error)) from error
+            after = _assert_vpk_output_snapshot(
+                source,
+                input_stream,
+                name=name,
+            )
             if (
-                (after_path.st_dev, after_path.st_ino)
-                != (after.st_dev, after.st_ino)
-                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                 or before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns
                 or before.st_ctime_ns != after.st_ctime_ns

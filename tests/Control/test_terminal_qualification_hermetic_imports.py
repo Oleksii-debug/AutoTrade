@@ -30,14 +30,23 @@ if preloaded:
     raise AssertionError(f"research package preloaded: {preloaded}")
 
 sys.meta_path.insert(0, BlockResearch())
+import autotrade_runtime.artifacts as runtime_artifacts
 import mvp.autotrade_mvp.bounded_real
 import mvp.autotrade_mvp.execution_qualification
+import mvp.autotrade_mvp.qualification_attestation as qualification_attestation
 import mvp.autotrade_mvp.provider_qualification_authority
 import mvp.autotrade_mvp.recovery_qualification
 import mvp.autotrade_mvp.release_qualification
 import mvp.autotrade_mvp.supply_chain_qualification
 import tools.check_nvda_qualification
 import tools.check_product_completion
+
+if qualification_attestation.ArtifactStore is not runtime_artifacts.ArtifactStore:
+    raise AssertionError("qualification verifier does not use neutral ArtifactStore")
+if tools.check_nvda_qualification.ArtifactStore is not runtime_artifacts.ArtifactStore:
+    raise AssertionError("NVDA verifier does not use neutral ArtifactStore")
+if tools.check_product_completion.ArtifactStore is not runtime_artifacts.ArtifactStore:
+    raise AssertionError("completion verifier does not use neutral ArtifactStore")
 
 leaked = sorted(
     name

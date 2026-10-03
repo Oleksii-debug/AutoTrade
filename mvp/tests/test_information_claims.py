@@ -230,6 +230,196 @@ class InformationClaimTests(unittest.TestCase):
         self.assertEqual(store.revisions("corp"), (first, revised_metadata))
         self.assertEqual(store.revisions("wire"), (mirror,))
 
+    def test_effective_view_supersedes_only_after_revision_is_causally_visible(self):
+        store = ClaimStore()
+        old = store.build_claim(
+            doc("corp", "r1", "first guidance", available=0),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        revised = store.build_claim(
+            doc("corp", "r2", "revised guidance", available=2),
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        store.add(old)
+        store.add(revised)
+
+        self.assertEqual(
+            store.effective_at(BASE + timedelta(hours=1)),
+            (old,),
+        )
+        self.assertEqual(
+            store.effective_at(BASE + timedelta(hours=2)),
+            (revised,),
+        )
+        # Historical provenance remains intact and replayable.
+        self.assertEqual(store.revisions("corp"), (old, revised))
+        self.assertEqual(
+            store.snapshot_at(BASE + timedelta(hours=2)).claims,
+            (old, revised),
+        )
+        self.assertEqual(
+            store.decision_snapshot_at(BASE + timedelta(hours=2)).claims,
+            (revised,),
+        )
+
+    def test_delayed_ingest_of_older_revision_does_not_roll_back_newer_source_fact(self):
+        store = ClaimStore()
+        newer_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="r2",
+            source_kind="CORPORATE",
+            title="newer revision",
+            passage="guidance is 8",
+            published_at=BASE + timedelta(hours=2),
+            available_at=BASE + timedelta(hours=2),
+            ingested_at=BASE + timedelta(hours=2),
+            rights_basis="issuer-release",
+            locator="guidance",
+        )
+        delayed_old_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="r1",
+            source_kind="CORPORATE",
+            title="older revision discovered late",
+            passage="guidance was 10",
+            published_at=BASE,
+            available_at=BASE,
+            ingested_at=BASE + timedelta(hours=3),
+            rights_basis="issuer-release",
+            locator="guidance",
+        )
+        newer = store.build_claim(
+            newer_document,
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        delayed_old = store.build_claim(
+            delayed_old_document,
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        store.add(newer)
+        store.add(delayed_old)
+
+        self.assertEqual(
+            store.effective_at(BASE + timedelta(hours=3)),
+            (newer,),
+        )
+        self.assertEqual(
+            store.revisions("corp"),
+            (delayed_old, newer),
+        )
+
+    def test_contradictions_are_detected_across_different_publication_times(self):
+        store = ClaimStore()
+        first_document = SourceDocument.create(
+            source_id="official-a",
+            source_revision="r1",
+            source_kind="OFFICIAL",
+            title="release A",
+            passage="value is 10",
+            published_at=BASE,
+            available_at=BASE,
+            ingested_at=BASE,
+            rights_basis="official-release",
+            locator="table-1",
+        )
+        second_document = SourceDocument.create(
+            source_id="official-b",
+            source_revision="r1",
+            source_kind="OFFICIAL",
+            title="release B",
+            passage="value is 12",
+            published_at=BASE + timedelta(minutes=5),
+            available_at=BASE + timedelta(minutes=5),
+            ingested_at=BASE + timedelta(minutes=5),
+            rights_basis="official-release",
+            locator="table-1",
+        )
+        first = store.build_claim(
+            first_document,
+            subject="INDEX",
+            predicate="value",
+            value="10",
+        )
+        second = store.build_claim(
+            second_document,
+            subject="INDEX",
+            predicate="value",
+            value="12",
+        )
+        store.add(first)
+        store.add(second)
+
+        # Exact-published-at conflict keys differ, but the effective contradiction
+        # view must still surface disagreement rather than silently choosing.
+        self.assertNotEqual(first.conflict_key, second.conflict_key)
+        self.assertEqual(
+            store.contradiction_groups_at(BASE + timedelta(minutes=5)),
+            ((first, second),),
+        )
+
+    def test_superseded_source_value_does_not_create_stale_contradiction(self):
+        store = ClaimStore()
+        old = store.build_claim(
+            doc("corp", "r1", "old", available=0),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        revised = store.build_claim(
+            doc("corp", "r2", "revised", available=2),
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        peer = store.build_claim(
+            doc("peer", "r1", "peer agrees", available=1),
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        for item in (old, revised, peer):
+            store.add(item)
+
+        self.assertEqual(
+            store.contradiction_groups_at(BASE + timedelta(hours=1)),
+            ((old, peer),),
+        )
+        self.assertEqual(
+            store.contradiction_groups_at(BASE + timedelta(hours=2)),
+            (),
+        )
+
+    def test_one_source_revision_cannot_supply_two_competing_effective_values(self):
+        store = ClaimStore()
+        document = doc("corp", "r1", "ambiguous passage")
+        first = store.build_claim(
+            document,
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        second = store.build_claim(
+            document,
+            subject="X",
+            predicate="guidance",
+            value="11",
+        )
+        store.add(first)
+        store.add(second)
+        with self.assertRaisesRegex(
+            ValueError,
+            "source revision contains contradictory",
+        ):
+            store.effective_at(BASE)
+
     def test_batch_ingest_keys_extraction_by_source_and_revision(self):
         alpha = doc("alpha", "r1", "alpha passage")
         beta = doc("beta", "r1", "beta passage")

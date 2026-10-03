@@ -293,7 +293,12 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
         key = _require_text(name, "budget key")
         if type(raw) not in (int, float):
             raise ValueError("resource budget values must use exact numeric scalars")
-        value = float(raw)
+        try:
+            value = float(raw)
+        except OverflowError as error:
+            raise ValueError(
+                "resource budget values must be finite and non-negative"
+            ) from error
         if value < 0 or value == float("inf") or value != value:
             raise ValueError("resource budget values must be finite and non-negative")
         normalized[key] = value

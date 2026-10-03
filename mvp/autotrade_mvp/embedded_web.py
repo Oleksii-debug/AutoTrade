@@ -153,6 +153,13 @@ class ImmutableWebAssetBundle:
             raise ValueError(
                 "web bundle is missing required core assets: " + ", ".join(missing_core)
             )
+        empty_core = sorted(
+            path for path in _REQUIRED_CORE_ASSETS if not by_path[path].body
+        )
+        if empty_core:
+            raise ValueError(
+                "web bundle has empty required core assets: " + ", ".join(empty_core)
+            )
 
         manifest = {
             "schema_version": "1",

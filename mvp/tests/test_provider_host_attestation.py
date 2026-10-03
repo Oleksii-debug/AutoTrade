@@ -384,7 +384,7 @@ def _fence_fixture():
 
 class ProviderHostAttestationTests(unittest.TestCase):
     def test_self_describing_session_cannot_replace_independent_pin(self):
-        prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, _observed, session_id, key_sha, _response = _fixture()
         with self.assertRaisesRegex(
             HostProviderAttestationError,
             "independently pinned",
@@ -394,11 +394,10 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256="sha256:" + "f" * 64,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_attempt_binding_tamper_fails_before_platform_crypto(self):
-        prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, _observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["attempt"]["subject"]["account_id"] = "attacker-account"
         with self.assertRaisesRegex(
@@ -410,11 +409,10 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_noncanonical_or_extra_fields_are_rejected(self):
-        prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, _observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["attempt"]["caller_authorized"] = True
         with self.assertRaisesRegex(
@@ -426,11 +424,10 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_serialized_query_cannot_replace_independently_pinned_query(self):
-        prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, _observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(prepared)
         changed["query"]["symbol"] = "ETHUSDT"
         with self.assertRaisesRegex(
@@ -442,7 +439,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     def test_sender_fence_transition_must_match_independent_restore_context(self):
@@ -498,7 +494,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
 
     @unittest.skipIf(sys.platform == "win32", "non-Windows fail-closed contract")
     def test_non_windows_never_grants_host_signature_authority(self):
-        prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, _observed, session_id, key_sha, _response = _fixture()
         with self.assertRaisesRegex(
             HostProviderAttestationUnavailable,
             "Windows CNG",
@@ -508,7 +504,6 @@ class ProviderHostAttestationTests(unittest.TestCase):
                 expected_session_identity=session_id,
                 expected_public_key_sha256=key_sha,
                 expected_query=prepared["query"],
-                expected_journal_identity=observed["durable_prepared"]["journal_identity"],
             )
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")

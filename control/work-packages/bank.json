@@ -2428,7 +2428,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Windows bundle/install/update/rollback implementation and focused recovery tests are integrated. Signed/frozen release artifact installation, update/rollback/restore qualification on target Windows remains open."
+      "status_note": "Windows bundle/install/update/rollback implementation is integrated. The current WP-50 successor selects repository-pinned Velopack plus a disabled-by-default Azure Artifact Signing Authenticode boundary with exact-source signer policy, exact regional service endpoints, distinct account/profile constraints, reparse/hardlink/path-drift admission fences and pre-publication signature verification. A real reviewed signer account/profile/RBAC credential boundary, signed/frozen artifact, clean target-Windows install/update/interrupted-update/rollback/uninstall matrices, recovery evidence and keyboard/NVDA qualification remain open."
     },
     {
       "id": "WP-51",

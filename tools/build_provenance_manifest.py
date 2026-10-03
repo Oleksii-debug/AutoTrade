@@ -784,6 +784,7 @@ def dotnet_package_projects() -> list[Path]:
 def build_manifest() -> dict[str, object]:
     components_path = ROOT / "provenance" / "components.json"
     requirements_path = ROOT / "requirements-dev.txt"
+    root_pyproject_path = ROOT / "pyproject.toml"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
     dotnet_tools_path = ROOT / ".config" / "dotnet-tools.json"
@@ -1043,6 +1044,7 @@ def build_manifest() -> dict[str, object]:
         "components_blob_sha": git_blob_sha(components_path),
         "requirements_dev_blob_sha": git_blob_sha(requirements_path),
         "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
+        "root_pyproject_blob_sha": git_blob_sha(root_pyproject_path),
         "global_json_blob_sha": git_blob_sha(global_path),
         "dotnet_lock_blob_shas": {
             record["lock_file"]: record["lock_blob_sha"]

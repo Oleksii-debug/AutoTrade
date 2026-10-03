@@ -72,6 +72,13 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             git_blob_sha(ROOT / "research" / "pyproject.toml"),
         )
 
+    def test_manifest_binds_root_product_build_metadata(self):
+        document = json.loads(rendered_manifest())
+        self.assertEqual(
+            document["source_inventory"]["root_pyproject_blob_sha"],
+            git_blob_sha(ROOT / "pyproject.toml"),
+        )
+
     def test_manifest_check_is_read_only_and_byte_stable(self):
         before = OUTPUT.read_bytes()
         result = subprocess.run(

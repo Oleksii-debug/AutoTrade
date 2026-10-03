@@ -122,6 +122,7 @@ _DESCRIPTORS = (
         QUALIFICATION_FINANCIAL,
     ),
     _descriptor("provider_nonce", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
+    _descriptor("recovery_clock_incident", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("recovery_owner", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
     _descriptor("reservation_book", FINANCIAL, QUALIFICATION_FINANCIAL),
     _descriptor("risk_decision", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),

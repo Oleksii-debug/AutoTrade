@@ -249,7 +249,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
             original_commit = JournalStore.commit_command
 
-            def fail_before_commit(self, **kwargs):
+            def fail_before_commit(selected_store, **kwargs):
                 raise RuntimeError("injected pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -278,9 +278,9 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(self, **kwargs):
+            def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
-                result = original_commit(self, **kwargs)
+                result = original_commit(selected_store, **kwargs)
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected acknowledgement loss")
@@ -446,9 +446,9 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(self, **kwargs):
+            def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
-                result = original_commit(self, **kwargs)
+                result = original_commit(selected_store, **kwargs)
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected settlement acknowledgement loss")
@@ -530,7 +530,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
             original_commit = JournalStore.commit_command
 
-            def fail_before_commit(self, **kwargs):
+            def fail_before_commit(selected_store, **kwargs):
                 raise RuntimeError("injected three-way pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -1051,7 +1051,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
 
             original_commit = JournalStore.commit_command
 
-            def fail_before_commit(self, **kwargs):
+            def fail_before_commit(selected_store, **kwargs):
                 raise RuntimeError("injected provider-fill binding failure")
 
             JournalStore.commit_command = fail_before_commit
@@ -2691,7 +2691,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
 
             original_commit = JournalStore.commit_command
 
-            def fail_before_commit(self, **kwargs):
+            def fail_before_commit(selected_store, **kwargs):
                 raise RuntimeError("injected correction pre-commit failure")
 
             JournalStore.commit_command = fail_before_commit

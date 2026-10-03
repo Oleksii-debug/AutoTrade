@@ -26,6 +26,7 @@ WORKLOAD = "sha256:" + "d" * 64
 RELEASE_ID = "40000000-0000-4000-8000-000000000001"
 OTHER_RELEASE_ID = "40000000-0000-4000-8000-000000000002"
 RELEASE_SHA = "sha256:" + "e" * 64
+OTHER_RELEASE_SHA = "sha256:" + "f" * 64
 
 
 def spec() -> RuntimeBudgetSpec:
@@ -130,6 +131,29 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
                 cut=cut,
                 measurement=value,
                 expected_release_artifact_id=OTHER_RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        mechanics.assert_not_called()
+
+    def test_external_release_sha_must_match_before_mechanics_dispatch(self):
+        temporary, journal, current_spec, current_plan, cut = self._context()
+        self.addCleanup(temporary.cleanup)
+        value = artifact(current_plan, cut)
+        with patch(
+            "mvp.autotrade_mvp.runtime_target_host_measurement_authority."
+            "collect_runtime_campaign_evidence_from_measurement_artifact"
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostMeasurementError,
+            "another delivered release digest",
+        ):
+            collect_release_bound_target_host_evidence(
+                journal=journal,
+                spec=current_spec,
+                plan=current_plan,
+                cut=cut,
+                measurement=value,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=OTHER_RELEASE_SHA,
             )
         mechanics.assert_not_called()
 
@@ -151,6 +175,7 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
                 cut=cut,
                 measurement=value,
                 expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
             )
         mechanics.assert_not_called()
 
@@ -171,6 +196,7 @@ class RuntimeTargetHostMeasurementAuthorityTests(unittest.TestCase):
                 cut=cut,
                 measurement=value,
                 expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
                 max_events=123,
             )
         self.assertIs(result, sentinel)

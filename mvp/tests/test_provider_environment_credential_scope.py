@@ -39,6 +39,9 @@ class _HostileText(str):
     def upper(self):
         raise AssertionError("hostile string callback executed")
 
+    def encode(self, *args, **kwargs):
+        raise AssertionError("hostile string callback executed")
+
 
 class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -229,6 +232,38 @@ class ProviderEnvironmentCredentialScopeTests(unittest.TestCase):
             ),
             "sim-secret",
         )
+
+    def test_hostile_secret_text_is_rejected_before_callbacks_or_mutation(self):
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(SecretVaultError, "exact non-empty text"):
+            self.vault.register(
+                handle_id="cred-hostile-secret",
+                owner_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value=_HostileText("secret"),
+            )
+        self.assertEqual(self.path.read_bytes(), before)
+
+        handle = self.vault.register(
+            handle_id="cred-rotate-hostile-secret",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="secret-v1",
+        )
+        before_rotate = self.path.read_bytes()
+        with self.assertRaisesRegex(SecretVaultError, "exact non-empty text"):
+            self.vault.rotate(
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value=_HostileText("secret-v2"),
+            )
+        self.assertEqual(self.path.read_bytes(), before_rotate)
 
     def test_hostile_provider_domain_text_is_rejected_before_callbacks(self):
         before = self.path.read_bytes()

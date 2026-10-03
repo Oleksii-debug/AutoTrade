@@ -1,10 +1,13 @@
 from decimal import Decimal
 from pathlib import Path
 import platform
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
     _observed_source_sha,
+    _require_clean_checkout,
     _require_exact_checkout,
     _require_source_sha,
     qualify,
@@ -121,6 +124,25 @@ class ZeroModelQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "actual Git checkout"):
             _require_exact_checkout(different)
         self.assertEqual(_require_exact_checkout(observed), observed)
+
+    def test_source_identity_is_read_from_qualifier_checkout_root(self):
+        expected = "a" * 40
+        with patch(
+            "qualification.zero_model.qualify.subprocess.run",
+            return_value=SimpleNamespace(stdout=expected + "\n"),
+        ) as run:
+            self.assertEqual(_observed_source_sha(), expected)
+        self.assertEqual(run.call_args.kwargs["cwd"], ROOT)
+
+    def test_dirty_checkout_cannot_issue_zero_model_qualification(self):
+        with patch(
+            "qualification.zero_model.qualify._git",
+            return_value=SimpleNamespace(
+                stdout=" M mvp/autotrade_mvp/pipeline.py\n"
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "source changes"):
+                _require_clean_checkout()
 
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)

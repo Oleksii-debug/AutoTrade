@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import durable_settlement as settlement_authority
 from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.persistence import (
     JournalStore,
@@ -19,6 +20,23 @@ class DurableSettlementBindingUnforgeabilityTests(unittest.TestCase):
             account_id="acct-1",
             environment="PAPER",
             evidence_artifact_store=ArtifactStore(root / "evidence"),
+        )
+
+    def test_original_store_binding_registry_is_not_module_mutable_state(self):
+        self.assertFalse(
+            hasattr(settlement_authority, "_DURABLE_SETTLEMENT_STORE_BINDINGS")
+        )
+        self.assertFalse(
+            hasattr(
+                settlement_authority,
+                "_DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                settlement_authority,
+                "_install_durable_settlement_store_binding",
+            )
         )
 
     def test_caller_cannot_retarget_store_and_visible_identity_together(self):

@@ -475,28 +475,44 @@ class PreparedSettlementMutation:
     already_committed: bool = False
 
 
-_DURABLE_SETTLEMENT_STORE_BINDINGS = WeakKeyDictionary()
-_DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK = RLock()
+def _install_durable_settlement_store_binding():
+    """Keep original settlement-store composition outside mutable module state."""
+
+    bindings: WeakKeyDictionary[object, tuple[JournalStore, object]] = (
+        WeakKeyDictionary()
+    )
+    lock = RLock()
+
+    def bind(
+        book: object,
+        store: JournalStore,
+        identity: object,
+    ) -> None:
+        with lock:
+            if book in bindings:
+                raise RuntimeError(
+                    "durable settlement JournalStore is already bound"
+                )
+            bindings[book] = (store, identity)
+
+    def bound(book: object) -> tuple[JournalStore, object]:
+        with lock:
+            binding = bindings.get(book)
+        if binding is None:
+            raise SettlementConflict(
+                "durable settlement JournalStore binding is unavailable"
+            )
+        store, identity = binding
+        return store, identity
+
+    return bind, bound
 
 
-def _bind_durable_settlement_store(
-    book: object,
-    store: JournalStore,
-    identity: object,
-) -> None:
-    with _DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK:
-        if book in _DURABLE_SETTLEMENT_STORE_BINDINGS:
-            raise RuntimeError("durable settlement JournalStore is already bound")
-        _DURABLE_SETTLEMENT_STORE_BINDINGS[book] = (store, identity)
-
-
-def _bound_durable_settlement_store(book: object) -> tuple[JournalStore, object]:
-    with _DURABLE_SETTLEMENT_STORE_BINDINGS_LOCK:
-        binding = _DURABLE_SETTLEMENT_STORE_BINDINGS.get(book)
-    if binding is None:
-        raise SettlementConflict("durable settlement JournalStore binding is unavailable")
-    store, identity = binding
-    return store, identity
+(
+    _bind_durable_settlement_store,
+    _bound_durable_settlement_store,
+) = _install_durable_settlement_store_binding()
+del _install_durable_settlement_store_binding
 
 
 class DurableSettlementBook:

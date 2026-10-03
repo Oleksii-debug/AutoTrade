@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-import weakref
 
 from mvp.autotrade_mvp import risk_policy_authority as authority
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -99,25 +98,37 @@ class RiskPolicyIssuerUnforgeabilityTests(unittest.TestCase):
             with self.assertRaises(RiskPolicyAuthorityError):
                 authority.require_registry_issued_resolved_policy(forged)
 
-    def test_imported_issuance_map_cannot_upgrade_caller_mint_to_registry_authority(self):
+    def test_imported_module_has_no_issuance_registration_capability(self):
         with TemporaryDirectory() as directory:
             issued = self._issued(directory)
             forged = self._forge_from(issued)
-            forged_digest = authority._resolved_policy_authority_digest(forged)
 
-            # Moving the seal to another importable mutable module global is not
-            # an issuer boundary. A caller that can mint with the exported token
-            # can also insert the exact weakref/digest tuple expected by the
-            # consumer unless issuance truth is held by an unforgeable owner.
-            authority._RESOLVED_POLICY_ISSUANCE_BINDINGS[id(forged)] = (
-                weakref.ref(forged),
-                forged_digest,
+            # The registrar and mutable issuance table are closure-owned by the
+            # genuine registry resolver, not caller-retrievable module globals.
+            self.assertFalse(
+                hasattr(authority, "_record_resolved_policy_issuance")
             )
-            try:
-                with self.assertRaises(RiskPolicyAuthorityError):
-                    authority.require_registry_issued_resolved_policy(forged)
-            finally:
-                authority._RESOLVED_POLICY_ISSUANCE_BINDINGS.pop(id(forged), None)
+            self.assertFalse(
+                hasattr(authority, "_RESOLVED_POLICY_ISSUANCE_BINDINGS")
+            )
+
+            # Recomputing every caller-visible seal still cannot register the
+            # forged object.
+            object.__setattr__(
+                forged,
+                "_authority_digest",
+                authority._resolved_policy_authority_digest(forged),
+            )
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "was not issued by DurableRiskPolicyRegistry",
+            ):
+                authority.require_registry_issued_resolved_policy(forged)
+
+            self.assertIs(
+                authority.require_registry_issued_resolved_policy(issued),
+                issued,
+            )
 
 
 if __name__ == "__main__":

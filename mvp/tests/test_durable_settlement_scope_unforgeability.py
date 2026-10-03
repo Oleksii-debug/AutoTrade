@@ -16,6 +16,7 @@ class DurableSettlementScopeUnforgeabilityTests(unittest.TestCase):
             provider_id="PROVIDER-A",
             account_id="acct-selected",
             environment="PAPER",
+            evidence_artifact_root=root / "evidence",
             evidence_artifact_store=ArtifactStore(root / "evidence"),
         )
 
@@ -32,6 +33,7 @@ class DurableSettlementScopeUnforgeabilityTests(unittest.TestCase):
                     provider_id="PROVIDER-A",
                     account_id="acct-other",
                     environment="PAPER",
+                    evidence_artifact_root=root / "other-evidence",
                     evidence_artifact_store=ArtifactStore(root / "other-evidence"),
                 )
 

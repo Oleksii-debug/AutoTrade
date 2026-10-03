@@ -83,6 +83,16 @@ def _safe_relative(path: Path, root: Path) -> str:
 def _windows_path_key(relative: str) -> str:
     normalized: list[str] = []
     for part in PurePosixPath(relative).parts:
+        if "\\" in part:
+            raise BundleError(
+                f"bundle contains Windows separator in path segment: {relative}"
+            )
+        if any(char in part for char in '*?"<>|') or any(
+            ord(char) < 32 for char in part
+        ):
+            raise BundleError(
+                f"bundle contains Windows-forbidden path character: {relative}"
+            )
         if part.endswith((" ", ".")):
             raise BundleError(
                 f"bundle contains Windows-unsafe trailing space/dot segment: {relative}"

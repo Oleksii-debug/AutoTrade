@@ -166,6 +166,56 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
                     installer_manifest.verify_release_bundle(bundle)
 
 
+    def test_windows_acquisition_cleanup_failure_does_not_mask_primary_blocker(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = (Path(directory) / "release.zip").absolute()
+            bundle.write_bytes(b"data")
+
+            @contextmanager
+            def retained_parent(path, *, create=False):
+                try:
+                    yield object()
+                finally:
+                    raise OSError("cleanup sentinel")
+
+            @contextmanager
+            def rejected_leaf(authority, *, target_name, subject):
+                raise RuntimeError("leaf sentinel")
+                yield  # pragma: no cover
+
+            with patch.object(
+                installer_manifest.sys,
+                "platform",
+                "win32",
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=retained_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+                side_effect=rejected_leaf,
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+            ) as parser:
+                with self.assertRaises(installer_manifest.InstallerManifestError) as captured:
+                    installer_manifest.verify_release_bundle(bundle)
+
+            cause = captured.exception.__cause__
+            self.assertIsInstance(cause, RuntimeError)
+            self.assertIn("leaf sentinel", str(cause))
+            notes = getattr(cause, "__notes__", [])
+            self.assertTrue(
+                any(
+                    "retained Windows namespace cleanup also failed" in note
+                    and "cleanup sentinel" in note
+                    for note in notes
+                )
+            )
+            parser.assert_not_called()
+
+
     def test_windows_parent_namespace_rejection_prevents_leaf_open_and_zip_parse(self) -> None:
         with TemporaryDirectory() as directory:
             bundle = (Path(directory) / "release.zip").absolute()

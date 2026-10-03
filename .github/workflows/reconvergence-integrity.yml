@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -22,20 +23,111 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify event base is still live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          live_base="$(
+            git ls-remote --refs origin \
+              "refs/heads/${BASE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test -n "${live_base}"
+          test "${live_base}" = "${BASE_SHA}"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"
-          test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
-          git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
-          git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "${HEAD_SHA}"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+      - name: Resolve trusted exact-path scope approval
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes.txt
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import urllib.parse
+          import urllib.request
+
+          from control.tools.reconvergence_integrity import parse_trusted_scope_approval
+
+          repository = os.environ["REPOSITORY"]
+          pr_number = os.environ["PR_NUMBER"]
+          head_sha = os.environ["HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+          target = Path(os.environ["APPROVED_SCOPE_FILE"])
+          approved: list[str] = []
+          seen: set[str] = set()
+          page = 1
+          while True:
+              query = urllib.parse.urlencode({"per_page": 100, "page": page})
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments?{query}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  comments = json.load(response)
+              if not isinstance(comments, list):
+                  raise RuntimeError("GitHub issue comments response must be a list")
+              for comment in comments:
+                  if comment.get("author_association") != "OWNER":
+                      continue
+                  parsed = parse_trusted_scope_approval(
+                      comment.get("body"),
+                      expected_head_sha=head_sha,
+                  )
+                  if parsed is not None:
+                      for path in parsed:
+                          if path not in seen:
+                              seen.add(path)
+                              approved.append(path)
+              if len(comments) < 100:
+                  break
+              page += 1
+
+          target.write_text("".join(f"{path}\n" for path in approved), encoding="utf-8")
+          print(f"Resolved {len(approved)} externally approved exact path(s).")
+          PY
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
         shell: bash
-        run: >-
-          python -m control.tools.reconvergence_integrity
-          --base "${{ github.event.pull_request.base.sha }}"
-          --head "${{ github.event.pull_request.head.sha }}"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes.txt
+        run: |
+          args=(--base "${BASE_SHA}" --head "${HEAD_SHA}")
+          while IFS= read -r scope; do
+            test -n "${scope}"
+            args+=(--allowed-scope "${scope}")
+          done < "${APPROVED_SCOPE_FILE}"
+          python -m control.tools.reconvergence_integrity "${args[@]}"
       - name: Run trusted guard regression tests
-        run: python -m unittest tests.Control.test_reconvergence_integrity -v
+        run: >-
+          python -m unittest
+          tests.Control.test_reconvergence_integrity
+          tests.Control.test_reconvergence_integrity_entrypoint
+          tests.Control.test_reconvergence_integrity_security_regressions
+          tests.Control.test_reconvergence_workflow_authority
+          -v

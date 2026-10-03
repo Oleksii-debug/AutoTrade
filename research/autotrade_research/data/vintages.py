@@ -269,6 +269,7 @@ def causal_market_event_history(
         str,
         dict[int, tuple[datetime, datetime, str, bytes, dict[str, Any]]],
     ] = {}
+    visible_knowledge: dict[str, dict[int, datetime]] = {}
     for raw in events:
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event must be an object")
@@ -298,9 +299,11 @@ def causal_market_event_history(
             or evidence_observed > point
         ):
             continue
+        effective_knowledge = max(available, ingested, evidence_observed)
 
         canonical = _canonical_bytes(event)
         history = visible_revisions.setdefault(event_id, {})
+        knowledge_history = visible_knowledge.setdefault(event_id, {})
         same_revision = history.get(revision)
         if same_revision is not None:
             if same_revision[3] != canonical:
@@ -322,6 +325,17 @@ def causal_market_event_history(
                 raise HistoricalConflict(
                     "higher event revision cannot predate lower revision availability"
                 )
+            other_knowledge = knowledge_history[other_revision]
+            if (
+                (revision > other_revision and effective_knowledge <= other_knowledge)
+                or (
+                    revision < other_revision
+                    and effective_knowledge >= other_knowledge
+                )
+            ):
+                raise HistoricalConflict(
+                    "higher event revision must have later effective knowledge time"
+                )
         history[revision] = (
             available,
             source_at,
@@ -329,6 +343,7 @@ def causal_market_event_history(
             canonical,
             event,
         )
+        knowledge_history[revision] = effective_knowledge
 
     rows = [
         item[4]

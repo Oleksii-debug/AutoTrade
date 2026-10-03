@@ -302,6 +302,15 @@ class SimulationOperatorTests(unittest.TestCase):
             self.assertEqual(status["active_reservations"][0]["remaining"], {"CASH:USD": "0"})
             self.assertEqual(status["active_reservations"][0]["state"], "WORKING")
 
+    def test_buy_direct_operator_projection_is_readable(self):
+        """A valid completed BUY must survive the strict direct projection."""
+        with TemporaryDirectory() as directory:
+            run(directory)
+            read = inspect_canonical_simulation(directory)
+            self.assertEqual(read["status"]["status"], "awaiting_order_reconciliation")
+            self.assertEqual(read["status"]["cash"], "896.897")
+            self.assertEqual(read["status"]["position"], "1")
+
     def test_buy_report_does_not_invent_a_mark_or_pnl(self):
         with TemporaryDirectory() as directory:
             run(directory)
@@ -370,7 +379,7 @@ class SimulationOperatorTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             original = simulation_session._reconcile
             def crash(provider, book, now, **kwargs):
-                if kwargs.get("fill") is not None:
+                if kwargs.get("provider_fill") is not None:
                     raise RuntimeError("post-fill reconciliation crash")
                 return original(provider, book, now, **kwargs)
             with patch.object(simulation_session, "_reconcile", crash):

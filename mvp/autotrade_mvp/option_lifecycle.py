@@ -415,8 +415,8 @@ def _bind_version(
     registry: InstrumentRegistry,
     observation: OptionLifecycleObservation,
 ) -> InstrumentVersion:
-    if not isinstance(registry, InstrumentRegistry):
-        raise TypeError("registry must be InstrumentRegistry")
+    if type(registry) is not InstrumentRegistry:
+        raise TypeError("registry must be exact InstrumentRegistry")
     version = registry.exact(observation.instrument_version)
     effective = registry.at(version.instrument_id, observation.effective_at)
     if effective != version:

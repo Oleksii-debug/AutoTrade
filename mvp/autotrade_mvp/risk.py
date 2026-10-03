@@ -16,6 +16,7 @@ from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
     bounded_fraction,
+    canonical_decimal_text,
     exact_abs,
     exact_add,
     exact_multiply,
@@ -268,12 +269,12 @@ def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decim
 
 
 def _canonical_decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    # normalize() rounds to the ambient Decimal context precision. Risk and
-    # authority evidence must retain every provider-supplied significant digit.
-    exact = format(value, "f")
-    return exact.rstrip("0").rstrip(".") if "." in exact else exact
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "risk decimal identity exceeds the exact arithmetic resource envelope"
+        ) from error
 
 
 def stress_scenario_digest(scenario: Mapping[str, object]) -> str:

@@ -29,6 +29,7 @@ trading authority.
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
@@ -126,6 +127,30 @@ def _snapshot_campaign_plan(plan: RuntimeCampaignPlan) -> RuntimeCampaignPlan:
     if type(plan) is not RuntimeCampaignPlan:
         raise TypeError("campaign_plan must be exact RuntimeCampaignPlan")
     return replace(plan)
+
+
+def _snapshot_campaign_cut(cut: RuntimeCampaignCut) -> RuntimeCampaignCut:
+    """Detach one issued cut before release-bound prechecks can observe caller mutation."""
+
+    if type(cut) is not RuntimeCampaignCut:
+        raise TypeError("campaign_cut must be exact RuntimeCampaignCut")
+    detached = copy(cut)
+    if type(detached) is not RuntimeCampaignCut or detached is cut:
+        raise RuntimeTargetHostCompositionError(
+            "campaign_cut could not be detached at composed authority boundary"
+        )
+    for field in ("plan_digest", "spec_digest", "journal_store_identity_digest"):
+        if type(getattr(detached, field)) is not str:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain exact inert text"
+            )
+    for field in ("start_journal_sequence", "started_monotonic_ns"):
+        value = getattr(detached, field)
+        if type(value) is not int or value < 0:
+            raise RuntimeTargetHostCompositionError(
+                f"campaign_cut {field} must remain a non-negative integer"
+            )
+    return detached
 
 
 def _projection_identity(
@@ -400,6 +425,8 @@ def verify_composed_runtime_target_host_qualification(
     measurement = _snapshot_measurement(measurement)
     spec = _snapshot_spec(spec)
     campaign_plan = _snapshot_campaign_plan(campaign_plan)
+    if type(campaign_cut) is RuntimeCampaignCut:
+        campaign_cut = _snapshot_campaign_cut(campaign_cut)
 
     durable_binding: DurableTargetHostFinancialBinding = (
         bind_release_bound_durable_financial_latency_to_target_host_measurement(

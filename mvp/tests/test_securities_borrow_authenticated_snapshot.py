@@ -152,6 +152,56 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
 
             self.assertEqual(malicious.override_calls, 0)
 
+    def test_malformed_snapshot_representation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+            artifact_id = bound.evidence_ref[len("artifact:"):].split(
+                "@sha256:",
+                1,
+            )[0]
+            manifest, raw = ArtifactStore.read_authenticated_snapshot(
+                artifacts,
+                artifact_id,
+            )
+            cases = (
+                ("manifest-type", [], raw),
+                ("raw-type", manifest, bytearray(raw)),
+                (
+                    "artifact-identity",
+                    {**manifest, "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                    raw,
+                ),
+                (
+                    "manifest-hash",
+                    {**manifest, "manifest_hash": "sha256:" + "g" * 64},
+                    raw,
+                ),
+            )
+            for name, candidate_manifest, candidate_raw in cases:
+                with self.subTest(case=name):
+                    with patch.object(
+                        ArtifactStore,
+                        "read_authenticated_snapshot",
+                        return_value=(candidate_manifest, candidate_raw),
+                    ):
+                        with self.assertRaisesRegex(
+                            BorrowEvidenceError,
+                            "verification failed",
+                        ):
+                            verify_provider_borrow_evidence(bound, artifacts)
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=OSError("injected descriptor failure"),
+            ):
+                with self.assertRaisesRegex(
+                    BorrowEvidenceError,
+                    "verification failed",
+                ):
+                    verify_provider_borrow_evidence(bound, artifacts)
+
     def test_snapshot_integrity_failure_precedes_journal_mutation(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

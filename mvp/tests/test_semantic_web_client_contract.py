@@ -121,7 +121,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
     def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function resetEventHistoryForScope()", js)
+        self.assertIn("function resetEventHistoryForScope(", js)
         self.assertIn("renderedAccountId: null", js)
         self.assertIn("renderedEnvironment: null", js)
         self.assertIn("const scopeChanged = state.renderedAccountId !== null", js)
@@ -129,10 +129,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("parsed.environment !== state.renderedEnvironment", js)
         self.assertIn("state.renderedAccountId = parsed.accountId", js)
         self.assertIn("state.renderedEnvironment = parsed.environment", js)
-        scope = js.index("if (scopeChanged)")
+        scope = js.index("if (displayContextChanged)")
         cursor_reset = js.index("state.cursor = 0n", scope)
         version_reset = js.index("state.version = 0n", scope)
-        history_reset = js.index("resetEventHistoryForScope()", scope)
+        history_reset = js.index("resetEventHistoryForScope();", scope)
         regression_check = js.index("host snapshot counters regressed", scope)
         self.assertLess(cursor_reset, regression_check)
         self.assertLess(version_reset, regression_check)
@@ -304,7 +304,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_unresolved_command_cannot_be_retargeted_after_scope_or_session_change(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
-        build = js.index("const payload = commandForSubmission(action)", submit)
+        build = js.index("payload = commandForSubmission(action)", submit)
         fence = js.index("if (recovering && (", submit)
         self.assertLess(fence, build)
         for required in (
@@ -327,7 +327,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("state.renderedAccountId = null", invalidation)
         self.assertNotIn("state.renderedEnvironment = null", invalidation)
         self.assertIn(
-            "last successfully rendered scope is retained only to prevent stale read-only",
+            "successfully rendered scope is retained only to prevent stale read-only",
             js,
         )
 
@@ -1033,14 +1033,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("if (state.pendingCommand !== null)", js)
         self.assertIn("return state.pendingCommand", js)
         self.assertIn("state.pendingCommand = payload", js)
-        self.assertIn("const payload = commandForSubmission(action)", js)
+        self.assertIn("payload = commandForSubmission(action)", js)
         self.assertIn("clearConfirmedCommand(payload)", js)
         self.assertIn(
             "Its original command_id and idempotency_key are retained for exact retry",
             js,
         )
         submit = js.index("async function submitCommand(event)")
-        construct = js.index("const payload = commandForSubmission(action)", submit)
+        construct = js.index("payload = commandForSubmission(action)", submit)
         post = js.index("await submitCanonicalCommand(payload)", construct)
         clear = js.index("clearConfirmedCommand(payload)", post)
         ambiguous = js.index("could not be confirmed", clear)
@@ -1482,7 +1482,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         condition = snapshot[
             snapshot.index("const skippedSameScopeEvents ="):
-            snapshot.index("if (scopeChanged)")
+            snapshot.index("if (displayContextChanged)")
         ]
         self.assertIn("!displayContextChanged", condition)
         self.assertIn("state.renderedHostId !== null", condition)
@@ -1508,8 +1508,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js.index("function newCommandPayload")
         ]
         self.assertIn("pollEpoch = state.scopeEpoch", poll)
-        self.assertIn("const renderedAccountId = state.renderedAccountId", poll)
-        self.assertIn("const renderedEnvironment = state.renderedEnvironment", poll)
+        self.assertIn("pollRenderedAccountId = state.renderedAccountId", poll)
+        self.assertIn("pollRenderedEnvironment = state.renderedEnvironment", poll)
         self.assertIn("pollEpoch !== state.scopeEpoch", poll)
         response = poll.index("const response = await jsonFetch(")
         fence = poll.index("pollEpoch !== state.scopeEpoch", response)
@@ -1574,7 +1574,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "function resetCommandFeedbackForContext(accountId, environment)",
+            "function resetCommandFeedbackForContext(",
             js,
         )
         self.assertIn(
@@ -1600,7 +1600,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         operations = snapshot.index("resetOperationsForScope();")
         history = snapshot.index("resetEventHistoryForScope();")
         command = snapshot.index(
-            "resetCommandFeedbackForContext(parsed.accountId, parsed.environment);"
+            "resetCommandFeedbackForContext(\n        parsed.hostId,\n        parsed.accountId,\n        parsed.environment,\n        parsed.sessionIdentity);"
         )
         self.assertLess(notifications, filters)
         self.assertLess(filters, operations)

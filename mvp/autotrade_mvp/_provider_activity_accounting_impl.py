@@ -2162,6 +2162,15 @@ def commit_economic_batch_with_reservation_consumption(
         raise ValueError(
             "economic and reservation books must share account/environment scope"
         )
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        provider_fill_binding is None
+        or _order_book is None
+        or _order_fill_plan is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE economic batches require provider fill binding "
+            "and atomic canonical order projection"
+        )
 
     if (_order_book is None) != (_order_fill_plan is None):
         raise ValueError(

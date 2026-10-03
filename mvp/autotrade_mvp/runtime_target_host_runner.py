@@ -537,9 +537,15 @@ def run_declared_target_host_campaign(
         "min_research_samples",
     )
     input_spec_dict = input_spec.__dict__
+    if type(input_spec_dict) is not dict:
+        raise RuntimeTargetHostRunnerError(
+            "input RuntimeBudgetSpec instance state is non-canonical"
+        )
+    input_spec_keys = tuple(input_spec_dict)
     if (
-        type(input_spec_dict) is not dict
-        or tuple(sorted(input_spec_dict)) != tuple(sorted(budget_spec_fields))
+        any(type(key) is not str for key in input_spec_keys)
+        or len(input_spec_keys) != len(budget_spec_fields)
+        or set(input_spec_keys) != set(budget_spec_fields)
     ):
         raise RuntimeTargetHostRunnerError(
             "input RuntimeBudgetSpec instance state is non-canonical"
@@ -706,9 +712,15 @@ def run_declared_target_host_campaign(
                 "input RuntimeBudgetSpec authority changed during campaign callback"
             )
         current_state = input_spec.__dict__
+        if type(current_state) is not dict:
+            raise error_type(
+                "input RuntimeBudgetSpec state changed during campaign callback"
+            )
+        current_keys = tuple(current_state)
         if (
-            type(current_state) is not dict
-            or tuple(sorted(current_state)) != tuple(sorted(budget_spec_fields))
+            any(type(key) is not str for key in current_keys)
+            or len(current_keys) != len(budget_spec_fields)
+            or set(current_keys) != set(budget_spec_fields)
         ):
             raise error_type(
                 "input RuntimeBudgetSpec state changed during campaign callback"

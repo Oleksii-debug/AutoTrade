@@ -1221,7 +1221,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn("top-secret", rendered)
         self.assertEqual(
             redacted["prefix-[REDACTED]-suffix"],
-            "visible",
+            "[REDACTED]",
         )
 
     def test_diagnostic_redaction_never_emits_binary_payload_bytes(self):

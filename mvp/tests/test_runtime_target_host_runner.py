@@ -4,7 +4,10 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.runtime_load_measurement as measurement_module
+import mvp.autotrade_mvp.runtime_target_host_runner as runner_module
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
+from mvp.autotrade_mvp.runtime_load_measurement import RuntimeLoadMeasurementError
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.runtime_load_campaign import capture_runtime_host_identity
 from mvp.autotrade_mvp.runtime_load_evidence import ExpectedJournalEvent
@@ -244,6 +247,58 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             )
             self.assertEqual(result.campaign_evidence.reconnect_backlog_remaining, 1)
             self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
+
+    def test_research_callback_cannot_replace_terminal_budget_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module.evaluate_runtime_budget
+
+            def poison_budget_authority() -> None:
+                runner_module.evaluate_runtime_budget = lambda *_args, **_kwargs: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "budget evaluator callable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-budget", poison_budget_authority),),
+                    )
+            finally:
+                runner_module.evaluate_runtime_budget = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
+    def test_financial_operation_cannot_replace_latency_clock_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+
+            def poison_latency_clock() -> None:
+                append_expected(journal, "fin-1")
+                measurement_module.perf_counter_ns = lambda: 1
+
+            with self.assertRaisesRegex(
+                RuntimeLoadMeasurementError,
+                "financial latency clock authority changed",
+            ):
+                self._run(
+                    journal,
+                    spec,
+                    {"fin-1": poison_latency_clock},
+                    clock=clock,
+                )
+
+            self.assertIsNotNone(journal.get_event("fin-1"))
 
     def test_cpu_pressure_probe_is_bounded_and_deterministic(self):
         first = run_cpu_pressure_probe(iterations=3)

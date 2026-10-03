@@ -21,8 +21,10 @@ from hashlib import sha256
 import sys
 import threading
 import time
+from types import FunctionType, MethodType
 from typing import Callable, Mapping
 
+from . import runtime_load_measurement as _runtime_load_measurement
 from .performance_qualification import (
     RuntimeBudgetDecision,
     RuntimeBudgetSpec,
@@ -158,9 +160,73 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
     return value
 
 
+def _callable_authority_state(
+    value: object,
+) -> tuple[
+    object,
+    object | None,
+    object | None,
+    object | None,
+    tuple[tuple[object, object], ...] | None,
+]:
+    """Capture exact executable state for a callback-adjacent authority callable."""
+
+    target = value.__func__ if type(value) is MethodType else value
+    if type(target) is not FunctionType:
+        return (target, None, None, None, None)
+    kwdefaults = target.__kwdefaults__
+    return (
+        target,
+        target.__code__,
+        target.__defaults__,
+        kwdefaults,
+        None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+    )
+
+
+def _require_callable_authority(
+    value: object,
+    state: tuple[
+        object,
+        object | None,
+        object | None,
+        object | None,
+        tuple[tuple[object, object], ...] | None,
+    ],
+    *,
+    name: str,
+) -> None:
+    target = value.__func__ if type(value) is MethodType else value
+    expected_target, code, defaults, kwdefaults, kwdefault_items = state
+    if target is not expected_target:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} callable authority changed during campaign callback"
+        )
+    if code is None:
+        return
+    if (
+        target.__code__ is not code
+        or target.__defaults__ is not defaults
+        or target.__kwdefaults__ is not kwdefaults
+        or (
+            kwdefaults is not None
+            and tuple(sorted(kwdefaults.items())) != kwdefault_items
+        )
+    ):
+        raise RuntimeTargetHostRunnerError(
+            f"{name} executable authority changed during campaign callback"
+        )
+
+
 def _capture_resource_metrics(
     store: JournalStore,
     resource_probe: Callable[[], Mapping[str, int]] | None,
+    *,
+    current_journal_sequence: Callable[[JournalStore], int] | None = None,
+    pending_outbox_count: Callable[[JournalStore], int] | None = None,
+    active_count: Callable[[], int] | None = None,
+    process_time_ns: Callable[[], int] | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     """Capture one cut-consistent portable/optional resource observation.
 
@@ -172,7 +238,16 @@ def _capture_resource_metrics(
     replace runner-owned metric keys.
     """
 
-    sequence_before = JournalStore.current_journal_sequence(store)
+    if current_journal_sequence is None:
+        current_journal_sequence = JournalStore.current_journal_sequence
+    if pending_outbox_count is None:
+        pending_outbox_count = JournalStore.pending_outbox_count
+    if active_count is None:
+        active_count = threading.active_count
+    if process_time_ns is None:
+        process_time_ns = time.process_time_ns
+
+    sequence_before = current_journal_sequence(store)
     extras: dict[str, int] = {}
     if resource_probe is not None:
         raw = resource_probe()
@@ -183,14 +258,16 @@ def _capture_resource_metrics(
         for key, metric in raw.items():
             name = _text(key, name="resource metric")
             extras[name] = _non_negative_int(metric, name=f"resource metric {name}")
+        if authority_check is not None:
+            authority_check()
 
     # Keep every observation inside the same journal-sequence bracket. The final
     # sequence read is intentionally last: a write that races pending-outbox or
     # the optional probe invalidates the complete resource sample.
-    pending_outbox = JournalStore.pending_outbox_count(store)
-    active_threads = threading.active_count()
-    process_cpu_time_ns = time.process_time_ns()
-    sequence_after = JournalStore.current_journal_sequence(store)
+    pending_outbox = pending_outbox_count(store)
+    active_threads = active_count()
+    process_cpu_time_ns = process_time_ns()
+    sequence_after = current_journal_sequence(store)
     if sequence_after != sequence_before:
         raise RuntimeTargetHostRunnerError(
             "resource observation crossed a durable JournalStore cut"
@@ -296,6 +373,67 @@ def run_declared_target_host_campaign(
     )
     resource_probe = _snapshot_resource_probe(resource_probe)
 
+    # Freeze every authority callable used after a caller-supplied callback. A
+    # callback may exercise product/research code, but it cannot replace clocks,
+    # durable-store readers, evidence collection, evaluation, or terminal parse.
+    monotonic_ns = time.monotonic_ns
+    process_time_ns = time.process_time_ns
+    active_count = threading.active_count
+    financial_clock = _runtime_load_measurement.perf_counter_ns
+    journal_store_type = JournalStore
+    current_journal_sequence = JournalStore.current_journal_sequence
+    pending_outbox_count = JournalStore.pending_outbox_count
+    measure_financial = measure_declared_financial_operation
+    capture_resource_metrics = _capture_resource_metrics
+    collect_campaign_evidence = (
+        collect_runtime_campaign_evidence_from_measurement_artifact
+    )
+    evaluate_budget = evaluate_runtime_budget
+    parsed_campaign_type = ParsedRuntimeTargetHostCampaign
+    parse_campaign = ParsedRuntimeTargetHostCampaign.parse
+    measurement_type = TargetHostMeasurementArtifact
+    financial_sample_type = FinancialTargetHostSample
+    research_sample_type = ResearchInterferenceSample
+    resource_sample_type = ResourceTargetHostSample
+    retained_campaign_type = RuntimeLoadCampaignEvidence
+    run_result_type = RuntimeTargetHostRunResult
+
+    callable_states = (
+        ("runner monotonic clock", lambda: time.monotonic_ns, _callable_authority_state(monotonic_ns)),
+        ("runner process CPU clock", lambda: time.process_time_ns, _callable_authority_state(process_time_ns)),
+        ("runner thread counter", lambda: threading.active_count, _callable_authority_state(active_count)),
+        ("financial latency clock", lambda: _runtime_load_measurement.perf_counter_ns, _callable_authority_state(financial_clock)),
+        ("JournalStore current-sequence reader", lambda: JournalStore.current_journal_sequence, _callable_authority_state(current_journal_sequence)),
+        ("JournalStore pending-outbox reader", lambda: JournalStore.pending_outbox_count, _callable_authority_state(pending_outbox_count)),
+        ("financial measurement authority", lambda: measure_declared_financial_operation, _callable_authority_state(measure_financial)),
+        ("resource capture authority", lambda: _capture_resource_metrics, _callable_authority_state(capture_resource_metrics)),
+        ("campaign evidence collector", lambda: collect_runtime_campaign_evidence_from_measurement_artifact, _callable_authority_state(collect_campaign_evidence)),
+        ("budget evaluator", lambda: evaluate_runtime_budget, _callable_authority_state(evaluate_budget)),
+        ("terminal campaign parser", lambda: ParsedRuntimeTargetHostCampaign.parse, _callable_authority_state(parse_campaign)),
+    )
+
+    def require_callback_authority() -> None:
+        if JournalStore is not journal_store_type:
+            raise RuntimeTargetHostRunnerError(
+                "JournalStore authority changed during campaign callback"
+            )
+        class_bindings = (
+            ("terminal campaign type", ParsedRuntimeTargetHostCampaign, parsed_campaign_type),
+            ("measurement type", TargetHostMeasurementArtifact, measurement_type),
+            ("financial sample type", FinancialTargetHostSample, financial_sample_type),
+            ("research sample type", ResearchInterferenceSample, research_sample_type),
+            ("resource sample type", ResourceTargetHostSample, resource_sample_type),
+            ("retained campaign type", RuntimeLoadCampaignEvidence, retained_campaign_type),
+            ("run result type", RuntimeTargetHostRunResult, run_result_type),
+        )
+        for name, current, expected in class_bindings:
+            if current is not expected:
+                raise RuntimeTargetHostRunnerError(
+                    f"{name} authority changed during campaign callback"
+                )
+        for name, resolve, state in callable_states:
+            _require_callable_authority(resolve(), state, name=name)
+
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,
     )
@@ -320,26 +458,37 @@ def run_declared_target_host_campaign(
     research_samples: list[ResearchInterferenceSample] = []
 
     def capture_resource(phase: str) -> None:
+        require_callback_authority()
         resource_samples.append(
-            ResourceTargetHostSample(
+            resource_sample_type(
                 sample_id=f"resource-{len(resource_samples) + 1}",
-                monotonic_ns=time.monotonic_ns(),
+                monotonic_ns=monotonic_ns(),
                 phase=phase,
-                metrics=_capture_resource_metrics(journal, resource_probe),
+                metrics=capture_resource_metrics(
+                    journal,
+                    resource_probe,
+                    current_journal_sequence=current_journal_sequence,
+                    pending_outbox_count=pending_outbox_count,
+                    active_count=active_count,
+                    process_time_ns=process_time_ns,
+                    authority_check=require_callback_authority,
+                ),
             )
         )
 
     capture_resource("campaign-start")
     for phase, research_operation in research_snapshot:
-        started = time.monotonic_ns()
+        require_callback_authority()
+        started = monotonic_ns()
         research_operation()
-        ended = time.monotonic_ns()
+        require_callback_authority()
+        ended = monotonic_ns()
         if type(started) is not int or type(ended) is not int or started < 0 or ended < started:
             raise RuntimeTargetHostRunnerError(
                 "system monotonic clock produced an invalid research interval"
             )
         research_samples.append(
-            ResearchInterferenceSample(
+            research_sample_type(
                 sample_id=f"research-{len(research_samples) + 1}",
                 phase=phase,
                 start_monotonic_ns=started,
@@ -350,19 +499,22 @@ def run_declared_target_host_campaign(
 
     durable_samples: list[DurableFinancialLatencySample] = []
     for event_id, operation in operation_snapshot:
-        _result, durable_sample = measure_declared_financial_operation(
+        require_callback_authority()
+        _result, durable_sample = measure_financial(
             journal,
             spec,
             plan_id=declared.plan_id,
             event_id=event_id,
             operation=operation,
         )
+        require_callback_authority()
         durable_samples.append(durable_sample)
         capture_resource(f"after-financial:{event_id}")
 
-    end_sequence = JournalStore.current_journal_sequence(journal)
+    require_callback_authority()
+    end_sequence = current_journal_sequence(journal)
     financial_samples = tuple(
-        FinancialTargetHostSample(
+        financial_sample_type(
             sample_id=sample.measurement_event_id,
             event_id=sample.event_id,
             journal_sequence=sample.event_journal_sequence,
@@ -373,7 +525,7 @@ def run_declared_target_host_campaign(
         )
         for sample in durable_samples
     )
-    measurement = TargetHostMeasurementArtifact(
+    measurement = measurement_type(
         source_sha=spec.release_sha,
         release_artifact_id=release_artifact_id,
         release_artifact_sha256=release_artifact_sha256,
@@ -394,7 +546,8 @@ def run_declared_target_host_campaign(
         research_samples=tuple(research_samples),
         resource_samples=tuple(resource_samples),
     )
-    campaign_evidence = collect_runtime_campaign_evidence_from_measurement_artifact(
+    require_callback_authority()
+    campaign_evidence = collect_campaign_evidence(
         journal=journal,
         spec=spec,
         plan=campaign_plan,
@@ -403,8 +556,9 @@ def run_declared_target_host_campaign(
         expected_release_artifact_id=release_artifact_id,
     )
     observation = campaign_evidence.to_observation(spec)
-    decision = evaluate_runtime_budget(spec, observation)
-    retained_campaign = RuntimeLoadCampaignEvidence(
+    require_callback_authority()
+    decision = evaluate_budget(spec, observation)
+    retained_campaign = retained_campaign_type(
         observation=observation,
         journal_sequence_before=campaign_evidence.start_journal_sequence,
         journal_sequence_after=campaign_evidence.end_journal_sequence,
@@ -419,12 +573,14 @@ def run_declared_target_host_campaign(
     )
     # Reparse canonical campaign bytes now so the executable runner cannot return
     # a retained document that the terminal WP-65 parser would later reject.
-    retained_campaign = ParsedRuntimeTargetHostCampaign.parse(
-        ParsedRuntimeTargetHostCampaign(
+    require_callback_authority()
+    retained_campaign = parse_campaign(
+        parsed_campaign_type(
             evidence=retained_campaign
         ).canonical_bytes
     ).evidence
-    return RuntimeTargetHostRunResult(
+    require_callback_authority()
+    return run_result_type(
         declared_plan=declared,
         campaign_plan=campaign_plan,
         campaign_cut=campaign_cut,

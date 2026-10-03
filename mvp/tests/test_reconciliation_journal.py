@@ -1442,7 +1442,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                     "event_type": "AccountReconciled",
                     "aggregate_type": "account_reconciliation",
                     "aggregate_id": "oversized-resource-checkpoint",
-                    "aggregate_version": 1,
+                    "aggregate_version": "1",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
                     "committed_at": "2026-09-24T19:00:01Z",
@@ -1452,7 +1452,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "finite bounded decimal"):
                 load_account_resource_availability_evidence(
                     store,
-                    checkpoint_event_id=crafted["event_id"],
+                    checkpoint_event_id=crafted.event_id,
                     provider_id="TEST_PROVIDER",
                     account_id="test-account",
                     environment="PAPER",

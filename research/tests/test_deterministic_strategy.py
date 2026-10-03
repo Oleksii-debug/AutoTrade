@@ -1283,5 +1283,74 @@ class DeterministicStrategyTests(unittest.TestCase):
         )
 
 
+
+    def test_strategy_descriptor_rejects_tuple_subclass_before_iteration(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+        with self.assertRaisesRegex(ValueError, "market_requirements must be a tuple"):
+            self.descriptor(market_requirements=HostileTuple(("CAUSAL_PRICE",)))
+        self.assertEqual(calls, [])
+
+    def test_economics_rejects_tuple_subclass_before_iteration(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+        with self.assertRaisesRegex(ValueError, "input_manifest_refs must be a tuple"):
+            economics_binding(
+                proposal,
+                instrument_version="instrument:aaa@1",
+                input_manifest_refs=HostileTuple(("sha256:" + "c" * 64,)),
+            )
+        self.assertEqual(calls, [])
+
+    def test_run_baseline_rejects_strategy_subclass_before_virtual_dispatch(self):
+        calls = []
+
+        class HostileStrategy(ReturnThresholdBaseline):
+            def ingest(self, observation, *, simulation_time):
+                calls.append("ingest")
+                return True
+
+            def propose(self, *, symbol, decision_time):
+                calls.append("propose")
+                raise AssertionError("virtual dispatch reached")
+
+        strategy = HostileStrategy(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "strategy must be ReturnThresholdBaseline"):
+            run_baseline(
+                strategy,
+                [obs(0, "100"), obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+            )
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

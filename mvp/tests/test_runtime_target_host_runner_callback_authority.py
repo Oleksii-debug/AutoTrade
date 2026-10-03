@@ -147,6 +147,42 @@ class RuntimeTargetHostRunnerCallbackAuthorityTests(unittest.TestCase):
 
             self.assertEqual(forged_calls, 0)
 
+    def test_resource_timestamp_and_metrics_share_one_durable_cut(self) -> None:
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            self._declared(journal, spec)
+            ticks = 0
+
+            def racing_clock() -> int:
+                nonlocal ticks
+                ticks += 1
+                if ticks == 1:
+                    append_expected(journal, "resource-clock-race")
+                return 2_000_000_000 + ticks * 100_000
+
+            with (
+                patch.object(runner, "_require_shared_clock_contract", return_value=None),
+                patch.object(runner.time, "monotonic_ns", side_effect=racing_clock),
+                self.assertRaisesRegex(
+                    runner.RuntimeTargetHostRunnerError,
+                    r"resource sample crossed a durable JournalStore cut",
+                ),
+            ):
+                runner.run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="callback-authority-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations={"fin-1": lambda: append_expected(journal, "fin-1")},
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertEqual(ticks, 1)
+            self.assertGreaterEqual(journal.current_journal_sequence(), 2)
+
     def test_research_callback_cannot_retarget_runner_monotonic_clock(self) -> None:
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

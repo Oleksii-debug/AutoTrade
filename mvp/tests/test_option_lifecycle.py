@@ -319,6 +319,117 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.book.transactions, ())
         self.assertEqual(self.authority._events(), [])
 
+    def test_authority_rejects_economic_book_subclass_before_virtual_dispatch(self):
+        class HostileEconomicBook(DurableProviderEconomicBook):
+            def read_cut(self):
+                raise AssertionError("hostile economic read-cut dispatch")
+
+        hostile = HostileEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "economic_book must be exact DurableProviderEconomicBook",
+        ):
+            self._authority(
+                registry=self.registry,
+                economic_book=hostile,
+            )
+
+    def test_lifecycle_rejects_post_construction_economic_method_shadow(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="shadowed-owner")
+        self.book.read_cut = lambda: (_ for _ in ()).throw(
+            AssertionError("shadowed economic cut dispatch")
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "DurableProviderEconomicBook authority is shadowed",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(
+            self.book.position(f"{OPTION_ID}@1"),
+            Decimal("1"),
+        )
+
+    def test_evidence_callback_cannot_retarget_economic_book_scope(self):
+        self.seed_option_position("1")
+        evidence_ref = self.evidence(external_event_id="retarget-owner")
+        original_resolver = self.authority.evidence_resolver
+
+        def hostile_resolver(reference):
+            source = original_resolver(reference)
+            self.book.account_id = "attacker-account"
+            return source
+
+        self.authority.evidence_resolver = hostile_resolver
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "economic-book scope changed after lifecycle construction",
+        ):
+            self.authority.apply(evidence_ref)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
+    def test_correction_position_projection_is_context_independent(self):
+        instrument = f"{OPTION_ID}@1"
+        current = book_equity_fill(
+            transaction_id="projection-current",
+            cause_event_id="projection-current-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="BUY",
+            quantity=Decimal("123456789012345678901234567890"),
+            price=Decimal("1"),
+        )
+        prior_retirement = book_equity_fill(
+            transaction_id="projection-prior",
+            cause_event_id="projection-prior-cause",
+            instrument=instrument,
+            settlement_currency="USD",
+            side="SELL",
+            quantity=Decimal("1"),
+            price=Decimal("1"),
+        )
+        cut = EconomicBookCut(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            transactions=(current,),
+            book_digest="sha256:" + "a" * 64,
+            aggregate_version=1,
+        )
+
+        values = []
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (80, ROUND_CEILING),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                values.append(
+                    _project_position_after_reversal(
+                        economic_cut=cut,
+                        instrument=instrument,
+                        old_active_transactions=(prior_retirement,),
+                    )
+                )
+        self.assertEqual(values[0], values[1])
+        self.assertEqual(
+            values[0],
+            Decimal("123456789012345678901234567891"),
+        )
+
     def test_physical_exercise_strike_cash_is_context_independent(self):
         high_precision_version = option_version(
             strike="12345678901234567890.123456789",

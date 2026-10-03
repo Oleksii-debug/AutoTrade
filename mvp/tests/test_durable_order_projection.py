@@ -715,6 +715,51 @@ class DurableOrderProjectionTests(unittest.TestCase):
 
             self.assertEqual(acknowledged.snapshot.state, "WORKING")
 
+    def test_provider_evidence_instance_snapshot_shadow_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-shadow-evidence",
+                client_order_id="shadow-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "shadow-evidence",
+                "provider_order_id": "provider-shadow-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            artifacts.read_authenticated_snapshot = lambda _artifact_id: (
+                {"sha256": "sha256:" + "0" * 64},
+                b"shadow provider evidence",
+            )
+
+            acknowledged = book.acknowledge(
+                event_key="ack-shadow-evidence",
+                client_order_id="shadow-evidence",
+                provider_order_id="provider-shadow-evidence",
+                status="ACCEPTED",
+                committed_at=T1,
+                evidence_refs=[ref],
+            )
+
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+
     def test_provider_evidence_store_subclass_is_rejected(self):
         class DerivedArtifactStore(ArtifactStore):
             pass

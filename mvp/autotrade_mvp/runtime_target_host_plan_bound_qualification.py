@@ -4,7 +4,8 @@ The lower-level signed target-host verifier accepts exact expected identities so
 it can validate independently produced evidence. Product admission must not let a
 caller invent the workload-profile or JournalStore-generation digests used at
 that boundary. This adapter reloads the immutable pre-run declaration from the
-canonical JournalStore and derives those identities from durable authority.
+canonical JournalStore and then requires the composed signed + raw measurement
+authority. A legacy signed PASS alone is intentionally insufficient.
 
 This module creates no measurements, trusted chronology, signer policy, release
 attestation, provider authority, or trading authority.
@@ -22,10 +23,13 @@ from .persistence import (
 )
 from .qualification_attestation import SignedQualificationAttestation
 from .runtime_load_plan import load_declared_runtime_event_plan
-from .runtime_target_host_qualification import (
-    AcceptedRuntimeTargetHostQualification,
-    verify_runtime_target_host_qualification,
+from .runtime_load_qualification import RuntimeCampaignCut, RuntimeCampaignPlan
+from .runtime_target_host_composed_qualification import (
+    AcceptedComposedRuntimeTargetHostQualification,
+    RuntimeTargetHostCompositionError,
+    verify_composed_runtime_target_host_qualification,
 )
+from .runtime_target_host_measurement import TargetHostMeasurementArtifact
 
 
 def _snapshot_budget_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
@@ -55,14 +59,17 @@ def verify_declared_plan_runtime_target_host_qualification(
     spec: RuntimeBudgetSpec,
     expected_release_artifact_id: str,
     expected_release_artifact_sha256: str,
-) -> AcceptedRuntimeTargetHostQualification:
-    """Verify terminal WP-65 evidence against one durable pre-run workload plan.
+    campaign_plan: RuntimeCampaignPlan | None = None,
+    campaign_cut: RuntimeCampaignCut | None = None,
+    measurement: TargetHostMeasurementArtifact | None = None,
+) -> AcceptedComposedRuntimeTargetHostQualification:
+    """Verify terminal WP-65 evidence through the composed raw/signed authority.
 
-    ``workload_profile_hash`` and ``journal_store_identity_digest`` are
-    intentionally absent from this API. Both are reloaded from the canonical
-    immutable plan, which itself is verified against the supplied exact budget
-    spec and current physical JournalStore generation before signed target-host
-    evidence is consulted.
+    The durable pre-run plan remains the source of the canonical plan identity.
+    Legacy callers that provide only a signed receipt are failed closed: terminal
+    acceptance additionally requires the exact campaign plan/cut and canonical
+    ``TargetHostMeasurementArtifact`` so the #1228 composition authority can bind
+    signed payloads to durable raw financial evidence.
     """
 
     if type(journal_store) is not JournalStore:
@@ -82,17 +89,20 @@ def verify_declared_plan_runtime_target_host_qualification(
             plan_id=plan_id,
             spec=spec,
         )
-    return verify_runtime_target_host_qualification(
-        receipt,
-        evidence_store=evidence_store,
-        evidence_root=evidence_root,
-        expected_source_sha=spec.release_sha,
-        expected_scenario_id=plan.scenario_id,
-        expected_spec_digest=plan.spec_digest,
-        expected_configuration_hash=spec.configuration_hash,
-        expected_host_fingerprint=spec.host_fingerprint,
-        expected_workload_profile_hash=plan.digest,
-        expected_journal_store_identity_digest=plan.store_identity_digest,
-        expected_release_artifact_id=expected_release_artifact_id,
-        expected_release_artifact_sha256=expected_release_artifact_sha256,
-    )
+        if campaign_plan is None or campaign_cut is None or measurement is None:
+            raise RuntimeTargetHostCompositionError(
+                "terminal WP-65 qualification requires composed target-host measurement authority"
+            )
+        return verify_composed_runtime_target_host_qualification(
+            receipt,
+            evidence_store=evidence_store,
+            evidence_root=evidence_root,
+            journal_store=journal_store,
+            spec=spec,
+            campaign_plan=campaign_plan,
+            campaign_cut=campaign_cut,
+            declared_plan_id=plan.plan_id,
+            measurement=measurement,
+            expected_release_artifact_id=expected_release_artifact_id,
+            expected_release_artifact_sha256=expected_release_artifact_sha256,
+        )

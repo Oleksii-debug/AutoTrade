@@ -1,0 +1,412 @@
+from hashlib import sha256
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from mvp.autotrade_mvp.embedded_web import (
+    EmbeddedWebHostApplication,
+    ImmutableWebAsset,
+    ImmutableWebAssetBundle,
+)
+from mvp.autotrade_mvp.host_network import (
+    header_principal_resolver,
+    public_session_reference,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.security import SecurityBoundary
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+
+
+class DeterministicProtector:
+    PREFIX = b"embedded-web-test-v1:"
+
+    def protect(self, plaintext: bytes, *, entropy: bytes) -> bytes:
+        return self.PREFIX + sha256(entropy).digest() + plaintext[::-1]
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        expected = self.PREFIX + sha256(entropy).digest()
+        if not ciphertext.startswith(expected):
+            raise OSError("scope entropy mismatch")
+        return ciphertext[len(expected):][::-1]
+
+
+def asset(path: str, body: bytes) -> ImmutableWebAsset:
+    content_type = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+    }[Path(path).suffix]
+    return ImmutableWebAsset(
+        path=path,
+        body=body,
+        sha256_hex=sha256(body).hexdigest(),
+        content_type=content_type,
+    )
+
+
+def bundle(*assets: ImmutableWebAsset) -> ImmutableWebAssetBundle:
+    return ImmutableWebAssetBundle(
+        source_revision="a" * 40,
+        host_api_contract_version="3.0.1",
+        assets=tuple(assets),
+    )
+
+
+class EmbeddedWebTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.origin = "http://127.0.0.1:8765"
+        self.clock = [1000.0]
+        vault = ProtectedCredentialVault(
+            Path(self.directory.name) / "credentials.json",
+            protector=DeterministicProtector(),
+        )
+        self.boundary = SecurityBoundary(
+            allowed_origins={self.origin},
+            credential_vault=vault,
+            session_authorizer=lambda subject, role, paired_origin: True,
+            now=lambda: self.clock[0],
+        )
+        self.owner = self.boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.origin,
+            ttl_seconds=600,
+        )
+        self.web_bundle = bundle(
+            asset("index.html", b"<!doctype html><title>AutoTrade</title>"),
+            asset("app.js", b"export const app = 'autotrade';"),
+            asset("host-api-routes.js", b"export const state = '/api/v1/state';"),
+            asset("styles.css", b"body { font-family: sans-serif; }"),
+        )
+        self.app = EmbeddedWebHostApplication(
+            JournalStore(str(Path(self.directory.name) / "journal.sqlite3")),
+            security_boundary=self.boundary,
+            account_id="paper-account-1",
+            environment="PAPER",
+            host_id="host-local-1",
+            public_origin=self.origin,
+            principal_resolver=header_principal_resolver,
+            snapshot_provider=self._snapshot,
+            now=lambda: "2026-09-25T09:30:00Z",
+            web_bundle=self.web_bundle,
+        )
+
+    @staticmethod
+    def _snapshot(durable, principal):
+        return {
+            "state_version": durable["state_version"],
+            "event_cursor": durable["event_cursor"],
+            "server_time": "2026-09-25T09:30:00Z",
+            "host_id": "host-local-1",
+            "account_id": durable["account_id"],
+            "environment": durable["environment"],
+            "permission_summary": {
+                "actor": principal.actor,
+                "session": principal.session,
+                "role": principal.role,
+            },
+            "connection_freshness": {
+                "host": "CURRENT",
+                "as_of": "2026-09-25T09:30:00Z",
+            },
+            "portfolio": {},
+            "risk": {},
+            "strategy": {},
+            "jobs": [],
+            "reason_codes": [],
+        }
+
+    def auth_headers(self):
+        return {
+            "Authorization": "AutoTrade-Session " + self.owner.token,
+            "X-AutoTrade-Actor": "owner",
+            "Accept": "application/json",
+        }
+
+    def test_asset_requires_exact_hash_immutable_bytes_and_media_type(self):
+        body = b"console.log('safe')"
+        accepted = asset("nested/app.js", body)
+        self.assertEqual(accepted.body, body)
+
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            ImmutableWebAsset(
+                path="app.js",
+                body=body,
+                sha256_hex="0" * 64,
+                content_type="text/javascript; charset=utf-8",
+            )
+        with self.assertRaisesRegex(TypeError, "immutable bytes"):
+            ImmutableWebAsset(
+                path="app.js",
+                body=bytearray(body),
+                sha256_hex=sha256(body).hexdigest(),
+                content_type="text/javascript; charset=utf-8",
+            )
+        with self.assertRaisesRegex(ValueError, "content type"):
+            ImmutableWebAsset(
+                path="app.js",
+                body=body,
+                sha256_hex=sha256(body).hexdigest(),
+                content_type="text/html; charset=utf-8",
+            )
+
+    def test_asset_paths_reject_traversal_encoding_and_api_namespace(self):
+        body = b"x"
+        for path in (
+            "/index.html",
+            "../index.html",
+            "nested/../index.html",
+            "nested//index.html",
+            "nested\\index.html",
+            "nested/%2e%2e/index.html",
+            "index.html?x=1",
+            "index.html#x",
+            "api/v1/state.js",
+            "API/state.js",
+            "readme.txt",
+        ):
+            with self.subTest(path=path), self.assertRaises((TypeError, ValueError)):
+                ImmutableWebAsset(
+                    path=path,
+                    body=body,
+                    sha256_hex=sha256(body).hexdigest(),
+                    content_type="text/html; charset=utf-8",
+                )
+
+    def test_bundle_identity_is_deterministic_across_manifest_order(self):
+        assets = self.web_bundle.assets
+        reversed_bundle = ImmutableWebAssetBundle(
+            source_revision=self.web_bundle.source_revision,
+            host_api_contract_version=self.web_bundle.host_api_contract_version,
+            assets=tuple(reversed(assets)),
+        )
+        self.assertEqual(
+            reversed_bundle.bundle_sha256,
+            self.web_bundle.bundle_sha256,
+        )
+        self.assertEqual(
+            tuple(item.path for item in reversed_bundle.assets),
+            tuple(item.path for item in self.web_bundle.assets),
+        )
+
+    def test_bundle_identity_changes_with_contract_source_or_content(self):
+        changed_contract = ImmutableWebAssetBundle(
+            source_revision="a" * 40,
+            host_api_contract_version="3.0.2",
+            assets=self.web_bundle.assets,
+        )
+        changed_source = ImmutableWebAssetBundle(
+            source_revision="b" * 40,
+            host_api_contract_version="3.0.1",
+            assets=self.web_bundle.assets,
+        )
+        changed_content = bundle(
+            asset("index.html", b"changed"),
+            *tuple(
+                item for item in self.web_bundle.assets
+                if item.path != "index.html"
+            ),
+        )
+        self.assertNotEqual(changed_contract.bundle_sha256, self.web_bundle.bundle_sha256)
+        self.assertNotEqual(changed_source.bundle_sha256, self.web_bundle.bundle_sha256)
+        self.assertNotEqual(changed_content.bundle_sha256, self.web_bundle.bundle_sha256)
+
+    def test_bundle_rejects_missing_index_duplicate_and_noncanonical_identity(self):
+        with self.assertRaisesRegex(ValueError, "index"):
+            bundle(asset("app.js", b"x"))
+        duplicate = asset("index.html", b"x")
+        with self.assertRaisesRegex(ValueError, "unique"):
+            bundle(duplicate, duplicate)
+        with self.assertRaisesRegex(ValueError, "source revision"):
+            ImmutableWebAssetBundle(
+                source_revision="A" * 40,
+                host_api_contract_version="3.0.1",
+                assets=(duplicate,),
+            )
+        with self.assertRaisesRegex(ValueError, "contract version"):
+            ImmutableWebAssetBundle(
+                source_revision="a" * 40,
+                host_api_contract_version="v3",
+                assets=(duplicate,),
+            )
+
+    def test_root_and_asset_routes_return_exact_immutable_bytes(self):
+        root = self.app.dispatch(method="GET", target="/", headers={})
+        index = self.app.dispatch(method="GET", target="/index.html", headers={})
+        script = self.app.dispatch(method="GET", target="/app.js", headers={})
+        self.assertEqual(root.status, 200)
+        self.assertEqual(root.body, index.body)
+        self.assertEqual(root.body, self.web_bundle.asset_for_path("/index.html").body)
+        self.assertEqual(script.status, 200)
+        self.assertEqual(
+            script.body,
+            self.web_bundle.asset_for_path("/app.js").body,
+        )
+
+    def test_static_responses_bind_bundle_source_contract_and_harden_browser(self):
+        response = self.app.dispatch(method="GET", target="/index.html", headers={})
+        headers = dict(response.headers)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(
+            headers["X-AutoTrade-Web-Bundle"],
+            self.web_bundle.bundle_sha256,
+        )
+        self.assertEqual(headers["X-AutoTrade-Source-Revision"], "a" * 40)
+        self.assertEqual(headers["X-AutoTrade-Host-Api-Contract"], "3.0.1")
+        self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        csp = headers["Content-Security-Policy"]
+        for directive in (
+            "default-src 'self'",
+            "base-uri 'none'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "connect-src 'self'",
+            "script-src 'self'",
+            "style-src 'self'",
+        ):
+            self.assertIn(directive, csp)
+        self.assertNotIn("Location", headers)
+
+    def test_static_query_method_and_body_fail_closed(self):
+        self.assertEqual(
+            self.app.dispatch(method="GET", target="/app.js?v=1", headers={}).status,
+            400,
+        )
+        self.assertEqual(
+            self.app.dispatch(method="POST", target="/app.js", headers={}).status,
+            405,
+        )
+        self.assertEqual(
+            self.app.dispatch(
+                method="GET",
+                target="/app.js",
+                headers={},
+                body=b"unexpected",
+            ).status,
+            400,
+        )
+
+    def test_static_origin_is_exact_and_duplicate_origin_fails(self):
+        allowed = self.app.dispatch(
+            method="GET",
+            target="/styles.css",
+            headers={"Origin": self.origin},
+        )
+        self.assertEqual(allowed.status, 200)
+        for origin in (
+            "http://127.0.0.1:8766",
+            "https://example.com",
+        ):
+            with self.subTest(origin=origin):
+                denied = self.app.dispatch(
+                    method="GET",
+                    target="/styles.css",
+                    headers={"Origin": origin},
+                )
+                self.assertEqual(denied.status, 403)
+        duplicate = self.app.dispatch(
+            method="GET",
+            target="/styles.css",
+            headers={"Origin": self.origin, "origin": self.origin},
+        )
+        self.assertEqual(duplicate.status, 400)
+
+    def test_static_surface_rejects_accidental_bearer_or_actor_injection(self):
+        for headers in (
+            {"Authorization": "AutoTrade-Session SECRET-NEVER-STATIC"},
+            {"X-AutoTrade-Actor": "owner"},
+            {
+                "Authorization": "AutoTrade-Session SECRET-NEVER-STATIC",
+                "X-AutoTrade-Actor": "owner",
+            },
+        ):
+            response = self.app.dispatch(
+                method="GET",
+                target="/index.html",
+                headers=headers,
+            )
+            self.assertEqual(response.status, 400)
+            rendered = response.body.decode("utf-8")
+            self.assertNotIn("SECRET-NEVER-STATIC", rendered)
+            self.assertNotIn("owner", rendered)
+
+    def test_request_headers_and_body_are_never_reflected_into_static_content(self):
+        response = self.app.dispatch(
+            method="GET",
+            target="/index.html",
+            headers={
+                "X-Untrusted": "ATTACKER-MARKER",
+                "Referer": "https://example.com/ATTACKER-MARKER",
+            },
+        )
+        self.assertEqual(response.status, 200)
+        rendered = response.body.decode("utf-8")
+        self.assertNotIn("ATTACKER-MARKER", rendered)
+        self.assertEqual(
+            response.body,
+            self.web_bundle.asset_for_path("/index.html").body,
+        )
+
+    def test_encoded_traversal_and_absolute_targets_never_serve_assets(self):
+        encoded = self.app.dispatch(
+            method="GET",
+            target="/%2e%2e/index.html",
+            headers=self.auth_headers(),
+        )
+        absolute = self.app.dispatch(
+            method="GET",
+            target="http://127.0.0.1:8765/index.html",
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(encoded.status, 404)
+        self.assertEqual(absolute.status, 400)
+
+    def test_api_routes_delegate_unchanged_to_canonical_authenticated_host(self):
+        denied = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers={},
+        )
+        self.assertEqual(denied.status, 403)
+
+        allowed = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(allowed.status, 200)
+        payload = json.loads(allowed.body.decode("utf-8"))
+        self.assertEqual(payload["account_id"], "paper-account-1")
+        self.assertEqual(payload["environment"], "PAPER")
+        self.assertEqual(
+            payload["permission_summary"]["session"],
+            public_session_reference(self.owner.token),
+        )
+        self.assertNotIn(self.owner.token, allowed.body.decode("utf-8"))
+
+    def test_unknown_routes_delegate_instead_of_becoming_static_fallback(self):
+        response = self.app.dispatch(
+            method="GET",
+            target="/not-an-asset",
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(response.status, 404)
+        self.assertEqual(
+            json.loads(response.body.decode("utf-8")),
+            {"error": "NOT_FOUND"},
+        )
+
+    def test_bundle_is_read_only_and_cannot_alias_api_path(self):
+        with self.assertRaises((TypeError, ValueError)):
+            asset("api/v1/state.js", b"forged")
+        self.assertIsNone(self.web_bundle.asset_for_path("/api/v1/state"))
+        self.assertFalse(hasattr(self.web_bundle._routes, "__setitem__"))
+
+
+if __name__ == "__main__":
+    unittest.main()

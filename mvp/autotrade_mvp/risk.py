@@ -1660,9 +1660,9 @@ def evaluate_risk(
         "PERPETUAL",
         "OPTION",
     }
-    equivalent_exposure_map = context.{} if equivalent_exposure_per_unit is None else equivalent_exposure_per_unit
+    equivalent_exposure_map = context.equivalent_exposure_per_unit if context.equivalent_exposure_per_unit is not None else {}
     derivative_instrument_types = {"FUTURE", "PERPETUAL", "OPTION"}
-    context_instrument_types = context.{} if instrument_types is None else instrument_types
+    context_instrument_types = context.instrument_types if context.instrument_types is not None else {}
     declared_intent_type = context_instrument_types.get(intent.symbol)
     if declared_intent_type is not None and declared_intent_type != intent.instrument_type:
         raise ValueError(
@@ -1800,7 +1800,7 @@ def evaluate_risk(
     missing_asset_buckets: set[str] = set()
     if policy.max_asset_concentration_fraction is not None and gross > 0:
         asset_groups: dict[str, Decimal] = {}
-        asset_map = context.{} if asset_buckets is None else asset_buckets
+        asset_map = context.asset_buckets if context.asset_buckets is not None else {}
         for symbol, notional in notionals.items():
             bucket = asset_map.get(symbol)
             if bucket is None:
@@ -1828,7 +1828,7 @@ def evaluate_risk(
     missing_venues: set[str] = set()
     if policy.max_venue_concentration_fraction is not None and gross > 0:
         venue_groups: dict[str, Decimal] = {}
-        venue_map = context.{} if venues is None else venues
+        venue_map = context.venues if context.venues is not None else {}
         for symbol, notional in notionals.items():
             venue = venue_map.get(symbol)
             if venue is None:
@@ -1854,7 +1854,7 @@ def evaluate_risk(
     participation_fraction = Fraction(0, 1)
     participation_evidenced = True
     if policy.max_order_participation_fraction is not None:
-        liquidity_map = context.{} if liquidity_capacity is None else liquidity_capacity
+        liquidity_map = context.liquidity_capacity if context.liquidity_capacity is not None else {}
         capacity = liquidity_map.get(intent.symbol)
         if capacity is None or capacity <= 0:
             participation_evidenced = False
@@ -1869,15 +1869,15 @@ def evaluate_risk(
                 operation="liquidity participation",
             )
 
-    spread_observation = (context.{} if spread_fraction is None else spread_fraction).get(intent.symbol)
-    slippage_observation = (context.{} if slippage_fraction is None else slippage_fraction).get(intent.symbol)
+    spread_observation = (context.spread_fraction if context.spread_fraction is not None else {}).get(intent.symbol)
+    slippage_observation = (context.slippage_fraction if context.slippage_fraction is not None else {}).get(intent.symbol)
 
     factor_exposure = Decimal("0")
     base_factor_exposure = Decimal("0")
     factor_exposure_complete = True
     missing_factor_loadings: set[str] = set()
     if policy.max_abs_factor_exposure is not None:
-        loading_map = context.{} if factor_loadings is None else factor_loadings
+        loading_map = context.factor_loadings if context.factor_loadings is not None else {}
         projected_factors: dict[str, Decimal] = {}
         base_factors: dict[str, Decimal] = {}
         for symbol, notional in notionals.items():
@@ -2517,7 +2517,7 @@ def evaluate_risk(
         policy.min_futures_delivery_headroom_seconds is not None
         and intent.instrument_type == "FUTURE"
     ):
-        delivery_headroom = (context.{} if futures_delivery_headroom_seconds is None else futures_delivery_headroom_seconds).get(
+        delivery_headroom = (context.futures_delivery_headroom_seconds if context.futures_delivery_headroom_seconds is not None else {}).get(
             intent.symbol
         )
         delivery_ok = protective_reduction or (

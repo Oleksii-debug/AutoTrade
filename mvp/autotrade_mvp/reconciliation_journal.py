@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import (
     ReconciliationResult,
@@ -731,26 +732,31 @@ def load_account_resource_availability_evidence(
     if current < completed:
         raise ValueError("availability checkpoint cannot be from the future")
 
-    if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
+    if type(max_age_seconds) not in {Decimal, str, int}:
+        if isinstance(max_age_seconds, Decimal):
+            raise TypeError("max_age_seconds must be an exact built-in Decimal")
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
-    if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
-        raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
-        max_age = (
-            max_age_seconds
-            if type(max_age_seconds) is Decimal
-            else Decimal(max_age_seconds)
-        )
-    except Exception as error:
-        raise ValueError("max_age_seconds must be a finite decimal") from error
-    if not max_age.is_finite() or max_age < 0:
+        max_age = parse_bounded_exact_decimal(max_age_seconds)
+    except ExactDecimalError as error:
+        raise ValueError("max_age_seconds must be a finite bounded decimal") from error
+    if max_age < 0:
         raise ValueError("max_age_seconds must be a non-negative finite decimal")
     delta = current - completed
     age_microseconds = (
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
+    whole_seconds, remaining_microseconds = divmod(age_microseconds, 1_000_000)
+    age_text = (
+        str(whole_seconds)
+        if remaining_microseconds == 0
+        else f"{whole_seconds}.{remaining_microseconds:06d}"
+    )
+    try:
+        age_seconds = parse_bounded_exact_decimal(age_text)
+    except ExactDecimalError as error:
+        raise ValueError("availability checkpoint age exceeds numeric bounds") from error
     if age_seconds > max_age:
         raise ValueError("availability checkpoint is stale")
 
@@ -816,17 +822,17 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) not in {Decimal, str, int}:
             raise TypeError(
                 "resource availability must use exact decimal encoding"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "resource availability must be a finite bounded decimal"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )

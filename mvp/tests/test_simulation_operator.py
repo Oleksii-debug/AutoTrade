@@ -175,6 +175,17 @@ class SimulationOperatorTests(unittest.TestCase):
                 event["payload"]["request_digest"] = payload_digest(request)
         self._invalid_journal(alter)
 
+    def test_provider_fill_financial_binding_rejects_rehashed_provider_evidence(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["provider_fill"]["price"] = "999"
+                request["provider_fill_digest"] = payload_digest(
+                    request["provider_fill"]
+                )
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
     def test_provider_fill_financial_binding_cannot_replace_admission_identity(self):
         def alter(event):
             if event["event_type"] == "ProviderFillFinancialPlanBound":

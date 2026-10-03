@@ -41,6 +41,30 @@ class TrustedChronologyCutImplementationNamespaceSealTests(unittest.TestCase):
 
         forged.assert_not_called()
 
+    def test_production_current_cut_rejects_pre_call_cut_type_mutation(self) -> None:
+        cut_type = chronology.TrustedChronologyCut
+        had_own_getattribute = "__getattribute__" in cut_type.__dict__
+        original_own_getattribute = cut_type.__dict__.get("__getattribute__")
+
+        def forged_getattribute(instance, name):
+            if name in {"covered_utc", "utc_lower_bound", "utc_upper_bound"}:
+                return "2099-01-01T00:00:00Z"
+            return object.__getattribute__(instance, name)
+
+        try:
+            cut_type.__getattribute__ = forged_getattribute
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "trusted chronology implementation type authority changed: "
+                "TrustedChronologyCut",
+            ):
+                chronology.require_current_trusted_chronology_cut()
+        finally:
+            if had_own_getattribute:
+                cut_type.__getattribute__ = original_own_getattribute
+            else:
+                del cut_type.__getattribute__
+
     def test_guard_ignores_only_explicitly_excluded_names(self) -> None:
         canonical = object()
         namespace = {"authority": canonical, "diagnostic": object()}

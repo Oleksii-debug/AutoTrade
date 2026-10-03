@@ -693,6 +693,14 @@ def verify_runtime_target_host_qualification(
         raise RuntimeTargetHostQualificationError(
             "canonical verifier returned non-canonical accepted attestation"
         )
+    attestation_id = _uuid(
+        accepted.attestation_id,
+        name="accepted attestation_id",
+    )
+    attestation_digest = _digest(
+        accepted.attestation_digest,
+        name="accepted attestation_digest",
+    )
     if accepted.release_artifact_id != release_artifact_id or (
         accepted.release_artifact_sha256 != release_artifact_sha256
     ):
@@ -811,8 +819,8 @@ def verify_runtime_target_host_qualification(
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
     return AcceptedRuntimeTargetHostQualification(
-        attestation_id=accepted.attestation_id,
-        attestation_digest=accepted.attestation_digest,
+        attestation_id=attestation_id,
+        attestation_digest=attestation_digest,
         source_sha=source_sha,
         scenario_id=scenario_id,
         spec_digest=spec_digest,

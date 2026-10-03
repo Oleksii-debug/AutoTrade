@@ -110,6 +110,46 @@ class TrustedChronologyCutTests(_cases.TrustedChronologyCutTests):
                     claimed_instants=("2026-10-03T14:00:00.000001Z",),
                 )
 
+    def test_current_cut_rejects_stale_local_owner_after_durable_advance(self):
+        with _cases.TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            cut = self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+
+            stale_owner = recovery.owner
+            self.assertIsNotNone(stale_owner)
+            successor = type(stale_owner)(
+                owner_id="independently-authorized-successor",
+                epoch=stale_owner.epoch + 1,
+            )
+            recovery._append_durable_owner(successor)
+
+            self.assertEqual(recovery.owner, stale_owner)
+            self.assertEqual(recovery.durable_owner_chain()[-1], successor)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "durable recovery owner changed",
+            ):
+                self._require_current(
+                    store=store,
+                    recovery=recovery,
+                    cut=cut,
+                    accepted=accepted,
+                    artifact_store=artifacts,
+                    expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                    claimed_instants=("2026-10-03T14:00:00Z",),
+                )
+
     def test_standalone_horizon_never_admits_caller_owned_cut(self):
         with _cases.TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)

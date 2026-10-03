@@ -21,7 +21,7 @@ from autotrade_numeric import (
 from .durable_reservations import DurableReservationBook
 from .accounting import book_external_cash_flow, canonical_transaction
 from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation_journal import load_latest_reconciliation_checkpoint
 from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
@@ -188,6 +188,112 @@ def _require_recorded_admission(events: list[dict], *, episode_id: str, outcome:
             or not risks[0]["journal_sequence"] < admission["journal_sequence"]):
         raise ValueError("simulation recorded risk attribution differs")
     return admission
+
+
+def _require_provider_fill_financial_binding(
+    events: list[dict],
+    *,
+    episode_id: str,
+    fill_id: str,
+    order_id: str,
+    transaction,
+    admission: dict,
+    reconciliation: dict,
+) -> None:
+    """Bind displayed fill economics to the canonical durable provider-fill plan."""
+
+    bindings = [
+        event
+        for event in events
+        if event["aggregate_type"] == "provider_fill_financial_binding"
+    ]
+    if len(bindings) != 1:
+        raise ValueError("simulation provider-fill financial binding differs")
+    binding = bindings[0]
+    payload = binding.get("payload")
+    if (
+        binding.get("event_type") != "ProviderFillFinancialPlanBound"
+        or binding.get("aggregate_version") != 1
+        or binding.get("journal_sequence") >= reconciliation["journal_sequence"]
+        or type(payload) is not dict
+        or payload.get("provider_id") != PROVIDER
+        or payload.get("account_id") != ACCOUNT
+        or payload.get("environment") != ENVIRONMENT
+        or payload.get("provider_execution_id") != fill_id
+    ):
+        raise ValueError("simulation provider-fill financial binding owner differs")
+
+    request = payload.get("request")
+    if type(request) is not dict:
+        raise ValueError("simulation provider-fill financial request is malformed")
+    if payload.get("request_digest") != payload_digest(request):
+        raise ValueError("simulation provider-fill financial request digest differs")
+
+    financial_admission = request.get("financial_admission")
+    projected = request.get("projected_fill")
+    provider_fill = request.get("provider_fill")
+    if (
+        type(financial_admission) is not dict
+        or type(projected) is not dict
+        or type(provider_fill) is not dict
+        or request.get("financial_admission_digest") != payload_digest(financial_admission)
+        or financial_admission.get("admission_id") != admission["payload"].get("admission_id")
+        or financial_admission.get("intent_id") != admission["payload"].get("intent_id")
+        or financial_admission.get("reservation_id") != admission["payload"].get("reservation_id")
+        or financial_admission.get("account_id") != admission["payload"].get("account_id")
+        or financial_admission.get("environment") != admission["payload"].get("environment")
+        or financial_admission.get("instrument") != admission["payload"].get("instrument")
+        or financial_admission.get("action") != admission["payload"].get("action")
+        or financial_admission.get("risk_decision_id") != admission["payload"].get("risk_decision_id")
+        or financial_admission.get("financial_command_id") != admission["payload"].get("financial_command_id")
+        or financial_admission.get("request_fingerprint") != admission["payload"].get("request_fingerprint")
+        or financial_admission.get("authority_event_id") != admission["event_id"]
+        or financial_admission.get("authority_event_payload_hash") != admission["payload_hash"]
+        or financial_admission.get("authority_aggregate_version") != admission["aggregate_version"]
+        or financial_admission.get("authority_journal_sequence") != admission["journal_sequence"]
+        or financial_admission.get("provider_id") != PROVIDER
+        or financial_admission.get("instrument_symbol") != INSTRUMENT
+        or request.get("provider_id") != PROVIDER
+        or request.get("account_id") != ACCOUNT
+        or request.get("environment") != ENVIRONMENT
+        or request.get("reservation_id") != _uuid("reservation", episode_id)
+        or request.get("intent_id") != _uuid("intent", episode_id)
+        or request.get("provider_execution_id") != fill_id
+        or request.get("fill_id") != _uuid("projected-fill", episode_id)
+        or projected.get("fill_id") != _uuid("projected-fill", episode_id)
+        or projected.get("provider_execution_id") != fill_id
+        or projected.get("intent_id") != _uuid("intent", episode_id)
+        or projected.get("client_order_id") != order_id
+        or projected.get("side") != "BUY"
+        or projected.get("correction_of") is not None
+        or provider_fill.get("provider_id") != PROVIDER
+        or provider_fill.get("account_id") != ACCOUNT
+        or provider_fill.get("environment") != ENVIRONMENT
+        or provider_fill.get("provider_execution_id") != fill_id
+        or provider_fill.get("client_order_id") != order_id
+        or provider_fill.get("instrument") != INSTRUMENT
+        or provider_fill.get("side") != "BUY"
+        or provider_fill.get("evidence_refs")
+        != [f"simulated:provider-execution:{fill_id}"]
+    ):
+        raise ValueError("simulation provider-fill financial request identity differs")
+
+    transaction_payload = canonical_transaction(transaction)
+    expected_cause = (
+        f"provider:{PROVIDER}:environment:{ENVIRONMENT}:"
+        f"account:{ACCOUNT}:execution:{fill_id}"
+    )
+    if (
+        type(transaction.transaction_id) is not str
+        or re.fullmatch(r"provider-fill:[0-9a-f]{64}", transaction.transaction_id)
+        is None
+        or transaction.cause_event_id != expected_cause
+        or request.get("transaction_id") != transaction.transaction_id
+        or request.get("transaction_digest") != payload_digest(transaction_payload)
+        or projected.get("quantity") != provider_fill.get("quantity")
+        or projected.get("price") != provider_fill.get("price")
+    ):
+        raise ValueError("simulation provider-fill transaction binding differs")
 
 
 def inspect_canonical_simulation(state_dir: str | Path, *, history_limit: int = 0) -> dict | None:
@@ -391,8 +497,6 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
             if (result["decision"] != "BUY" or position <= 0
                     or type(fill_id) is not str or not fill_id
                     or type(result.get("order_id")) is not str or not result["order_id"]
-                    or book.transactions[1].cause_event_id != fill_id
-                    or book.transactions[1].transaction_id != _uuid("fill-transaction", episode_id)
                     or book.transactions[1].reverses_transaction_id is not None
                     or book.transactions[1].corrects_transaction_id is not None
                     or reconciliation["journal_sequence"] <= max(event["journal_sequence"] for event in events
@@ -400,6 +504,15 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 raise ValueError("completed simulation fill is not durably evidenced")
             _require_completed_send(events, episode_id=episode_id, order_id=result["order_id"])
             admission = _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
+            _require_provider_fill_financial_binding(
+                events,
+                episode_id=episode_id,
+                fill_id=fill_id,
+                order_id=result["order_id"],
+                transaction=book.transactions[1],
+                admission=admission,
+                reconciliation=reconciliation,
+            )
             prepared = next(event for event in events if event["event_type"] == "SubmissionPrepared")
             if (prepared["payload"].get("intent_hash") != admission["payload"].get("intent_hash")
                     or prepared["journal_sequence"] <= admission["journal_sequence"]):

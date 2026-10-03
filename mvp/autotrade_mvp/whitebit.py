@@ -125,9 +125,12 @@ def decode_whitebit_json(raw: str | bytes):
         raise WhiteBitAdapterError("provider JSON is invalid") from error
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise WhiteBitAdapterError(f"{name} must use exact text")
+    normalized = str.strip(value)
+    if not normalized:
         raise WhiteBitAdapterError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:

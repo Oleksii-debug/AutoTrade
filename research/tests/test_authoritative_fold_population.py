@@ -13,6 +13,7 @@ from autotrade_research.data.vintages import (
     HistoricalConflict,
     HistoricalDataError,
     HistoricalVintageRegistry,
+    FrozenMarketPopulation,
     canonical_market_event_population_bytes,
     explicit_missingness,
     market_event_population_digest,
@@ -20,6 +21,8 @@ from autotrade_research.data.vintages import (
 from autotrade_research.features.authoritative import (
     AuthoritativeFoldNormalizer,
     HistoricalFeatureInputSpec,
+    authoritative_feature_points,
+    authoritative_source_values,
     fit_authoritative_fold_normalizer,
     resolve_authoritative_feature_points,
 )
@@ -429,7 +432,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         manifest_digest = self.registry.commit(manifest)
         with self.assertRaisesRegex(
             HistoricalDataError,
-            "exactly one ArtifactStore content object",
+            "exactly one content hash",
         ):
             fit_authoritative_fold_normalizer(
                 registry=self.registry,
@@ -560,6 +563,44 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                     fold=self.fold,
                     spec=self.spec,
                 )
+
+    def test_population_binding_requires_explicit_rights_identity(self):
+        rows = self._base_events()
+        artifact_id = _uuid(43, 1)
+        artifact_manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=canonical_market_event_population_bytes(rows),
+            media_type="application/vnd.autotrade.market-event-population+json",
+            rights={
+                "storage": True,
+                "export": False,
+                "rights_id": "research-fixture",
+            },
+        )
+        population_evidence = {
+            "artifact_id": artifact_id,
+            "sha256": artifact_manifest["sha256"],
+            "observed_at": _iso(BASE + timedelta(days=8)),
+        }
+        manifest_digest = self.registry.commit(
+            self._manifest(
+                [artifact_manifest["sha256"]],
+                population_evidence=population_evidence,
+            )
+        )
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "source evidence must bind rights_id",
+        ):
+            resolve_authoritative_feature_points(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                cutoff=BASE + timedelta(days=4, minutes=2),
+                spec=self.spec,
+            )
 
     def test_artifact_rights_identity_is_bound_by_dataset_vintage(self):
         rows = self._base_events()
@@ -738,6 +779,60 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
         self.assertFalse(state["called"])
         self.assertEqual(fitted.dataset_id, self.dataset_id)
+
+    def test_caller_constructed_frozen_population_cannot_cross_authority_seam(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        cutoff = BASE + timedelta(days=4, minutes=2)
+        issued = HistoricalVintageRegistry.resolve_market_population(
+            self.registry,
+            self.dataset_id,
+            1,
+            manifest_digest=manifest_digest,
+            artifact_store=self.artifacts,
+            cutoff=cutoff,
+        )
+        self.assertTrue(
+            authoritative_feature_points(
+                issued,
+                spec=self.spec,
+                registry=self.registry,
+                artifact_store=self.artifacts,
+            )
+        )
+        self.assertTrue(
+            authoritative_source_values(
+                issued,
+                spec=self.spec,
+                registry=self.registry,
+                artifact_store=self.artifacts,
+            )
+        )
+        forged = FrozenMarketPopulation(
+            dataset_id=issued.dataset_id,
+            version=issued.version,
+            manifest_digest=issued.manifest_digest,
+            cutoff=issued.cutoff,
+            source_artifact_id=issued.source_artifact_id,
+            source_content_digest=issued.source_content_digest,
+            visible_event_json=issued.visible_event_json,
+            fingerprint="sha256:" + "f" * 64,
+        )
+        for consumer in (
+            authoritative_feature_points,
+            authoritative_source_values,
+        ):
+            with self.subTest(consumer=consumer.__name__):
+                with self.assertRaisesRegex(
+                    HistoricalConflict,
+                    "differs from authenticated authority",
+                ):
+                    consumer(
+                        forged,
+                        spec=self.spec,
+                        registry=self.registry,
+                        artifact_store=self.artifacts,
+                    )
 
     def test_caller_forged_validation_feature_is_rejected(self):
         rows = self._base_events()

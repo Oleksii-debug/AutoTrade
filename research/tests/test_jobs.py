@@ -1917,6 +1917,15 @@ class ResearchJobStoreTests(unittest.TestCase):
                     now=self.now,
                 )
 
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="oversized-budget-value",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 10 ** 10000},
+                    now=self.now,
+                )
+
             hostile_now = HostileDateTime(
                 2026, 9, 24, 16, 0, tzinfo=timezone.utc
             )

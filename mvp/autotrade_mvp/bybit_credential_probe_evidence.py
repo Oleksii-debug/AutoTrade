@@ -37,7 +37,11 @@ from .provider_transport import (
     ProviderTransportScopeError,
     UrllibJsonWireClient,
 )
-from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
+from .windows_secrets import (
+    PersistentCredentialHandle,
+    ProtectedCredentialVault,
+    SecretVaultError,
+)
 
 
 _BYBIT_QUERY_API_PATH = "/v5/user/query-api"
@@ -68,6 +72,15 @@ _PROBE_HEADER_NAMES = frozenset(
         "X-BAPI-SIGN",
     }
 )
+_CREDENTIAL_HANDLE_FIELDS = (
+    "handle_id",
+    "account_id",
+    "provider",
+    "environment",
+    "provider_environment",
+    "purpose",
+    "generation",
+)
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -76,6 +89,38 @@ def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ProviderCoreError(f"{name} must be canonical non-empty text")
     return value
+
+
+def _snapshot_credential_handle(value: object) -> PersistentCredentialHandle:
+    """Detach exact canonical credential subject state from caller-owned objects."""
+
+    if type(value) is not PersistentCredentialHandle:
+        raise TypeError("credential_handle must be an exact PersistentCredentialHandle")
+    captured: dict[str, object] = {}
+    for name in _CREDENTIAL_HANDLE_FIELDS:
+        current = getattr(value, name)
+        if name == "generation":
+            if type(current) is not int or current < 1:
+                raise ProviderCoreError(
+                    "Bybit credential handle generation must be exact positive integer"
+                )
+        elif type(current) is not str or not current or current != current.strip():
+            raise ProviderCoreError(
+                f"Bybit credential handle {name} must be canonical exact text"
+            )
+        captured[name] = current
+    try:
+        snapshot = PersistentCredentialHandle(**captured)
+    except (SecretVaultError, TypeError, ValueError) as error:
+        raise ProviderCoreError("Bybit credential handle state is invalid") from error
+    for name in _CREDENTIAL_HANDLE_FIELDS:
+        original = captured[name]
+        canonical = getattr(snapshot, name)
+        if type(original) is not type(canonical) or original != canonical:
+            raise ProviderCoreError(
+                f"Bybit credential handle {name} is not canonical"
+            )
+    return snapshot
 
 
 def _utc_text(value: object, *, name: str) -> str:
@@ -255,13 +300,11 @@ class BybitCredentialProbeEvidence:
     classification: BybitCredentialNonAcceptance = field(init=False)
 
     def __post_init__(self) -> None:
-        if type(self.credential_handle) is not PersistentCredentialHandle:
-            raise TypeError(
-                "credential_handle must be an exact PersistentCredentialHandle"
-            )
-        if self.credential_handle.provider != "BYBIT":
+        credential_handle = _snapshot_credential_handle(self.credential_handle)
+        object.__setattr__(self, "credential_handle", credential_handle)
+        if credential_handle.provider != "BYBIT":
             raise ProviderCoreError("Bybit probe evidence requires a BYBIT credential")
-        if self.credential_handle.purpose != "TRADE":
+        if credential_handle.purpose != "TRADE":
             raise ProviderCoreError("Bybit probe evidence requires a TRADE credential")
 
         provider_environment = _exact_text(
@@ -272,7 +315,7 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
             )
-        if self.credential_handle.provider_environment != provider_environment:
+        if credential_handle.provider_environment != provider_environment:
             raise ProviderCoreError(
                 "Bybit probe provider environment does not match credential provider domain"
             )
@@ -525,10 +568,7 @@ def probe_bybit_credential_with_vault(
 
     if type(vault) is not ProtectedCredentialVault:
         raise TypeError("vault must be exact ProtectedCredentialVault")
-    if type(credential_handle) is not PersistentCredentialHandle:
-        raise TypeError(
-            "credential_handle must be an exact PersistentCredentialHandle"
-        )
+    credential_handle = _snapshot_credential_handle(credential_handle)
     if credential_handle.provider != "BYBIT":
         raise ProviderCoreError("Bybit probe requires a BYBIT credential")
     if credential_handle.purpose != "TRADE":

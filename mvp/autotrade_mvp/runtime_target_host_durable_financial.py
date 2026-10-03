@@ -41,7 +41,7 @@ from .runtime_target_host_measurement import (
 
 SCHEMA_VERSION = "1.0.0"
 CLOCK_CONTRACT_ID = "python-perf-counter-equals-monotonic>=3.13"
-TARGET_HOST_SHARED_CLOCK_ID = "python-time.monotonic-perf-shared>=3.13"
+TARGET_HOST_SHARED_CLOCK_ID = "python-time.monotonic_ns"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -344,7 +344,7 @@ def bind_durable_financial_latency_to_target_host_measurement(
     measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
     if measurement.monotonic_clock_id != TARGET_HOST_SHARED_CLOCK_ID:
         raise RuntimeTargetHostDurableFinancialError(
-            "target-host measurement does not declare the shared monotonic/perf clock"
+            "target-host measurement does not declare canonical time.monotonic_ns authority"
         )
     spec = _snapshot_runtime_budget_spec(spec)
     declared_plan_id = _text(declared_plan_id, name="declared_plan_id")

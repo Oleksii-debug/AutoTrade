@@ -910,6 +910,21 @@ class TrustedChronologyCutTests(unittest.TestCase):
             ):
                 chronology._validate_prepared_event(event)
 
+    def test_prepared_event_must_be_immediate_challenge_successor(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            self._prepare(store, recovery, occurrence)
+            event = dict(
+                store.load_events_by_aggregate_type("trusted_chronology")[0]
+            )
+            event["journal_sequence"] += 1
+
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "sole post-challenge write",
+            ):
+                chronology._validate_prepared_event(event)
+
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")
         self.assertEqual(descriptor.domain_classification, NON_FINANCIAL)

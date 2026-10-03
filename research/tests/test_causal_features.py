@@ -49,7 +49,7 @@ class CausalFeatureTests(unittest.TestCase):
         self.assertEqual(point.value, Decimal("0.1"))
         self.assertEqual(point.source_revisions, ("r1", "r2"))
 
-    def test_same_timestamp_distinct_source_identities_preserve_provider_order(self):
+    def test_same_timestamp_distinct_source_identities_fail_without_order_policy(self):
         first = SourceValue.create(
             observation_id="event-a@r1",
             symbol="AAA",
@@ -58,7 +58,6 @@ class CausalFeatureTests(unittest.TestCase):
             value="100",
             source_revision="1",
             source_identity="event-a",
-            source_sequence=10,
         )
         second = SourceValue.create(
             observation_id="event-b@r1",
@@ -68,18 +67,15 @@ class CausalFeatureTests(unittest.TestCase):
             value="110",
             source_revision="1",
             source_identity="event-b",
-            source_sequence=11,
         )
 
-        point = rolling_return(
-            [second, first],
-            symbol="AAA",
-            decision_time=BASE + timedelta(seconds=1),
-            count=2,
-        )
-
-        self.assertEqual(point.input_ids, ("event-a@r1", "event-b@r1"))
-        self.assertEqual(point.value, Decimal("0.1"))
+        with self.assertRaisesRegex(ValueError, "registered provider-order policy"):
+            rolling_return(
+                [second, first],
+                symbol="AAA",
+                decision_time=BASE + timedelta(seconds=1),
+                count=2,
+            )
 
     def test_delayed_revision_of_old_event_does_not_reverse_feature_time(self):
         original = source(0, "100", revision="r1")

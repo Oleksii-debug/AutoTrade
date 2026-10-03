@@ -94,21 +94,6 @@ def _replay_common_cut(value: object | None) -> str | None:
     return text
 
 
-def _optional_sequence(value: object | None, *, name: str) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"{name} must be a canonical non-negative integer")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            f"{name} must be a canonical non-negative integer"
-        ) from error
-    if parsed < 0 or str(parsed) != str(value):
-        raise ValueError(f"{name} must be a canonical non-negative integer")
-    return parsed
-
 
 def _canonical_hash(material: Mapping[str, object]) -> str:
     return "sha256:" + sha256(
@@ -235,10 +220,6 @@ def authoritative_source_values(
                 value=payload[spec.payload_value_field],
                 source_revision=str(revision_int),
                 source_identity=event_id,
-                source_sequence=_optional_sequence(
-                    row.get("source_sequence"),
-                    name="source_sequence",
-                ),
             )
         )
     if not result:

@@ -43,7 +43,6 @@ class SourceValue:
     value: Decimal
     source_revision: str
     source_identity: str | None = None
-    source_sequence: int | None = None
 
     def __post_init__(self) -> None:
         event = _time(self.event_time, name="event_time")
@@ -66,12 +65,6 @@ class SourceValue:
                 "source_identity",
                 _text(self.source_identity, name="source_identity"),
             )
-        if self.source_sequence is not None and (
-            isinstance(self.source_sequence, bool)
-            or not isinstance(self.source_sequence, int)
-            or self.source_sequence < 0
-        ):
-            raise ValueError("source_sequence must be a non-negative integer")
 
     @classmethod
     def create(
@@ -84,7 +77,6 @@ class SourceValue:
         value,
         source_revision: str,
         source_identity: str | None = None,
-        source_sequence: int | None = None,
     ) -> "SourceValue":
         event = _time(event_time, name="event_time")
         available = _time(available_at, name="available_at")
@@ -98,7 +90,6 @@ class SourceValue:
             value=_decimal(value, name="value"),
             source_revision=_text(source_revision, name="source_revision"),
             source_identity=source_identity,
-            source_sequence=source_sequence,
         )
 
 
@@ -275,12 +266,19 @@ def _latest_known_vintages(
             key=lambda item: item.observation_id,
         )
 
+    identities_by_event_time: dict[datetime, set[tuple[str, object]]] = {}
+    for identity, item in latest_by_identity.items():
+        identities_by_event_time.setdefault(item.event_time, set()).add(identity)
+    if any(len(identities) > 1 for identities in identities_by_event_time.values()):
+        raise ValueError(
+            "simultaneous distinct source identities require a registered provider-order policy"
+        )
+
     return tuple(
         sorted(
             latest_by_identity.values(),
             key=lambda item: (
                 item.event_time,
-                -1 if item.source_sequence is None else item.source_sequence,
                 item.source_identity or item.observation_id,
                 item.available_at,
                 item.observation_id,

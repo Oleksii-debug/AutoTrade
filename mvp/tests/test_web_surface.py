@@ -47,6 +47,111 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         self.assertIn("<strong>SUCCEEDED</strong>", html)
         self.assertIn("<strong>WAITING_EXTERNAL</strong>", html)
 
+    def test_mixed_operation_id_types_do_not_crash_accessible_surface(self):
+        html = render_semantic_page(
+            {
+                "state_version": "7",
+                "event_cursor": "12",
+                "operations": {2: "WAITING_EXTERNAL", "op-1": "SUCCEEDED"},
+            },
+            status_text="Ready",
+        )
+        self.assertIn('<span class="operation-id">2</span>', html)
+        self.assertIn('<span class="operation-id">op-1</span>', html)
+        self.assertIn("<strong>WAITING_EXTERNAL</strong>", html)
+        self.assertIn("<strong>SUCCEEDED</strong>", html)
+
+    def test_hostile_operation_values_cannot_crash_accessible_surface(self):
+        class HostileText:
+            def __str__(self):
+                raise AssertionError("malformed state must not execute __str__")
+
+        html = render_semantic_page(
+            {
+                "state_version": "7",
+                "event_cursor": "12",
+                "operations": {
+                    HostileText(): "WAITING_EXTERNAL",
+                    "op-1": HostileText(),
+                },
+            },
+            status_text="Ready",
+        )
+
+        self.assertIn('<span class="operation-id">Unavailable</span>', html)
+        self.assertIn('<span class="operation-id">op-1</span>', html)
+        self.assertIn("<strong>Unavailable</strong>", html)
+        self.assertIn("<strong>WAITING_EXTERNAL</strong>", html)
+
+    def test_malformed_status_text_is_announced_explicitly(self):
+        class HostileText:
+            def __str__(self):
+                raise AssertionError("status rendering must not execute __str__")
+
+        html = render_semantic_page(
+            {"state_version": "7", "event_cursor": "12", "operations": {}},
+            status_text=HostileText(),
+        )
+        self.assertIn("Status details are unavailable.", html)
+
+    def test_operation_mapping_subclass_is_rejected_without_iteration(self):
+        class HostileOperations(dict):
+            def items(self):
+                raise AssertionError("malformed operations must not execute overridden items")
+
+        html = render_semantic_page(
+            {
+                "state_version": "7",
+                "event_cursor": "12",
+                "operations": HostileOperations({"op-1": "SUCCEEDED"}),
+            },
+            status_text="Ready",
+        )
+        self.assertIn(
+            "Operation state is unavailable because the state shape is malformed.",
+            html,
+        )
+        self.assertNotIn("op-1", html)
+
+    def test_nonfinite_scalars_do_not_render_as_status_values(self):
+        html = render_semantic_page(
+            {
+                "state_version": float("nan"),
+                "event_cursor": float("inf"),
+                "operations": {},
+            },
+            status_text="Ready",
+        )
+        self.assertIn("<dd>0</dd>", html)
+        self.assertNotIn(">nan<", html.lower())
+        self.assertNotIn(">inf<", html.lower())
+
+    def test_hostile_command_result_container_fails_closed_without_get(self):
+        class HostileResult(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("malformed command result must not execute get")
+
+        message = command_result_message(HostileResult({"status": "ACCEPTED"}))
+        self.assertEqual(
+            message,
+            "Command result is unavailable because the result shape is malformed.",
+        )
+
+    def test_hostile_reason_sequence_is_not_iterated(self):
+        class HostileReasons(list):
+            def __iter__(self):
+                raise AssertionError("malformed reason sequence must not be iterated")
+
+        message = command_result_message(
+            {
+                "status": "CONFLICT",
+                "command_id": "cmd-1",
+                "reason_codes": HostileReasons(["STALE_STATE"]),
+            }
+        )
+        self.assertIn("Command cmd-1 was not accepted", message)
+        self.assertIn("Reasons: none.", message)
+
     def test_command_form_carries_exact_state_version(self):
         html = render_semantic_page(self.snapshot(), status_text="Ready")
         self.assertIn(

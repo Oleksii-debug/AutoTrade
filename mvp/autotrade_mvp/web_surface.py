@@ -7,13 +7,20 @@ It is an implementation foundation, not a claim of completed NVDA qualification.
 from __future__ import annotations
 
 from html import escape
+from math import isfinite
 from typing import Iterable, Mapping
 
 
 def _text(value: object, fallback: str = "Unavailable") -> str:
+    """Render only JSON-like scalars; malformed objects must not execute code."""
+
     if value is None:
         return fallback
-    return str(value)
+    if type(value) in {str, int, bool}:
+        return str(value)
+    if type(value) is float and isfinite(value):
+        return str(value)
+    return fallback
 
 
 def _rows(items: Iterable[tuple[str, object]]) -> str:
@@ -24,14 +31,18 @@ def _rows(items: Iterable[tuple[str, object]]) -> str:
 
 
 def render_operation_list(operations: Mapping[str, object]) -> str:
+    if type(operations) is not dict:
+        return "<p>Operation state is unavailable because the state shape is malformed.</p>"
     if not operations:
         return "<p>No operations are currently recorded.</p>"
     parts = ["<ul>"]
-    for operation_id, phase in sorted(operations.items()):
+    for operation_id, phase in sorted(
+        operations.items(), key=lambda item: _text(item[0])
+    ):
         parts.append(
             "<li>"
-            f"<span class=\"operation-id\">{escape(str(operation_id))}</span>: "
-            f"<strong>{escape(str(phase))}</strong>"
+            f"<span class=\"operation-id\">{escape(_text(operation_id))}</span>: "
+            f"<strong>{escape(_text(phase))}</strong>"
             "</li>"
         )
     parts.append("</ul>")
@@ -50,13 +61,18 @@ def render_semantic_page(
     state_version = _text(snapshot.get("state_version"), "0")
     event_cursor = _text(snapshot.get("event_cursor"), "0")
     operations = snapshot.get("operations")
-    if not isinstance(operations, Mapping):
-        operations = {}
+    if type(operations) is not dict:
+        operations = None
 
-    safe_status_lines = [line for line in str(status_text).splitlines() if line.strip()]
+    rendered_status_text = _text(status_text, "")
+    safe_status_lines = [
+        line for line in rendered_status_text.splitlines() if line.strip()
+    ]
+    if not safe_status_lines:
+        safe_status_lines = ["Status details are unavailable."]
     status_html = "".join(f"<p>{escape(line)}</p>" for line in safe_status_lines)
-    announcement_html = escape(str(announcement))
-    command_html = escape(str(command_message))
+    announcement_html = escape(_text(announcement, ""))
+    command_html = escape(_text(command_message, ""))
 
     return (
         "<!doctype html>"
@@ -104,12 +120,15 @@ def render_semantic_page(
 def command_result_message(result: Mapping[str, object]) -> str:
     """Plain-language command result for a live region."""
 
-    status = str(result.get("status", "UNKNOWN"))
+    if type(result) is not dict:
+        return "Command result is unavailable because the result shape is malformed."
+
+    status = _text(result.get("status", "UNKNOWN"), "UNKNOWN")
     command_id = _text(result.get("command_id"), "unknown")
     operation_id = result.get("operation_id")
     reasons = result.get("reason_codes")
-    if isinstance(reasons, (list, tuple)):
-        reason_text = ", ".join(str(item) for item in reasons) or "none"
+    if type(reasons) in {list, tuple}:
+        reason_text = ", ".join(_text(item) for item in reasons) or "none"
     else:
         reason_text = "none"
 

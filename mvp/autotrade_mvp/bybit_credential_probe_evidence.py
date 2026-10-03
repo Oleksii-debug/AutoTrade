@@ -73,6 +73,7 @@ _PROBE_HEADER_NAMES = frozenset(
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_PROVIDER_ECHO_ATTESTATION = object()
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -359,10 +360,15 @@ class BybitCredentialProbeWireResponse:
     http_status: int
     response: InitVar[dict[str, Any]]
     api_key_echo_confirmed: bool = False
+    _provider_echo_attestation: InitVar[object | None] = None
     ret_code: int = field(init=False)
     response_sha256: str = field(init=False)
 
-    def __post_init__(self, response: dict[str, Any]) -> None:
+    def __post_init__(
+        self,
+        response: dict[str, Any],
+        _provider_echo_attestation: object | None,
+    ) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP status must be an exact three-digit integer"
@@ -376,9 +382,17 @@ class BybitCredentialProbeWireResponse:
             raise ProviderCoreError(
                 "successful Bybit credential probe requires exact API key echo confirmation"
             )
+        if ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
+            raise ProviderCoreError(
+                "successful Bybit credential probe requires provider-derived API key echo attestation"
+            )
         if ret_code != 0 and self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "Bybit credential probe API key echo confirmation is valid only for success"
+            )
+        if ret_code != 0 and _provider_echo_attestation is not None:
+            raise ProviderCoreError(
+                "Bybit credential probe provider echo attestation is valid only for success"
             )
         object.__setattr__(self, "ret_code", ret_code)
         object.__setattr__(self, "response_sha256", response_sha256)
@@ -841,6 +855,9 @@ def execute_bybit_credential_probe_wire_query(
         http_status=raw_response.http_status,
         response=decoded,
         api_key_echo_confirmed=api_key_echo_confirmed,
+        _provider_echo_attestation=(
+            _PROVIDER_ECHO_ATTESTATION if api_key_echo_confirmed else None
+        ),
     )
 
 

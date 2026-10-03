@@ -1088,6 +1088,89 @@ class TrustedChronologyCutTests(unittest.TestCase):
                     expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                 )
 
+    def test_validated_aggregate_rejects_rehashed_owner_splice(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            attempt = self._prepare(store, recovery, occurrence)
+            measurement = self._measurement(attempt)
+            accepted = self._accepted(attempt, measurement)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            self._accept(
+                store,
+                recovery,
+                attempt,
+                measurement,
+                accepted,
+                artifacts,
+            )
+            events = tuple(
+                store.load_events_by_aggregate_type("trusted_chronology")
+            )
+            accepted_event = dict(events[1])
+            payload = dict(accepted_event["payload"])
+            original_challenge_digest = payload["challenge_digest"]
+            payload["owner_id"] = "spliced-owner"
+            payload["cut_digest"] = chronology._cut_digest(payload)
+            accepted_event["payload"] = payload
+            accepted_event["payload_hash"] = payload_digest(payload)
+
+            self.assertEqual(
+                payload["challenge_digest"],
+                original_challenge_digest,
+            )
+            with self.assertRaisesRegex(
+                TrustedChronologyError,
+                "differs from prepared challenge",
+            ):
+                chronology._validated_aggregate((events[0], accepted_event))
+
+    def test_validated_aggregate_rejects_rehashed_release_runtime_splice(self):
+        with TemporaryDirectory() as directory:
+            store, recovery, _config, occurrence = self._state(directory)
+            runtime = self._runtime(directory)
+            try:
+                attempt = self._prepare(
+                    store,
+                    recovery,
+                    occurrence,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    runtime=runtime,
+                )
+                measurement = self._measurement(attempt)
+                accepted = self._accepted(attempt, measurement)
+                artifacts = ArtifactStore(Path(directory) / "artifacts")
+                self._accept(
+                    store,
+                    recovery,
+                    attempt,
+                    measurement,
+                    accepted,
+                    artifacts,
+                    runtime=runtime,
+                )
+                events = tuple(
+                    store.load_events_by_aggregate_type("trusted_chronology")
+                )
+                accepted_event = dict(events[1])
+                payload = dict(accepted_event["payload"])
+                original_challenge_digest = payload["challenge_digest"]
+                payload["runtime_host_id"] = "spliced-host"
+                payload["cut_digest"] = chronology._cut_digest(payload)
+                accepted_event["payload"] = payload
+                accepted_event["payload_hash"] = payload_digest(payload)
+
+                self.assertEqual(
+                    payload["challenge_digest"],
+                    original_challenge_digest,
+                )
+                with self.assertRaisesRegex(
+                    TrustedChronologyError,
+                    "differs from prepared challenge",
+                ):
+                    chronology._validated_aggregate((events[0], accepted_event))
+            finally:
+                runtime.stop()
+
     def test_taxonomy_classifies_cut_as_nonfinancial_qualification_evidence(self):
         descriptor = require_journal_aggregate_descriptor("trusted_chronology")
         self.assertEqual(descriptor.domain_classification, NON_FINANCIAL)

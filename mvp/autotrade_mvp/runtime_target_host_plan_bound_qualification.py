@@ -106,103 +106,130 @@ def _snapshot_campaign_cut(value: RuntimeCampaignCut) -> RuntimeCampaignCut:
     return detached
 
 
-def _verify_declared_plan_runtime_target_host_qualification_without_chronology(
-    receipt: SignedQualificationAttestation,
+def _build_chronology_free_verifier(
     *,
-    evidence_store: ArtifactStore,
-    evidence_root: str,
-    journal_store: JournalStore,
-    plan_id: str,
-    spec: RuntimeBudgetSpec,
-    expected_release_artifact_id: str,
-    expected_release_artifact_sha256: str,
-    campaign_plan: RuntimeCampaignPlan | None = None,
-    campaign_cut: RuntimeCampaignCut | None = None,
-    measurement: TargetHostMeasurementArtifact | None = None,
-) -> AcceptedComposedRuntimeTargetHostQualification:
-    """Apply durable-plan + composed WP-65 fencing without granting terminal status."""
+    journal_store_type=JournalStore,
+    snapshot_budget_spec=_snapshot_budget_spec,
+    require_journal_authority=require_exact_journal_store_authority,
+    journal_authority_scope=journal_store_authority_scope,
+    load_declared_plan=load_declared_runtime_event_plan,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    canonical_sha256_text=_canonical_sha256_text,
+    campaign_plan_type=RuntimeCampaignPlan,
+    measurement_type=TargetHostMeasurementArtifact,
+    campaign_cut_type=RuntimeCampaignCut,
+    snapshot_campaign_cut=_snapshot_campaign_cut,
+    verify_composed=verify_composed_runtime_target_host_qualification,
+):
+    """Capture the durable-plan/composed authority graph behind one private closure."""
 
-    if type(journal_store) is not JournalStore:
-        raise TypeError("journal_store must be exact JournalStore")
-    spec = _snapshot_budget_spec(spec)
+    def verify_declared_plan_runtime_target_host_qualification_without_chronology(
+        receipt: SignedQualificationAttestation,
+        *,
+        evidence_store: ArtifactStore,
+        evidence_root: str,
+        journal_store: JournalStore,
+        plan_id: str,
+        spec: RuntimeBudgetSpec,
+        expected_release_artifact_id: str,
+        expected_release_artifact_sha256: str,
+        campaign_plan: RuntimeCampaignPlan | None = None,
+        campaign_cut: RuntimeCampaignCut | None = None,
+        measurement: TargetHostMeasurementArtifact | None = None,
+    ) -> AcceptedComposedRuntimeTargetHostQualification:
+        if type(journal_store) is not journal_store_type:
+            raise TypeError("journal_store must be exact JournalStore")
+        spec = snapshot_budget_spec(spec)
 
-    selected_journal_identity = require_exact_journal_store_authority(
-        journal_store,
-        subject="runtime target-host qualification JournalStore",
-    )
-    with journal_store_authority_scope(
-        journal_store,
-        selected_journal_identity,
-    ):
-        plan = load_declared_runtime_event_plan(
-            journal_store,
-            plan_id=plan_id,
-            spec=spec,
-        )
-        if campaign_plan is None or campaign_cut is None or measurement is None:
-            raise RuntimeTargetHostCompositionError(
-                "terminal WP-65 qualification requires composed target-host measurement authority"
-            )
-        durable_plan_digest = _canonical_sha256_text(
-            plan.digest,
-            name="durable pre-run plan digest",
-        )
-        if type(campaign_plan) is RuntimeCampaignPlan:
-            campaign_workload = _canonical_sha256_text(
-                campaign_plan.workload_profile_hash,
-                name="campaign workload identity",
-            )
-            if campaign_workload != durable_plan_digest:
-                raise RuntimeTargetHostCompositionError(
-                    "campaign workload identity does not match durable pre-run plan"
-                )
-        if type(measurement) is TargetHostMeasurementArtifact:
-            measurement_workload = _canonical_sha256_text(
-                measurement.workload_profile_hash,
-                name="measurement workload identity",
-            )
-            if measurement_workload != durable_plan_digest:
-                raise RuntimeTargetHostCompositionError(
-                    "measurement workload identity does not match durable pre-run plan"
-                )
-        if type(campaign_cut) is RuntimeCampaignCut:
-            campaign_cut = _snapshot_campaign_cut(campaign_cut)
-        accepted = verify_composed_runtime_target_host_qualification(
-            receipt,
-            evidence_store=evidence_store,
-            evidence_root=evidence_root,
-            journal_store=journal_store,
-            spec=spec,
-            campaign_plan=campaign_plan,
-            campaign_cut=campaign_cut,
-            declared_plan_id=plan.plan_id,
-            measurement=measurement,
-            expected_release_artifact_id=expected_release_artifact_id,
-            expected_release_artifact_sha256=expected_release_artifact_sha256,
-        )
-
-        final_plan = load_declared_runtime_event_plan(
-            journal_store,
-            plan_id=plan.plan_id,
-            spec=spec,
-        )
-        final_plan_digest = _canonical_sha256_text(
-            final_plan.digest,
-            name="revalidated durable pre-run plan digest",
-        )
-        if final_plan_digest != durable_plan_digest:
-            raise RuntimeTargetHostCompositionError(
-                "durable pre-run plan changed during terminal qualification"
-            )
-        final_journal_identity = require_exact_journal_store_authority(
+        selected_journal_identity = require_journal_authority(
             journal_store,
             subject="runtime target-host qualification JournalStore",
         )
-        if final_journal_identity != selected_journal_identity:
-            raise RuntimeError(
-                "journal operation authority changed during terminal qualification"
+        with journal_authority_scope(
+            journal_store,
+            selected_journal_identity,
+        ):
+            plan = load_declared_plan(
+                journal_store,
+                plan_id=plan_id,
+                spec=spec,
             )
-        return accepted
+            if campaign_plan is None or campaign_cut is None or measurement is None:
+                raise composition_error_type(
+                    "terminal WP-65 qualification requires composed target-host measurement authority"
+                )
+            durable_plan_digest = canonical_sha256_text(
+                plan.digest,
+                name="durable pre-run plan digest",
+            )
+            if type(campaign_plan) is campaign_plan_type:
+                campaign_workload = canonical_sha256_text(
+                    campaign_plan.workload_profile_hash,
+                    name="campaign workload identity",
+                )
+                if campaign_workload != durable_plan_digest:
+                    raise composition_error_type(
+                        "campaign workload identity does not match durable pre-run plan"
+                    )
+            if type(measurement) is measurement_type:
+                measurement_workload = canonical_sha256_text(
+                    measurement.workload_profile_hash,
+                    name="measurement workload identity",
+                )
+                if measurement_workload != durable_plan_digest:
+                    raise composition_error_type(
+                        "measurement workload identity does not match durable pre-run plan"
+                    )
+            if type(campaign_cut) is campaign_cut_type:
+                campaign_cut = snapshot_campaign_cut(campaign_cut)
+            accepted = verify_composed(
+                receipt,
+                evidence_store=evidence_store,
+                evidence_root=evidence_root,
+                journal_store=journal_store,
+                spec=spec,
+                campaign_plan=campaign_plan,
+                campaign_cut=campaign_cut,
+                declared_plan_id=plan.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=expected_release_artifact_id,
+                expected_release_artifact_sha256=expected_release_artifact_sha256,
+            )
+
+            final_plan = load_declared_plan(
+                journal_store,
+                plan_id=plan.plan_id,
+                spec=spec,
+            )
+            final_plan_digest = canonical_sha256_text(
+                final_plan.digest,
+                name="revalidated durable pre-run plan digest",
+            )
+            if final_plan_digest != durable_plan_digest:
+                raise composition_error_type(
+                    "durable pre-run plan changed during terminal qualification"
+                )
+            final_journal_identity = require_journal_authority(
+                journal_store,
+                subject="runtime target-host qualification JournalStore",
+            )
+            if final_journal_identity != selected_journal_identity:
+                raise RuntimeError(
+                    "journal operation authority changed during terminal qualification"
+                )
+            return accepted
+
+    return verify_declared_plan_runtime_target_host_qualification_without_chronology
+
+
+# Canonical chronology-bound verification captures this closure during module
+# initialization. All authority-bearing dependencies are default-captured above,
+# so later module-global rebinding cannot redirect durable plan, JournalStore or
+# composed qualification authority. Focused tests use the private factory with
+# explicit injected doubles instead of rebinding production globals.
+_verify_declared_plan_runtime_target_host_qualification_without_chronology = (
+    _build_chronology_free_verifier()
+)
 
 
 def _terminal_chronology_dispatch_authority():

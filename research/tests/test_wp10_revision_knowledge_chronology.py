@@ -3,6 +3,7 @@ import unittest
 
 from autotrade_research.data.vintages import (
     HistoricalConflict,
+    HistoricalDataError,
     causal_market_event_history,
 )
 
@@ -22,7 +23,6 @@ def _event(
     ingested_minutes: int,
     kind: str = "BAR",
     source_sequence: int | None = 10,
-    stream_generation: int | None = 1,
 ) -> dict:
     source_at = BASE
     available_at = BASE + timedelta(minutes=available_minutes)
@@ -47,8 +47,6 @@ def _event(
     }
     if source_sequence is not None:
         result["source_sequence"] = str(source_sequence)
-    if stream_generation is not None:
-        result["stream_generation"] = str(stream_generation)
     return result
 
 
@@ -80,11 +78,7 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
             )
 
     def test_revision_cannot_change_stable_source_identity_metadata(self):
-        cases = (
-            {"kind": "TRADE"},
-            {"source_sequence": 11},
-            {"stream_generation": 2},
-        )
+        cases = ({"kind": "TRADE"},)
         for changed in cases:
             with self.subTest(changed=changed):
                 lower = _event(
@@ -106,6 +100,26 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
                         [lower, higher],
                         BASE + timedelta(minutes=5),
                     )
+
+    def test_revision_may_have_a_later_provider_source_sequence(self):
+        lower = _event(1, available_minutes=1, ingested_minutes=3, source_sequence=10)
+        higher = _event(2, available_minutes=2, ingested_minutes=4, source_sequence=11)
+
+        history = causal_market_event_history(
+            [higher, lower],
+            BASE + timedelta(minutes=5),
+        )
+
+        self.assertEqual([row["source_sequence"] for row in history], ["10", "11"])
+
+    def test_noncanonical_market_event_field_cannot_become_research_authority(self):
+        row = _event(1, available_minutes=1, ingested_minutes=3)
+        row["stream_generation"] = "1"
+        with self.assertRaisesRegex(
+            HistoricalDataError,
+            "canonical MarketEvent contract",
+        ):
+            causal_market_event_history([row], BASE + timedelta(minutes=4))
 
     def test_strictly_later_revision_knowledge_time_is_accepted(self):
         lower = _event(1, available_minutes=1, ingested_minutes=3)

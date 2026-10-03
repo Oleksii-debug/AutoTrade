@@ -8,13 +8,7 @@ from autotrade_research.features.causal import SourceValue, rolling_return
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _source(
-    identity: str,
-    value: str,
-    *,
-    source_sequence: int,
-    stream_generation: int | None,
-) -> SourceValue:
+def _source(identity: str, value: str, *, source_sequence: int) -> SourceValue:
     return SourceValue.create(
         observation_id=f"{identity}@r1",
         symbol="AAA",
@@ -24,27 +18,16 @@ def _source(
         source_revision="1",
         source_identity=identity,
         source_sequence=source_sequence,
-        stream_generation=stream_generation,
     )
 
 
-class InitialGenerationProviderOrderTests(unittest.TestCase):
-    def test_missing_generation_matches_explicit_initial_generation_order(self):
-        earlier = _source(
-            "event-a",
-            "100",
-            source_sequence=10,
-            stream_generation=0,
-        )
-        later_legacy = _source(
-            "event-b",
-            "110",
-            source_sequence=11,
-            stream_generation=None,
-        )
+class CanonicalSourceSequenceOrderTests(unittest.TestCase):
+    def test_generic_source_values_use_explicit_canonical_sequence_order(self):
+        earlier = _source("event-a", "100", source_sequence=10)
+        later = _source("event-b", "110", source_sequence=11)
 
         point = rolling_return(
-            [later_legacy, earlier],
+            [later, earlier],
             symbol="AAA",
             decision_time=BASE + timedelta(seconds=1),
             count=2,

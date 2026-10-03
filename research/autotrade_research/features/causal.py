@@ -44,7 +44,6 @@ class SourceValue:
     source_revision: str
     source_identity: str | None = None
     source_sequence: int | None = None
-    stream_generation: int | None = None
 
     def __post_init__(self) -> None:
         event = _time(self.event_time, name="event_time")
@@ -67,14 +66,12 @@ class SourceValue:
                 "source_identity",
                 _text(self.source_identity, name="source_identity"),
             )
-        for field_name in ("source_sequence", "stream_generation"):
-            field_value = getattr(self, field_name)
-            if field_value is not None and (
-                isinstance(field_value, bool)
-                or not isinstance(field_value, int)
-                or field_value < 0
-            ):
-                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.source_sequence is not None and (
+            isinstance(self.source_sequence, bool)
+            or not isinstance(self.source_sequence, int)
+            or self.source_sequence < 0
+        ):
+            raise ValueError("source_sequence must be a non-negative integer")
 
     @classmethod
     def create(
@@ -88,7 +85,6 @@ class SourceValue:
         source_revision: str,
         source_identity: str | None = None,
         source_sequence: int | None = None,
-        stream_generation: int | None = None,
     ) -> "SourceValue":
         event = _time(event_time, name="event_time")
         available = _time(available_at, name="available_at")
@@ -103,7 +99,6 @@ class SourceValue:
             source_revision=_text(source_revision, name="source_revision"),
             source_identity=source_identity,
             source_sequence=source_sequence,
-            stream_generation=stream_generation,
         )
 
 
@@ -259,10 +254,6 @@ def _latest_known_vintages(
         event_times = {item.event_time for item in candidates}
         if len(event_times) != 1:
             raise ValueError("source identity changed event_time across revisions")
-        source_sequences = {item.source_sequence for item in candidates}
-        stream_generations = {item.stream_generation for item in candidates}
-        if len(source_sequences) != 1 or len(stream_generations) != 1:
-            raise ValueError("source identity changed provider order across revisions")
         event_time = next(iter(event_times))
         latest_available_at = max(item.available_at for item in candidates)
         latest = [
@@ -289,7 +280,6 @@ def _latest_known_vintages(
             latest_by_identity.values(),
             key=lambda item: (
                 item.event_time,
-                0 if item.stream_generation is None else item.stream_generation,
                 -1 if item.source_sequence is None else item.source_sequence,
                 item.source_identity or item.observation_id,
                 item.available_at,

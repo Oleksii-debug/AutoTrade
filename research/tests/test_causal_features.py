@@ -59,7 +59,6 @@ class CausalFeatureTests(unittest.TestCase):
             source_revision="1",
             source_identity="event-a",
             source_sequence=10,
-            stream_generation=2,
         )
         second = SourceValue.create(
             observation_id="event-b@r1",
@@ -70,7 +69,6 @@ class CausalFeatureTests(unittest.TestCase):
             source_revision="1",
             source_identity="event-b",
             source_sequence=11,
-            stream_generation=2,
         )
 
         point = rolling_return(

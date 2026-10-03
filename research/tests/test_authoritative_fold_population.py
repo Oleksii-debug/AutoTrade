@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from autotrade_research.artifacts import ArtifactStore
@@ -100,7 +101,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             purge_seconds=0,
         )
 
-    def _manifest(self, content_hashes, *, content_refs=None, version=1):
+    def _manifest(self, content_hashes, *, population_evidence=None, version=1):
         manifest = {
             "dataset_id": self.dataset_id,
             "version": str(version),
@@ -146,8 +147,8 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             ],
             "created_at": _iso(BASE + timedelta(days=8, seconds=1)),
         }
-        if content_refs is not None:
-            manifest["content_refs"] = list(content_refs)
+        if population_evidence is not None:
+            manifest["source_evidence"].append(dict(population_evidence))
         return manifest
 
     @staticmethod
@@ -173,18 +174,16 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 "dataset_version": version,
             },
         )
-        content_ref = {
-            "ordinal": 1,
-            "role": "market_event_population",
+        population_evidence = {
             "artifact_id": artifact_id,
             "sha256": artifact_manifest["sha256"],
-            "manifest_hash": artifact_manifest["manifest_hash"],
+            "observed_at": _iso(BASE + timedelta(days=8)),
             "rights_id": "research-fixture",
         }
         return self.registry.commit(
             self._manifest(
                 [artifact_manifest["sha256"]],
-                content_refs=[content_ref],
+                population_evidence=population_evidence,
                 version=version,
             )
         )
@@ -322,7 +321,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         manifest_digest = self.registry.commit(self._manifest([dangling_digest]))
         with self.assertRaisesRegex(
             HistoricalDataError,
-            "lacks authoritative content references",
+            "exactly one ArtifactStore content object",
         ):
             fit_authoritative_fold_normalizer(
                 registry=self.registry,
@@ -335,66 +334,31 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 spec=self.spec,
             )
 
-    def test_manifest_rejects_content_ref_digest_different_from_hash_list(self):
+    def test_research_manifest_cannot_extend_canonical_dataset_contract(self):
         rows = self._base_events()
-        digest = market_event_population_digest(rows)
-        content_ref = {
-            "ordinal": 1,
-            "role": "market_event_population",
-            "artifact_id": _uuid(30, 1),
-            "sha256": "sha256:" + "0" * 64,
-            "manifest_hash": "sha256:" + "1" * 64,
-            "rights_id": "research-fixture",
-        }
-        with self.assertRaisesRegex(
-            HistoricalDataError,
-            "exactly match ordered content_refs",
-        ):
-            self.registry.commit(
-                self._manifest([digest], content_refs=[content_ref])
-            )
+        manifest = self._manifest([market_event_population_digest(rows)])
+        manifest["content_refs"] = [{"role": "noncanonical"}]
+        with self.assertRaisesRegex(HistoricalDataError, "unknown=.*content_refs"):
+            self.registry.commit(manifest)
 
-    def test_artifact_manifest_hash_is_bound_by_dataset_vintage(self):
+
+    def test_registered_manifest_uses_only_canonical_dataset_fields(self):
         rows = self._base_events()
-        artifact_id = _uuid(31, 1)
-        artifact_manifest = self.artifacts.publish_bytes(
-            artifact_id=artifact_id,
-            data=canonical_market_event_population_bytes(rows),
-            media_type="application/vnd.autotrade.market-event-population+json",
-            rights={
-                "storage": True,
-                "export": False,
-                "rights_id": "research-fixture",
-            },
+        manifest_digest = self._register(rows)
+        registered = self.registry.load(self.dataset_id, 1)
+        schema_path = (
+            Path(__file__).resolve().parents[2]
+            / "contracts"
+            / "jsonschema"
+            / "data.schema.json"
         )
-        content_ref = {
-            "ordinal": 1,
-            "role": "market_event_population",
-            "artifact_id": artifact_id,
-            "sha256": artifact_manifest["sha256"],
-            "manifest_hash": "sha256:" + "0" * 64,
-            "rights_id": "research-fixture",
-        }
-        manifest_digest = self.registry.commit(
-            self._manifest(
-                [artifact_manifest["sha256"]],
-                content_refs=[content_ref],
-            )
-        )
-        with self.assertRaisesRegex(
-            HistoricalConflict,
-            "artifact manifest identity differs",
-        ):
-            fit_authoritative_fold_normalizer(
-                registry=self.registry,
-                dataset_id=self.dataset_id,
-                dataset_version=1,
-                manifest_digest=manifest_digest,
-                artifact_store=self.artifacts,
-                events=rows,
-                fold=self.fold,
-                spec=self.spec,
-            )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        definition = schema["$defs"]["DatasetManifest"]
+        self.assertFalse(definition["additionalProperties"])
+        self.assertEqual(set(registered), set(definition["properties"]))
+        self.assertTrue(set(definition["required"]).issubset(registered))
+        self.assertEqual(self.registry.digest(self.dataset_id, 1), manifest_digest)
+
 
     def test_artifact_rights_identity_is_bound_by_dataset_vintage(self):
         rows = self._base_events()
@@ -409,18 +373,16 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 "rights_id": "research-fixture",
             },
         )
-        content_ref = {
-            "ordinal": 1,
-            "role": "market_event_population",
+        population_evidence = {
             "artifact_id": artifact_id,
             "sha256": artifact_manifest["sha256"],
-            "manifest_hash": artifact_manifest["manifest_hash"],
+            "observed_at": _iso(BASE + timedelta(days=8)),
             "rights_id": "different-rights",
         }
         manifest_digest = self.registry.commit(
             self._manifest(
                 [artifact_manifest["sha256"]],
-                content_refs=[content_ref],
+                population_evidence=population_evidence,
             )
         )
         with self.assertRaisesRegex(
@@ -763,42 +725,30 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         self.assertEqual(first.fingerprint, second.fingerprint)
         self.assertEqual(transformed_first, transformed_second)
 
-    def test_simultaneous_distinct_events_use_canonical_provider_order(self):
+    def test_simultaneous_distinct_events_require_registered_provider_order_policy(self):
         first = event(2, "105", event_id=_uuid(1, 200))
         second = event(2, "106", event_id=_uuid(1, 201))
         first["source_sequence"] = "40"
-        first["stream_generation"] = "2"
         second["source_sequence"] = "41"
-        second["stream_generation"] = "2"
         second["raw_evidence_ref"]["artifact_id"] = _uuid(3, 201)
         rows = [event(0, "100"), event(1, "102"), first, second]
         manifest_digest = self._register(rows)
 
-        points = resolve_authoritative_feature_points(
-            registry=self.registry,
-            dataset_id=self.dataset_id,
-            dataset_version=1,
-            manifest_digest=manifest_digest,
-            artifact_store=self.artifacts,
-            events=rows,
-            cutoff=BASE + timedelta(days=2, minutes=2),
-            spec=self.spec,
-        )
-        simultaneous = [
-            point
-            for point in points
-            if point.decision_time == BASE + timedelta(days=2, minutes=2)
-        ]
-        self.assertEqual(len(simultaneous), 1)
-        point = simultaneous[0]
-        self.assertEqual(
-            point.input_ids,
-            (f"{first['event_id']}@r1", f"{second['event_id']}@r1"),
-        )
-        with localcontext() as context:
-            context.prec = 50
-            expected = (Decimal("106") / Decimal("105")) - Decimal("1")
-        self.assertEqual(point.value, expected)
+        with self.assertRaisesRegex(
+            ValueError,
+            "registered provider-order policy",
+        ):
+            resolve_authoritative_feature_points(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=rows,
+                cutoff=BASE + timedelta(days=2, minutes=2),
+                spec=self.spec,
+            )
+
 
     def test_simultaneous_distinct_events_without_sequence_fail_closed(self):
         first = event(2, "105", event_id=_uuid(1, 210))
@@ -809,7 +759,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "simultaneous distinct market events require source_sequence",
+            "registered provider-order policy",
         ):
             resolve_authoritative_feature_points(
                 registry=self.registry,

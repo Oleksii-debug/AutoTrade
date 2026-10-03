@@ -831,17 +831,17 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) not in {Decimal, str, int}:
             raise TypeError(
                 "resource availability must use exact decimal encoding"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "resource availability must be a finite bounded decimal"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )

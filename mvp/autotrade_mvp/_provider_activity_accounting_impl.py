@@ -2891,8 +2891,32 @@ def book_external_provider_cash_activity(
     economic mappings and remain blocked until such a mapping is qualified.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    store_identity = require_exact_journal_store_authority(
+        store,
+        subject="provider cash JournalStore",
+    )
+
+    def durable_get_event(event_id: str):
+        with journal_store_authority_scope(store, store_identity):
+            return JournalStore.get_event(store, event_id)
+
+    def durable_next_aggregate_version(
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> int:
+        with journal_store_authority_scope(store, store_identity):
+            return JournalStore.next_aggregate_version(
+                store,
+                aggregate_type,
+                aggregate_id,
+            )
+
+    def durable_commit_command(**kwargs: Any):
+        with journal_store_authority_scope(store, store_identity):
+            return JournalStore.commit_command(store, **kwargs)
+
     if not isinstance(activity, ProviderActivityEvidence):
         raise TypeError("activity must be ProviderActivityEvidence")
 
@@ -3020,8 +3044,8 @@ def book_external_provider_cash_activity(
         )
     )
 
-    existing_imported = store.get_event(imported_event_id)
-    existing_economic = store.get_event(economic_event_id)
+    existing_imported = durable_get_event(imported_event_id)
+    existing_economic = durable_get_event(economic_event_id)
     if (existing_imported is None) != (existing_economic is None):
         raise AccountingConflict(
             "provider cash activity has only part of its durable financial effect"
@@ -3101,7 +3125,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        saved_result, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = durable_commit_command(
             command_id=command_identity,
             actor="provider-activity-accounting",
             environment=scope,
@@ -3127,10 +3151,10 @@ def book_external_provider_cash_activity(
             )
         return transaction, False
 
-    activity_version = store.next_aggregate_version(
+    activity_version = durable_next_aggregate_version(
         "provider_activity", identity
     )
-    book_version = store.next_aggregate_version("economic_book", book_id)
+    book_version = durable_next_aggregate_version("economic_book", book_id)
 
     imported_payload = {
         **request,
@@ -3168,7 +3192,7 @@ def book_external_provider_cash_activity(
         "payload_hash": payload_digest(economic_payload),
     }
 
-    saved_result, inserted, _ = store.commit_command(
+    saved_result, inserted, _ = durable_commit_command(
         command_id=command_identity,
         actor="provider-activity-accounting",
         environment=scope,
@@ -3186,8 +3210,8 @@ def book_external_provider_cash_activity(
             "provider cash durable command result conflicts with its financial effect"
         )
     if not inserted:
-        raced_imported = store.get_event(imported_event_id)
-        raced_economic = store.get_event(economic_event_id)
+        raced_imported = durable_get_event(imported_event_id)
+        raced_economic = durable_get_event(economic_event_id)
         if raced_imported is None or raced_economic is None:
             raise AccountingConflict(
                 "provider cash durable command exists without its financial effects"

@@ -836,12 +836,12 @@ def _prepare_provider_fill_correction_binding(
     ):
         raise AccountingConflict("initial provider fill financial binding is invalid")
     initial_payload = initial_event.get("payload")
-    if not isinstance(initial_payload, Mapping):
+    if type(initial_payload) is not dict:
         raise AccountingConflict("initial provider fill binding payload is invalid")
     if payload_digest(initial_payload) != initial_event.get("payload_hash"):
         raise AccountingConflict("initial provider fill binding payload hash is invalid")
     initial_request = initial_payload.get("request")
-    if not isinstance(initial_request, Mapping):
+    if type(initial_request) is not dict:
         raise AccountingConflict("initial provider fill binding request is invalid")
     initial_request = dict(initial_request)
     if initial_payload.get("request_digest") != payload_digest(initial_request):
@@ -948,7 +948,7 @@ def _prepare_provider_fill_correction_binding(
                 "provider fill correction binding versions are invalid"
             )
         payload = event.get("payload")
-        if not isinstance(payload, Mapping):
+        if type(payload) is not dict:
             raise AccountingConflict("provider fill correction binding payload is invalid")
         if payload_digest(payload) != event.get("payload_hash"):
             raise AccountingConflict(
@@ -964,7 +964,7 @@ def _prepare_provider_fill_correction_binding(
                 "provider fill correction binding scope is invalid"
             )
         request = payload.get("request")
-        if not isinstance(request, Mapping):
+        if type(request) is not dict:
             raise AccountingConflict("provider fill correction request is invalid")
         request = dict(request)
         if payload.get("request_digest") != payload_digest(request):
@@ -1044,8 +1044,8 @@ def _prepare_provider_fill_correction_binding(
         corrected_projected_payload = request.get("corrected_projected_fill")
         corrected_provider_payload = request.get("corrected_provider_fill")
         if (
-            not isinstance(corrected_projected_payload, Mapping)
-            or not isinstance(corrected_provider_payload, Mapping)
+            type(corrected_projected_payload) is not dict
+            or type(corrected_provider_payload) is not dict
             or corrected_projected_digest
             != payload_digest(corrected_projected_payload)
             or corrected_provider_digest

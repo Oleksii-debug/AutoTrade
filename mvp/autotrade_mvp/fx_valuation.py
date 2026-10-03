@@ -563,10 +563,16 @@ def value_cash_balances(
         raise FxValuationError("balances must be an exact dict")
     if type(quotes) is not dict:
         raise FxValuationError("quotes must be an exact dict")
-    for raw_currency in balances:
+
+    # Hold the caller-owned mapping bindings once. Validation and valuation must
+    # consume the same snapshots rather than re-reading mutable dict authority.
+    balances_snapshot = dict.copy(balances)
+    quotes_snapshot = dict.copy(quotes)
+
+    for raw_currency in balances_snapshot:
         if type(raw_currency) is not str:
             raise FxValuationError("balance currency keys must be exact strings")
-    for raw_currency in quotes:
+    for raw_currency in quotes_snapshot:
         if type(raw_currency) is not str:
             raise FxValuationError("quote currency keys must be exact strings")
     reporting = _currency(reporting_currency, "reporting_currency")
@@ -582,15 +588,15 @@ def value_cash_balances(
 
     components: list[FxValuation] = []
     seen_currencies: set[str] = set()
-    for raw_currency in sorted(balances):
+    for raw_currency in sorted(balances_snapshot):
         currency = _currency(raw_currency, "balance currency")
         if currency in seen_currencies:
             raise FxValuationError(
                 "balances contain duplicate normalized currency codes"
             )
         seen_currencies.add(currency)
-        amount = _decimal(balances[raw_currency], f"balance[{currency}]")
-        quote = None if currency == reporting else quotes.get(currency)
+        amount = _decimal(balances_snapshot[raw_currency], f"balance[{currency}]")
+        quote = None if currency == reporting else quotes_snapshot.get(currency)
         component = value_amount(
             amount,
             source_currency=currency,

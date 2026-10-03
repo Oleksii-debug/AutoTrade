@@ -262,41 +262,6 @@ def _callable_authority_state(
     )
 
 
-def _require_callable_authority(
-    value: object,
-    state: tuple[
-        object,
-        object | None,
-        object | None,
-        object | None,
-        tuple[tuple[object, object], ...] | None,
-    ],
-    *,
-    name: str,
-    error_type: type[RuntimeLoadMeasurementError],
-) -> None:
-    target = value.__func__ if type(value) is MethodType else value
-    expected_target, code, defaults, kwdefaults, kwdefault_items = state
-    if target is not expected_target:
-        raise error_type(
-            f"{name} callable authority changed during measured operation"
-        )
-    if code is None:
-        return
-    if (
-        target.__code__ is not code
-        or target.__defaults__ is not defaults
-        or target.__kwdefaults__ is not kwdefaults
-        or (
-            kwdefaults is not None
-            and tuple(sorted(kwdefaults.items())) != kwdefault_items
-        )
-    ):
-        raise error_type(
-            f"{name} executable authority changed during measured operation"
-        )
-
-
 def _build_post_operation_authority_guard(
     plan: DeclaredRuntimeEventPlan,
     expected: ExpectedJournalEvent,
@@ -326,6 +291,7 @@ def _build_post_operation_authority_guard(
         ("_MEASUREMENT_EVENT_TYPE", _MEASUREMENT_EVENT_TYPE),
         ("_MEASUREMENT_AGGREGATE_TYPE", _MEASUREMENT_AGGREGATE_TYPE),
         ("_MEASUREMENT_SCHEMA_VERSION", _MEASUREMENT_SCHEMA_VERSION),
+        ("sha256", sha256),
         ("datetime", datetime),
         ("timezone", timezone),
         ("JournalStore", journal_type),
@@ -337,6 +303,19 @@ def _build_post_operation_authority_guard(
 
     def member(owner: type, name: str) -> object:
         return owner.__dict__.get(name)
+
+    plan_digest_member = member(plan_type, "digest")
+    expected_payload_member = member(expected_type, "payload")
+    if not isinstance(plan_digest_member, property) or plan_digest_member.fget is None:
+        raise error_type("plan digest property authority is unavailable")
+    if not isinstance(expected_payload_member, property) or expected_payload_member.fget is None:
+        raise error_type("expected event payload property authority is unavailable")
+    plan_digest_function = plan_digest_member.fget
+    plan_digest_namespace = plan_digest_function.__globals__
+    plan_digest_schema = plan_digest_namespace.get("_PLAN_SCHEMA_VERSION")
+    plan_digest_payload = plan_digest_namespace.get("payload_digest")
+    if plan_digest_schema is None or plan_digest_payload is None:
+        raise error_type("plan digest dependency authority is unavailable")
 
     callable_bindings = (
         (
@@ -384,22 +363,19 @@ def _build_post_operation_authority_guard(
             lambda: member(plan_type, "digest").fget
             if isinstance(member(plan_type, "digest"), property)
             else None,
-            _callable_authority_state(
-                member(plan_type, "digest").fget
-                if isinstance(member(plan_type, "digest"), property)
-                else None
-            ),
+            _callable_authority_state(plan_digest_function),
+        ),
+        (
+            "plan digest payload authority",
+            lambda: plan_digest_namespace.get("payload_digest"),
+            _callable_authority_state(plan_digest_payload),
         ),
         (
             "expected event payload property",
             lambda: member(expected_type, "payload").fget
             if isinstance(member(expected_type, "payload"), property)
             else None,
-            _callable_authority_state(
-                member(expected_type, "payload").fget
-                if isinstance(member(expected_type, "payload"), property)
-                else None
-            ),
+            _callable_authority_state(expected_payload_member.fget),
         ),
         (
             "latency sample constructor",
@@ -410,8 +386,38 @@ def _build_post_operation_authority_guard(
     if any(state[0] is None for _name, _resolve, state in callable_bindings):
         raise error_type("post-operation measurement authority is unavailable")
 
-    plan_digest_member = member(plan_type, "digest")
-    expected_payload_member = member(expected_type, "payload")
+    def require_callable_authority(
+        value: object,
+        state: tuple[
+            object,
+            object | None,
+            object | None,
+            object | None,
+            tuple[tuple[object, object], ...] | None,
+        ],
+        *,
+        name: str,
+    ) -> None:
+        target = value.__func__ if type(value) is MethodType else value
+        expected_target, code, defaults, kwdefaults, kwdefault_items = state
+        if target is not expected_target:
+            raise error_type(
+                f"{name} callable authority changed during measured operation"
+            )
+        if code is None:
+            return
+        if (
+            target.__code__ is not code
+            or target.__defaults__ is not defaults
+            or target.__kwdefaults__ is not kwdefaults
+            or (
+                kwdefaults is not None
+                and tuple(sorted(kwdefaults.items())) != kwdefault_items
+            )
+        ):
+            raise error_type(
+                f"{name} executable authority changed during measured operation"
+            )
 
     def require_post_operation_authority() -> None:
         for name, expected_value in constant_bindings:
@@ -427,13 +433,12 @@ def _build_post_operation_authority_guard(
             raise error_type(
                 "expected event payload property authority changed during measured operation"
             )
-        for name, resolve, state in callable_bindings:
-            _require_callable_authority(
-                resolve(),
-                state,
-                name=name,
-                error_type=error_type,
+        if plan_digest_namespace.get("_PLAN_SCHEMA_VERSION") is not plan_digest_schema:
+            raise error_type(
+                "plan digest schema authority changed during measured operation"
             )
+        for name, resolve, state in callable_bindings:
+            require_callable_authority(resolve(), state, name=name)
 
     return require_post_operation_authority
 

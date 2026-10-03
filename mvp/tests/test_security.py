@@ -482,6 +482,66 @@ class SecurityBoundaryTests(unittest.TestCase):
                 origin=paired,
             )
 
+    def test_session_creation_cannot_cross_unpair_repair_generation(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def authorize(subject, role, origin):
+            if subject == "blocked-repair":
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("test authorization barrier timed out")
+            return True
+
+        boundary = SecurityBoundary(
+            allowed_origins={self.owner.origin},
+            credential_vault=self.vault,
+            session_authorizer=authorize,
+            now=lambda: self.clock[0],
+        )
+        owner = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=self.owner.origin,
+        )
+        paired = boundary.pair_origin(
+            owner.token,
+            origin=owner.origin,
+            new_origin="https://paired-generation.autotrade.invalid",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            create = executor.submit(
+                boundary.create_session,
+                subject="blocked-repair",
+                role="OPERATOR",
+                origin=paired,
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            boundary.unpair_origin(
+                owner.token,
+                origin=owner.origin,
+                paired_origin=paired,
+            )
+            self.assertEqual(
+                boundary.pair_origin(
+                    owner.token,
+                    origin=owner.origin,
+                    new_origin=paired,
+                ),
+                paired,
+            )
+            release.set()
+            with self.assertRaisesRegex(PermissionError, "pairing changed"):
+                create.result(timeout=2)
+
+        replacement = boundary.create_session(
+            subject="operator-after-repair",
+            role="OPERATOR",
+            origin=paired,
+        )
+        self.assertEqual(replacement.origin, paired)
+
     def test_refresh_cannot_cross_concurrent_origin_unpair(self):
         entered = threading.Event()
         release = threading.Event()

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter_ns
+from types import FunctionType, MethodType, ModuleType
 from typing import Callable, Sequence, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
@@ -237,6 +238,93 @@ def _decode_measurement(
     )
 
 
+def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
+    """Snapshot only post-callback executable dependencies needed for issuance."""
+
+    function_states: list[tuple] = []
+    global_bindings: list[tuple[dict[str, object], str, object]] = []
+    module_members: list[tuple[ModuleType, str, object]] = []
+    closure_bindings: list[tuple[object, bool, object | None]] = []
+    seen_functions: set[int] = set()
+    seen_globals: set[tuple[int, str]] = set()
+    seen_members: set[tuple[int, str]] = set()
+
+    def is_first_party(function: FunctionType) -> bool:
+        module = function.__module__
+        return module == "mvp.autotrade_mvp" or module.startswith(
+            "mvp.autotrade_mvp."
+        )
+
+    def capture(value: object) -> None:
+        target = value.__func__ if type(value) is MethodType else value
+        if type(target) is not FunctionType or id(target) in seen_functions:
+            return
+        seen_functions.add(id(target))
+        kwdefaults = target.__kwdefaults__
+        function_states.append(
+            (
+                target,
+                target.__code__,
+                target.__defaults__,
+                kwdefaults,
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+            )
+        )
+        namespace = target.__globals__
+        referenced_names = target.__code__.co_names
+        for dependency_name in referenced_names:
+            if dependency_name not in namespace:
+                continue
+            dependency = namespace[dependency_name]
+            binding_key = (id(namespace), dependency_name)
+            if binding_key not in seen_globals:
+                seen_globals.add(binding_key)
+                global_bindings.append((namespace, dependency_name, dependency))
+            if type(dependency) is ModuleType:
+                for member_name in referenced_names:
+                    if not hasattr(dependency, member_name):
+                        continue
+                    member_key = (id(dependency), member_name)
+                    if member_key in seen_members:
+                        continue
+                    seen_members.add(member_key)
+                    module_members.append(
+                        (dependency, member_name, getattr(dependency, member_name))
+                    )
+            dependency_target = (
+                dependency.__func__ if type(dependency) is MethodType else dependency
+            )
+            if type(dependency_target) is FunctionType and is_first_party(
+                dependency_target
+            ):
+                capture(dependency_target)
+        for cell in target.__closure__ or ():
+            try:
+                expected_value = cell.cell_contents
+            except ValueError:
+                closure_bindings.append((cell, False, None))
+                continue
+            closure_bindings.append((cell, True, expected_value))
+            dependency_target = (
+                expected_value.__func__
+                if type(expected_value) is MethodType
+                else expected_value
+            )
+            if type(dependency_target) is FunctionType and is_first_party(
+                dependency_target
+            ):
+                capture(dependency_target)
+
+    for value in values:
+        capture(value)
+    return (
+        tuple(function_states),
+        tuple(global_bindings),
+        tuple(module_members),
+        tuple(closure_bindings),
+    )
+
+
 def measure_declared_financial_operation(
     store: JournalStore,
     spec: RuntimeBudgetSpec,
@@ -258,6 +346,8 @@ def measure_declared_financial_operation(
     # The operation runs inside evidence issuance, so validation must happen here
     # before a forged readback/decoder can commit a durable latency sample.
     clock = perf_counter_ns
+    type_for = type
+    object_getattribute = object.__getattribute__
     error_type = RuntimeLoadMeasurementError
     journal_store_type = JournalStore
     get_event = JournalStore.get_event
@@ -371,9 +461,91 @@ def measure_declared_financial_operation(
             ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),
         )
     )
+    journal_dependency_names = (
+        "__getattribute__",
+        "_connect",
+        "_require_text",
+        "_decode_event_row",
+        "_aggregate_version_value",
+        "_journal_sequence_value",
+    )
+    journal_dependencies = tuple(
+        (name, getattr(journal_store_type, name)) for name in journal_dependency_names
+    )
+    journal_schema_version = journal_store_type.SCHEMA_VERSION
+    journal_dependency_graph = _capture_operation_dependency_graph(
+        (canonical_json_for, get_event, current_journal_sequence, append_event)
+        + tuple(value for _name, value in journal_dependencies)
+    )
 
     def require_operation_authority() -> None:
         missing = object()
+        if type_for(store) is not journal_store_type:
+            raise error_type(
+                "measurement JournalStore exact class changed during financial operation"
+            )
+        current_store_state = object_getattribute(store, "__dict__")
+        if type_for(current_store_state) is not dict:
+            raise error_type(
+                "measurement JournalStore instance state became non-canonical"
+            )
+        if tuple(current_store_state) != store_state_names:
+            raise error_type(
+                "measurement JournalStore instance state shape changed during financial operation"
+            )
+        for name, expected_value in store_state_snapshot:
+            if current_store_state.get(name, missing) is not expected_value:
+                raise error_type(
+                    "measurement JournalStore instance state changed during financial "
+                    f"operation: {name}"
+                )
+        for value, snapshot, label in (
+            (store_identity, selected_identity_snapshot, "selected JournalStore identity"),
+            (stored_identity, stored_identity_snapshot, "stored JournalStore identity"),
+        ):
+            if type_for(value) is not identity_type:
+                raise error_type(f"measurement {label} class changed during financial operation")
+            current_identity_state = object_getattribute(value, "__dict__")
+            if type_for(current_identity_state) is not dict:
+                raise error_type(f"measurement {label} state became non-canonical")
+            if tuple(current_identity_state) != identity_state_names:
+                raise error_type(f"measurement {label} state shape changed during financial operation")
+            for name, expected_value in snapshot:
+                if current_identity_state.get(name, missing) is not expected_value:
+                    raise error_type(
+                        f"measurement {label} state changed during financial operation: {name}"
+                    )
+        if tuple(identity_type.__dict__) != identity_class_member_names:
+            raise error_type(
+                "measurement JournalStoreIdentity class shape changed during financial operation"
+            )
+        for name, expected_value in identity_class_members:
+            if identity_type.__dict__.get(name, missing) is not expected_value:
+                raise error_type(
+                    "measurement JournalStoreIdentity class authority changed during "
+                    f"financial operation: {name}"
+                )
+        for (
+            name,
+            function,
+            code,
+            defaults,
+            kwdefaults,
+            kwdefault_items,
+        ) in identity_class_executables:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "measurement JournalStoreIdentity executable authority changed during "
+                    f"financial operation: {name}"
+                )
         for name, expected_value in module_bindings:
             if module_namespace.get(name, missing) is not expected_value:
                 raise error_type(
@@ -396,6 +568,16 @@ def measure_declared_financial_operation(
             raise error_type(
                 "measurement class authority changed during financial operation"
             )
+        for name, expected_dependency in journal_dependencies:
+            if getattr(journal_store_type, name, missing) is not expected_dependency:
+                raise error_type(
+                    "measurement JournalStore dependency changed during financial "
+                    f"operation: {name}"
+                )
+        if journal_store_type.SCHEMA_VERSION != journal_schema_version:
+            raise error_type(
+                "measurement JournalStore schema authority changed during financial operation"
+            )
         for (
             name,
             function,
@@ -416,10 +598,85 @@ def measure_declared_financial_operation(
                 raise error_type(
                     f"measurement executable authority changed during financial operation: {name}"
                 )
+        (
+            graph_functions,
+            graph_globals,
+            graph_module_members,
+            graph_closures,
+        ) = journal_dependency_graph
+        for function, code, defaults, kwdefaults, kwdefault_items in graph_functions:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "measurement transitive executable authority changed during "
+                    f"financial operation: {function.__module__}.{function.__qualname__}"
+                )
+        for namespace, dependency_name, expected_dependency in graph_globals:
+            if namespace.get(dependency_name, missing) is not expected_dependency:
+                raise error_type(
+                    "measurement transitive global dependency changed during "
+                    f"financial operation: {dependency_name}"
+                )
+        for module, member_name, expected_member in graph_module_members:
+            if getattr(module, member_name, missing) is not expected_member:
+                raise error_type(
+                    "measurement transitive module dependency changed during financial "
+                    f"operation: {module.__name__}.{member_name}"
+                )
+        for cell, had_value, expected_value in graph_closures:
+            try:
+                current_value = cell.cell_contents
+            except ValueError:
+                if had_value:
+                    raise error_type(
+                        "measurement transitive closure dependency changed during financial operation"
+                    )
+                continue
+            if not had_value or current_value is not expected_value:
+                raise error_type(
+                    "measurement transitive closure dependency changed during financial operation"
+                )
 
     store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
+    )
+    store_state = object_getattribute(store, "__dict__")
+    store_state_snapshot = tuple(store_state.items())
+    store_state_names = tuple(store_state)
+    stored_identity = store_state.get("_store_identity")
+    identity_type = type_for(store_identity)
+    if type_for(stored_identity) is not identity_type:
+        raise error_type("stored JournalStore identity class is not canonical")
+    selected_identity_state = object_getattribute(store_identity, "__dict__")
+    stored_identity_state = object_getattribute(stored_identity, "__dict__")
+    selected_identity_snapshot = tuple(selected_identity_state.items())
+    stored_identity_snapshot = tuple(stored_identity_state.items())
+    identity_state_names = tuple(selected_identity_state)
+    if tuple(stored_identity_state) != identity_state_names:
+        raise error_type("stored JournalStore identity state shape is not canonical")
+    identity_class_member_names = tuple(identity_type.__dict__)
+    identity_class_members = tuple(identity_type.__dict__.items())
+    identity_class_executables = tuple(
+        (
+            name,
+            value,
+            value.__code__,
+            value.__defaults__,
+            value.__kwdefaults__,
+            None
+            if value.__kwdefaults__ is None
+            else tuple(sorted(value.__kwdefaults__.items())),
+        )
+        for name, value in identity_class_members
+        if type_for(value) is FunctionType
     )
     # The operation callback is inside the evidence issuance boundary. Hold the
     # exact physical JournalStore generation across pre-cut, operation, event

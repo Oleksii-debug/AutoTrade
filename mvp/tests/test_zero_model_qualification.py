@@ -32,6 +32,9 @@ class ZeroModelQualificationTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("mvp.tests.test_zero_model_economics", workflow)
+        self.assertEqual(workflow.count("python -E -s -S -m"), 2)
+        self.assertNotIn("python -m unittest", workflow)
+        self.assertNotIn("python -m qualification.zero_model.qualify", workflow)
         for path in (
             "mvp/autotrade_mvp/**",
             "research/autotrade_research/economics/**",

@@ -13,7 +13,9 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import threading
 from typing import FrozenSet, Iterable
+import weakref
 from uuid import UUID
 
 from research.autotrade_research.artifacts import trusted_authenticated_reader
@@ -283,6 +285,91 @@ class EvidenceVerification:
             raise ValueError("evidence cannot be both valid and conflicted")
 
 
+def _artifact_store_evidence_verifier_operations():
+    """Keep verifier authority outside caller-writable instance state."""
+
+    states: dict[int, tuple[weakref.ReferenceType, ArtifactStore, Path, object, str]] = {}
+    state_lock = threading.RLock()
+
+    def cleanup(object_id: int, verifier_ref: weakref.ReferenceType) -> None:
+        with state_lock:
+            current = states.get(object_id)
+            if current is not None and current[0] is verifier_ref:
+                states.pop(object_id, None)
+
+    def require_unbound(verifier: object) -> None:
+        object_id = id(verifier)
+        with state_lock:
+            current = states.get(object_id)
+            if current is None:
+                return
+            current_verifier = current[0]()
+            if current_verifier is verifier:
+                raise ValueError(
+                    "ArtifactStoreEvidenceVerifier composition is already initialized"
+                )
+            if current_verifier is not None:
+                raise ValueError(
+                    "ArtifactStoreEvidenceVerifier binding identity collision"
+                )
+            states.pop(object_id, None)
+
+    def register(
+        verifier: object,
+        *,
+        store: ArtifactStore,
+        evidence_root: Path,
+        read_snapshot: object,
+        store_identity: str,
+    ) -> None:
+        object_id = id(verifier)
+        with state_lock:
+            current = states.get(object_id)
+            if current is not None:
+                current_verifier = current[0]()
+                if current_verifier is verifier:
+                    raise ValueError(
+                        "ArtifactStoreEvidenceVerifier composition is already initialized"
+                    )
+                if current_verifier is not None:
+                    raise ValueError(
+                        "ArtifactStoreEvidenceVerifier binding identity collision"
+                    )
+                states.pop(object_id, None)
+            verifier_ref = weakref.ref(
+                verifier,
+                lambda ref, object_id=object_id: cleanup(object_id, ref),
+            )
+            states[object_id] = (
+                verifier_ref,
+                store,
+                evidence_root,
+                read_snapshot,
+                store_identity,
+            )
+
+    def binding(
+        verifier: object,
+    ) -> tuple[ArtifactStore, Path, object, str]:
+        with state_lock:
+            state = states.get(id(verifier))
+        if state is None or state[0]() is not verifier:
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier process binding is unavailable"
+            )
+        return state[1], state[2], state[3], state[4]
+
+    return require_unbound, register, binding
+
+
+(
+    _require_unbound_artifact_store_evidence_verifier,
+    _register_artifact_store_evidence_verifier,
+    _artifact_store_evidence_verifier_binding,
+) = _artifact_store_evidence_verifier_operations()
+del _artifact_store_evidence_verifier_operations
+
+
 class ArtifactStoreEvidenceVerifier:
     """Immutable-evidence integrity verifier backed by the canonical ArtifactStore.
 
@@ -308,28 +395,37 @@ class ArtifactStoreEvidenceVerifier:
         if isinstance(evidence_root, str) and not evidence_root.strip():
             raise ValueError("evidence_root must be non-empty")
         root = Path(evidence_root).absolute()
-        self._store = store
-        self._evidence_root = root
-        self._read_snapshot = trusted_authenticated_reader(
+        _require_unbound_artifact_store_evidence_verifier(self)
+        read_snapshot = trusted_authenticated_reader(
             root,
             publication_store=store,
         )
-        self._store_identity = (
+        store_identity = (
             "sha256:"
             + hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+        )
+        _register_artifact_store_evidence_verifier(
+            self,
+            store=store,
+            evidence_root=root,
+            read_snapshot=read_snapshot,
+            store_identity=store_identity,
         )
 
     @property
     def identity(self) -> str:
-        return f"{self.VERIFIER_ID}:{self._store_identity}"
+        _, _, _, store_identity = _artifact_store_evidence_verifier_binding(self)
+        return f"{self.VERIFIER_ID}:{store_identity}"
 
     @property
     def store(self) -> ArtifactStore:
-        return self._store
+        store, _, _, _ = _artifact_store_evidence_verifier_binding(self)
+        return store
 
     @property
     def evidence_root(self) -> Path:
-        return self._evidence_root
+        _, evidence_root, _, _ = _artifact_store_evidence_verifier_binding(self)
+        return evidence_root
 
     @staticmethod
     def _manifest_hash(manifest: dict) -> str:
@@ -346,8 +442,13 @@ class ArtifactStoreEvidenceVerifier:
         return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
     def verify(self, ref: ImmutableEvidenceRef) -> EvidenceVerification:
+        if type(ref) is not ImmutableEvidenceRef:
+            raise TypeError("evidence reference must be exact ImmutableEvidenceRef")
+        _, _, read_snapshot, _ = _artifact_store_evidence_verifier_binding(self)
+        if not callable(read_snapshot):
+            raise ValueError("trusted immutable evidence reader is unavailable")
         try:
-            manifest, payload = self._read_snapshot(ref.artifact_id)
+            manifest, payload = read_snapshot(ref.artifact_id)
         except FileNotFoundError:
             return EvidenceVerification(
                 valid=False,
@@ -368,7 +469,7 @@ class ArtifactStoreEvidenceVerifier:
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
-            or manifest_hash != self._manifest_hash(manifest)
+            or manifest_hash != ArtifactStoreEvidenceVerifier._manifest_hash(manifest)
         ):
             return EvidenceVerification(
                 valid=False,
@@ -460,8 +561,8 @@ class QualificationEvidence:
         source_sha = _sha(self.source_sha, name="source_sha")
         envelope_id = _text(self.envelope_id, name="envelope_id")
         envelope_digest = _digest(self.envelope_digest)
-        if not isinstance(self.evidence_ref, ImmutableEvidenceRef):
-            raise TypeError("evidence_ref must be ImmutableEvidenceRef")
+        if type(self.evidence_ref) is not ImmutableEvidenceRef:
+            raise TypeError("evidence_ref must be exact ImmutableEvidenceRef")
         if self.evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
             raise ValueError("prerequisite evidence_ref kind does not match evidence_kind")
         if (
@@ -521,13 +622,17 @@ class BoundedRealObservations:
             "protection_verified",
         ):
             _bool(getattr(self, field_name), name=field_name)
-        refs = tuple(self.evidence_refs)
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must be an exact tuple")
+        refs = self.evidence_refs
         artifact_ids: set[str] = set()
         digests: set[str] = set()
         kinds: set[str] = set()
         for ref in refs:
-            if not isinstance(ref, ImmutableEvidenceRef):
-                raise TypeError("evidence_refs must contain ImmutableEvidenceRef")
+            if type(ref) is not ImmutableEvidenceRef:
+                raise TypeError(
+                    "evidence_refs must contain exact ImmutableEvidenceRef"
+                )
             if (
                 ref.source_sha != source_sha
                 or ref.envelope_id != envelope_id

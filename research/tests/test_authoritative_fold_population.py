@@ -21,6 +21,7 @@ from autotrade_research.features.authoritative import (
     AuthoritativeFoldNormalizer,
     HistoricalFeatureInputSpec,
     authoritative_feature_points,
+    authoritative_source_values,
     fit_authoritative_fold_normalizer,
     resolve_authoritative_feature_points,
 )
@@ -971,6 +972,16 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             "differs from authenticated authority",
         ):
             authoritative_feature_points(
+                forged,
+                spec=self.spec,
+                registry=self.registry,
+                artifact_store=self.artifacts,
+            )
+        with self.assertRaisesRegex(
+            HistoricalConflict,
+            "differs from authenticated authority",
+        ):
+            authoritative_source_values(
                 forged,
                 spec=self.spec,
                 registry=self.registry,

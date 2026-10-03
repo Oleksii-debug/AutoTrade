@@ -76,6 +76,7 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
 
         self.assertEqual(verified, receipt)
         self.assertEqual(receipt.operation, "ROTATED")
+        self.assertIsNone(receipt.previous_receipt_id)
         self.assertEqual(receipt.prior_generation, old.generation)
         self.assertEqual(receipt.successor_generation, current.generation)
         self.assertTrue(receipt.active_after)
@@ -259,7 +260,45 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
             second_receipt,
         )
         self.assertEqual(second_receipt.transition_sequence, 2)
+        self.assertEqual(second_receipt.previous_receipt_id, first_receipt.receipt_id)
         self.assertEqual(second_receipt.successor_generation, third.generation)
+
+    def test_transition_lineage_is_content_linked_to_exact_prior_receipt(self) -> None:
+        first = self._register()
+        second, first_receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            first,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v2",
+        )
+        _third, second_receipt = rotate_trade_credential_with_receipt(
+            self.vault,
+            second,
+            execution_identity="windows-user-1",
+            new_secret_value="secret-v3",
+        )
+
+        self.assertIsNone(first_receipt.previous_receipt_id)
+        self.assertEqual(
+            second_receipt.previous_receipt_id,
+            first_receipt.receipt_id,
+        )
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "predecessor receipt id",
+        ):
+            replace(
+                second_receipt,
+                previous_receipt_id="credential-transition/sha256:" + "g" * 64,
+            )
+        with self.assertRaisesRegex(
+            CredentialTransitionReceiptError,
+            "first credential transition",
+        ):
+            replace(
+                first_receipt,
+                previous_receipt_id=second_receipt.receipt_id,
+            )
 
     def test_tampered_prior_receipt_cannot_be_laundered_by_next_rotation(self) -> None:
         first = self._register()

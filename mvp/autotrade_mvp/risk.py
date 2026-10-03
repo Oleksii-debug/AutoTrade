@@ -142,7 +142,7 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _identity_key(value, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} keys must be non-empty strings")
     return value.strip()
 
@@ -222,7 +222,7 @@ def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
         raise TypeError(f"{name} must be a sequence of action names")
     normalized: list[str] = []
     for value in values:
-        if not isinstance(value, str) or not value.strip():
+        if type(value) is not str or not value.strip():
             raise ValueError(f"{name} values must be non-empty strings")
         action = value.strip().upper()
         if action not in RISK_ACTIONS:
@@ -240,7 +240,7 @@ def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
         raise TypeError(f"{name} must be a sequence of labels")
     normalized: list[str] = []
     for value in values:
-        if not isinstance(value, str) or not value.strip():
+        if type(value) is not str or not value.strip():
             raise ValueError(f"{name} values must be non-empty strings")
         label = value.strip()
         if label in normalized:
@@ -552,23 +552,23 @@ class RiskIntent:
         action: str = "TRADE",
         instrument_type: str = "GENERIC",
     ) -> "RiskIntent":
-        if not isinstance(symbol, str) or not symbol.strip():
+        if type(symbol) is not str or not symbol.strip():
             raise ValueError("symbol is required")
-        normalized_side = side.upper() if isinstance(side, str) else ""
+        normalized_side = side.upper() if type(side) is str else ""
         if normalized_side not in {"BUY", "SELL"}:
             raise ValueError("side must be BUY or SELL")
-        if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool) or expected_state_version < 0:
+        if type(expected_state_version) is not int or expected_state_version < 0:
             raise ValueError("expected_state_version must be a non-negative integer")
-        if not isinstance(reduce_only, bool):
+        if type(reduce_only) is not bool:
             raise TypeError("reduce_only must be a boolean")
-        if not isinstance(action, str) or not action.strip():
+        if type(action) is not str or not action.strip():
             raise ValueError("action is required")
         normalized_action = action.strip().upper()
         if normalized_action not in RISK_ACTIONS:
             raise ValueError(f"Unsupported risk action: {normalized_action}")
         if normalized_action in {"REDUCE", "FLATTEN"} and not reduce_only:
             raise ValueError(f"{normalized_action} action requires reduce_only")
-        if not isinstance(instrument_type, str) or not instrument_type.strip():
+        if type(instrument_type) is not str or not instrument_type.strip():
             raise ValueError("instrument_type is required")
         normalized_instrument_type = instrument_type.strip().upper()
         if normalized_instrument_type not in RISK_INSTRUMENT_TYPES:
@@ -1287,8 +1287,8 @@ def _risk_input_fingerprint(
 
 
 def risk_decision_fingerprint(decision: RiskDecision) -> str:
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("decision must be a RiskDecision")
+    if type(decision) is not RiskDecision:
+        raise TypeError("decision must be an exact RiskDecision")
     payload = {
         "admitted": decision.admitted,
         "resulting_position": _canonical_decimal_text(decision.resulting_position),
@@ -1516,12 +1516,12 @@ def evaluate_risk(
     *,
     evidence_store: object | None = None,
 ) -> RiskDecision:
-    if not isinstance(intent, RiskIntent):
-        raise TypeError("intent must be RiskIntent")
-    if not isinstance(context, RiskContext):
-        raise TypeError("context must be RiskContext")
-    if not isinstance(policy, RiskPolicy):
-        raise TypeError("policy must be RiskPolicy")
+    if type(intent) is not RiskIntent:
+        raise TypeError("intent must be exact RiskIntent")
+    if type(context) is not RiskContext:
+        raise TypeError("context must be exact RiskContext")
+    if type(policy) is not RiskPolicy:
+        raise TypeError("policy must be exact RiskPolicy")
 
     intent = RiskIntent.create(
         symbol=intent.symbol,

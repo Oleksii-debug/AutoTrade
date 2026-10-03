@@ -734,6 +734,7 @@ class DurableFinancingBook:
     ) -> FinancingRevisionBook:
         history: list[FinancingEvent] = []
         aggregate_id = self._aggregate_id(charge_id)
+        canonical_charge_scope: tuple[str, str] | None = None
         for expected_version, durable in enumerate(events, 1):
             if (
                 durable.get("event_type") != _FINANCING_EVENT_TYPE
@@ -752,11 +753,17 @@ class DurableFinancingBook:
                 or payload.get("charge_id") != charge_id
             ):
                 raise FinancingConflict("durable financing scope is invalid")
-            _charge_scope(
+            durable_charge_scope = _charge_scope(
                 payload.get("charge_scope_type"),
                 payload.get("charge_scope_id"),
                 account_id=self.account_id,
             )
+            if canonical_charge_scope is None:
+                canonical_charge_scope = durable_charge_scope
+            elif durable_charge_scope != canonical_charge_scope:
+                raise FinancingConflict(
+                    "durable financing charge scope changed across revisions"
+                )
             _validate_source_account_binding(
                 payload.get("source_account"),
                 provider_id=payload.get("provider_id"),
@@ -1041,6 +1048,24 @@ class DurableFinancingBook:
     ) -> DurableFinancingResult:
         aggregate_id = self._aggregate_id(event.charge_id)
         accepted_cut, durable_events, book = self._stable_replay_cut(event.charge_id)
+        incoming_charge_scope = _charge_scope(
+            charge_scope_type,
+            charge_scope_id,
+            account_id=self.account_id,
+        )
+        if durable_events:
+            first_payload = durable_events[0].get("payload")
+            if not isinstance(first_payload, Mapping):
+                raise FinancingConflict("durable financing payload is invalid")
+            durable_charge_scope = _charge_scope(
+                first_payload.get("charge_scope_type"),
+                first_payload.get("charge_scope_id"),
+                account_id=self.account_id,
+            )
+            if incoming_charge_scope != durable_charge_scope:
+                raise FinancingConflict(
+                    "financing charge scope cannot change across revisions"
+                )
         previous_revision_digest = _revision_book_digest(list(book.events))
         update = _record_exact(book, event)
         resulting_revision_digest = _revision_book_digest(list(book.events))

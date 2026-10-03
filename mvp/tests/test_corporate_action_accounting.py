@@ -648,6 +648,56 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertTrue(retry.inserted)
             self.assertEqual(len(economics.transactions), 2)
 
+    def test_post_planning_journal_shadow_fails_before_financial_mutation(self):
+        from mvp.autotrade_mvp import corporate_action_accounting as accounting_module
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action())
+            original = accounting_module._economic_transactions
+            injected = False
+
+            def plan_then_shadow(*args, **kwargs):
+                nonlocal injected
+                transactions = original(*args, **kwargs)
+                if not injected:
+                    injected = True
+                    store.commit_command = lambda **_kwargs: (
+                        "forged-command",
+                        True,
+                        {},
+                    )
+                return transactions
+
+            accounting_module._economic_transactions = plan_then_shadow
+            try:
+                with self.assertRaisesRegex(TypeError, "shadowed"):
+                    commit_authoritative_corporate_action(
+                        store=store,
+                        evidence_store=durable_evidence,
+                        economic_book=economics,
+                        corporate_book=pure_book(),
+                        accepted=accepted,
+                    )
+            finally:
+                accounting_module._economic_transactions = original
+                if "commit_command" in store.__dict__:
+                    del store.commit_command
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            economics.refresh()
+            self.assertEqual(len(economics.transactions), 1)
+
     def test_exact_retry_ignores_later_unrelated_journal_tail(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

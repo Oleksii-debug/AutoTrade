@@ -218,6 +218,100 @@ class WindowsInstallerBundleReparseAuthorityTests(unittest.TestCase):
                     installer_manifest.verify_release_bundle(bundle)
 
 
+    def test_windows_verifier_failure_survives_retained_cleanup_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = (Path(directory) / "release.zip").absolute()
+            bundle.write_bytes(b"data")
+
+            @contextmanager
+            def retained_parent(path, *, create=False):
+                try:
+                    yield object()
+                finally:
+                    raise OSError("cleanup sentinel")
+
+            @contextmanager
+            def retained_leaf(authority, *, target_name, subject):
+                descriptor = os.open(bundle, os.O_RDONLY)
+                try:
+                    yield descriptor
+                finally:
+                    os.close(descriptor)
+
+            with patch.object(
+                installer_manifest.sys,
+                "platform",
+                "win32",
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=retained_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+                side_effect=retained_leaf,
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+                side_effect=RuntimeError("parser sentinel"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "parser sentinel") as captured:
+                    installer_manifest.verify_release_bundle(bundle)
+
+            self.assertTrue(
+                any(
+                    "retained Windows namespace cleanup also failed" in note
+                    and "cleanup sentinel" in note
+                    for note in getattr(captured.exception, "__notes__", [])
+                )
+            )
+
+    def test_windows_successful_verification_fails_closed_when_cleanup_fails(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = (Path(directory) / "release.zip").absolute()
+            bundle.write_bytes(b"data")
+
+            @contextmanager
+            def retained_parent(path, *, create=False):
+                try:
+                    yield object()
+                finally:
+                    raise OSError("cleanup sentinel")
+
+            @contextmanager
+            def retained_leaf(authority, *, target_name, subject):
+                descriptor = os.open(bundle, os.O_RDONLY)
+                try:
+                    yield descriptor
+                finally:
+                    os.close(descriptor)
+
+            with patch.object(
+                installer_manifest.sys,
+                "platform",
+                "win32",
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_parent_namespace",
+                side_effect=retained_parent,
+            ), patch.object(
+                installer_manifest,
+                "retain_windows_regular_file",
+                side_effect=retained_leaf,
+            ), patch.object(
+                installer_manifest,
+                "_verify_release_bundle_stream",
+                return_value={"verified": True},
+            ):
+                with self.assertRaisesRegex(
+                    installer_manifest.InstallerManifestError,
+                    "retained Windows namespace cleanup failed",
+                ) as captured:
+                    installer_manifest.verify_release_bundle(bundle)
+
+            self.assertIsInstance(captured.exception.__cause__, OSError)
+            self.assertIn("cleanup sentinel", str(captured.exception.__cause__))
+
     def test_windows_acquisition_cleanup_failure_does_not_mask_primary_blocker(self) -> None:
         with TemporaryDirectory() as directory:
             bundle = (Path(directory) / "release.zip").absolute()

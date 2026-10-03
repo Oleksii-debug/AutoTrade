@@ -292,54 +292,78 @@ def assess_reconvergence(
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
 
-    deleted = tuple(
-        sorted({change.path for change in validated_changes if change.status == "D"})
-    )
-    protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
-    fraction = len(deleted) / base_count
+    base_path_set = frozenset(normalized_base)
+    direct_deletions: set[str] = set()
+    disappeared_paths: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "D" and change.path in base_path_set:
+            direct_deletions.add(change.path)
+            disappeared_paths.add(change.path)
+        elif (
+            kind == "R"
+            and change.previous_path is not None
+            and change.previous_path in base_path_set
+            and change.previous_path != change.path
+        ):
+            disappeared_paths.add(change.previous_path)
+        # Copy never removes its source path.
+
+    disappeared = tuple(sorted(disappeared_paths))
+    protected = tuple(sorted(direct_deletions.intersection(protected_sentinels)))
+    fraction = len(disappeared) / base_count
     protected_authorizations = _normalized_protected_authorizations(
         authorized_protected_paths,
         protected_sentinels=protected_sentinels,
     )
 
-    protected_damage: set[str] = set()
+    protected_damage: set[str] = set(protected)
     for change in validated_changes:
         kind = change.status[:1]
-        if kind == "R":
-            if (
-                change.previous_path in protected_sentinels
-                and change.previous_path not in protected_authorizations
-            ):
-                protected_damage.add(
-                    f"{change.previous_path} -> {change.path} (rename)"
-                )
-            if (
-                change.path in protected_sentinels
-                and change.path != change.previous_path
-                and change.path not in protected_authorizations
-            ):
-                protected_damage.add(f"{change.path} (rename destination)")
-            continue
-        if kind == "C":
-            if (
-                change.path in protected_sentinels
-                and change.path not in protected_authorizations
-            ):
-                protected_damage.add(f"{change.path} (copy destination)")
-            continue
+
+        # Sentinel deletion/rename-away/type-change is never approved by an
+        # ordinary evolution exception; those operations remove the trust root.
         if (
-            change.path not in protected_sentinels
-            or change.path in protected_authorizations
+            kind == "R"
+            and change.previous_path in protected_sentinels
+            and change.path != change.previous_path
         ):
-            continue
-        if kind == "D":
-            protected_damage.add(change.path)
-        elif kind == "T":
+            protected_damage.add(
+                f"{change.previous_path} -> {change.path} (rename)"
+            )
+        if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
-        elif kind == "M":
-            protected_damage.add(f"{change.path} (modified)")
-        elif kind == "A":
-            protected_damage.add(f"{change.path} (added)")
+
+        if (
+            kind == "M"
+            and change.path in MUTATION_AUTHORITY_ROOTS
+            and change.path not in protected_authorizations
+        ):
+            protected_damage.add(
+                f"{change.path} (unauthorized trust-root modification)"
+            )
+
+        is_new_authority = (
+            change.path not in base_path_set
+            and (
+                _is_workflow_authority_path(change.path)
+                or change.path in BOOTSTRAP_TRUST_ROOTS
+                or change.path in INTEGRATION_HARNESS_ROOTS
+            )
+        )
+        if (
+            kind in {"A", "R", "C"}
+            and is_new_authority
+            and change.path not in protected_authorizations
+        ):
+            authority_kind = (
+                "workflow-authority"
+                if _is_workflow_authority_path(change.path)
+                else "trust-root"
+            )
+            protected_damage.add(
+                f"{change.path} (unauthorized {authority_kind} creation)"
+            )
     protected_violations = tuple(sorted(protected_damage))
 
     normalized_scopes: tuple[str, ...] | None = None
@@ -379,17 +403,17 @@ def assess_reconvergence(
             "changed paths outside declared mutation scope: "
             + ", ".join(scope_violations)
         )
-    if len(deleted) >= max_deletions and fraction >= max_deleted_fraction:
+    if len(disappeared) >= max_deletions and fraction >= max_deleted_fraction:
         reasons.append(
-            "mass base-tree deletion: "
-            f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
+            "mass base-tree deletion/rename-away: "
+            f"{len(disappeared)}/{base_count} paths ({fraction:.1%})"
         )
 
     return IntegrityAssessment(
         allowed=not reasons,
         base_is_ancestor=base_is_ancestor,
         base_path_count=base_count,
-        deletion_count=len(deleted),
+        deletion_count=len(disappeared),
         deletion_fraction=fraction,
         protected_deletions=protected,
         protected_violations=protected_violations,

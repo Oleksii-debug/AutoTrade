@@ -19,6 +19,12 @@ from typing import Mapping
 from uuid import UUID
 
 from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_runtime.strict_json import (
+    DuplicateJsonKeyError,
+    InvalidJsonDomainError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
+)
 from .runtime_load_campaign import capture_runtime_host_identity
 
 
@@ -197,30 +203,26 @@ class RuntimeTargetHostInventory:
             raise RuntimeTargetHostInventoryError(
                 "target-host inventory must be non-empty bytes"
             )
-
-        def reject_duplicates(
-            pairs: list[tuple[str, object]],
-        ) -> dict[str, object]:
-            result: dict[str, object] = {}
-            for key, item in pairs:
-                if key in result:
-                    raise RuntimeTargetHostInventoryError(
-                        "target-host inventory contains duplicate JSON key"
-                    )
-                result[key] = item
-            return result
-
         try:
-            value = json.loads(
-                raw.decode("utf-8"),
-                object_pairs_hook=reject_duplicates,
-                parse_constant=lambda token: (_ for _ in ()).throw(
-                    RuntimeTargetHostInventoryError(
-                        f"target-host inventory contains invalid JSON constant {token}"
-                    )
-                ),
-            )
-        except (UnicodeError, json.JSONDecodeError) as error:
+            text = raw.decode("utf-8")
+            value = strict_json_loads(text)
+        except UnicodeError as error:
+            raise RuntimeTargetHostInventoryError(
+                "target-host inventory is not valid UTF-8 JSON"
+            ) from error
+        except DuplicateJsonKeyError as error:
+            raise RuntimeTargetHostInventoryError(
+                "target-host inventory contains duplicate JSON key"
+            ) from error
+        except NonStandardJsonConstantError as error:
+            raise RuntimeTargetHostInventoryError(
+                "target-host inventory contains invalid JSON constant"
+            ) from error
+        except InvalidJsonDomainError as error:
+            raise RuntimeTargetHostInventoryError(
+                "target-host inventory exceeds bounded JSON domain"
+            ) from error
+        except json.JSONDecodeError as error:
             raise RuntimeTargetHostInventoryError(
                 "target-host inventory is not valid UTF-8 JSON"
             ) from error
@@ -248,7 +250,6 @@ class RuntimeTargetHostInventory:
                 "target-host inventory bytes are not canonical JSON"
             )
         return inventory
-
 
 @dataclass(frozen=True, slots=True)
 class PublishedRuntimeTargetHostInventory:

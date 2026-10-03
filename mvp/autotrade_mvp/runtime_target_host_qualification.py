@@ -22,6 +22,12 @@ from autotrade_runtime.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
+from autotrade_runtime.strict_json import (
+    DuplicateJsonKeyError,
+    InvalidJsonDomainError,
+    NonStandardJsonConstantError,
+    strict_json_loads,
+)
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
@@ -112,18 +118,6 @@ def _uuid(value: object, *, name: str) -> str:
         )
     return text
 
-
-def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeTargetHostQualificationError(
-                "target-host evidence contains duplicate JSON object key"
-            )
-        result[key] = value
-    return result
-
-
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value,
@@ -138,16 +132,25 @@ def _strict_json(raw: bytes, *, name: str) -> dict[str, object]:
     if type(raw) is not bytes or not raw:
         raise RuntimeTargetHostQualificationError(f"{name} must be non-empty bytes")
     try:
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_object,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                RuntimeTargetHostQualificationError(
-                    f"{name} contains invalid JSON constant {token}"
-                )
-            ),
-        )
-    except (UnicodeError, json.JSONDecodeError) as error:
+        text = raw.decode("utf-8")
+        value = strict_json_loads(text)
+    except UnicodeError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} is not valid UTF-8 JSON"
+        ) from error
+    except DuplicateJsonKeyError as error:
+        raise RuntimeTargetHostQualificationError(
+            "target-host evidence contains duplicate JSON object key"
+        ) from error
+    except NonStandardJsonConstantError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} contains invalid JSON constant"
+        ) from error
+    except InvalidJsonDomainError as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} exceeds bounded JSON domain"
+        ) from error
+    except json.JSONDecodeError as error:
         raise RuntimeTargetHostQualificationError(
             f"{name} is not valid UTF-8 JSON"
         ) from error

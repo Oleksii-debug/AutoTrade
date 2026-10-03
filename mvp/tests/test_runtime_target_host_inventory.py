@@ -122,6 +122,20 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
         ):
             RuntimeTargetHostInventory.parse(duplicate)
 
+    def test_parser_enforces_bounded_json_domain(self) -> None:
+        adversarial = (
+            b"[" + (b" " * 1_000_001) + b"]",
+            (b"[" * 129) + b"0" + (b"]" * 129),
+            b'{"x":' + (b"9" * 641) + b"}",
+        )
+        for raw in adversarial:
+            with self.subTest(size=len(raw)):
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostInventoryError,
+                    "bounded JSON domain",
+                ):
+                    RuntimeTargetHostInventory.parse(raw)
+
     def test_parser_rejects_fingerprint_substitution(self) -> None:
         inventory = RuntimeTargetHostInventory(
             host_identity=IDENTITY,

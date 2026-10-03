@@ -608,6 +608,25 @@ class RuntimeTargetHostQualificationTests(unittest.TestCase):
         ):
             self._verify(raw_by_id, evidence_refs)
 
+    def test_signed_profile_parsers_enforce_bounded_json_domain(self):
+        parsers = (
+            RuntimeTargetHostBinding.parse,
+            RuntimeTargetHostProvenance.parse,
+        )
+        adversarial = (
+            b"[" + (b" " * 1_000_001) + b"]",
+            (b"[" * 129) + b"0" + (b"]" * 129),
+            b'{"x":' + (b"9" * 641) + b"}",
+        )
+        for parser in parsers:
+            for raw in adversarial:
+                with self.subTest(parser=parser.__qualname__, size=len(raw)):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostQualificationError,
+                        "bounded JSON domain",
+                    ):
+                        parser(raw)
+
     def test_canonical_trust_failure_happens_before_any_profile_read(self):
         raw_by_id, evidence_refs, _binding = material()
         signed = receipt(evidence_refs)

@@ -10,7 +10,8 @@ namespace AutoTrade.Desktop;
 /// </summary>
 public sealed class WebExperienceSecurityPolicy
 {
-    private const string CanonicalOperationPrefix = "/api/v1/operations/";
+    private const string RouteProbeOperationId = "00000000-0000-0000-0000-000000000000";
+    private static readonly string CanonicalOperationPrefix = BuildCanonicalOperationPrefix();
     private static readonly string StatePath = "/" + HostApiRoutes.GetState;
     private static readonly string CommandPath = "/" + HostApiRoutes.SubmitCommand;
     private static readonly string EventPath = "/" + HostApiRoutes.StreamEvents;
@@ -123,6 +124,18 @@ public sealed class WebExperienceSecurityPolicy
         }
 
         return true;
+    }
+
+    private static string BuildCanonicalOperationPrefix()
+    {
+        string route = "/" + HostApiRoutes.GetOperation(RouteProbeOperationId);
+        if (!route.EndsWith(RouteProbeOperationId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Generated Host API operation route does not preserve its canonical parameter.");
+        }
+
+        return route[..^RouteProbeOperationId.Length];
     }
 
     /// <summary>

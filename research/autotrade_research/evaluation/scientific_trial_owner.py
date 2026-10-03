@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -52,6 +53,18 @@ def _assert_registry_dispatch_unshadowed(registry: ScientificRegistry) -> None:
             "ScientificRegistry authority methods must not be instance-shadowed: "
             + ", ".join(sorted(shadowed))
         )
+
+
+def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry:
+    """Freeze one caller registry onto one pathlib-owned DB path for this cut."""
+
+    _assert_registry_dispatch_unshadowed(registry)
+    path = object.__getattribute__(registry, "path")
+    if not isinstance(path, Path) or type(path).__module__ != "pathlib":
+        raise TypeError("ScientificRegistry path must be a pathlib-owned path")
+    authority = object.__new__(ScientificRegistry)
+    object.__setattr__(authority, "path", path)
+    return authority
 
 
 def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
@@ -147,8 +160,8 @@ class ScientificTrialOwnerEvidence:
 
 
 def _registered_protocol_rows(registry: ScientificRegistry) -> tuple[dict[str, Any], ...]:
-    _assert_registry_dispatch_unshadowed(registry)
-    with ScientificRegistry._connect(registry) as con:
+    authority = _registry_authority_view(registry)
+    with ScientificRegistry._connect(authority) as con:
         con.execute("BEGIN")
         rows = con.execute(
             "SELECT protocol_id,protocol_hash,payload_json "
@@ -254,19 +267,19 @@ def resolve_scientific_trial_owner(
     mixed profile-owner/trial-population composition.
     """
 
-    _assert_registry_dispatch_unshadowed(registry)
+    authority = _registry_authority_view(registry)
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
-    with ScientificRegistry._connect(registry) as authority_guard:
+    with ScientificRegistry._connect(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
-            registry=registry,
+            registry=authority,
             profile=profile,
         )
         trial_evidence = ScientificRegistry.trial_completeness_evidence(
-            registry,
+            authority,
             binding.protocol_id,
         )
         if trial_evidence.protocol_hash != binding.protocol_hash:

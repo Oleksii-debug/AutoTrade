@@ -14,6 +14,7 @@ from tools.build_provenance_manifest import (
     _trusted_git_environment,
     _trusted_git_executable,
     dependency_advisory_evidence_document,
+    git_blob_sha,
     qualification_trust_policy_composition,
     qualification_trust_policy_digest_from_git_source,
     qualification_trust_policy_digest_from_source,
@@ -105,6 +106,29 @@ class ReleaseEvidenceSnapshotTests(unittest.TestCase):
         self.assertTrue(qualified)
         self.assertIsNone(reason)
         self.assertEqual(read_bytes.call_count, 1)
+
+
+class ProvenanceGitAuthorityTests(unittest.TestCase):
+    def test_git_blob_identity_uses_trusted_git_boundary_not_caller_path(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        target = repository_root / "global.json"
+        object_id = "f" * 40
+
+        with patch(
+            "tools.build_provenance_manifest._trusted_git",
+            return_value=object_id + "\n",
+        ) as trusted_git:
+            observed = git_blob_sha(target)
+
+        self.assertEqual(observed, object_id)
+        self.assertEqual(trusted_git.call_count, 1)
+        args = trusted_git.call_args.args
+        kwargs = trusted_git.call_args.kwargs
+        self.assertEqual(args[0], "hash-object")
+        self.assertEqual(args[1], "--path=global.json")
+        self.assertEqual(args[2], str(target.resolve()))
+        self.assertEqual(kwargs["source_root"], repository_root.resolve())
+        self.assertIs(kwargs["text"], True)
 
 
 class QualificationTrustPolicyPinSourceTests(unittest.TestCase):

@@ -582,7 +582,9 @@ class SecurityBoundary:
 
         active_containers: set[int] = set()
 
-        def scrub(item: object) -> object:
+        def scrub(item: object, *, depth: int = 0) -> object:
+            if depth > 64:
+                return "[REDACTED:DEPTH]"
             item_type = type(item)
             if item_type is dict or item_type is MappingProxyType:
                 identity = id(item)
@@ -599,7 +601,7 @@ class SecurityBoundary:
                         elif _REDACT_RE.search(key):
                             result[key] = "[REDACTED]"
                         else:
-                            result[key] = scrub(child)
+                            result[key] = scrub(child, depth=depth + 1)
                     return result
                 finally:
                     active_containers.remove(identity)
@@ -609,7 +611,7 @@ class SecurityBoundary:
                     return "[REDACTED:CYCLE]"
                 active_containers.add(identity)
                 try:
-                    return [scrub(child) for child in item]
+                    return [scrub(child, depth=depth + 1) for child in item]
                 finally:
                     active_containers.remove(identity)
             if item_type is tuple:
@@ -618,13 +620,13 @@ class SecurityBoundary:
                     return "[REDACTED:CYCLE]"
                 active_containers.add(identity)
                 try:
-                    return tuple(scrub(child) for child in item)
+                    return tuple(scrub(child, depth=depth + 1) for child in item)
                 finally:
                     active_containers.remove(identity)
             if item_type is set:
-                return {scrub(child) for child in item}
+                return {scrub(child, depth=depth + 1) for child in item}
             if item_type is frozenset:
-                return frozenset(scrub(child) for child in item)
+                return frozenset(scrub(child, depth=depth + 1) for child in item)
             if item_type is str:
                 return "[REDACTED]" if _REDACT_RE.search(item) else item
             if item is None or item_type in {bool, int, float}:

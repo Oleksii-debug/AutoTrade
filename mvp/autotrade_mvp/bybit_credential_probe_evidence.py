@@ -18,7 +18,7 @@ import math
 import re
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .bybit_credential_nonacceptance import (
@@ -71,6 +71,7 @@ _PROBE_HEADER_NAMES = frozenset(
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -79,7 +80,7 @@ def _exact_text(value: object, *, name: str) -> str:
     return value
 
 
-def _utc_text(value: object, *, name: str) -> str:
+def _utc_datetime(value: object, *, name: str) -> datetime:
     text = _exact_text(value, name=name)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -87,7 +88,11 @@ def _utc_text(value: object, *, name: str) -> str:
         raise ProviderCoreError(f"{name} must be an ISO timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ProviderCoreError(f"{name} must include timezone")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_text(value: object, *, name: str) -> str:
+    return _utc_datetime(value, name=name).isoformat().replace("+00:00", "Z")
 
 
 def _clock_utc_text(value: object) -> str:
@@ -100,6 +105,15 @@ def _clock_utc_text(value: object) -> str:
             "Bybit credential probe clock_utc must return exact timezone-aware datetime"
         )
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _datetime_epoch_millis(value: datetime) -> int:
+    delta = value - _EPOCH_UTC
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
 
 
 def _exact_request_timestamp(value: object) -> int:
@@ -123,8 +137,9 @@ def _snapshot_exact_json_data(
     *,
     path: str = "$",
     depth: int = 0,
+    _active_container_ids: set[int] | None = None,
 ) -> object:
-    """Detach one exact finite JSON tree from caller-owned mutable containers."""
+    """Detach one bounded exact finite JSON tree from caller-owned containers."""
 
     if depth > MAX_PROVIDER_JSON_DEPTH:
         raise ProviderCoreError(
@@ -138,22 +153,34 @@ def _snapshot_exact_json_data(
                 f"Bybit credential probe response value at {path} must be finite"
             )
         return value
-    if type(value) is list:
-        try:
-            items = tuple(value)
-        except RuntimeError as error:
-            raise ProviderCoreError(
-                "Bybit credential probe response mutated during JSON snapshot"
-            ) from error
-        return [
-            _snapshot_exact_json_data(
-                item,
-                path=f"{path}[{index}]",
-                depth=depth + 1,
-            )
-            for index, item in enumerate(items)
-        ]
-    if type(value) is dict:
+    if type(value) not in {list, dict}:
+        raise ProviderCoreError(
+            f"Bybit credential probe response value at {path} is not exact JSON data"
+        )
+
+    active = _active_container_ids if _active_container_ids is not None else set()
+    identity = id(value)
+    if identity in active:
+        raise ProviderCoreError("Bybit credential probe response contains a JSON cycle")
+    active.add(identity)
+    try:
+        if type(value) is list:
+            try:
+                items = tuple(value)
+            except RuntimeError as error:
+                raise ProviderCoreError(
+                    "Bybit credential probe response mutated during JSON snapshot"
+                ) from error
+            return [
+                _snapshot_exact_json_data(
+                    item,
+                    path=f"{path}[{index}]",
+                    depth=depth + 1,
+                    _active_container_ids=active,
+                )
+                for index, item in enumerate(items)
+            ]
+
         try:
             items = tuple(value.items())
         except RuntimeError as error:
@@ -170,11 +197,11 @@ def _snapshot_exact_json_data(
                 item,
                 path=f"{path}.{key}",
                 depth=depth + 1,
+                _active_container_ids=active,
             )
         return result
-    raise ProviderCoreError(
-        f"Bybit credential probe response value at {path} is not exact JSON data"
-    )
+    finally:
+        active.remove(identity)
 
 
 def _require_exact_json_data(value: object, *, path: str = "$") -> None:
@@ -271,12 +298,42 @@ def _decode_wire_json(body: object) -> dict[str, Any]:
     return snapshot
 
 
+def _confirm_success_api_key_echo(
+    response: dict[str, Any],
+    *,
+    expected_api_key: str,
+) -> bool:
+    """Bind retCode=0 to the exact API key used to authenticate the request."""
+
+    ret_code, _digest = _response_digest(response)
+    if ret_code != 0:
+        return False
+    expected = _exact_text(expected_api_key, name="expected_api_key")
+    result = response.get("result")
+    if type(result) is not dict:
+        raise ProviderCoreError(
+            "successful Bybit credential probe must include exact result object"
+        )
+    echoed_api_key = result.get("apiKey")
+    if type(echoed_api_key) is not str or echoed_api_key != expected:
+        raise ProviderCoreError(
+            "successful Bybit credential probe API key echo does not match request credential"
+        )
+    secret_echo = result.get("secret")
+    if type(secret_echo) is not str or secret_echo != "":
+        raise ProviderCoreError(
+            "successful Bybit credential probe must return an empty secret field"
+        )
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeWireResponse:
     """Scrubbed HTTP result: raw provider JSON is consumed, not retained."""
 
     http_status: int
     response: InitVar[dict[str, Any]]
+    api_key_echo_confirmed: bool = False
     ret_code: int = field(init=False)
     response_sha256: str = field(init=False)
 
@@ -285,7 +342,19 @@ class BybitCredentialProbeWireResponse:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP status must be an exact three-digit integer"
             )
+        if type(self.api_key_echo_confirmed) is not bool:
+            raise ProviderCoreError(
+                "Bybit credential probe API key echo flag must be exact boolean"
+            )
         ret_code, response_sha256 = _response_digest(response)
+        if ret_code == 0 and not self.api_key_echo_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential probe requires exact API key echo confirmation"
+            )
+        if ret_code != 0 and self.api_key_echo_confirmed:
+            raise ProviderCoreError(
+                "Bybit credential probe API key echo confirmation is valid only for success"
+            )
         object.__setattr__(self, "ret_code", ret_code)
         object.__setattr__(self, "response_sha256", response_sha256)
 
@@ -306,6 +375,7 @@ class BybitCredentialProbeEvidence:
     ret_code: int
     response_sha256: str
     observed_at: str
+    api_key_echo_confirmed: bool = False
     classification: BybitCredentialNonAcceptance = field(init=False)
 
     def __post_init__(self) -> None:
@@ -365,12 +435,29 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe ret_code must be exact integer"
             )
+        if type(self.api_key_echo_confirmed) is not bool:
+            raise ProviderCoreError(
+                "Bybit credential probe API key echo flag must be exact boolean"
+            )
+        if self.ret_code == 0 and not self.api_key_echo_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential evidence requires API key echo confirmation"
+            )
+        if self.ret_code != 0 and self.api_key_echo_confirmed:
+            raise ProviderCoreError(
+                "API key echo confirmation is valid only for successful Bybit evidence"
+            )
         response_sha256 = _exact_text(self.response_sha256, name="response_sha256")
         if _SHA256.fullmatch(response_sha256) is None:
             raise ProviderCoreError(
                 "Bybit credential probe response_sha256 must be canonical sha256"
             )
-        observed_at = _utc_text(self.observed_at, name="observed_at")
+        observed_datetime = _utc_datetime(self.observed_at, name="observed_at")
+        observed_at = observed_datetime.isoformat().replace("+00:00", "Z")
+        if _datetime_epoch_millis(observed_datetime) < request_timestamp_ms:
+            raise ProviderCoreError(
+                "Bybit credential probe observed_at cannot precede signed request timestamp"
+            )
         classification = classify_bybit_credential_nonacceptance(
             ret_code=self.ret_code,
             product_family=product_family,
@@ -419,6 +506,7 @@ def bybit_credential_probe_receipt_metadata(
         "ret_code": evidence.ret_code,
         "response_sha256": evidence.response_sha256,
         "observed_at": evidence.observed_at,
+        "api_key_echo_confirmed": evidence.api_key_echo_confirmed,
         "classification": evidence.classification.value,
         "send_authority": False,
         "retirement_authority": False,
@@ -438,6 +526,7 @@ def capture_bybit_credential_probe_evidence(
     http_status: int,
     response: dict[str, Any],
     observed_at: str,
+    api_key_echo_confirmed: bool = False,
 ) -> BybitCredentialProbeEvidence:
     ret_code, response_sha256 = _response_digest(response)
     return BybitCredentialProbeEvidence(
@@ -452,6 +541,7 @@ def capture_bybit_credential_probe_evidence(
         ret_code=ret_code,
         response_sha256=response_sha256,
         observed_at=observed_at,
+        api_key_echo_confirmed=api_key_echo_confirmed,
     )
 
 
@@ -494,13 +584,17 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
             "Bybit credential probe wire headers must have exact auth shape"
         )
     normalized: dict[str, str] = {}
-    for key in _PROBE_HEADER_NAMES:
-        value = _exact_text(headers[key], name=f"header {key}")
+    for raw_key, raw_value in headers.items():
+        if type(raw_key) is not str or raw_key not in _PROBE_HEADER_NAMES:
+            raise ProviderCoreError(
+                "Bybit credential probe wire header names must be exact canonical text"
+            )
+        value = _exact_text(raw_value, name=f"header {raw_key}")
         if "\r" in value or "\n" in value:
             raise ProviderCoreError(
                 "Bybit credential probe header values must not contain line breaks"
             )
-        normalized[key] = value
+        normalized[raw_key] = value
     if normalized["Accept"] != "application/json":
         raise ProviderCoreError("Bybit credential probe Accept header is not canonical")
     timestamp = normalized["X-BAPI-TIMESTAMP"]
@@ -643,7 +737,7 @@ class BybitCredentialProbeUrllibClient:
                         read_failed = True
             else:
                 read_failed = True
-        except URLError:
+        except Exception:
             transport_unavailable = True
 
         if transport_unavailable:
@@ -709,9 +803,19 @@ def execute_bybit_credential_probe_wire_query(
         raise TypeError(
             "Bybit credential probe wire client must return exact BybitCredentialProbeRawHttpResponse"
         )
+    if raw_response.http_status != 200:
+        raise ProviderCoreError(
+            "Bybit credential probe non-200 HTTP result is not rejection evidence"
+        )
+    decoded = _decode_wire_json(raw_response.body)
+    api_key_echo_confirmed = _confirm_success_api_key_echo(
+        decoded,
+        expected_api_key=headers["X-BAPI-API-KEY"],
+    )
     return BybitCredentialProbeWireResponse(
         http_status=raw_response.http_status,
-        response=_decode_wire_json(raw_response.body),
+        response=decoded,
+        api_key_echo_confirmed=api_key_echo_confirmed,
     )
 
 
@@ -819,6 +923,7 @@ def probe_bybit_credential_with_vault(
             ret_code=wire_response.ret_code,
             response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
+            api_key_echo_confirmed=wire_response.api_key_echo_confirmed,
         )
 
 

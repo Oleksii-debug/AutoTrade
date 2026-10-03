@@ -87,10 +87,8 @@ def _risk_ratio(
     try:
         denominator_fraction = as_fraction(denominator)
         if denominator_fraction == 0:
-            raise ValueError(f"risk {operation} denominator must be non-zero")
+            raise ZeroDivisionError
         return bounded_fraction(as_fraction(numerator) / denominator_fraction)
-    except ValueError:
-        raise
     except (ExactDecimalError, TypeError, ZeroDivisionError) as error:
         raise _risk_arithmetic_error(operation, error) from error
 
@@ -2496,7 +2494,7 @@ def evaluate_risk(
         (
             f"current<{_risk_abs(current)};projected<{_risk_abs(base_position)}"
             if intent.reduce_only
-            else abs(base_position)
+            else _risk_abs(base_position)
         ),
         "reduce-only intent must reduce both current and reserved-inclusive exposure without crossing flat",
     )

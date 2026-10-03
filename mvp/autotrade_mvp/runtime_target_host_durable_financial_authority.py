@@ -32,7 +32,6 @@ from .runtime_target_host_measurement_authority import (
 )
 
 
-
 def _build_module_authority_guard(*, root, error_type, label: str):
     """Freeze one callable's same-module executable dependency graph.
 
@@ -240,6 +239,12 @@ def _build_release_bound_durable_financial_authority(
         except parent_error_types as error:
             raise durable_error_type(str(error)) from error
 
+        # The low-level durable binder snapshots the measurement again. The parent
+        # evidence collector runs between the first snapshot and that nested use,
+        # so a callback/side effect there must not be able to retarget the
+        # measurement module's executable graph after the first guard passed.
+        if measurement_dependency_guard is not None:
+            measurement_dependency_guard()
         if durable_dependency_guard is not None:
             durable_dependency_guard()
         return durable_binder(
@@ -250,7 +255,6 @@ def _build_release_bound_durable_financial_authority(
         )
 
     return bind
-
 
 
 _PRODUCTION_MEASUREMENT_SNAPSHOT_GUARD = _build_module_authority_guard(

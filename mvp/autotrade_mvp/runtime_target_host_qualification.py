@@ -15,6 +15,7 @@ import json
 import re
 from types import MappingProxyType
 from typing import Callable, Mapping
+from uuid import UUID
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
@@ -89,6 +90,21 @@ def _digest(value: object, *, name: str) -> str:
     return text
 
 
+def _uuid(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        canonical = str(UUID(text))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} must be a canonical UUID"
+        ) from error
+    if canonical != text:
+        raise RuntimeTargetHostQualificationError(
+            f"{name} must be a canonical UUID"
+        )
+    return text
+
+
 def _reject_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -144,6 +160,8 @@ class RuntimeTargetHostProvenance:
     host_fingerprint: str
     workload_profile_hash: str
     journal_store_identity_digest: str
+    release_artifact_id: str
+    release_artifact_sha256: str
     collector_id: str
     collector_version: str
     payload_sha256: str
@@ -163,6 +181,11 @@ class RuntimeTargetHostProvenance:
         object.__setattr__(
             self, "source_sha", _git_sha(self.source_sha, name="source_sha")
         )
+        object.__setattr__(
+            self,
+            "release_artifact_id",
+            _uuid(self.release_artifact_id, name="release_artifact_id"),
+        )
         for field in ("scenario_id", "collector_id", "collector_version"):
             object.__setattr__(
                 self, field, _text(getattr(self, field), name=field)
@@ -173,6 +196,7 @@ class RuntimeTargetHostProvenance:
             "host_fingerprint",
             "workload_profile_hash",
             "journal_store_identity_digest",
+            "release_artifact_sha256",
             "payload_sha256",
         ):
             object.__setattr__(
@@ -188,6 +212,8 @@ class RuntimeTargetHostProvenance:
             "host_fingerprint": self.host_fingerprint,
             "journal_store_identity_digest": self.journal_store_identity_digest,
             "payload_sha256": self.payload_sha256,
+            "release_artifact_id": self.release_artifact_id,
+            "release_artifact_sha256": self.release_artifact_sha256,
             "scenario_id": self.scenario_id,
             "schema_version": self.schema_version,
             "source_sha": self.source_sha,
@@ -209,6 +235,8 @@ class RuntimeTargetHostProvenance:
             "host_fingerprint",
             "journal_store_identity_digest",
             "payload_sha256",
+            "release_artifact_id",
+            "release_artifact_sha256",
             "scenario_id",
             "schema_version",
             "source_sha",
@@ -238,6 +266,8 @@ class RuntimeTargetHostBinding:
     host_fingerprint: str
     workload_profile_hash: str
     journal_store_identity_digest: str
+    release_artifact_id: str
+    release_artifact_sha256: str
     campaign_evidence_sha256: str
     staleness_evidence_sha256: str
     interference_evidence_sha256: str
@@ -256,12 +286,18 @@ class RuntimeTargetHostBinding:
         object.__setattr__(
             self, "scenario_id", _text(self.scenario_id, name="scenario_id")
         )
+        object.__setattr__(
+            self,
+            "release_artifact_id",
+            _uuid(self.release_artifact_id, name="release_artifact_id"),
+        )
         for field in (
             "spec_digest",
             "configuration_hash",
             "host_fingerprint",
             "workload_profile_hash",
             "journal_store_identity_digest",
+            "release_artifact_sha256",
             "campaign_evidence_sha256",
             "staleness_evidence_sha256",
             "interference_evidence_sha256",
@@ -280,6 +316,8 @@ class RuntimeTargetHostBinding:
             "host_inventory_evidence_sha256": self.host_inventory_evidence_sha256,
             "interference_evidence_sha256": self.interference_evidence_sha256,
             "journal_store_identity_digest": self.journal_store_identity_digest,
+            "release_artifact_id": self.release_artifact_id,
+            "release_artifact_sha256": self.release_artifact_sha256,
             "resource_evidence_sha256": self.resource_evidence_sha256,
             "scenario_id": self.scenario_id,
             "schema_version": self.schema_version,
@@ -306,6 +344,8 @@ class RuntimeTargetHostBinding:
             "host_inventory_evidence_sha256",
             "interference_evidence_sha256",
             "journal_store_identity_digest",
+            "release_artifact_id",
+            "release_artifact_sha256",
             "resource_evidence_sha256",
             "scenario_id",
             "schema_version",
@@ -337,6 +377,8 @@ class AcceptedRuntimeTargetHostQualification:
     host_fingerprint: str
     workload_profile_hash: str
     journal_store_identity_digest: str
+    release_artifact_id: str
+    release_artifact_sha256: str
     binding_artifact_id: str
     binding_sha256: str
     evidence_sha256_by_kind: Mapping[str, str]
@@ -431,6 +473,8 @@ def _identity_tuple(
     host_fingerprint: str,
     workload_profile_hash: str,
     journal_store_identity_digest: str,
+    release_artifact_id: str,
+    release_artifact_sha256: str,
 ) -> tuple[str, ...]:
     return (
         source_sha,
@@ -440,6 +484,8 @@ def _identity_tuple(
         host_fingerprint,
         workload_profile_hash,
         journal_store_identity_digest,
+        release_artifact_id,
+        release_artifact_sha256,
     )
 
 
@@ -452,6 +498,8 @@ def _provenance_identity(value: RuntimeTargetHostProvenance) -> tuple[str, ...]:
         host_fingerprint=value.host_fingerprint,
         workload_profile_hash=value.workload_profile_hash,
         journal_store_identity_digest=value.journal_store_identity_digest,
+        release_artifact_id=value.release_artifact_id,
+        release_artifact_sha256=value.release_artifact_sha256,
     )
 
 
@@ -467,6 +515,8 @@ def verify_runtime_target_host_qualification(
     expected_host_fingerprint: str,
     expected_workload_profile_hash: str,
     expected_journal_store_identity_digest: str,
+    expected_release_artifact_id: str,
+    expected_release_artifact_sha256: str,
 ) -> AcceptedRuntimeTargetHostQualification:
     """Accept one terminal WP-65 target-host receipt through canonical trust only."""
 
@@ -490,6 +540,14 @@ def verify_runtime_target_host_qualification(
         expected_journal_store_identity_digest,
         name="expected_journal_store_identity_digest",
     )
+    release_artifact_id = _uuid(
+        expected_release_artifact_id,
+        name="expected_release_artifact_id",
+    )
+    release_artifact_sha256 = _digest(
+        expected_release_artifact_sha256,
+        name="expected_release_artifact_sha256",
+    )
     expected_identity = _identity_tuple(
         source_sha=source_sha,
         scenario_id=scenario_id,
@@ -498,6 +556,8 @@ def verify_runtime_target_host_qualification(
         host_fingerprint=host_fingerprint,
         workload_profile_hash=workload_profile_hash,
         journal_store_identity_digest=journal_identity,
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
     )
 
     accepted = verify_canonical_qualification_attestation(
@@ -511,10 +571,18 @@ def verify_runtime_target_host_qualification(
         expected_protocol_id=PROTOCOL_ID,
         expected_protocol_version=PROTOCOL_VERSION,
         expected_requirement_id=REQUIREMENT_ID,
+        expected_release_artifact_id=release_artifact_id,
+        expected_release_artifact_sha256=release_artifact_sha256,
     )
     if type(accepted) is not AcceptedQualificationAttestation:
         raise RuntimeTargetHostQualificationError(
             "canonical verifier returned non-canonical accepted attestation"
+        )
+    if accepted.release_artifact_id != release_artifact_id or (
+        accepted.release_artifact_sha256 != release_artifact_sha256
+    ):
+        raise RuntimeTargetHostQualificationError(
+            "canonical verifier accepted a different release artifact"
         )
     if accepted.result != "PASS":
         raise RuntimeTargetHostQualificationError(
@@ -548,6 +616,8 @@ def verify_runtime_target_host_qualification(
         host_fingerprint=binding.host_fingerprint,
         workload_profile_hash=binding.workload_profile_hash,
         journal_store_identity_digest=binding.journal_store_identity_digest,
+        release_artifact_id=binding.release_artifact_id,
+        release_artifact_sha256=binding.release_artifact_sha256,
     )
     if binding_identity != expected_identity:
         raise RuntimeTargetHostQualificationError(
@@ -591,6 +661,8 @@ def verify_runtime_target_host_qualification(
         host_fingerprint=host_fingerprint,
         workload_profile_hash=workload_profile_hash,
         journal_store_identity_digest=journal_identity,
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
         binding_artifact_id=binding_ref.artifact_id,
         binding_sha256=binding_ref.sha256,
         evidence_sha256_by_kind={

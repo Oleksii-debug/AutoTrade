@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tempfile import TemporaryDirectory
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.runtime_load_plan import declare_runtime_event_plan
 from mvp.autotrade_mvp.runtime_target_host_inventory import host_identity_fingerprint
 from mvp.autotrade_mvp.runtime_target_host_runner import (
     RuntimeTargetHostRunnerError,
+    _require_shared_clock_contract,
     run_cpu_pressure_probe,
     run_declared_target_host_campaign,
 )
@@ -388,6 +390,33 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(journal.get_event("fin-1"))
+
+    @unittest.skipUnless(
+        sys.version_info >= (3, 13),
+        "language-level shared perf_counter/monotonic clock contract requires Python 3.13+",
+    )
+    def test_supported_runtime_executes_unpatched_shared_clock_campaign(self):
+        _require_shared_clock_contract()
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            result = run_declared_target_host_campaign(
+                journal=journal,
+                spec=spec,
+                declared_plan_id="runner-plan",
+                release_artifact_id=RELEASE_ID,
+                release_artifact_sha256=RELEASE_SHA,
+                declared_duration_ms=1_000,
+                operations={"fin-1": lambda: append_expected(journal, "fin-1")},
+                research_operations=(
+                    ("cpu-contention", lambda: run_cpu_pressure_probe(iterations=1)),
+                ),
+            )
+            self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
+            self.assertEqual(len(result.measurement.financial_latency_us), 1)
+            self.assertEqual(len(result.measurement.research_interference_us), 1)
+            self.assertIn(result.budget_decision.status, {"PASS", "FAIL"})
 
     def test_cpu_pressure_probe_is_bounded_and_deterministic(self):
         first = run_cpu_pressure_probe(iterations=3)

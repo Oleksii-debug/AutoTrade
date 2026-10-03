@@ -5,12 +5,12 @@ chronology for one exact production-runtime occurrence. This adapter consumes bo
 read-only. It does not mint time, signer, release, provider, PAPER/LIVE, economic
 edge, or trading authority.
 
-The chronology authority is checked before and after signed/artifact verification
-so verifier side effects cannot move recovery ownership, clock-incident generation,
-runtime occurrence, or durable chronology authority behind a terminal PASS. The
-signed WP-65 completion/signature instants must also fit inside the conservative
-trusted chronology horizon; local wall clock and artifact/journal storage times are
-never used as substitutes.
+Chronology authority is checked before and after signed/artifact verification so
+verifier side effects cannot move recovery ownership, clock-incident generation,
+runtime occurrence, or durable chronology authority behind a terminal PASS. Signed
+WP-65 completion/signature instants must fit inside the conservative trusted
+chronology horizon; local wall clock and artifact/journal storage times are never
+used as substitutes.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+from . import runtime_target_host_plan_bound_qualification as _plan_bound
 from .performance_qualification import RuntimeBudgetSpec
 from .persistence import JournalStore
 from .production_host import ProductionHostRuntime
@@ -37,15 +38,18 @@ from .runtime_target_host_measurement import (
     TargetHostMeasurementArtifact,
     snapshot_target_host_measurement,
 )
-from .runtime_target_host_plan_bound_qualification import (
-    _verify_declared_plan_runtime_target_host_qualification_without_chronology as verify_declared_plan_runtime_target_host_qualification,
-)
 from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 from .trusted_chronology import ChronologyScope
 from .trusted_chronology_cut import (
     TrustedChronologyCut,
     require_chronology_horizon,
     require_current_trusted_chronology_cut,
+)
+
+# Isolated local seam: focused tests may replace this symbol, while the product
+# entry in runtime_target_host_plan_bound_qualification remains chronology-gated.
+verify_declared_plan_runtime_target_host_qualification = (
+    _plan_bound._verify_declared_plan_runtime_target_host_qualification_without_chronology
 )
 
 
@@ -129,10 +133,19 @@ def _snapshot_measurement(
         raise RuntimeTargetHostChronologyBindingError(str(error)) from error
 
 
+def _exact_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value:
+        raise RuntimeTargetHostChronologyBindingError(
+            f"{name} must remain exact non-empty text"
+        )
+    return value
+
+
 def _require_pre_binding(
     chronology: TrustedChronologyCut,
-    measurement: TargetHostMeasurementArtifact,
     *,
+    source_sha: str,
+    journal_store_identity_digest: str,
     expected_release_artifact_id: str,
     expected_release_artifact_sha256: str,
 ) -> None:
@@ -141,7 +154,7 @@ def _require_pre_binding(
             "chronology verifier returned non-canonical cut"
         )
     bindings = (
-        ("source SHA", chronology.source_sha, measurement.source_sha),
+        ("source SHA", chronology.source_sha, source_sha),
         (
             "release artifact id",
             chronology.release_artifact_id,
@@ -155,7 +168,7 @@ def _require_pre_binding(
         (
             "JournalStore identity",
             chronology.store_identity_digest,
-            measurement.journal_store_identity_digest,
+            journal_store_identity_digest,
         ),
     )
     for name, observed, expected in bindings:
@@ -168,8 +181,10 @@ def _require_pre_binding(
 def _require_cross_binding(
     qualification: AcceptedComposedRuntimeTargetHostQualification,
     chronology: TrustedChronologyCut,
-    measurement: TargetHostMeasurementArtifact,
     *,
+    source_sha: str,
+    journal_store_identity_digest: str,
+    measurement_digest: str,
     expected_release_artifact_id: str,
     expected_release_artifact_sha256: str,
 ) -> None:
@@ -184,12 +199,13 @@ def _require_cross_binding(
         )
     _require_pre_binding(
         chronology,
-        measurement,
+        source_sha=source_sha,
+        journal_store_identity_digest=journal_store_identity_digest,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
     bindings = (
-        ("source SHA", accepted.source_sha, measurement.source_sha),
+        ("source SHA", accepted.source_sha, source_sha),
         (
             "release artifact id",
             accepted.release_artifact_id,
@@ -203,7 +219,12 @@ def _require_cross_binding(
         (
             "JournalStore identity",
             accepted.journal_store_identity_digest,
-            measurement.journal_store_identity_digest,
+            journal_store_identity_digest,
+        ),
+        (
+            "target-host measurement digest",
+            qualification.target_host_measurement_digest,
+            measurement_digest,
         ),
     )
     for name, observed, expected in bindings:
@@ -248,8 +269,32 @@ def verify_chronology_bound_runtime_target_host_qualification(
 ) -> AcceptedChronologyBoundRuntimeTargetHostQualification:
     """Require one current RELEASE_RUNTIME chronology around terminal WP-65 PASS."""
 
-    receipt = _snapshot_signed_receipt(receipt)
-    measurement = _snapshot_measurement(measurement)
+    receipt_authority = _snapshot_signed_receipt(receipt)
+    receipt_for_verifier = _snapshot_signed_receipt(receipt_authority)
+    measurement_authority = _snapshot_measurement(measurement)
+    measurement_for_verifier = _snapshot_measurement(measurement_authority)
+
+    completed_at = _exact_text(
+        receipt_authority.attestation.completed_at,
+        name="signed qualification completed_at",
+    )
+    signed_at = _exact_text(
+        receipt_authority.attestation.signed_at,
+        name="signed qualification signed_at",
+    )
+    source_sha = _exact_text(
+        measurement_authority.source_sha,
+        name="target-host measurement source_sha",
+    )
+    journal_store_identity_digest = _exact_text(
+        measurement_authority.journal_store_identity_digest,
+        name="target-host measurement JournalStore identity",
+    )
+    measurement_digest = _exact_text(
+        measurement_authority.digest,
+        name="target-host measurement digest",
+    )
+
     if type(chronology_cut) is not TrustedChronologyCut:
         raise TypeError("chronology_cut must be exact TrustedChronologyCut")
     if chronology_cut.scope is not ChronologyScope.RELEASE_RUNTIME:
@@ -263,7 +308,7 @@ def verify_chronology_bound_runtime_target_host_qualification(
         cut=chronology_cut,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
-        expected_source_sha=measurement.source_sha,
+        expected_source_sha=source_sha,
         expected_scope=ChronologyScope.RELEASE_RUNTIME,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
@@ -271,18 +316,15 @@ def verify_chronology_bound_runtime_target_host_qualification(
     )
     _require_pre_binding(
         chronology,
-        measurement,
+        source_sha=source_sha,
+        journal_store_identity_digest=journal_store_identity_digest,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
-    require_chronology_horizon(
-        chronology,
-        receipt.attestation.completed_at,
-        receipt.attestation.signed_at,
-    )
+    require_chronology_horizon(chronology, completed_at, signed_at)
 
     qualification = verify_declared_plan_runtime_target_host_qualification(
-        receipt,
+        receipt_for_verifier,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
         journal_store=journal_store,
@@ -292,12 +334,14 @@ def verify_chronology_bound_runtime_target_host_qualification(
         expected_release_artifact_sha256=expected_release_artifact_sha256,
         campaign_plan=campaign_plan,
         campaign_cut=campaign_cut,
-        measurement=measurement,
+        measurement=measurement_for_verifier,
     )
     _require_cross_binding(
         qualification,
         chronology,
-        measurement,
+        source_sha=source_sha,
+        journal_store_identity_digest=journal_store_identity_digest,
+        measurement_digest=measurement_digest,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
@@ -308,7 +352,7 @@ def verify_chronology_bound_runtime_target_host_qualification(
         cut=chronology,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
-        expected_source_sha=measurement.source_sha,
+        expected_source_sha=source_sha,
         expected_scope=ChronologyScope.RELEASE_RUNTIME,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
@@ -318,15 +362,13 @@ def verify_chronology_bound_runtime_target_host_qualification(
         raise RuntimeTargetHostChronologyBindingError(
             "trusted runtime chronology changed during terminal WP-65 verification"
         )
-    require_chronology_horizon(
-        final_chronology,
-        receipt.attestation.completed_at,
-        receipt.attestation.signed_at,
-    )
+    require_chronology_horizon(final_chronology, completed_at, signed_at)
     _require_cross_binding(
         qualification,
         final_chronology,
-        measurement,
+        source_sha=source_sha,
+        journal_store_identity_digest=journal_store_identity_digest,
+        measurement_digest=measurement_digest,
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )

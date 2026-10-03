@@ -11,10 +11,12 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
 )
 from mvp.autotrade_mvp.authority_persistence import (
+    AUTHORITY_AGGREGATE_TYPE,
+    AUTHORITY_EVENT_TYPE,
     persist_authority_snapshot,
     restore_authority_snapshot,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -206,6 +208,270 @@ class AuthorityPersistenceTests(unittest.TestCase):
             )
             self.assertEqual("REJECTED", second.outcome)
             self.assertEqual("confirmation_already_used", second.reason)
+
+    def test_interleaved_newer_snapshot_cannot_be_republished_as_next_version(self):
+        class InterleavingJournalStore(JournalStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self._intervening_state = None
+                self._injected = False
+
+            def arm_intervening_snapshot(self, state):
+                self._intervening_state = state
+
+            def load_events(self, aggregate_type, aggregate_id):
+                events = super().load_events(aggregate_type, aggregate_id)
+                if (
+                    not self._injected
+                    and self._intervening_state is not None
+                    and aggregate_type == AUTHORITY_AGGREGATE_TYPE
+                    and aggregate_id == "runtime-authority"
+                    and events
+                ):
+                    self._injected = True
+                    payload = {
+                        "authority_id": aggregate_id,
+                        "state": self._intervening_state,
+                    }
+                    super().append_event(
+                        {
+                            "event_id": "authority-snapshot-intervening",
+                            "event_type": AUTHORITY_EVENT_TYPE,
+                            "aggregate_type": AUTHORITY_AGGREGATE_TYPE,
+                            "aggregate_id": aggregate_id,
+                            "aggregate_version": str(events[-1]["aggregate_version"] + 1),
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": "2026-09-25T01:05:01Z",
+                        }
+                    )
+                return events
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = InterleavingJournalStore(Path(directory) / "journal.sqlite")
+            initial = self._service()
+            persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            stale = restore_authority_snapshot(store, authority_id="runtime-authority")
+            advanced = restore_authority_snapshot(store, authority_id="runtime-authority")
+            advanced.revoke_policy(
+                "policy-1",
+                reason="operator-revoked",
+                revoked_at="2026-09-25T01:05:00Z",
+            )
+            store.arm_intervening_snapshot(advanced.export_state())
+
+            with self.assertRaisesRegex(ValueError, "aggregate_version"):
+                persist_authority_snapshot(
+                    store,
+                    stale,
+                    authority_id="runtime-authority",
+                    event_id="authority-snapshot-stale",
+                    committed_at="2026-09-25T01:06:00Z",
+                )
+
+            events = JournalStore.load_events(
+                store, AUTHORITY_AGGREGATE_TYPE, "runtime-authority"
+            )
+            self.assertEqual(2, len(events))
+            restored = restore_authority_snapshot(store, authority_id="runtime-authority")
+            self.assertEqual(2, restored.epoch)
+
+    def test_stale_snapshot_cannot_erase_newer_revocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            initial = self._service()
+            persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            fresh = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            stale = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            fresh.revoke_policy(
+                "policy-1",
+                reason="operator-revoked",
+                revoked_at="2026-09-25T01:05:00Z",
+            )
+            persist_authority_snapshot(
+                store,
+                fresh,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-2",
+                committed_at="2026-09-25T01:05:01Z",
+            )
+
+            with self.assertRaisesRegex(ValueError, "stale"):
+                persist_authority_snapshot(
+                    store,
+                    stale,
+                    authority_id="runtime-authority",
+                    event_id="authority-snapshot-3",
+                    committed_at="2026-09-25T01:06:00Z",
+                )
+
+            restored = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            self.assertEqual(2, restored.epoch)
+            self.assertEqual(
+                (False, "policy_revoked"),
+                restored.dispatch_allowed(
+                    "admit-1",
+                    intent_hash="intent-hash",
+                    account_id="account-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=2,
+                    action="BUY",
+                    now="2026-09-25T01:30:00Z",
+                ),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "financial-authority",
+                        "runtime-authority",
+                    )
+                ),
+                2,
+            )
+
+    def test_stale_snapshot_cannot_forget_consumed_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            initial = self._service()
+            persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            stale = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            durable = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            # _service() already consumed confirm-1 while admitting admit-1.
+            # Build an intentionally stale candidate from the same policy and
+            # confirmation but without the consumed-confirmation/admission facts.
+            forgotten = AuthorityService()
+            forgotten.register_policy(
+                AuthorityPolicy.create(
+                    policy_id="policy-1",
+                    account_id="account-1",
+                    environments={"PAPER"},
+                    instruments={InstrumentVersionIdentity(INSTRUMENT_ID, 2)},
+                    actions={"BUY"},
+                    max_notional=Decimal("100"),
+                    valid_from="2026-09-25T00:00:00Z",
+                    expires_at="2026-09-26T00:00:00Z",
+                    autonomous=False,
+                )
+            )
+            forgotten.add_confirmation(
+                confirmation_id="confirm-1",
+                policy_id="policy-1",
+                intent_hash="intent-hash",
+                account_id="account-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=2,
+                action="BUY",
+                notional=Decimal("10"),
+                expires_at="2026-09-25T02:00:00Z",
+            )
+            self.assertEqual(stale.epoch, forgotten.epoch)
+            self.assertEqual(durable.epoch, forgotten.epoch)
+
+            with self.assertRaisesRegex(ValueError, "admissions facts were removed"):
+                persist_authority_snapshot(
+                    store,
+                    forgotten,
+                    authority_id="runtime-authority",
+                    event_id="authority-snapshot-2",
+                    committed_at="2026-09-25T01:05:00Z",
+                )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "financial-authority",
+                        "runtime-authority",
+                    )
+                ),
+                1,
+            )
+
+    def test_historical_lost_reply_retry_survives_newer_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            initial = self._service()
+            first = persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T01:00:01Z",
+            )
+            advanced = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            advanced.revoke_policy(
+                "policy-1",
+                reason="operator-revoked",
+                revoked_at="2026-09-25T01:05:00Z",
+            )
+            persist_authority_snapshot(
+                store,
+                advanced,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-2",
+                committed_at="2026-09-25T01:05:01Z",
+            )
+
+            retry = persist_authority_snapshot(
+                store,
+                initial,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-1",
+                committed_at="2026-09-25T09:59:59Z",
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(retry.event_id, first.event_id)
+            self.assertEqual(
+                len(store.load_events("financial-authority", "runtime-authority")),
+                2,
+            )
+            restored = restore_authority_snapshot(
+                store, authority_id="runtime-authority"
+            )
+            self.assertEqual(2, restored.epoch)
+            self.assertEqual(
+                (False, "policy_revoked"),
+                restored.dispatch_allowed(
+                    "admit-1",
+                    intent_hash="intent-hash",
+                    account_id="account-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=2,
+                    action="BUY",
+                    now="2026-09-25T01:30:00Z",
+                ),
+            )
 
     def test_missing_durable_state_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

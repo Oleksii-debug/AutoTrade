@@ -315,6 +315,13 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn('"OWNER"', workflow)
         self.assertIn("issues/{pr_number}/comments", workflow)
         self.assertIn('args+=(--allowed-scope "$scope")', workflow)
+        self.assertIn("frozen_authority_paths", workflow)
+        self.assertIn(
+            "non-bootstrap trust authority is frozen until terminal guard integration",
+            workflow,
+        )
+        self.assertIn('path.startswith(".github/workflows/")', workflow)
+        self.assertIn('"tools/verify.py"', workflow)
         self.assertNotIn("edited", workflow)
 
 

@@ -49,6 +49,7 @@ _PAYLOAD_FIELDS = frozenset(
         "owner_identity_sha256",
         "vault_authority_sha256",
         "record_state_sha256",
+        "previous_receipt_id",
         "transition_sequence",
         "completed_time_ns",
     }
@@ -144,6 +145,7 @@ def _event_payload(receipt: CredentialTransitionReceipt) -> dict[str, object]:
         "owner_identity_sha256": receipt.owner_identity_sha256,
         "vault_authority_sha256": receipt.vault_authority_sha256,
         "record_state_sha256": receipt.record_state_sha256,
+        "previous_receipt_id": receipt.previous_receipt_id,
         "transition_sequence": receipt.transition_sequence,
         "completed_time_ns": receipt.completed_time_ns,
     }
@@ -190,6 +192,7 @@ def _receipt_from_payload(
             owner_identity_sha256=payload["owner_identity_sha256"],
             vault_authority_sha256=payload["vault_authority_sha256"],
             record_state_sha256=payload["record_state_sha256"],
+            previous_receipt_id=payload["previous_receipt_id"],
             transition_sequence=payload["transition_sequence"],
             completed_time_ns=payload["completed_time_ns"],
         )
@@ -243,6 +246,10 @@ def _validate_chain(
             if receipt.transition_sequence != prior.transition_sequence + 1:
                 raise CredentialTransitionAnchorError(
                     "credential transition anchor receipt sequence is not contiguous"
+                )
+            if receipt.previous_receipt_id != prior.receipt_id:
+                raise CredentialTransitionAnchorError(
+                    "credential transition anchor predecessor receipt does not match durable lineage"
                 )
             if receipt.vault_authority_sha256 != prior.vault_authority_sha256:
                 raise CredentialTransitionAnchorError(
@@ -321,6 +328,10 @@ def record_current_trade_credential_transition_anchor(
             if verified.transition_sequence != latest.transition_sequence + 1:
                 raise CredentialTransitionAnchorError(
                     "new credential transition is not the next durable receipt sequence"
+                )
+            if verified.previous_receipt_id != latest.receipt_id:
+                raise CredentialTransitionAnchorError(
+                    "new credential transition does not descend from the latest durable receipt"
                 )
             if verified.vault_authority_sha256 != latest.vault_authority_sha256:
                 raise CredentialTransitionAnchorError(

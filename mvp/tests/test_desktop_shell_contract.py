@@ -34,7 +34,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('parsedOperationId.ToString("D")', text)
         self.assertIn("HasCanonicalEventQuery(target.Query)", text)
         self.assertIn('const string prefix = "?after=";', text)
-        self.assertIn('value.Contains(\'&\', StringComparison.Ordinal)', text)
+        self.assertIn("value.Contains('&')", text)
         self.assertNotIn("CanonicalApiRoot", text)
         self.assertIn("AllowsWebMessageCommandAuthority => false", text)
         self.assertIn("AllowsDeveloperTools => false", text)

@@ -164,6 +164,71 @@ class CredentialTransitionJournalTests(unittest.TestCase):
                 receipt_one,
             )
 
+    def test_divergent_rollback_branch_cannot_rejoin_durable_lineage(self) -> None:
+        second, receipt_one = self._rotate(self.first, "secret-v2")
+        first_witness = record_current_trade_credential_transition_anchor(
+            self.store,
+            self.vault,
+            receipt_one,
+        )
+        rolled_back_bytes = self.vault_path.read_bytes()
+
+        _third, receipt_two = self._rotate(second, "secret-v3")
+        second_witness = record_current_trade_credential_transition_anchor(
+            self.store,
+            self.vault,
+            receipt_two,
+        )
+        self.assertEqual(receipt_two.previous_receipt_id, receipt_one.receipt_id)
+
+        self.vault_path.write_bytes(rolled_back_bytes)
+        rolled_back = ProtectedCredentialVault(
+            self.vault_path,
+            protector=DeterministicProtector(),
+        )
+        alternative_third, alternative_two = rotate_trade_credential_with_receipt(
+            rolled_back,
+            second,
+            execution_identity="windows-user-1",
+            new_secret_value="alternative-v3",
+        )
+        _alternative_fourth, alternative_three = (
+            rotate_trade_credential_with_receipt(
+                rolled_back,
+                alternative_third,
+                execution_identity="windows-user-1",
+                new_secret_value="alternative-v4",
+            )
+        )
+
+        self.assertEqual(alternative_two.transition_sequence, 2)
+        self.assertNotEqual(alternative_two.receipt_id, receipt_two.receipt_id)
+        self.assertEqual(
+            alternative_three.previous_receipt_id,
+            alternative_two.receipt_id,
+        )
+        self.assertEqual(
+            alternative_three.transition_sequence,
+            receipt_two.transition_sequence + 1,
+        )
+
+        with self.assertRaisesRegex(
+            CredentialTransitionAnchorError,
+            "does not descend from the latest durable receipt",
+        ):
+            record_current_trade_credential_transition_anchor(
+                self.store,
+                rolled_back,
+                alternative_three,
+            )
+
+        events = self.store.load_events(
+            "credential_transition_anchor",
+            first_witness.aggregate_id,
+        )
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["event_id"], second_witness.event_id)
+
     def test_missing_intermediate_anchor_fails_closed(self) -> None:
         second, receipt_one = self._rotate(self.first, "secret-v2")
         record_current_trade_credential_transition_anchor(

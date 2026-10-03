@@ -142,7 +142,10 @@ class AccessibleStatusTests(unittest.TestCase):
             text,
         )
         self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertIn("Reservation state: unavailable; malformed value", text)
         self.assertIn("Reservation resource detail: unavailable; malformed value", text)
+        self.assertIn("Reserved", text)
+        self.assertIn("state: Unavailable", text)
         self.assertIn("Economic edge: unproven", text)
 
     def test_cli_accessible_status_after_simulation(self):

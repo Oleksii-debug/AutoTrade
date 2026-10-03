@@ -1,4 +1,5 @@
 from decimal import Decimal
+from hashlib import sha256
 import os
 from pathlib import Path
 import platform
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from qualification.zero_model.qualify import (
     _git,
     _observed_source_sha,
+    _qualifier_sha256,
     _require_clean_checkout,
     _require_exact_checkout,
     _require_source_sha,
@@ -140,6 +142,25 @@ class ZeroModelQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "actual Git checkout"):
             _require_exact_checkout(different)
         self.assertEqual(_require_exact_checkout(observed), observed)
+
+    def test_qualifier_digest_is_bound_to_exact_source_blob(self):
+        source_sha = "a" * 40
+        canonical_blob = b"canonical zero-model qualifier bytes\n"
+        with patch(
+            "qualification.zero_model.qualify._git_bytes",
+            return_value=SimpleNamespace(stdout=canonical_blob),
+        ) as git:
+            digest = _qualifier_sha256(source_sha)
+
+        self.assertEqual(digest, "sha256:" + sha256(canonical_blob).hexdigest())
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "cat-file",
+                "blob",
+                f"{source_sha}:qualification/zero_model/qualify.py",
+            ),
+        )
 
     def test_source_identity_is_read_from_exact_qualifier_checkout_root(self):
         expected = "a" * 40

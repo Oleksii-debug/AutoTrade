@@ -74,6 +74,53 @@ class QualificationTrustPolicyPinSourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "literal source definition"):
                     qualification_trust_policy_digest_from_source(path)
 
+    def test_non_assignment_module_rebindings_fail_closed(self):
+        cases = (
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ndef _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256():\n"
+                "    return None\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nclass _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256:\n"
+                "    pass\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nimport os as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\nfrom os import path as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ndel _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256\n"
+            ),
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = "
+                + repr(DIGEST)
+                + "\ntry:\n"
+                "    raise RuntimeError()\n"
+                "except RuntimeError as _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256:\n"
+                "    pass\n"
+            ),
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                path = self.write_source(source)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "one literal source definition",
+                ):
+                    qualification_trust_policy_digest_from_source(path)
+
     def test_duplicate_pin_definition_fails_closed(self):
         path = self.write_source(
             "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"

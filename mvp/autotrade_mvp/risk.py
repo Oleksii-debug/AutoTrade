@@ -1429,11 +1429,19 @@ def evaluate_bound_risk(
     evidence_store: object | None = None,
     authoritative_risk_snapshot_id: str | None = None,
 ) -> RiskDecision:
+    # A bound financial decision must never acquire liquidation authority from a
+    # caller-selected store.  Until the product-owned sealed evidence/root
+    # composition is wired into this boundary, liquidation evidence on the bound
+    # path is intentionally fail-closed.  Unbound evaluate_risk() retains the
+    # explicit store seam for simulation and evidence-verification tests.
+    if evidence_store is not None:
+        raise ValueError(
+            "caller-selected evidence_store cannot bind financial risk"
+        )
     decision = evaluate_risk(
         intent,
         context,
         policy,
-        evidence_store=evidence_store,
     )
     return bind_risk_decision(
         decision,

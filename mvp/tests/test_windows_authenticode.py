@@ -362,6 +362,47 @@ class WindowsAuthenticodeTests(unittest.TestCase):
 
         self.assertEqual(destination.read_bytes(), payload)
 
+    def test_windows_snapshot_uses_exact_digest_across_split_identity_domains(self):
+        source = self.root / "split-identity.bin"
+        destination = self.root / "split-identity-copy.bin"
+        payload = b"stable signed bytes with canonical digest"
+        source.write_bytes(payload)
+        expected_digest = "sha256:" + sha256(payload).hexdigest()
+        real_lstat = auth.os.lstat
+
+        def lstat_with_distinct_windows_identity(path):
+            value = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=value.st_mode,
+                st_nlink=value.st_nlink,
+                st_dev=value.st_dev + 17,
+                st_ino=value.st_ino + 101,
+                st_size=value.st_size,
+                st_mtime_ns=value.st_mtime_ns,
+                st_ctime_ns=value.st_ctime_ns,
+            )
+
+        with (
+            patch.object(
+                auth,
+                "_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY",
+                True,
+            ),
+            patch.object(
+                auth.os,
+                "lstat",
+                side_effect=lstat_with_distinct_windows_identity,
+            ),
+        ):
+            auth._snapshot_file_to_private_copy(
+                source,
+                destination,
+                expected_digest=expected_digest,
+                expected_size=len(payload),
+            )
+
+        self.assertEqual(destination.read_bytes(), payload)
+
     def make_signed_outputs(
         self,
         *,

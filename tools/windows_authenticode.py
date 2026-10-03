@@ -38,6 +38,7 @@ CERTIFICATE_PROFILE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{3,98}[A-Za-z0-9]$")
 THUMBPRINT = re.compile(r"^[0-9A-F]{40}$")
 MAX_VERIFIED_PE_BYTES = 512 * 1024 * 1024
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY = os.name == "nt"
 ARTIFACT_SIGNING_ENDPOINTS = frozenset(
     {
         "https://brs.codesigning.azure.net/",
@@ -628,8 +629,12 @@ def _snapshot_file_to_private_copy(
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)
             or before.st_size != expected_size
+            or (
+                not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+                and (before.st_dev, before.st_ino)
+                != (before_path.st_dev, before_path.st_ino)
+            )
         ):
             raise AuthenticodeSigningError("signed artifact identity changed")
         digest = sha256()
@@ -655,8 +660,12 @@ def _snapshot_file_to_private_copy(
             )
         if (
             not stat.S_ISREG(after_path.st_mode)
+            or after_path.st_size != expected_size
             or _descriptor_snapshot(before) != _descriptor_snapshot(after)
-            or _path_object_identity(after) != _path_object_identity(after_path)
+            or (
+                not _WINDOWS_SPLIT_PATH_DESCRIPTOR_IDENTITY
+                and _path_object_identity(after) != _path_object_identity(after_path)
+            )
             or size != expected_size
             or "sha256:" + digest.hexdigest() != expected_digest
         ):

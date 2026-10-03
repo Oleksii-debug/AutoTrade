@@ -355,7 +355,7 @@ def _require_settlement_contract(
     scope: FuturesSettlementScope,
     evidence: FuturesSettlementEvidence,
 ) -> None:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     version = contract.canonical_instrument
     if version is None:
@@ -385,9 +385,9 @@ def _validate_settlement_history(
     history: tuple[FuturesSettlementEvidence, ...],
     last_price: Decimal,
 ) -> None:
-    if not isinstance(scope, FuturesSettlementScope):
+    if type(scope) is not FuturesSettlementScope:
         raise FuturesError("settlement_scope is required")
-    if not isinstance(history, tuple):
+    if type(history) is not tuple:
         raise FuturesError("settlement_history must be an immutable tuple")
     seen_observations: set[str] = set()
     latest_by_period: dict[str, FuturesSettlementEvidence] = {}
@@ -476,7 +476,7 @@ def _settlement_duplicate_or_require_new(
 
 
 def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     material = {
         "settlement_id": evidence.settlement_id,
@@ -653,7 +653,7 @@ def apply_variation_margin(
 ) -> tuple[VariationMarginState, Decimal]:
     """Apply one identity-bound linear settlement exactly once."""
 
-    if not isinstance(state, VariationMarginState):
+    if type(state) is not VariationMarginState:
         raise FuturesError("linear variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -687,7 +687,7 @@ def apply_inverse_variation_margin(
 ) -> tuple[InverseVariationMarginState, Fraction]:
     """Apply one identity-bound inverse settlement without premature rounding."""
 
-    if not isinstance(state, InverseVariationMarginState):
+    if type(state) is not InverseVariationMarginState:
         raise FuturesError("inverse variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -760,9 +760,9 @@ def settle_and_book_inverse_variation_margin(
     is the provider-facing cash settlement amount.
     """
 
-    if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
+    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
         raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     _require_settlement_contract(contract, settlement.scope, settlement)
     if settlement.price_currency != contract.quote_currency:
@@ -820,7 +820,7 @@ def book_variation_margin(
 ) -> JournalTransaction:
     """Create one deterministic journal identity from accepted settlement evidence."""
 
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     value = _decimal(amount, "amount")
     if value == 0:

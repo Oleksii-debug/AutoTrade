@@ -44,8 +44,8 @@ compat_modules = sorted(
     name for name in sys.modules
     if name == 'autotrade_research' or name.startswith('autotrade_research.')
 )
-assert not research_modules, f"research tree leaked into production imports: {research_modules!r}"
-assert not compat_modules, f"research compatibility tree leaked into production imports: {compat_modules!r}"
+assert not research_modules, f"research tree leaked into production imports: {{research_modules!r}}"
+assert not compat_modules, f"research compatibility tree leaked into production imports: {{compat_modules!r}}"
 import autotrade_runtime.artifacts as artifacts
 assert artifacts.ArtifactStore.__module__ == 'autotrade_runtime.artifacts.store'
 assert artifacts.CANONICAL_ARTIFACT_STORE_MODULE == 'autotrade_runtime.artifacts.store'

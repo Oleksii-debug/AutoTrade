@@ -2156,7 +2156,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 validate_result=lambda _value: True,
                 now_utc=NOW,
             )
-            self.assertEqual(parent.status, "NOT_SENT")
+            self.assertEqual(parent.status, "UNKNOWN")
             fallback = spec(
                 fallback_parent_attempt_id=parent.attempt_id,
                 fallback_index=1,
@@ -2167,23 +2167,26 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 allowed_model_ids=("remote-only",),
             )
             calls = []
-            outcome = orchestrator.execute(
-                spec=fallback,
-                policy=local_policy,
-                request=request,
-                descriptors=[
-                    descriptor(
-                        model_id="remote-only",
-                        provider_id="remote-provider",
-                        remote=True,
-                        cost="0.1",
-                    )
-                ],
-                call=lambda *_args: calls.append(True),
-                validate_result=lambda _value: True,
-                now_utc=NOW,
-            )
-            self.assertEqual(outcome.status, "NO_MODEL")
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "blind retry/fallback is forbidden",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=local_policy,
+                    request=request,
+                    descriptors=[
+                        descriptor(
+                            model_id="remote-only",
+                            provider_id="remote-provider",
+                            remote=True,
+                            cost="0.1",
+                        )
+                    ],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
             self.assertEqual(calls, [])
 
     def test_over_reserved_observed_cost_is_conservative_unknown(self):
@@ -2318,8 +2321,9 @@ class ModelCallIntegrityTests(unittest.TestCase):
         def not_sent(*_):
             raise ModelCallNotSent("TEST_SECRET_DO_NOT_PERSIST")
         with TemporaryDirectory() as directory:
-            _, _, orchestrator, result = self._run(directory, call=not_sent)
-            self.assertEqual(result.status, "NOT_SENT")
+            _, budget, orchestrator, result = self._run(directory, call=not_sent)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
             self.assertNotIn("TEST_SECRET_DO_NOT_PERSIST", str(orchestrator._events(result.attempt_id)))
 
     def test_callback_cannot_extend_original_request_deadline(self):

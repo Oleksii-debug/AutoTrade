@@ -254,6 +254,169 @@ def measure_declared_financial_operation(
 
     if not callable(operation):
         raise TypeError("operation must be callable")
+    # Freeze every direct authority used after caller-controlled product code.
+    # The operation runs inside evidence issuance, so validation must happen here
+    # before a forged readback/decoder can commit a durable latency sample.
+    clock = perf_counter_ns
+    error_type = RuntimeLoadMeasurementError
+    journal_store_type = JournalStore
+    get_event = JournalStore.get_event
+    current_journal_sequence = JournalStore.current_journal_sequence
+    append_event = JournalStore.append_event
+    require_expected_event = _require_expected_event
+    actual_binding = _actual_binding
+    decode_measurement = _decode_measurement
+    measurement_event_id_for = _measurement_event_id
+    non_negative_int = _non_negative_int
+    payload_digest_for = payload_digest
+    datetime_type = datetime
+    timezone_type = timezone
+    plan_type = DeclaredRuntimeEventPlan
+    expected_type = ExpectedJournalEvent
+    sample_type = DurableFinancialLatencySample
+    sample_init = DurableFinancialLatencySample.__init__
+    expected_payload_getter = ExpectedJournalEvent.payload.fget
+    plan_digest_getter = DeclaredRuntimeEventPlan.digest.fget
+    measurement_event_type = _MEASUREMENT_EVENT_TYPE
+    measurement_aggregate_type = _MEASUREMENT_AGGREGATE_TYPE
+    measurement_schema_version = _MEASUREMENT_SCHEMA_VERSION
+    measurement_sha256 = sha256
+
+    digest_namespace = payload_digest_for.__globals__
+    digest_sha256 = digest_namespace.get("sha256")
+    canonical_json_for = digest_namespace.get("canonical_json")
+    if not callable(digest_sha256) or not callable(canonical_json_for):
+        raise error_type("payload digest authority is not canonical")
+    canonical_json_namespace = canonical_json_for.__globals__
+    json_module = canonical_json_namespace.get("json")
+
+    plan_digest_namespace = plan_digest_getter.__globals__
+    plan_payload_digest = plan_digest_namespace.get("payload_digest")
+    plan_schema_version = plan_digest_namespace.get("_PLAN_SCHEMA_VERSION")
+    if plan_payload_digest is not payload_digest_for:
+        raise error_type("declared plan digest authority is not canonical")
+
+    module_namespace = globals()
+    module_bindings = (
+        ("perf_counter_ns", clock),
+        ("RuntimeLoadMeasurementError", error_type),
+        ("JournalStore", journal_store_type),
+        ("_require_expected_event", require_expected_event),
+        ("_actual_binding", actual_binding),
+        ("_decode_measurement", decode_measurement),
+        ("_measurement_event_id", measurement_event_id_for),
+        ("_non_negative_int", non_negative_int),
+        ("payload_digest", payload_digest_for),
+        ("datetime", datetime_type),
+        ("timezone", timezone_type),
+        ("DeclaredRuntimeEventPlan", plan_type),
+        ("ExpectedJournalEvent", expected_type),
+        ("DurableFinancialLatencySample", sample_type),
+        ("_MEASUREMENT_EVENT_TYPE", measurement_event_type),
+        ("_MEASUREMENT_AGGREGATE_TYPE", measurement_aggregate_type),
+        ("_MEASUREMENT_SCHEMA_VERSION", measurement_schema_version),
+        ("sha256", measurement_sha256),
+    )
+    transitive_bindings = (
+        (digest_namespace, "sha256", digest_sha256, "payload_digest.sha256"),
+        (
+            digest_namespace,
+            "canonical_json",
+            canonical_json_for,
+            "payload_digest.canonical_json",
+        ),
+        (
+            canonical_json_namespace,
+            "json",
+            json_module,
+            "canonical_json.json",
+        ),
+        (
+            plan_digest_namespace,
+            "payload_digest",
+            plan_payload_digest,
+            "DeclaredRuntimeEventPlan.digest.payload_digest",
+        ),
+        (
+            plan_digest_namespace,
+            "_PLAN_SCHEMA_VERSION",
+            plan_schema_version,
+            "DeclaredRuntimeEventPlan.digest._PLAN_SCHEMA_VERSION",
+        ),
+    )
+    protected_functions = tuple(
+        (
+            name,
+            function,
+            function.__code__,
+            function.__defaults__,
+            function.__kwdefaults__,
+            None
+            if function.__kwdefaults__ is None
+            else tuple(sorted(function.__kwdefaults__.items())),
+        )
+        for name, function in (
+            ("JournalStore.get_event", get_event),
+            ("JournalStore.current_journal_sequence", current_journal_sequence),
+            ("JournalStore.append_event", append_event),
+            ("_require_expected_event", require_expected_event),
+            ("_actual_binding", actual_binding),
+            ("_decode_measurement", decode_measurement),
+            ("_measurement_event_id", measurement_event_id_for),
+            ("_non_negative_int", non_negative_int),
+            ("payload_digest", payload_digest_for),
+            ("payload_digest.canonical_json", canonical_json_for),
+            ("DurableFinancialLatencySample.__init__", sample_init),
+            ("ExpectedJournalEvent.payload", expected_payload_getter),
+            ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),
+        )
+    )
+
+    def require_operation_authority() -> None:
+        missing = object()
+        for name, expected_value in module_bindings:
+            if module_namespace.get(name, missing) is not expected_value:
+                raise error_type(
+                    f"measurement authority changed during financial operation: {name}"
+                )
+        for namespace, dependency_name, expected_value, label in transitive_bindings:
+            if namespace.get(dependency_name, missing) is not expected_value:
+                raise error_type(
+                    "measurement transitive authority changed during financial "
+                    f"operation: {label}"
+                )
+        if (
+            JournalStore.get_event is not get_event
+            or JournalStore.current_journal_sequence is not current_journal_sequence
+            or JournalStore.append_event is not append_event
+            or DurableFinancialLatencySample.__init__ is not sample_init
+            or ExpectedJournalEvent.payload.fget is not expected_payload_getter
+            or DeclaredRuntimeEventPlan.digest.fget is not plan_digest_getter
+        ):
+            raise error_type(
+                "measurement class authority changed during financial operation"
+            )
+        for (
+            name,
+            function,
+            code,
+            defaults,
+            kwdefaults,
+            kwdefault_items,
+        ) in protected_functions:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    f"measurement executable authority changed during financial operation: {name}"
+                )
+
     store_identity = require_exact_journal_store_authority(
         store,
         subject="runtime qualification JournalStore",
@@ -265,43 +428,45 @@ def measure_declared_financial_operation(
     with journal_store_authority_scope(store, store_identity):
         plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
         expected_index, expected = _expected_for_id(plan, event_id)
-        measurement_id = _measurement_event_id(plan.plan_id, expected.event_id)
-        if JournalStore.get_event(store, measurement_id) is not None:
+        measurement_id = measurement_event_id_for(plan.plan_id, expected.event_id)
+        if get_event(store, measurement_id) is not None:
             raise RuntimeLoadMeasurementError("financial latency was already measured")
-        if JournalStore.get_event(store, expected.event_id) is not None:
-            raise RuntimeLoadMeasurementError(
+        if get_event(store, expected.event_id) is not None:
+            raise error_type(
                 "predeclared financial event already exists before monotonic measurement"
             )
 
-        pre_sequence = JournalStore.current_journal_sequence(store)
-        start_ns = perf_counter_ns()
-        if JournalStore.get_event(store, expected.event_id) is not None:
-            raise RuntimeLoadMeasurementError(
+        pre_sequence = current_journal_sequence(store)
+        start_ns = clock()
+        if get_event(store, expected.event_id) is not None:
+            raise error_type(
                 "predeclared financial event appeared before monotonic measurement start"
             )
         result = operation()
+        require_operation_authority()
         # Bind the expected durable event before sampling the terminal clock. If the
         # operation returned without publishing it, an unrelated commit racing with
         # end-clock sampling must not be attributed to the measured operation.
-        financial_event = _require_expected_event(
-            JournalStore.get_event(store, expected.event_id),
+        financial_event = require_expected_event(
+            get_event(store, expected.event_id),
             expected,
             after_sequence=pre_sequence,
         )
-        end_ns = perf_counter_ns()
+        end_ns = clock()
         if (
             type(start_ns) is not int
             or type(end_ns) is not int
             or start_ns < 0
             or end_ns < start_ns
         ):
-            raise RuntimeLoadMeasurementError(
+            raise error_type(
                 "system monotonic clock produced an invalid interval"
             )
 
         latency_us = (end_ns - start_ns + 999) // 1_000
+        require_operation_authority()
         payload = {
-            "schema_version": _MEASUREMENT_SCHEMA_VERSION,
+            "schema_version": measurement_schema_version,
             "plan_id": plan.plan_id,
             "plan_digest": plan.digest,
             "spec_digest": plan.spec_digest,
@@ -313,23 +478,27 @@ def measure_declared_financial_operation(
             "monotonic_end_ns": end_ns,
             "latency_us": latency_us,
         }
-        JournalStore.append_event(
+        require_operation_authority()
+        append_event(
             store,
             {
                 "event_id": measurement_id,
-                "event_type": _MEASUREMENT_EVENT_TYPE,
-                "aggregate_type": _MEASUREMENT_AGGREGATE_TYPE,
+                "event_type": measurement_event_type,
+                "aggregate_type": measurement_aggregate_type,
                 "aggregate_id": plan.plan_id,
                 "aggregate_version": str(expected_index + 1),
                 "payload": payload,
-                "payload_hash": payload_digest(payload),
-                "committed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "payload_hash": payload_digest_for(payload),
+                "committed_at": datetime_type.now(timezone_type.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
             },
         )
-        measurement_event = JournalStore.get_event(store, measurement_id)
+        measurement_event = get_event(store, measurement_id)
         if measurement_event is None:
-            raise RuntimeLoadMeasurementError("durable latency measurement disappeared")
-        sample = _decode_measurement(
+            raise error_type("durable latency measurement disappeared")
+        require_operation_authority()
+        sample = decode_measurement(
             event=measurement_event,
             plan=plan,
             expected_index=expected_index,

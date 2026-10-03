@@ -13,12 +13,15 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import threading
 from typing import FrozenSet, Iterable
+import weakref
 from uuid import UUID
 
 from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
@@ -81,16 +84,22 @@ def _digest(value: str) -> str:
 def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(f"{name} must use an exact built-in Decimal")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
+    if not Decimal.is_finite(result):
         raise ValueError(f"{name} must be a finite decimal")
     if result < 0 or (result == 0 and not allow_zero):
         raise ValueError(
             f"{name} must be {'non-negative' if allow_zero else 'positive'}"
         )
+    try:
+        canonical_decimal_text(result)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} exceeds exact decimal authority") from error
     return result
 
 
@@ -125,11 +134,10 @@ _BOUNDED_REAL_ENVELOPE_SCHEMA_VERSION = 1
 def _canonical_decimal_text(value: Decimal) -> str:
     """Canonical exact numeric identity for bounded-real risk limits."""
 
-    normalized = value.normalize()
-    rendered = format(normalized, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered or "0"
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError("bounded-real limit exceeds exact decimal authority") from error
 
 
 def _bounded_real_envelope_digest(
@@ -277,6 +285,114 @@ class EvidenceVerification:
             raise ValueError("evidence cannot be both valid and conflicted")
 
 
+def _artifact_store_evidence_verifier_operations():
+    """Seal verifier state without discoverable weakref callbacks."""
+
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            Path,
+            str,
+        ],
+    ] = {}
+    state_lock = threading.RLock()
+
+    def prune_dead() -> None:
+        dead = [key for key, state in states.items() if state[0]() is None]
+        for key in dead:
+            states.pop(key, None)
+
+    def require_unbound(verifier: object) -> None:
+        object_id = id(verifier)
+        with state_lock:
+            prune_dead()
+            current = states.get(object_id)
+            if current is None:
+                return
+            current_verifier = current[0]()
+            if current_verifier is verifier:
+                raise ValueError(
+                    "ArtifactStoreEvidenceVerifier composition is already initialized"
+                )
+            if current_verifier is not None:
+                raise ValueError(
+                    "ArtifactStoreEvidenceVerifier binding identity collision"
+                )
+            states.pop(object_id, None)
+
+    def register(
+        verifier: object,
+        *,
+        store: ArtifactStore,
+        evidence_root: Path,
+        read_snapshot: object,
+        store_identity: str,
+    ) -> None:
+        object_id = id(verifier)
+        with state_lock:
+            prune_dead()
+            current = states.get(object_id)
+            if current is not None:
+                current_verifier = current[0]()
+                if current_verifier is verifier:
+                    raise ValueError(
+                        "ArtifactStoreEvidenceVerifier composition is already initialized"
+                    )
+                if current_verifier is not None:
+                    raise ValueError(
+                        "ArtifactStoreEvidenceVerifier binding identity collision"
+                    )
+                states.pop(object_id, None)
+            states[object_id] = (
+                weakref.ref(verifier),
+                weakref.ref(store),
+                weakref.ref(read_snapshot),
+                evidence_root,
+                store_identity,
+            )
+
+    def binding(
+        verifier: object,
+    ) -> tuple[ArtifactStore, Path, object, str]:
+        with state_lock:
+            state = states.get(id(verifier))
+        if state is None or state[0]() is not verifier:
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier process binding is unavailable"
+            )
+        store = state[1]()
+        read_snapshot = state[2]()
+        evidence_root = state[3]
+        store_identity = state[4]
+        if store is None or read_snapshot is None:
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier selected authority was lost"
+            )
+        visible = vars(verifier)
+        if (
+            visible.get("_store") is not store
+            or visible.get("_read_snapshot") is not read_snapshot
+            or visible.get("_evidence_root") != evidence_root
+            or visible.get("_store_identity") != store_identity
+        ):
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier composition was modified"
+            )
+        return store, evidence_root, read_snapshot, store_identity
+
+    return require_unbound, register, binding
+
+
+(
+    _require_unbound_artifact_store_evidence_verifier,
+    _register_artifact_store_evidence_verifier,
+    _artifact_store_evidence_verifier_binding,
+) = _artifact_store_evidence_verifier_operations()
+del _artifact_store_evidence_verifier_operations
+
 class ArtifactStoreEvidenceVerifier:
     """Immutable-evidence integrity verifier backed by the canonical ArtifactStore.
 
@@ -302,28 +418,43 @@ class ArtifactStoreEvidenceVerifier:
         if isinstance(evidence_root, str) and not evidence_root.strip():
             raise ValueError("evidence_root must be non-empty")
         root = Path(evidence_root).absolute()
-        self._store = store
-        self._evidence_root = root
-        self._read_snapshot = trusted_authenticated_reader(
+        _require_unbound_artifact_store_evidence_verifier(self)
+        read_snapshot = trusted_authenticated_reader(
             root,
             publication_store=store,
         )
-        self._store_identity = (
+        store_identity = (
             "sha256:"
             + hashlib.sha256(str(root).encode("utf-8")).hexdigest()
         )
+        _register_artifact_store_evidence_verifier(
+            self,
+            store=store,
+            evidence_root=root,
+            read_snapshot=read_snapshot,
+            store_identity=store_identity,
+        )
+        # Strong lifetime anchors only. Closure-owned weak references and exact
+        # values remain the authority and detect any caller retargeting.
+        self._store = store
+        self._evidence_root = root
+        self._read_snapshot = read_snapshot
+        self._store_identity = store_identity
 
     @property
     def identity(self) -> str:
-        return f"{self.VERIFIER_ID}:{self._store_identity}"
+        _, _, _, store_identity = _artifact_store_evidence_verifier_binding(self)
+        return f"{self.VERIFIER_ID}:{store_identity}"
 
     @property
     def store(self) -> ArtifactStore:
-        return self._store
+        store, _, _, _ = _artifact_store_evidence_verifier_binding(self)
+        return store
 
     @property
     def evidence_root(self) -> Path:
-        return self._evidence_root
+        _, evidence_root, _, _ = _artifact_store_evidence_verifier_binding(self)
+        return evidence_root
 
     @staticmethod
     def _manifest_hash(manifest: dict) -> str:
@@ -340,8 +471,13 @@ class ArtifactStoreEvidenceVerifier:
         return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
     def verify(self, ref: ImmutableEvidenceRef) -> EvidenceVerification:
+        if type(ref) is not ImmutableEvidenceRef:
+            raise TypeError("evidence reference must be exact ImmutableEvidenceRef")
+        _, _, read_snapshot, _ = _artifact_store_evidence_verifier_binding(self)
+        if not callable(read_snapshot):
+            raise ValueError("trusted immutable evidence reader is unavailable")
         try:
-            manifest, payload = self._read_snapshot(ref.artifact_id)
+            manifest, payload = read_snapshot(ref.artifact_id)
         except FileNotFoundError:
             return EvidenceVerification(
                 valid=False,
@@ -362,7 +498,7 @@ class ArtifactStoreEvidenceVerifier:
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
-            or manifest_hash != self._manifest_hash(manifest)
+            or manifest_hash != ArtifactStoreEvidenceVerifier._manifest_hash(manifest)
         ):
             return EvidenceVerification(
                 valid=False,
@@ -454,8 +590,8 @@ class QualificationEvidence:
         source_sha = _sha(self.source_sha, name="source_sha")
         envelope_id = _text(self.envelope_id, name="envelope_id")
         envelope_digest = _digest(self.envelope_digest)
-        if not isinstance(self.evidence_ref, ImmutableEvidenceRef):
-            raise TypeError("evidence_ref must be ImmutableEvidenceRef")
+        if type(self.evidence_ref) is not ImmutableEvidenceRef:
+            raise TypeError("evidence_ref must be exact ImmutableEvidenceRef")
         if self.evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
             raise ValueError("prerequisite evidence_ref kind does not match evidence_kind")
         if (
@@ -515,13 +651,17 @@ class BoundedRealObservations:
             "protection_verified",
         ):
             _bool(getattr(self, field_name), name=field_name)
-        refs = tuple(self.evidence_refs)
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must be an exact tuple")
+        refs = self.evidence_refs
         artifact_ids: set[str] = set()
         digests: set[str] = set()
         kinds: set[str] = set()
         for ref in refs:
-            if not isinstance(ref, ImmutableEvidenceRef):
-                raise TypeError("evidence_refs must contain ImmutableEvidenceRef")
+            if type(ref) is not ImmutableEvidenceRef:
+                raise TypeError(
+                    "evidence_refs must contain exact ImmutableEvidenceRef"
+                )
             if (
                 ref.source_sha != source_sha
                 or ref.envelope_id != envelope_id
@@ -605,10 +745,10 @@ def assess_bounded_real_qualification(
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
-    if not isinstance(envelope, BoundedRealEnvelope):
-        raise TypeError("envelope must be BoundedRealEnvelope")
-    if not isinstance(observations, BoundedRealObservations):
-        raise TypeError("observations must be BoundedRealObservations")
+    if type(envelope) is not BoundedRealEnvelope:
+        raise TypeError("envelope must be exact BoundedRealEnvelope")
+    if type(observations) is not BoundedRealObservations:
+        raise TypeError("observations must be exact BoundedRealObservations")
 
     reasons: list[str] = []
     scope_matches = (
@@ -625,9 +765,9 @@ def assess_bounded_real_qualification(
     all_refs: list[tuple[str, ImmutableEvidenceRef]] = []
     evidence_ids: set[str] = set()
     for evidence in prerequisite_evidence:
-        if not isinstance(evidence, QualificationEvidence):
+        if type(evidence) is not QualificationEvidence:
             raise TypeError(
-                "prerequisite_evidence must contain QualificationEvidence"
+                "prerequisite_evidence must contain exact QualificationEvidence"
             )
         if evidence.evidence_id in evidence_ids:
             raise ValueError("evidence_id must be unique")
@@ -700,22 +840,30 @@ def assess_bounded_real_qualification(
     accepted: AcceptedQualificationAttestation | None = None
     if evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
-        reasons.append("untrusted_immutable_evidence_verifier")
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
+        raise TypeError(
+            "evidence_verifier must be exact ArtifactStoreEvidenceVerifier"
+        )
     else:
-        verifier_identity = evidence_verifier.identity
+        verifier_identity = ArtifactStoreEvidenceVerifier.identity.__get__(
+            evidence_verifier,
+            ArtifactStoreEvidenceVerifier,
+        )
         for label, ref in all_refs:
             try:
-                verification = evidence_verifier.verify(ref)
+                verification = ArtifactStoreEvidenceVerifier.verify(
+                    evidence_verifier,
+                    ref,
+                )
             except Exception:
                 verification = EvidenceVerification(
                     valid=False,
                     conflicted=True,
                     reason="trusted immutable evidence verifier raised",
                 )
-            if not isinstance(verification, EvidenceVerification):
+            if type(verification) is not EvidenceVerification:
                 raise TypeError(
-                    "trusted evidence verifier must return EvidenceVerification"
+                    "trusted evidence verifier must return exact EvidenceVerification"
                 )
             if not verification.valid:
                 suffix = "conflicted" if verification.conflicted else "unverified"
@@ -731,7 +879,7 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_unavailable")
     elif any(value is None for value in trust_inputs):
         reasons.append("independent_evidence_trust_incomplete")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
@@ -750,8 +898,14 @@ def assess_bounded_real_qualification(
             accepted = verify_qualification_attestation(
                 qualification_receipt,
                 policy=qualification_policy,
-                evidence_store=evidence_verifier.store,
-                evidence_root=evidence_verifier.evidence_root,
+                evidence_store=ArtifactStoreEvidenceVerifier.store.__get__(
+                    evidence_verifier,
+                    ArtifactStoreEvidenceVerifier,
+                ),
+                evidence_root=ArtifactStoreEvidenceVerifier.evidence_root.__get__(
+                    evidence_verifier,
+                    ArtifactStoreEvidenceVerifier,
+                ),
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,

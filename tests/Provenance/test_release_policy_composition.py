@@ -8,6 +8,7 @@ from tools.build_provenance_manifest import (
     QUALIFICATION_TRUST_POLICY_COMPONENT_KIND,
     QUALIFICATION_TRUST_POLICY_COMPONENT_PATH,
     QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION,
+    _QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES,
     _trusted_git_environment,
     _trusted_git_executable,
     qualification_trust_policy_composition,
@@ -148,6 +149,81 @@ class QualificationTrustPolicyPinSourceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unavailable or invalid"):
             qualification_trust_policy_digest_from_source(path)
+
+    def _init_git_repo_with_pin_source(self, body: bytes) -> tuple[Path, Path, str]:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        source = root / "mvp" / "autotrade_mvp" / "qualification_attestation.py"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(body)
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        git("init")
+        git("config", "user.name", "AutoTrade Test")
+        git("config", "user.email", "autotrade-test@example.invalid")
+        git("add", "mvp/autotrade_mvp/qualification_attestation.py")
+        git("commit", "-m", "pin source")
+        return root, source, git("rev-parse", "HEAD")
+
+    def test_release_pin_rejects_oversized_git_blob_before_parse(self):
+        root, _, source_sha = self._init_git_repo_with_pin_source(
+            b"#" * (_QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES + 1)
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds bounded size"):
+            qualification_trust_policy_digest_from_git_source(
+                source_root=root,
+                source_sha=source_sha,
+            )
+
+    def test_release_pin_rejects_symlink_mode_even_when_blob_is_valid_python(self):
+        root, source, _ = self._init_git_repo_with_pin_source(
+            (
+                "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None\n"
+            ).encode("utf-8")
+        )
+        trusted_git = _trusted_git_executable(source_root=root)
+
+        def git(*args: str) -> str:
+            completed = subprocess.run(
+                [trusted_git, *args],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_trusted_git_environment(),
+            )
+            return completed.stdout.strip()
+
+        blob_sha = git("hash-object", "-w", str(source))
+        git(
+            "update-index",
+            "--cacheinfo",
+            f"120000,{blob_sha},mvp/autotrade_mvp/qualification_attestation.py",
+        )
+        git("commit", "-m", "symlink-mode pin source")
+        source_sha = git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(ValueError, "not a regular blob"):
+            qualification_trust_policy_digest_from_git_source(
+                source_root=root,
+                source_sha=source_sha,
+            )
 
     def test_release_pin_is_read_from_selected_git_object_not_dirty_worktree(self):
         directory = TemporaryDirectory()

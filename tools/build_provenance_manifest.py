@@ -35,6 +35,7 @@ QUALIFICATION_TRUST_POLICY_COMPONENT_VERSION = "source-controlled"
 QUALIFICATION_TRUST_POLICY_PIN_SOURCE_PATH = (
     "mvp/autotrade_mvp/qualification_attestation.py"
 )
+_QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES = 1024 * 1024
 
 
 def _trusted_git_candidate_paths() -> tuple[Path, ...]:
@@ -159,8 +160,47 @@ def _exact_git_blob(
     assert isinstance(object_type, str)
     if object_type.strip() != "blob":
         raise ValueError("exact Git source object is not a blob")
+
+    tree_entry = _trusted_git(
+        "ls-tree",
+        "-z",
+        source_sha,
+        "--",
+        relative_path,
+        source_root=source_root,
+    )
+    assert isinstance(tree_entry, bytes)
+    expected_path = relative_path.encode("utf-8") + b"\x00"
+    metadata, separator, tree_path = tree_entry.partition(b"\t")
+    metadata_parts = metadata.split()
+    if (
+        separator != b"\t"
+        or tree_path != expected_path
+        or len(metadata_parts) != 3
+        or metadata_parts[0] not in {b"100644", b"100755"}
+        or metadata_parts[1] != b"blob"
+        or metadata_parts[2].decode("ascii", errors="ignore") != object_id
+    ):
+        raise ValueError("exact Git source path is not a regular blob")
+
+    object_size_raw = _trusted_git(
+        "cat-file",
+        "-s",
+        object_id,
+        source_root=source_root,
+        text=True,
+    )
+    assert isinstance(object_size_raw, str)
+    object_size_text = object_size_raw.strip()
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)", object_size_text) is None:
+        raise ValueError("exact Git source object size is invalid")
+    if int(object_size_text) > _QUALIFICATION_TRUST_POLICY_PIN_SOURCE_MAX_BYTES:
+        raise ValueError("exact Git source object exceeds bounded size")
+
     raw = _trusted_git("cat-file", "blob", object_id, source_root=source_root)
     assert isinstance(raw, bytes)
+    if len(raw) != int(object_size_text):
+        raise ValueError("exact Git source object size changed during read")
     return raw, object_id
 
 

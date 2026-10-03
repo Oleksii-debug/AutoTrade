@@ -17,7 +17,9 @@ attestation, provider authority, economic edge, or trading authority.
 from __future__ import annotations
 
 from copy import copy
+from types import MappingProxyType
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from autotrade_runtime.artifacts import ArtifactStore
 
@@ -36,6 +38,7 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
+from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
 
 if TYPE_CHECKING:
     from .production_host import ProductionHostRuntime
@@ -120,6 +123,179 @@ def _snapshot_campaign_cut(
     return detached
 
 
+def _build_composed_acceptance_snapshotter(
+    *,
+    composed_type,
+    accepted_type,
+    composition_error_type,
+    mapping_proxy_type,
+):
+    """Build a detached canonical snapshotter for composed verifier output."""
+
+    def exact_text(value: object, *, name: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise composition_error_type(f"{name} must remain exact non-empty text")
+        return value
+
+    def canonical_sha256(value: object, *, name: str) -> str:
+        if type(value) is not str or (
+            not value.startswith("sha256:")
+            or len(value) != 71
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value[7:])
+        ):
+            raise composition_error_type(
+                f"{name} must remain exact canonical sha256 text"
+            )
+        return value
+
+    def canonical_git_sha(value: object, *, name: str) -> str:
+        if type(value) is not str or (
+            len(value) != 40
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise composition_error_type(
+                f"{name} must remain exact lowercase 40-character Git SHA"
+            )
+        return value
+
+    def canonical_uuid(value: object, *, name: str) -> str:
+        if type(value) is not str:
+            raise composition_error_type(f"{name} must remain exact canonical UUID")
+        try:
+            parsed = UUID(value)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise composition_error_type(
+                f"{name} must remain exact canonical UUID"
+            ) from error
+        if str(parsed) != value:
+            raise composition_error_type(f"{name} must remain exact canonical UUID")
+        return value
+
+    def snapshot_map(value: object, *, name: str, value_validator) -> dict[str, str]:
+        if type(value) is not mapping_proxy_type:
+            raise composition_error_type(
+                f"{name} must remain exact immutable mapping state"
+            )
+        detached = dict(value)
+        for key, item in detached.items():
+            key = exact_text(key, name=f"{name} key")
+            value_validator(item, name=f"{name}[{key}]")
+        return detached
+
+    def snapshot(value):
+        if type(value) is not composed_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical accepted qualification"
+            )
+        accepted = value.qualification
+        if type(accepted) is not accepted_type:
+            raise composition_error_type(
+                "composed verifier returned non-canonical signed acceptance"
+            )
+        accepted_snapshot = accepted_type(
+            attestation_id=canonical_uuid(
+                accepted.attestation_id,
+                name="accepted target-host attestation_id",
+            ),
+            attestation_digest=canonical_sha256(
+                accepted.attestation_digest,
+                name="accepted target-host attestation_digest",
+            ),
+            source_sha=canonical_git_sha(
+                accepted.source_sha,
+                name="accepted target-host source_sha",
+            ),
+            scenario_id=exact_text(
+                accepted.scenario_id,
+                name="accepted target-host scenario_id",
+            ),
+            spec_digest=canonical_sha256(
+                accepted.spec_digest,
+                name="accepted target-host spec_digest",
+            ),
+            configuration_hash=canonical_sha256(
+                accepted.configuration_hash,
+                name="accepted target-host configuration_hash",
+            ),
+            host_fingerprint=canonical_sha256(
+                accepted.host_fingerprint,
+                name="accepted target-host host_fingerprint",
+            ),
+            workload_profile_hash=canonical_sha256(
+                accepted.workload_profile_hash,
+                name="accepted target-host workload_profile_hash",
+            ),
+            journal_store_identity_digest=canonical_sha256(
+                accepted.journal_store_identity_digest,
+                name="accepted target-host journal_store_identity_digest",
+            ),
+            release_artifact_id=canonical_uuid(
+                accepted.release_artifact_id,
+                name="accepted target-host release_artifact_id",
+            ),
+            release_artifact_sha256=canonical_sha256(
+                accepted.release_artifact_sha256,
+                name="accepted target-host release_artifact_sha256",
+            ),
+            binding_artifact_id=canonical_uuid(
+                accepted.binding_artifact_id,
+                name="accepted target-host binding_artifact_id",
+            ),
+            binding_sha256=canonical_sha256(
+                accepted.binding_sha256,
+                name="accepted target-host binding_sha256",
+            ),
+            evidence_sha256_by_kind=snapshot_map(
+                accepted.evidence_sha256_by_kind,
+                name="accepted target-host evidence digest map",
+                value_validator=canonical_sha256,
+            ),
+            payload_artifact_id_by_kind=snapshot_map(
+                accepted.payload_artifact_id_by_kind,
+                name="accepted target-host payload artifact map",
+                value_validator=canonical_uuid,
+            ),
+            payload_sha256_by_kind=snapshot_map(
+                accepted.payload_sha256_by_kind,
+                name="accepted target-host payload digest map",
+                value_validator=canonical_sha256,
+            ),
+            collector_by_kind=snapshot_map(
+                accepted.collector_by_kind,
+                name="accepted target-host collector map",
+                value_validator=exact_text,
+            ),
+        )
+        return composed_type(
+            qualification=accepted_snapshot,
+            target_host_measurement_digest=canonical_sha256(
+                value.target_host_measurement_digest,
+                name="accepted target-host measurement digest",
+            ),
+            durable_financial_binding_digest=canonical_sha256(
+                value.durable_financial_binding_digest,
+                name="accepted durable financial binding digest",
+            ),
+            projection_sha256_by_kind=snapshot_map(
+                value.projection_sha256_by_kind,
+                name="accepted target-host projection map",
+                value_validator=canonical_sha256,
+            ),
+        )
+
+    return snapshot
+
+
+_PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
+    composed_type=AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=AcceptedRuntimeTargetHostQualification,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    mapping_proxy_type=type(MappingProxyType({})),
+)
+
+
 def _build_chronology_free_verifier(
     *,
     journal_store_type=JournalStore,
@@ -134,6 +310,7 @@ def _build_chronology_free_verifier(
     campaign_cut_type=RuntimeCampaignCut,
     snapshot_campaign_cut=_snapshot_campaign_cut,
     verify_composed=verify_composed_runtime_target_host_qualification,
+    acceptance_snapshotter=None,
 ):
     """Capture the durable-plan/composed authority graph behind one private closure."""
 
@@ -209,6 +386,8 @@ def _build_chronology_free_verifier(
                 expected_release_artifact_id=expected_release_artifact_id,
                 expected_release_artifact_sha256=expected_release_artifact_sha256,
             )
+            if acceptance_snapshotter is not None:
+                accepted = acceptance_snapshotter(accepted)
 
             final_plan = load_declared_plan(
                 journal_store,
@@ -242,7 +421,9 @@ def _build_chronology_free_verifier(
 # composed qualification authority. Focused tests use the private factory with
 # explicit injected doubles instead of rebinding production globals.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
-    _build_chronology_free_verifier()
+    _build_chronology_free_verifier(
+        acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+    )
 )
 
 

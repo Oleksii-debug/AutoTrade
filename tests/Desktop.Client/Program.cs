@@ -80,6 +80,100 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void WebExperienceSecurityPolicyOriginAndNavigationTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            policy.HostOrigin == HostOrigin,
+            "embedded web policy changed the canonical paired host origin");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/")),
+            "canonical host root was not admitted");
+        Check.True(
+            policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8765/app/index.html")),
+            "same-origin product content was not admitted");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://127.0.0.1:8766/app/")),
+            "cross-port navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://127.0.0.1:8765/app/")),
+            "cross-scheme navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("https://example.com/")),
+            "external HTTPS navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("file:///C:/AutoTrade/index.html")),
+            "file navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("data:text/html,untrusted")),
+            "data URI navigation entered the trusted embedded surface");
+        Check.True(
+            !policy.AllowsTopLevelNavigation(new Uri("http://user@127.0.0.1:8765/app/")),
+            "userinfo-bearing URI entered the trusted embedded surface");
+
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://example.com/")),
+            "non-loopback plaintext host origin was accepted");
+        Check.Throws<ArgumentException>(
+            () => _ = new WebExperienceSecurityPolicy(new Uri("http://127.0.0.1:8765/path")),
+            "host origin with a path was accepted");
+    }
+
+    static void WebExperienceSecurityPolicyCredentialForwardingTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        foreach (string path in new[]
+        {
+            "/api/v1",
+            "/api/v1/state",
+            "/api/v1/commands",
+            "/api/v1/operations/11111111-1111-1111-1111-111111111111",
+        })
+        {
+            Check.True(
+                policy.AllowsSessionHeaderForwarding(new Uri(HostOrigin, path)),
+                "canonical Host API request lost session-header eligibility: " + path);
+        }
+
+        foreach (Uri target in new[]
+        {
+            new Uri(HostOrigin, "/"),
+            new Uri(HostOrigin, "/index.html"),
+            new Uri(HostOrigin, "/api/v10/state"),
+            new Uri(HostOrigin, "/api/v1evil/state"),
+            new Uri("http://127.0.0.1:8766/api/v1/state"),
+            new Uri("https://example.com/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(target),
+                "credential forwarding escaped canonical Host API origin/path: " + target);
+        }
+    }
+
+    static void WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest()
+    {
+        WebExperienceSecurityPolicy policy = new(HostOrigin);
+
+        Check.True(
+            !policy.AllowsWebMessageCommandAuthority,
+            "web messages acquired financial command authority");
+        Check.True(
+            !policy.AllowsDeveloperTools,
+            "release-mode developer tools were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsDownloads,
+            "embedded downloads were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri(HostOrigin, "/app/help")),
+            "same-origin popup was silently admitted as trusted content");
+        Check.True(
+            !policy.AllowsNewWindow(new Uri("https://example.com/")),
+            "external popup was silently admitted as trusted content");
+    }
+
     static void CanonicalOperationIdentityVectorTest()
     {
         Check.True(
@@ -1172,6 +1266,9 @@ internal static class Program
 
     public static async Task Main()
     {
+        WebExperienceSecurityPolicyOriginAndNavigationTest();
+        WebExperienceSecurityPolicyCredentialForwardingTest();
+        WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
         WindowRetainsCurrentEvidenceFloorTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();

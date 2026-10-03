@@ -482,5 +482,110 @@ class FuturesExactArithmeticTests(unittest.TestCase):
             )
 
 
+    def test_canonical_instrument_subclass_is_rejected_before_metadata_dispatch(self):
+        base_contract = self._contract()
+        version = base_contract.canonical_instrument
+        assert version is not None
+        calls = []
+
+        class HostileInstrumentVersion(InstrumentVersion):
+            def __getattribute__(self, name):
+                if name in {
+                    "asset_class",
+                    "payoff",
+                    "instrument_id",
+                    "version",
+                    "contract_multiplier",
+                    "quote_currency",
+                    "settlement_currency",
+                    "expiry",
+                    "last_trade_at",
+                    "delivery_cutoff",
+                    "settlement_method",
+                    "base_currency",
+                }:
+                    calls.append(name)
+                return super().__getattribute__(name)
+
+        hostile = HostileInstrumentVersion(**version.__dict__)
+        calls.clear()
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "exact canonical InstrumentVersion",
+        ):
+            FuturesContract.from_instrument_version(hostile)
+
+        self.assertEqual(calls, [])
+
+    def test_contract_text_subclass_is_rejected_before_string_dispatch(self):
+        base = self._contract()
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("polymorphic strip must not run")
+
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("polymorphic hash must not run")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("polymorphic comparison must not run")
+
+        with self.assertRaisesRegex(FuturesError, "exact non-empty text"):
+            FuturesContract(
+                instrument=base.instrument,
+                payoff=HostileText("LINEAR"),
+                multiplier=base.multiplier,
+                quote_currency=base.quote_currency,
+                settlement_currency=base.settlement_currency,
+                last_trade_at=base.last_trade_at,
+                delivery_cutoff=base.delivery_cutoff,
+                expiry=base.expiry,
+                settlement_method=base.settlement_method,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_contract_datetime_subclass_is_rejected_before_time_dispatch(self):
+        base = self._contract()
+        calls = []
+
+        class HostileDatetime(datetime):
+            def astimezone(self, *args, **kwargs):
+                calls.append("astimezone")
+                raise AssertionError("polymorphic astimezone must not run")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            30,
+            20,
+            tzinfo=timezone.utc,
+        )
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "exact timezone-aware datetime",
+        ):
+            FuturesContract(
+                instrument=base.instrument,
+                payoff=base.payoff,
+                multiplier=base.multiplier,
+                quote_currency=base.quote_currency,
+                settlement_currency=base.settlement_currency,
+                last_trade_at=hostile,
+                delivery_cutoff=base.delivery_cutoff,
+                expiry=base.expiry,
+                settlement_method=base.settlement_method,
+            )
+
+        self.assertEqual(calls, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()

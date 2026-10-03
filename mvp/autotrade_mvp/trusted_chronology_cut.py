@@ -265,6 +265,10 @@ def _build_external_function_graph_guard(*, root, label: str):
                 global_bindings.append(
                     (dependency_namespace, dependency_name, expected_dependency)
                 )
+            if type(expected_dependency) is FunctionType:
+                capture_dependency_function(expected_dependency)
+            elif isinstance(expected_dependency, type):
+                capture_external_type(expected_dependency)
         for cell in function.__closure__ or ():
             cell_identity = id(cell)
             if cell_identity in seen_closures:
@@ -275,6 +279,23 @@ def _build_external_function_graph_guard(*, root, label: str):
             except ValueError:
                 expected_cell_value = missing
             closure_bindings.append((cell, expected_cell_value))
+
+    def capture_dependency_function(function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_module_attribute_functions:
+            return
+        seen_module_attribute_functions.add(identity)
+        module_attribute_function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                None
+                if function.__kwdefaults__ is None
+                else dict(function.__kwdefaults__),
+            )
+        )
+        capture_function_dependencies(function)
 
     def capture_external_type(cls: type) -> None:
         identity = id(cls)
@@ -323,19 +344,8 @@ def _build_external_function_graph_guard(*, root, label: str):
             if key not in seen_module_attributes:
                 seen_module_attributes.add(key)
                 module_attribute_bindings.append((base, attribute_name, expected))
-            if type(expected) is FunctionType and id(expected) not in seen_module_attribute_functions:
-                seen_module_attribute_functions.add(id(expected))
-                capture_function_dependencies(expected)
-                module_attribute_function_states.append(
-                    (
-                        expected,
-                        expected.__code__,
-                        expected.__defaults__,
-                        None
-                        if expected.__kwdefaults__ is None
-                        else dict(expected.__kwdefaults__),
-                    )
-                )
+            if type(expected) is FunctionType:
+                capture_dependency_function(expected)
             elif isinstance(expected, type):
                 capture_external_type(expected)
 

@@ -18,7 +18,9 @@ from typing import Iterable, Mapping
 from autotrade_research.artifacts import ArtifactStore
 from autotrade_research.data.vintages import (
     FrozenMarketPopulation,
+    HistoricalConflict,
     HistoricalVintageRegistry,
+    canonical_market_event_population_bytes,
 )
 from autotrade_research.features.causal import (
     CausalFold,
@@ -93,6 +95,24 @@ def _replay_common_cut(value: object | None) -> str | None:
         )
     return text
 
+
+
+def _detach_asserted_event_cache(
+    population: FrozenMarketPopulation,
+    events: Iterable[Mapping[str, object]] | None,
+) -> tuple[dict[str, object], ...] | None:
+    """Detach an optional caller cache only after trusted source authority exists."""
+
+    if events is None:
+        return None
+    asserted_bytes = canonical_market_event_population_bytes(events)
+    asserted_digest = "sha256:" + sha256(asserted_bytes).hexdigest()
+    if asserted_digest != population.source_content_digest:
+        raise HistoricalConflict(
+            "caller market event cache differs from authenticated artifact bytes"
+        )
+    document = json.loads(asserted_bytes.decode("utf-8"))
+    return tuple(dict(row) for row in document["events"])
 
 
 def _canonical_hash(material: Mapping[str, object]) -> str:
@@ -322,8 +342,9 @@ def resolve_authoritative_feature_points(
         manifest_digest=manifest_digest,
         artifact_store=artifact_store,
         cutoff=cutoff,
-        events=tuple(events) if events is not None else None,
+        events=None,
     )
+    _detach_asserted_event_cache(population, events)
     return authoritative_feature_points(population, spec=spec)
 
 
@@ -440,15 +461,15 @@ class AuthoritativeFoldNormalizer:
         if _replay_common_cut(replay_common_cut_fingerprint) != self.replay_common_cut_fingerprint:
             raise ValueError("replay common-cut identity differs from fitted authority")
 
-        event_cache = tuple(events) if events is not None else None
         training_population = registry.resolve_market_population(
             self.dataset_id,
             self.dataset_version,
             manifest_digest=self.manifest_digest,
             artifact_store=artifact_store,
             cutoff=fold.training_information_cutoff,
-            events=event_cache,
+            events=None,
         )
+        event_cache = _detach_asserted_event_cache(training_population, events)
         if training_population.fingerprint != self.training_population_fingerprint:
             raise ValueError("authoritative training population differs from fitted authority")
 
@@ -533,8 +554,9 @@ def fit_authoritative_fold_normalizer(
         manifest_digest=manifest_digest,
         artifact_store=artifact_store,
         cutoff=fold.training_information_cutoff,
-        events=tuple(events) if events is not None else None,
+        events=None,
     )
+    _detach_asserted_event_cache(population, events)
     fitted = _fit_from_population(population, fold=fold, spec=spec)
     return AuthoritativeFoldNormalizer(
         dataset_id=population.dataset_id,

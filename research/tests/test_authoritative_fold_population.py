@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import unittest
+from unittest.mock import patch
 
 from autotrade_research.artifacts import ArtifactStore
 from autotrade_research.data.vintages import (
@@ -418,6 +419,44 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 fold=self.fold,
                 spec=self.spec,
             )
+
+    def test_caller_event_iterable_runs_only_after_authenticated_snapshot(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        state = {"authority_read": False}
+        original = ArtifactStore.read_authenticated_snapshot
+
+        class ProbeIterable:
+            def __iter__(self_inner):
+                if not state["authority_read"]:
+                    raise AssertionError(
+                        "caller event iterable executed before authenticated source read"
+                    )
+                return iter(rows)
+
+        def counted_snapshot(store, artifact_id):
+            manifest, raw = original(store, artifact_id)
+            state["authority_read"] = True
+            return manifest, raw
+
+        with patch.object(
+            ArtifactStore,
+            "read_authenticated_snapshot",
+            new=counted_snapshot,
+        ):
+            fitted = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                events=ProbeIterable(),
+                fold=self.fold,
+                spec=self.spec,
+            )
+
+        self.assertTrue(state["authority_read"])
+        self.assertEqual(fitted.dataset_id, self.dataset_id)
 
     def test_caller_forged_validation_feature_is_rejected(self):
         rows = self._base_events()

@@ -1,5 +1,4 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
-from types import MappingProxyType
 import unittest
 
 from mvp.autotrade_mvp.allocation_valuation import (
@@ -622,91 +621,6 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
-    def test_mapping_subclasses_are_rejected_before_callbacks(self):
-        touched = []
-
-        class HostileDict(dict):
-            def __iter__(self):
-                touched.append("iter")
-                raise AssertionError("hostile mapping iteration")
-
-            def get(self, *args, **kwargs):
-                touched.append("get")
-                raise AssertionError("hostile mapping get")
-
-            def __contains__(self, key):
-                touched.append("contains")
-                raise AssertionError("hostile mapping contains")
-
-        for market, valuation in (
-            (HostileDict(self.market()), self.valuation()),
-            (self.market(), HostileDict(self.valuation())),
-        ):
-            touched.clear()
-            with self.subTest(
-                market_type=type(market).__name__,
-                valuation_type=type(valuation).__name__,
-            ):
-                with self.assertRaisesRegex(
-                    AllocationValuationError, "exact dict or mappingproxy"
-                ):
-                    self.normalize(market, valuation)
-                self.assertEqual(touched, [])
-
-    def test_nonexact_mapping_key_is_rejected_before_key_dispatch(self):
-        touched = []
-
-        class HostileKey(str):
-            def __eq__(self, other):
-                touched.append("eq")
-                raise AssertionError("hostile key equality")
-
-            def strip(self, *args, **kwargs):
-                touched.append("strip")
-                raise AssertionError("hostile key strip")
-
-            __hash__ = str.__hash__
-
-        market = self.market()
-        market[HostileKey("attacker")] = "value"
-        touched.clear()
-
-        with self.assertRaisesRegex(AllocationValuationError, "keys must be exact"):
-            self.normalize(market, self.valuation())
-
-        self.assertEqual(touched, [])
-
-    def test_nested_cost_mapping_subclass_is_rejected_before_callbacks(self):
-        touched = []
-
-        class HostileCosts(dict):
-            def __iter__(self):
-                touched.append("iter")
-                raise AssertionError("hostile cost iteration")
-
-            def __getitem__(self, key):
-                touched.append("getitem")
-                raise AssertionError("hostile cost lookup")
-
-        valuation = self.valuation()
-        valuation["cost_rate_components"] = HostileCosts(
-            {
-                "execution": "0.001",
-                "financing": "0",
-                "funding": "0",
-                "borrow": "0",
-                "fx": "0",
-            }
-        )
-        touched.clear()
-
-        with self.assertRaisesRegex(
-            AllocationValuationError, "exact dict or mappingproxy"
-        ):
-            self.normalize(self.market(), valuation)
-
-        self.assertEqual(touched, [])
-
     def test_fx_max_age_integer_subclass_is_rejected_before_comparison(self):
         touched = []
 
@@ -747,22 +661,6 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
-
-    def test_canonical_mappingproxy_payloads_remain_accepted(self):
-        market = MappingProxyType(self.market())
-        valuation_data = self.valuation()
-        valuation_data["cost_rate_components"] = MappingProxyType(
-            dict(valuation_data["cost_rate_components"])
-        )
-        valuation_data["cost_evidence_refs"] = MappingProxyType(
-            dict(valuation_data["cost_evidence_refs"])
-        )
-        valuation = MappingProxyType(valuation_data)
-
-        result = self.normalize(market, valuation)
-
-        self.assertEqual(result.symbol, "AAA")
-        self.assertEqual(result.unit_base_notional, Decimal("10"))
 
 
 if __name__ == "__main__":

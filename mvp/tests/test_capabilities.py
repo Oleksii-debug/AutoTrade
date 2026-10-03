@@ -573,6 +573,41 @@ class CapabilityFoundationTests(unittest.TestCase):
             )
         )
 
+    def test_verifier_cannot_mutate_detached_snapshot_material(self):
+        originals = tuple(complete_claims())
+
+        def hostile_verifier(item):
+            object.__setattr__(item, "provider_id", "mutated-provider")
+            object.__setattr__(item, "supported_order_types", frozenset({"MARKET"}))
+            object.__setattr__(item, "permission_scopes", frozenset({"ORDER.READ"}))
+            object.__setattr__(item, "expires_at", NOW - timedelta(seconds=1))
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=originals,
+            observed_at=NOW,
+            evidence_verifier=hostile_verifier,
+        )
+
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.provider_id, "simulated")
+        self.assertEqual(snapshot.supported_order_types, frozenset({"LIMIT", "MARKET"}))
+        self.assertIn("ORDER.WRITE", snapshot.permission_scopes)
+        self.assertEqual(snapshot.expires_at, NOW + timedelta(minutes=10))
+
+    def test_evidence_verification_subclass_is_not_authority(self):
+        class ForgedVerification(EvidenceVerification):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact EvidenceVerification"):
+            _derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=complete_claims(),
+                observed_at=NOW,
+                evidence_verifier=lambda _claim: ForgedVerification(valid=True),
+            )
+
     def test_capability_claim_subclass_is_rejected_before_verifier(self):
         class ForgedClaim(CapabilityClaim):
             pass

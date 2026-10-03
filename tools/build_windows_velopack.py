@@ -464,15 +464,15 @@ def _validate_vpk_outputs(
 ) -> list[tuple[Path, str, int]]:
     observed: list[Path] = []
     for path in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
-        if path.is_symlink():
-            raise VelopackPackagingError("Velopack emitted a symlink")
-        if not path.is_file():
-            raise VelopackPackagingError("Velopack emitted an unsupported filesystem entry")
         metadata = _nonreparse_path_metadata(
             path,
             name=f"Velopack output {path.name}",
         )
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        if stat.S_ISLNK(metadata.st_mode):
+            raise VelopackPackagingError("Velopack emitted a symlink")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise VelopackPackagingError("Velopack emitted an unsupported filesystem entry")
+        if metadata.st_nlink != 1:
             raise VelopackPackagingError(
                 "Velopack output must be a regular file without hard-link aliases"
             )

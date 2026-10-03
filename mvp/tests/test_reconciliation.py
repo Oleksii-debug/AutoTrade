@@ -164,6 +164,83 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(result.blocks_new_risk)
         self.assertEqual(result.matched_execution_ids, ("e1",))
 
+    def test_provider_fill_sequence_mutation_cannot_rewrite_financial_snapshot(self):
+        first = fill(
+            "e-mutated-after-admission",
+            "c-mutated-after-admission",
+        )
+        second = fill("e-local", "c-local")
+
+        class MutatingProviderFillSequence:
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                if index == 0:
+                    return first
+                if index == 1:
+                    object.__setattr__(first, "side", None)
+                    return second
+                raise IndexError
+
+        result = self.base(
+            local_execution_ids=["e-local"],
+            provider_fills=MutatingProviderFillSequence(),
+        )
+
+        self.assertIsNone(first.side)
+        self.assertEqual(
+            result.unexpected_execution_ids,
+            ("e-mutated-after-admission",),
+        )
+        self.assertEqual(len(result.unexpected_provider_fills), 1)
+        retained = result.unexpected_provider_fills[0]
+        self.assertIsNot(retained, first)
+        self.assertEqual(retained.side, "BUY")
+        self.assertEqual(
+            retained.provider_execution_id,
+            "e-mutated-after-admission",
+        )
+
+    def test_provider_fill_snapshot_rejects_executable_or_subclass_state(self):
+        mutated_refs = fill()
+
+        class EvidenceRefs(tuple):
+            pass
+
+        object.__setattr__(
+            mutated_refs,
+            "evidence_refs",
+            EvidenceRefs(mutated_refs.evidence_refs),
+        )
+        with self.assertRaisesRegex(TypeError, "evidence_refs must be exact tuple"):
+            self.base(provider_fills=[mutated_refs])
+
+        canonical = fill()
+
+        class ProviderFillSubclass(ProviderFillEvidence):
+            pass
+
+        subclass = ProviderFillSubclass(
+            provider_id=canonical.provider_id,
+            account_id=canonical.account_id,
+            environment=canonical.environment,
+            provider_execution_id=canonical.provider_execution_id,
+            client_order_id=canonical.client_order_id,
+            instrument=canonical.instrument,
+            quantity=canonical.quantity,
+            price=canonical.price,
+            fee_amount=canonical.fee_amount,
+            fee_currency=canonical.fee_currency,
+            trade_time=canonical.trade_time,
+            side=canonical.side,
+            position_side=canonical.position_side,
+            position_effect=canonical.position_effect,
+            evidence_refs=canonical.evidence_refs,
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderFillEvidence"):
+            self.base(provider_fills=[subclass])
+
     def test_incomplete_provider_fill_cannot_match_complete_or_resolve_unknown(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-diagnostic-fill",

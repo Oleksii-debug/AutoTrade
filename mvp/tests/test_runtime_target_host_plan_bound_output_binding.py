@@ -89,8 +89,12 @@ def _detached(spec, *, workload_profile_hash: str):
 def _validate(value, spec, *, workload_profile_hash: str):
     return plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR(
         value,
-        spec=spec,
-        durable_plan_digest=workload_profile_hash,
+        expected_source_sha=spec.release_sha,
+        expected_scenario_id=spec.scenario_id,
+        expected_spec_digest=spec.digest,
+        expected_configuration_hash=spec.configuration_hash,
+        expected_host_fingerprint=spec.host_fingerprint,
+        expected_workload_profile_hash=workload_profile_hash,
         expected_release_artifact_id=RELEASE_ID,
         expected_release_artifact_sha256=RELEASE_SHA,
     )
@@ -273,6 +277,71 @@ class RuntimeTargetHostPlanBoundOutputBindingTests(unittest.TestCase):
                     campaign_cut=object(),
                     measurement=object(),
                 )
+
+    def test_lower_callback_cannot_rebind_frozen_spec_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            caller_spec = _spec()
+            original_configuration = caller_spec.configuration_hash
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="lower-mutates-spec-plan",
+                spec=caller_spec,
+                expected_events=(_expected_event(),),
+            )
+            retained = _qualification(
+                caller_spec,
+                workload_profile_hash=plan.digest,
+            )
+            forged_configuration = _digest("lower-mutated-configuration")
+
+            def mutating_lower(*_args, **kwargs):
+                lower_spec = kwargs["spec"]
+                self.assertIsNot(lower_spec, caller_spec)
+                object.__setattr__(
+                    lower_spec,
+                    "configuration_hash",
+                    forged_configuration,
+                )
+                object.__setattr__(
+                    retained.qualification,
+                    "configuration_hash",
+                    forged_configuration,
+                )
+                object.__setattr__(
+                    retained.qualification,
+                    "spec_digest",
+                    lower_spec.digest,
+                )
+                return retained
+
+            verifier = plan_bound._build_chronology_free_verifier(
+                verify_composed=mutating_lower,
+                acceptance_snapshotter=plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+                acceptance_binding_validator=(
+                    plan_bound._PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "spec digest differs from captured authority",
+            ):
+                verifier(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=store,
+                    plan_id=plan.plan_id,
+                    spec=caller_spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
+
+            self.assertEqual(caller_spec.configuration_hash, original_configuration)
 
 
 if __name__ == "__main__":

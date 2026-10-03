@@ -432,6 +432,44 @@ class DecisionTraceStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "build_id"):
                 store.append(bad_build)
 
+    def test_executable_container_and_string_subclasses_are_rejected_before_callbacks(self):
+        class HostileDict(dict):
+            def items(self):
+                raise AssertionError("hostile mapping callback executed")
+
+        class HostileStr(str):
+            def lower(self):
+                raise AssertionError("hostile string callback executed")
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile string callback executed")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            hostile_attributes = trace("trace-hostile-attributes")
+            hostile_attributes["attributes"] = HostileDict({"safe": "value"})
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_attributes)
+            self.assertFalse(path.exists())
+
+            hostile_source = trace("trace-hostile-source")
+            hostile_source["source_sha"] = HostileStr("1" * 40)
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_source)
+            self.assertFalse(path.exists())
+
+            store.append(trace("trace-exact-subclass"))
+            with self.assertRaisesRegex(ValueError, "source_sha"):
+                store.reconstruct_exact(
+                    "trace-exact-subclass",
+                    expected_source_sha=HostileStr("1" * 40),
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+
     def test_exact_reconstruction_requires_matching_source_and_build(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

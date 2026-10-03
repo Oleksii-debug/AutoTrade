@@ -29,6 +29,9 @@ class SimulatedProviderConflict(ValueError):
     """Raised when an immutable simulated provider identity is reused."""
 
 
+TRANSPORT_SEND_CONTRACT = "simulated-provider-final-guard-before-mutation-v1"
+
+
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")

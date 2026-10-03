@@ -6,6 +6,7 @@ import unittest
 
 from mvp.autotrade_mvp.embedded_web import (
     EmbeddedWebHostApplication,
+    HOST_API_CONTRACT_VERSION,
     ImmutableWebAsset,
     ImmutableWebAssetBundle,
     load_immutable_web_bundle,
@@ -49,7 +50,7 @@ def asset(path: str, body: bytes) -> ImmutableWebAsset:
 def bundle(*assets: ImmutableWebAsset) -> ImmutableWebAssetBundle:
     return ImmutableWebAssetBundle(
         source_revision="a" * 40,
-        host_api_contract_version="3.0.1",
+        host_api_contract_version=HOST_API_CONTRACT_VERSION,
         assets=tuple(assets),
     )
 
@@ -193,15 +194,16 @@ class EmbeddedWebTests(unittest.TestCase):
             tuple(item.path for item in self.web_bundle.assets),
         )
 
-    def test_bundle_identity_changes_with_contract_source_or_content(self):
-        changed_contract = ImmutableWebAssetBundle(
-            source_revision="a" * 40,
-            host_api_contract_version="3.0.2",
-            assets=self.web_bundle.assets,
-        )
+    def test_bundle_rejects_contract_drift_and_identity_tracks_source_or_content(self):
+        with self.assertRaisesRegex(ValueError, "runtime authority"):
+            ImmutableWebAssetBundle(
+                source_revision="a" * 40,
+                host_api_contract_version="5.0.1",
+                assets=self.web_bundle.assets,
+            )
         changed_source = ImmutableWebAssetBundle(
             source_revision="b" * 40,
-            host_api_contract_version="3.0.1",
+            host_api_contract_version=HOST_API_CONTRACT_VERSION,
             assets=self.web_bundle.assets,
         )
         changed_content = bundle(
@@ -211,7 +213,6 @@ class EmbeddedWebTests(unittest.TestCase):
                 if item.path != "index.html"
             ),
         )
-        self.assertNotEqual(changed_contract.bundle_sha256, self.web_bundle.bundle_sha256)
         self.assertNotEqual(changed_source.bundle_sha256, self.web_bundle.bundle_sha256)
         self.assertNotEqual(changed_content.bundle_sha256, self.web_bundle.bundle_sha256)
 
@@ -224,7 +225,7 @@ class EmbeddedWebTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source revision"):
             ImmutableWebAssetBundle(
                 source_revision="A" * 40,
-                host_api_contract_version="3.0.1",
+                host_api_contract_version=HOST_API_CONTRACT_VERSION,
                 assets=(duplicate,),
             )
         with self.assertRaisesRegex(ValueError, "contract version"):
@@ -233,6 +234,21 @@ class EmbeddedWebTests(unittest.TestCase):
                 host_api_contract_version="v3",
                 assets=(duplicate,),
             )
+
+    def test_runtime_host_api_contract_version_matches_canonical_openapi(self):
+        openapi = (
+            Path(__file__).resolve().parents[2]
+            / "contracts"
+            / "openapi"
+            / "host-api.yaml"
+        ).read_text(encoding="utf-8")
+        info = openapi.split("info:", 1)[1].split("\nservers:", 1)[0]
+        version_line = next(
+            line for line in info.splitlines()
+            if line.strip().startswith("version:")
+        )
+        canonical_version = version_line.split(":", 1)[1].strip()
+        self.assertEqual(HOST_API_CONTRACT_VERSION, canonical_version)
 
     def test_canonical_manifest_round_trip_rejects_missing_extra_or_mutated_bytes(self):
         bodies = {item.path: item.body for item in self.web_bundle.assets}
@@ -296,7 +312,7 @@ class EmbeddedWebTests(unittest.TestCase):
         )
         current = ImmutableWebAssetBundle(
             source_revision="c" * 40,
-            host_api_contract_version="3.0.1",
+            host_api_contract_version=HOST_API_CONTRACT_VERSION,
             assets=canonical_assets,
         )
         loaded = load_immutable_web_bundle(
@@ -331,7 +347,10 @@ class EmbeddedWebTests(unittest.TestCase):
             self.web_bundle.bundle_sha256,
         )
         self.assertEqual(headers["X-AutoTrade-Source-Revision"], "a" * 40)
-        self.assertEqual(headers["X-AutoTrade-Host-Api-Contract"], "3.0.1")
+        self.assertEqual(
+            headers["X-AutoTrade-Host-Api-Contract"],
+            HOST_API_CONTRACT_VERSION,
+        )
         self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(headers["X-Frame-Options"], "DENY")

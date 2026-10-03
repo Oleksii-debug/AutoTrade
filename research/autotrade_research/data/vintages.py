@@ -232,19 +232,24 @@ def _content_ref(value: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(value, Mapping):
         raise HistoricalDataError("content reference must be an object")
-    required = {"ordinal", "role", "artifact_id", "sha256"}
-    allowed = required | {"rights_id"}
-    if not required.issubset(value) or set(value) - allowed:
+    required = {
+        "ordinal",
+        "role",
+        "artifact_id",
+        "sha256",
+        "manifest_hash",
+        "rights_id",
+    }
+    if set(value) != required:
         raise HistoricalDataError("content reference fields are not canonical")
-    result: dict[str, Any] = {
+    return {
         "ordinal": _sequence(value["ordinal"], "content ordinal"),
         "role": _text(value["role"], "content role"),
         "artifact_id": _uuid(value["artifact_id"], "content artifact_id"),
         "sha256": _digest(value["sha256"], "content sha256"),
+        "manifest_hash": _digest(value["manifest_hash"], "content manifest_hash"),
+        "rights_id": _text(value["rights_id"], "content rights_id"),
     }
-    if "rights_id" in value:
-        result["rights_id"] = _text(value["rights_id"], "content rights_id")
-    return result
 
 
 def causal_market_event_history(
@@ -763,6 +768,10 @@ class HistoricalVintageRegistry:
         if artifact_manifest.get("sha256") != population_ref["sha256"]:
             raise HistoricalConflict(
                 "market population artifact digest differs from dataset binding"
+            )
+        if artifact_manifest.get("manifest_hash") != population_ref["manifest_hash"]:
+            raise HistoricalConflict(
+                "market population artifact manifest identity differs from dataset binding"
             )
         if artifact_manifest.get("media_type") != _MARKET_POPULATION_MEDIA_TYPE:
             raise HistoricalDataError(

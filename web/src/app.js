@@ -1027,8 +1027,20 @@
     const scopeEpoch = state.scopeEpoch;
     const renderedAccountId = state.renderedAccountId;
     const renderedEnvironment = state.renderedEnvironment;
-    const raw = await jsonFetch(
-      HOST_API.route("getOperation", {operation_id: operationId}));
+    let raw;
+    try {
+      raw = await jsonFetch(
+        HOST_API.route("getOperation", {operation_id: operationId}));
+    } catch (error) {
+      if (
+        scopeEpoch !== state.scopeEpoch ||
+        renderedAccountId !== state.renderedAccountId ||
+        renderedEnvironment !== state.renderedEnvironment
+      ) {
+        return null;
+      }
+      throw error;
+    }
     const operation = parseOperationResult(raw, operationId);
     if (
       scopeEpoch !== state.scopeEpoch ||
@@ -1256,7 +1268,15 @@
   async function refreshSnapshot(options = {}) {
     state.scopeEpoch += 1;
     const refreshEpoch = state.scopeEpoch;
-    const snapshot = await jsonFetch(HOST_API.route("getState"));
+    let snapshot;
+    try {
+      snapshot = await jsonFetch(HOST_API.route("getState"));
+    } catch (error) {
+      if (refreshEpoch !== state.scopeEpoch) {
+        return false;
+      }
+      throw error;
+    }
     if (refreshEpoch !== state.scopeEpoch) {
       return false;
     }
@@ -1293,6 +1313,9 @@
   async function pollEvents() {
     if (state.polling || state.stopped) return;
     state.polling = true;
+    let pollEpoch = null;
+    let pollRenderedAccountId = null;
+    let pollRenderedEnvironment = null;
     try {
       // A failed post-event snapshot refresh disables commands but must not
       // require a new event or manual action to recover. Re-establish the
@@ -1304,20 +1327,23 @@
           return;
         }
       }
-      const pollEpoch = state.scopeEpoch;
-      const renderedAccountId = state.renderedAccountId;
-      const renderedEnvironment = state.renderedEnvironment;
+      pollEpoch = state.scopeEpoch;
+      pollRenderedAccountId = state.renderedAccountId;
+      pollRenderedEnvironment = state.renderedEnvironment;
       const response = await jsonFetch(
         HOST_API.route("streamEvents") + "?after=" +
           encodeURIComponent(state.cursor.toString()));
       if (
         pollEpoch !== state.scopeEpoch ||
-        renderedAccountId !== state.renderedAccountId ||
-        renderedEnvironment !== state.renderedEnvironment
+        pollRenderedAccountId !== state.renderedAccountId ||
+        pollRenderedEnvironment !== state.renderedEnvironment
       ) {
         return;
       }
-      const events = Array.isArray(response) ? response : (response.events || []);
+      if (!Array.isArray(response)) {
+        throw new Error("Host event response must be a canonical JSON array");
+      }
+      const events = response;
       let expectedCursor = state.cursor + 1n;
       for (const event of events) {
         const cursor = exactCounter(event.cursor, "event.cursor");
@@ -1333,7 +1359,7 @@
         const kind = String(event.kind ?? event.event_type ?? "");
         if (kind === "OPERATION_UPDATED") {
           const payload = requiredObject(event.payload, "event.payload");
-          const operationId = requiredText(
+          const operationId = canonicalId(
             payload.operation_id,
             "event.payload.operation_id");
           const operation = await refreshOperation(operationId);
@@ -1362,6 +1388,16 @@
         await refreshSnapshot();
       }
     } catch (error) {
+      if (
+        pollEpoch !== null &&
+        (
+          pollEpoch !== state.scopeEpoch ||
+          pollRenderedAccountId !== state.renderedAccountId ||
+          pollRenderedEnvironment !== state.renderedEnvironment
+        )
+      ) {
+        return;
+      }
       if (error.status === 409 || error.status === 410) {
         try {
           await refreshSnapshot({announceRefresh: true});

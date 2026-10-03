@@ -157,12 +157,23 @@ class AblationValuePolicyTests(unittest.TestCase):
 
             __hash__ = str.__hash__
 
+        class HostileKey(str):
+            def __hash__(self):
+                calls.append("hash")
+                return str.__hash__(self)
+
+        hostile_key_policy = dimensional_policy()
+        unit = hostile_key_policy.pop("value_unit")
+        hostile_key_policy[HostileKey("value_unit")] = unit
+
         hostile_values = [
             HostilePolicy(dimensional_policy()),
+            {**dimensional_policy(), "schema_version": HostileText("1.0.0")},
             {**dimensional_policy(), "value_unit": HostileText("USD")},
             {**dimensional_policy(), "utility_projection_ref": HostileText(UTILITY_REF)},
             {**dimensional_policy(), "cost_projection_ref": HostileText(COST_REF)},
             {**dimensional_policy(), "fx_valuation_ref": HostileText(FX_REF)},
+            hostile_key_policy,
         ]
         for index, policy in enumerate(hostile_values):
             with self.subTest(index=index), TemporaryDirectory() as directory:

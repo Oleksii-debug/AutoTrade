@@ -101,6 +101,20 @@ def _sha256_hex(value: str, *, field: str) -> str:
     return value
 
 
+def _signature_hex(value: str, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) < 64
+        or len(value) > 8192
+        or len(value) % 2
+        or any(character not in _SHA256_HEX for character in value)
+    ):
+        raise ReplayError(
+            f"{field} must be bounded canonical lowercase signature hex"
+        )
+    return value
+
+
 def _build_sha(value: str) -> str:
     if (
         not isinstance(value, str)
@@ -151,6 +165,7 @@ class RuntimeStateSnapshot:
     replay: "ReplayCheckpoint"
     runtime_components: Mapping[str, str]
     authority_id: str
+    verifier_id: str
     authority_seal: str
 
     def __post_init__(self) -> None:
@@ -164,7 +179,11 @@ class RuntimeStateSnapshot:
             raise ReplayError("runtime authority_id must be non-empty")
         if self.authority_id != self.authority_id.strip():
             raise ReplayError("runtime authority_id must be canonical text")
-        _sha256_hex(self.authority_seal, field="runtime authority seal")
+        if not isinstance(self.verifier_id, str) or not self.verifier_id.strip():
+            raise ReplayError("runtime verifier_id must be non-empty")
+        if self.verifier_id != self.verifier_id.strip():
+            raise ReplayError("runtime verifier_id must be canonical text")
+        _signature_hex(self.authority_seal, field="runtime authority signature")
         object.__setattr__(
             self,
             "runtime_components",
@@ -175,87 +194,134 @@ class RuntimeStateSnapshot:
 RuntimeStateCutResolver = Callable[
     [], tuple[str, "ReplayCheckpoint", Mapping[str, str]]
 ]
+RuntimeStateSigner = Callable[[bytes], str]
+RuntimeStateSignatureVerifier = Callable[[bytes, str], bool]
+
 
 def _runtime_authority_state_operations():
-    states = WeakKeyDictionary()
+    authority_states = WeakKeyDictionary()
+    verifier_states = WeakKeyDictionary()
 
-    def register_candidate(
+    def register_authority(
         authority: "RuntimeStateAuthority",
         authority_id: str,
-        secret: bytes,
+        signer: RuntimeStateSigner,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
-        states[authority] = (authority_id, bytes(secret), cut_resolver, False)
-
-    def issue(
-        *,
-        authority_id: str,
-        secret: bytes,
-        cut_resolver: RuntimeStateCutResolver,
-    ) -> "RuntimeStateAuthority":
-        authority = RuntimeStateAuthority(
-            authority_id=authority_id,
-            secret=secret,
-            cut_resolver=cut_resolver,
-        )
-        current = states[authority]
-        states[authority] = (current[0], current[1], current[2], True)
-        return authority
+        authority_states[authority] = (authority_id, signer, cut_resolver)
 
     def authority_id(authority: "RuntimeStateAuthority") -> str:
         try:
-            return states[authority][0]
+            return authority_states[authority][0]
         except KeyError as error:
             raise ReplayError(
                 "runtime state authority process state is unavailable"
             ) from error
-
-    def require_issued(authority: "RuntimeStateAuthority") -> None:
-        try:
-            issued = states[authority][3]
-        except KeyError as error:
-            raise ReplayError(
-                "runtime state authority process state is unavailable"
-            ) from error
-        if not issued:
-            raise ReplayError(
-                "runtime state authority is not composition-issued"
-            )
 
     def resolve_cut(
         authority: "RuntimeStateAuthority",
     ) -> tuple[str, "ReplayCheckpoint", Mapping[str, str]]:
-        require_issued(authority)
-        resolver = states[authority][2]
+        try:
+            resolver = authority_states[authority][2]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
         return resolver()
 
-    def seal(authority: "RuntimeStateAuthority", material: bytes) -> str:
-        require_issued(authority)
-        secret = states[authority][1]
-        return hmac.new(secret, material, sha256).hexdigest()
+    def sign(authority: "RuntimeStateAuthority", material: bytes) -> str:
+        try:
+            signer = authority_states[authority][1]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state authority process state is unavailable"
+            ) from error
+        try:
+            signature = signer(material)
+        except Exception as error:
+            raise ReplayError("runtime state signer failed") from error
+        return _signature_hex(
+            signature,
+            field="runtime authority signature",
+        )
+
+    def register_verifier(
+        verifier: "RuntimeStateVerifier",
+        authority_id_value: str,
+        verifier_id_value: str,
+        verify_signature: RuntimeStateSignatureVerifier,
+    ) -> None:
+        verifier_states[verifier] = (
+            authority_id_value,
+            verifier_id_value,
+            verify_signature,
+        )
+
+    def verifier_authority_id(verifier: "RuntimeStateVerifier") -> str:
+        try:
+            return verifier_states[verifier][0]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state verifier process state is unavailable"
+            ) from error
+
+    def verifier_id(verifier: "RuntimeStateVerifier") -> str:
+        try:
+            return verifier_states[verifier][1]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state verifier process state is unavailable"
+            ) from error
+
+    def verify_signature(
+        verifier: "RuntimeStateVerifier",
+        material: bytes,
+        signature: str,
+    ) -> None:
+        try:
+            verify = verifier_states[verifier][2]
+        except KeyError as error:
+            raise ReplayError(
+                "runtime state verifier process state is unavailable"
+            ) from error
+        signature = _signature_hex(
+            signature,
+            field="runtime authority signature",
+        )
+        try:
+            accepted = verify(material, signature)
+        except Exception as error:
+            raise ReplayError("runtime state verifier failed closed") from error
+        if accepted is not True:
+            raise ReplayError("runtime state authority signature mismatch")
 
     return (
-        register_candidate,
-        issue,
+        register_authority,
         authority_id,
-        require_issued,
         resolve_cut,
-        seal,
+        sign,
+        register_verifier,
+        verifier_authority_id,
+        verifier_id,
+        verify_signature,
     )
 
 
 (
-    _register_runtime_state_authority_candidate,
-    _issue_runtime_state_authority,
+    _register_runtime_state_authority,
     _runtime_state_authority_id,
-    _require_runtime_state_authority_issued,
     _resolve_runtime_authority_cut,
-    _seal_runtime_authority_material,
+    _sign_runtime_authority_material,
+    _register_runtime_state_verifier,
+    _runtime_state_verifier_authority_id,
+    _runtime_state_verifier_id,
+    _verify_runtime_state_signature,
 ) = _runtime_authority_state_operations()
 del _runtime_authority_state_operations
 
-class RuntimeStateAuthority:
-    """Composition-owned issuer/verifier for common runtime cuts."""
+
+class RuntimeStateVerifier:
+    """Separately provisioned trust anchor for one runtime-state authority."""
 
     __slots__ = ("__weakref__",)
 
@@ -263,23 +329,106 @@ class RuntimeStateAuthority:
         self,
         *,
         authority_id: str,
-        secret: bytes,
+        verifier_id: str,
+        verify_signature: RuntimeStateSignatureVerifier,
+    ) -> None:
+        for value, field in (
+            (authority_id, "runtime authority_id"),
+            (verifier_id, "runtime verifier_id"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ReplayError(f"{field} must be non-empty")
+            if value != value.strip():
+                raise ReplayError(f"{field} must be canonical text")
+        if not callable(verify_signature):
+            raise TypeError("runtime verify_signature must be callable")
+        _register_runtime_state_verifier(
+            self,
+            authority_id,
+            verifier_id,
+            verify_signature,
+        )
+
+    @property
+    def authority_id(self) -> str:
+        return _runtime_state_verifier_authority_id(self)
+
+    @property
+    def verifier_id(self) -> str:
+        return _runtime_state_verifier_id(self)
+
+    def verify_snapshot(self, snapshot: RuntimeStateSnapshot) -> None:
+        if type(snapshot) is not RuntimeStateSnapshot:
+            raise ReplayError(
+                "runtime state verifier requires canonical RuntimeStateSnapshot"
+            )
+        if snapshot.authority_id != self.authority_id:
+            raise ReplayError("runtime state snapshot authority identity mismatch")
+        if snapshot.verifier_id != self.verifier_id:
+            raise ReplayError("runtime state snapshot verifier identity mismatch")
+        _verify_runtime_state_signature(
+            self,
+            RuntimeStateAuthority._binding_material(
+                authority_id=snapshot.authority_id,
+                verifier_id=snapshot.verifier_id,
+                cut_id=snapshot.cut_id,
+                replay=snapshot.replay,
+                runtime_components=snapshot.runtime_components,
+            ),
+            snapshot.authority_seal,
+        )
+
+    def verify_checkpoint_binding(
+        self,
+        checkpoint: "CompositeReplayCheckpoint",
+    ) -> None:
+        if type(checkpoint) is not CompositeReplayCheckpoint:
+            raise ReplayError(
+                "runtime state verifier requires canonical CompositeReplayCheckpoint"
+            )
+        if checkpoint.runtime_authority_id != self.authority_id:
+            raise ReplayError("runtime state checkpoint authority identity mismatch")
+        if checkpoint.runtime_verifier_id != self.verifier_id:
+            raise ReplayError("runtime state checkpoint verifier identity mismatch")
+        _verify_runtime_state_signature(
+            self,
+            RuntimeStateAuthority._checkpoint_binding_material(
+                authority_id=checkpoint.runtime_authority_id,
+                verifier_id=checkpoint.runtime_verifier_id,
+                cut_id=checkpoint.runtime_cut_id,
+                replay=checkpoint.replay,
+                runtime_components=checkpoint.runtime_components,
+                build_sha=checkpoint.build_sha,
+                protocol_ref=checkpoint.protocol_ref,
+            ),
+            checkpoint.runtime_authority_seal,
+        )
+
+
+class RuntimeStateAuthority:
+    """Signing side for common runtime cuts; trust is supplied separately."""
+
+    __slots__ = ("__weakref__",)
+
+    def __init__(
+        self,
+        *,
+        authority_id: str,
+        signer: RuntimeStateSigner,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
         if not isinstance(authority_id, str) or not authority_id.strip():
             raise ReplayError("runtime authority_id must be non-empty")
         if authority_id != authority_id.strip():
             raise ReplayError("runtime authority_id must be canonical text")
-        if not isinstance(secret, bytes) or len(secret) < 32:
-            raise ReplayError(
-                "runtime authority secret must contain at least 32 bytes"
-            )
+        if not callable(signer):
+            raise TypeError("runtime signer must be callable")
         if not callable(cut_resolver):
             raise TypeError("runtime cut_resolver must be callable")
-        _register_runtime_state_authority_candidate(
+        _register_runtime_state_authority(
             self,
             authority_id,
-            secret,
+            signer,
             cut_resolver,
         )
 
@@ -291,12 +440,15 @@ class RuntimeStateAuthority:
     def _binding_material(
         *,
         authority_id: str,
+        verifier_id: str,
         cut_id: str,
         replay: "ReplayCheckpoint",
         runtime_components: Mapping[str, str],
     ) -> bytes:
         material = {
+            "binding_kind": "runtime_state_snapshot-v1",
             "authority_id": authority_id,
+            "verifier_id": verifier_id,
             "cut_id": cut_id,
             "replay": {
                 "dataset_digest": replay.dataset_digest,
@@ -317,6 +469,7 @@ class RuntimeStateAuthority:
     def _checkpoint_binding_material(
         *,
         authority_id: str,
+        verifier_id: str,
         cut_id: str,
         replay: "ReplayCheckpoint",
         runtime_components: Mapping[str, str],
@@ -332,6 +485,7 @@ class RuntimeStateAuthority:
         material = {
             "binding_kind": "composite_replay_checkpoint-v1",
             "authority_id": authority_id,
+            "verifier_id": verifier_id,
             "cut_id": cut_id,
             "replay": {
                 "dataset_digest": replay.dataset_digest,
@@ -350,56 +504,16 @@ class RuntimeStateAuthority:
             allow_nan=False,
         ).encode("utf-8")
 
-    def seal_checkpoint(
+    def capture(
         self,
-        snapshot: RuntimeStateSnapshot,
         *,
-        build_sha: str,
-        protocol_ref: str,
-    ) -> str:
-        """Bind a verified common cut to the exact build and protocol identity."""
-
-        RuntimeStateAuthority.verify_snapshot(self, snapshot)
+        verifier_id: str,
+    ) -> RuntimeStateSnapshot:
         authority_id = _runtime_state_authority_id(self)
-        return _seal_runtime_authority_material(
-            self,
-            self._checkpoint_binding_material(
-                authority_id=authority_id,
-                cut_id=snapshot.cut_id,
-                replay=snapshot.replay,
-                runtime_components=snapshot.runtime_components,
-                build_sha=build_sha,
-                protocol_ref=protocol_ref,
-            ),
-        )
-
-    def verify_checkpoint_binding(
-        self,
-        checkpoint: "CompositeReplayCheckpoint",
-    ) -> None:
-        if type(checkpoint) is not CompositeReplayCheckpoint:
-            raise ReplayError(
-                "runtime state authority must verify the canonical CompositeReplayCheckpoint"
-            )
-        authority_id = _runtime_state_authority_id(self)
-        if checkpoint.runtime_authority_id != authority_id:
-            raise ReplayError("runtime state snapshot authority identity mismatch")
-        expected = _seal_runtime_authority_material(
-            self,
-            self._checkpoint_binding_material(
-                authority_id=authority_id,
-                cut_id=checkpoint.runtime_cut_id,
-                replay=checkpoint.replay,
-                runtime_components=checkpoint.runtime_components,
-                build_sha=checkpoint.build_sha,
-                protocol_ref=checkpoint.protocol_ref,
-            ),
-        )
-        if not hmac.compare_digest(expected, checkpoint.runtime_authority_seal):
-            raise ReplayError("runtime state checkpoint authority seal mismatch")
-
-    def capture(self) -> RuntimeStateSnapshot:
-        authority_id = _runtime_state_authority_id(self)
+        if not isinstance(verifier_id, str) or not verifier_id.strip():
+            raise ReplayError("runtime verifier_id must be non-empty")
+        if verifier_id != verifier_id.strip():
+            raise ReplayError("runtime verifier_id must be canonical text")
         try:
             cut_id, replay, raw_components = _resolve_runtime_authority_cut(self)
         except Exception as error:
@@ -413,53 +527,67 @@ class RuntimeStateAuthority:
                 "runtime state authority must resolve a ReplayCheckpoint"
             )
         components = _component_bindings(raw_components)
+        material = self._binding_material(
+            authority_id=authority_id,
+            verifier_id=verifier_id,
+            cut_id=cut_id,
+            replay=replay,
+            runtime_components=components,
+        )
         return RuntimeStateSnapshot(
             cut_id=cut_id,
             replay=replay,
             runtime_components=components,
             authority_id=authority_id,
-            authority_seal=_seal_runtime_authority_material(
-                self,
-                self._binding_material(
-                    authority_id=authority_id,
-                    cut_id=cut_id,
-                    replay=replay,
-                    runtime_components=components,
-                ),
-            ),
+            verifier_id=verifier_id,
+            authority_seal=_sign_runtime_authority_material(self, material),
         )
 
-    def verify_snapshot(self, snapshot: RuntimeStateSnapshot) -> None:
+    def seal_checkpoint(
+        self,
+        snapshot: RuntimeStateSnapshot,
+        *,
+        build_sha: str,
+        protocol_ref: str,
+    ) -> str:
         if type(snapshot) is not RuntimeStateSnapshot:
             raise ReplayError(
-                "runtime state authority must issue the canonical RuntimeStateSnapshot"
+                "runtime state authority requires canonical RuntimeStateSnapshot"
             )
-        authority_id = _runtime_state_authority_id(self)
-        if snapshot.authority_id != authority_id:
+        if snapshot.authority_id != self.authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
-        expected = _seal_runtime_authority_material(
+        return _sign_runtime_authority_material(
             self,
-            self._binding_material(
-                authority_id=authority_id,
+            self._checkpoint_binding_material(
+                authority_id=snapshot.authority_id,
+                verifier_id=snapshot.verifier_id,
                 cut_id=snapshot.cut_id,
                 replay=snapshot.replay,
                 runtime_components=snapshot.runtime_components,
+                build_sha=build_sha,
+                protocol_ref=protocol_ref,
             ),
         )
-        if not hmac.compare_digest(expected, snapshot.authority_seal):
-            raise ReplayError("runtime state snapshot authority seal mismatch")
-
 
 def _resolve_runtime_snapshot(
     authority: RuntimeStateAuthority,
+    verifier: RuntimeStateVerifier,
 ) -> RuntimeStateSnapshot:
     if type(authority) is not RuntimeStateAuthority:
         raise TypeError(
             "runtime_state_authority must be the canonical RuntimeStateAuthority"
         )
-    _require_runtime_state_authority_issued(authority)
-    snapshot = RuntimeStateAuthority.capture(authority)
-    RuntimeStateAuthority.verify_snapshot(authority, snapshot)
+    if type(verifier) is not RuntimeStateVerifier:
+        raise TypeError(
+            "runtime_state_verifier must be the canonical RuntimeStateVerifier"
+        )
+    if authority.authority_id != verifier.authority_id:
+        raise ReplayError("runtime authority and verifier identities differ")
+    snapshot = RuntimeStateAuthority.capture(
+        authority,
+        verifier_id=verifier.verifier_id,
+    )
+    RuntimeStateVerifier.verify_snapshot(verifier, snapshot)
     return snapshot
 
 
@@ -477,10 +605,11 @@ class CompositeReplayCheckpoint:
     runtime_components: Mapping[str, str]
     runtime_cut_id: str
     runtime_authority_id: str
+    runtime_verifier_id: str
     runtime_authority_seal: str
     build_sha: str
     protocol_ref: str
-    schema_version: str = "3.0.0"
+    schema_version: str = "4.0.0"
 
     def __post_init__(self) -> None:
         if not isinstance(self.replay, ReplayCheckpoint):
@@ -496,9 +625,14 @@ class CompositeReplayCheckpoint:
         authority_id = self.runtime_authority_id.strip()
         if authority_id != self.runtime_authority_id:
             raise ReplayError("runtime_authority_id must be canonical text")
-        authority_seal = _sha256_hex(
+        if not isinstance(self.runtime_verifier_id, str) or not self.runtime_verifier_id.strip():
+            raise ReplayError("runtime_verifier_id must be non-empty")
+        verifier_id = self.runtime_verifier_id.strip()
+        if verifier_id != self.runtime_verifier_id:
+            raise ReplayError("runtime_verifier_id must be canonical text")
+        authority_seal = _signature_hex(
             self.runtime_authority_seal,
-            field="runtime authority seal",
+            field="runtime authority signature",
         )
         build = _build_sha(self.build_sha)
         if not isinstance(self.protocol_ref, str) or not self.protocol_ref.strip():
@@ -506,11 +640,12 @@ class CompositeReplayCheckpoint:
         protocol = self.protocol_ref.strip()
         if protocol != self.protocol_ref:
             raise ReplayError("protocol_ref must be canonical text")
-        if self.schema_version != "3.0.0":
+        if self.schema_version != "4.0.0":
             raise ReplayError("unsupported composite replay checkpoint schema")
         object.__setattr__(self, "runtime_components", components)
         object.__setattr__(self, "runtime_cut_id", cut_id)
         object.__setattr__(self, "runtime_authority_id", authority_id)
+        object.__setattr__(self, "runtime_verifier_id", verifier_id)
         object.__setattr__(self, "runtime_authority_seal", authority_seal)
         object.__setattr__(self, "build_sha", build)
         object.__setattr__(self, "protocol_ref", protocol)
@@ -527,6 +662,7 @@ class CompositeReplayCheckpoint:
             "runtime_components": dict(self.runtime_components),
             "runtime_cut_id": self.runtime_cut_id,
             "runtime_authority_id": self.runtime_authority_id,
+            "runtime_verifier_id": self.runtime_verifier_id,
             "runtime_authority_seal": self.runtime_authority_seal,
             "build_sha": self.build_sha,
             "protocol_ref": self.protocol_ref,
@@ -563,6 +699,7 @@ class CompositeReplayCheckpoint:
                 ),
                 "runtime_cut_id": self.runtime_cut_id,
                 "runtime_authority_id": self.runtime_authority_id,
+                "runtime_verifier_id": self.runtime_verifier_id,
                 "runtime_authority_seal": self.runtime_authority_seal,
                 "build_sha": self.build_sha,
                 "protocol_ref": self.protocol_ref,
@@ -615,6 +752,7 @@ class CompositeReplayCheckpoint:
             "runtime_components",
             "runtime_cut_id",
             "runtime_authority_id",
+            "runtime_verifier_id",
             "runtime_authority_seal",
             "build_sha",
             "protocol_ref",
@@ -651,6 +789,7 @@ class CompositeReplayCheckpoint:
             runtime_components=components,
             runtime_cut_id=decoded["runtime_cut_id"],
             runtime_authority_id=decoded["runtime_authority_id"],
+            runtime_verifier_id=decoded["runtime_verifier_id"],
             runtime_authority_seal=decoded["runtime_authority_seal"],
             build_sha=decoded["build_sha"],
             protocol_ref=decoded["protocol_ref"],
@@ -810,13 +949,17 @@ class CausalReplay:
         self,
         *,
         runtime_state_authority: RuntimeStateAuthority,
+        runtime_state_verifier: RuntimeStateVerifier,
         build_sha: str,
         protocol_ref: str,
     ) -> CompositeReplayCheckpoint:
         """Bind source cursor and component state to one authority-issued cut."""
 
         replay_before = self.checkpoint()
-        snapshot = _resolve_runtime_snapshot(runtime_state_authority)
+        snapshot = _resolve_runtime_snapshot(
+            runtime_state_authority,
+            runtime_state_verifier,
+        )
         replay_after = self.checkpoint()
         if replay_before != replay_after:
             raise ReplayError(
@@ -837,6 +980,7 @@ class CausalReplay:
             runtime_components=snapshot.runtime_components,
             runtime_cut_id=snapshot.cut_id,
             runtime_authority_id=snapshot.authority_id,
+            runtime_verifier_id=snapshot.verifier_id,
             runtime_authority_seal=checkpoint_seal,
             build_sha=build_sha,
             protocol_ref=protocol_ref,
@@ -849,6 +993,7 @@ def resume_from_composite_checkpoint(
     start_at: str,
     checkpoint: CompositeReplayCheckpoint,
     runtime_state_authority: RuntimeStateAuthority,
+    runtime_state_verifier: RuntimeStateVerifier,
     build_sha: str,
     protocol_ref: str,
 ) -> CausalReplay:
@@ -867,7 +1012,10 @@ def resume_from_composite_checkpoint(
         runtime_state_authority,
         checkpoint,
     )
-    snapshot = _resolve_runtime_snapshot(runtime_state_authority)
+    snapshot = _resolve_runtime_snapshot(
+        runtime_state_authority,
+        runtime_state_verifier,
+    )
     if snapshot.replay != checkpoint.replay:
         raise ReplayError(
             "runtime state snapshot replay cut differs from checkpoint"
@@ -883,6 +1031,7 @@ def resume_from_composite_checkpoint(
         runtime_components=snapshot.runtime_components,
         runtime_cut_id=snapshot.cut_id,
         runtime_authority_id=snapshot.authority_id,
+        runtime_verifier_id=snapshot.verifier_id,
         runtime_authority_seal=current_seal,
         build_sha=build_sha,
         protocol_ref=protocol_ref,

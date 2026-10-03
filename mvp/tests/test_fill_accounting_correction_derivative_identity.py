@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from autotrade_mvp.accounting import AccountingConflict, ScopedEconomicBook
-from autotrade_mvp.fill_accounting import (
+from mvp.autotrade_mvp.accounting import AccountingConflict, ScopedEconomicBook
+from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     book_provider_fill,
     book_provider_fill_correction,
 )
-from autotrade_mvp.reconciliation import ProviderFillEvidence
+from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 
 
 class ProviderFillCorrectionDerivativeIdentityTests(unittest.TestCase):

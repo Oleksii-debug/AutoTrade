@@ -165,8 +165,8 @@ def _require_zero_wire_blocked(
     *,
     episode_id: str,
     result: dict,
-) -> None:
-    """Re-derive completed BLOCKED from zero-wire durable authorities."""
+) -> str:
+    """Re-derive completed BLOCKED and return its admitted intent hash."""
 
     intent_id = _uuid("intent", episode_id)
     attempt_id = _uuid("attempt", episode_id)
@@ -210,6 +210,9 @@ def _require_zero_wire_blocked(
         or prepared.get("environment") != ENVIRONMENT
         or prepared.get("account_id") != ACCOUNT
         or prepared.get("client_order_id") != client_id
+        or prepared.get("owner_token") != "canonical-simulation-owner"
+        or prepared.get("owner_epoch") != 1
+        or type(prepared.get("intent_hash")) is not str
         or blocked.get("client_order_id") != client_id
         or type(reason) is not str
         or not reason.strip()
@@ -230,6 +233,7 @@ def _require_zero_wire_blocked(
         )
     ):
         raise ValueError("completed BLOCKED reservation evidence differs")
+    return prepared["intent_hash"]
 
 
 def _require_recorded_admission(events: list[dict], *, episode_id: str, outcome: str) -> dict:
@@ -504,17 +508,24 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 or active
             ):
                 raise ValueError("completed BLOCKED contains unexpected exposure")
-            _require_zero_wire_blocked(
+            submission_intent_hash = _require_zero_wire_blocked(
                 events,
                 reservations,
                 episode_id=episode_id,
                 result=result,
             )
-            _require_recorded_admission(
+            admission = _require_recorded_admission(
                 events,
                 episode_id=episode_id,
                 outcome="ADMITTED",
             )
+            if (
+                admission["payload"].get("intent_hash")
+                != submission_intent_hash
+            ):
+                raise ValueError(
+                    "completed BLOCKED submission does not belong to admitted intent"
+                )
         elif (fill_id is not None or result.get("order_id") is not None or position != 0 or active
               or any(event["aggregate_type"] == "submission_attempt" for event in events)
               or (session_status == "HOLD" and result["decision"] != "HOLD")

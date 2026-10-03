@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from mvp.autotrade_mvp import host_network, production_host
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import RecoveryController
 from mvp.autotrade_mvp.trusted_chronology import (
@@ -38,6 +39,50 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
         )
         recovery.start("owner-a")
         return store, recovery
+
+    class DummySecurityBoundary:
+        pass
+
+    def _production_runtime(
+        self,
+        root: Path,
+        *,
+        account_id: str = "account-1",
+        environment: str = "PAPER",
+    ):
+        config = production_host.ProductionHostConfig(
+            journal_path=root / "journal.sqlite3",
+            account_id=account_id,
+            environment=environment,
+            host_id="host-a",
+            bind_host="127.0.0.1",
+            bind_port=8765,
+            public_origin="http://127.0.0.1:8765",
+        )
+        patches = (
+            patch.object(
+                production_host,
+                "SecurityBoundary",
+                self.DummySecurityBoundary,
+            ),
+            patch.object(
+                host_network,
+                "SecurityBoundary",
+                self.DummySecurityBoundary,
+            ),
+            patch.object(
+                production_host,
+                "AuthenticatedHostServer",
+                return_value=Mock(),
+            ),
+        )
+        with patches[0], patches[1], patches[2]:
+            return production_host.build_production_host(
+                config,
+                security_boundary=self.DummySecurityBoundary(),
+                principal_resolver=lambda headers, origin: None,
+                snapshot_provider=lambda state, principal: {},
+            )
 
     def test_challenge_binds_physical_store_owner_incident_and_journal_cut(self):
         with TemporaryDirectory() as directory:
@@ -161,6 +206,164 @@ class TrustedChronologyChallengeTests(unittest.TestCase):
                     source_sha=SOURCE_SHA,
                     scope=ChronologyScope.RELEASE_RUNTIME,
                 )
+
+    def test_release_scope_binds_exact_current_runtime_occurrence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, recovery = self._durable_controller(root)
+            runtime = self._production_runtime(root)
+            try:
+                occurrence = runtime.runtime_occurrence
+                challenge = prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    release_artifact_id="11111111-1111-4111-8111-111111111111",
+                    release_artifact_sha256="sha256:" + ("b" * 64),
+                    runtime=runtime,
+                )
+
+                self.assertEqual(challenge.schema_version, "1.1.0")
+                self.assertEqual(challenge.runtime_host_id, occurrence.host_id)
+                self.assertEqual(
+                    challenge.runtime_occurrence_id,
+                    occurrence.runtime_occurrence_id,
+                )
+                self.assertEqual(
+                    challenge.runtime_occurrence_version,
+                    occurrence.aggregate_version,
+                )
+                self.assertEqual(
+                    challenge.runtime_occurrence_journal_sequence,
+                    occurrence.journal_sequence,
+                )
+                self.assertLessEqual(
+                    occurrence.journal_sequence,
+                    challenge.journal_sequence,
+                )
+                require_current_chronology_challenge(
+                    challenge=challenge,
+                    store=store,
+                    recovery=recovery,
+                    runtime=runtime,
+                )
+            finally:
+                runtime.close()
+
+    def test_release_scope_requires_runtime_and_source_scope_rejects_one(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, recovery = self._durable_controller(root)
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires canonical production runtime occurrence",
+            ):
+                prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    release_artifact_id="11111111-1111-4111-8111-111111111111",
+                    release_artifact_sha256="sha256:" + ("b" * 64),
+                )
+
+            runtime = self._production_runtime(root)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "cannot carry runtime occurrence",
+                ):
+                    prepare_chronology_challenge(
+                        store=store,
+                        recovery=recovery,
+                        source_sha=SOURCE_SHA,
+                        scope=ChronologyScope.SOURCE_QUALIFICATION,
+                        runtime=runtime,
+                    )
+            finally:
+                runtime.close()
+
+    def test_release_scope_rejects_runtime_from_other_store_generation(self):
+        with TemporaryDirectory() as selected_directory, TemporaryDirectory() as other_directory:
+            selected_root = Path(selected_directory)
+            store, recovery = self._durable_controller(selected_root)
+            other_runtime = self._production_runtime(Path(other_directory))
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "does not share chronology JournalStore generation",
+                ):
+                    prepare_chronology_challenge(
+                        store=store,
+                        recovery=recovery,
+                        source_sha=SOURCE_SHA,
+                        scope=ChronologyScope.RELEASE_RUNTIME,
+                        release_artifact_id="11111111-1111-4111-8111-111111111111",
+                        release_artifact_sha256="sha256:" + ("b" * 64),
+                        runtime=other_runtime,
+                    )
+            finally:
+                other_runtime.close()
+
+    def test_release_scope_rejects_runtime_account_or_environment_splice(self):
+        for account_id, environment, message in (
+            ("other-account", "PAPER", "account does not match"),
+            ("account-1", "SIMULATION", "environment does not match"),
+        ):
+            with self.subTest(account_id=account_id, environment=environment):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    store, recovery = self._durable_controller(root)
+                    runtime = self._production_runtime(
+                        root,
+                        account_id=account_id,
+                        environment=environment,
+                    )
+                    try:
+                        with self.assertRaisesRegex(PermissionError, message):
+                            prepare_chronology_challenge(
+                                store=store,
+                                recovery=recovery,
+                                source_sha=SOURCE_SHA,
+                                scope=ChronologyScope.RELEASE_RUNTIME,
+                                release_artifact_id=(
+                                    "11111111-1111-4111-8111-111111111111"
+                                ),
+                                release_artifact_sha256="sha256:" + ("b" * 64),
+                                runtime=runtime,
+                            )
+                    finally:
+                        runtime.close()
+
+    def test_release_challenge_cannot_survive_runtime_occurrence_advance(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, recovery = self._durable_controller(root)
+            runtime = self._production_runtime(root)
+            try:
+                challenge = prepare_chronology_challenge(
+                    store=store,
+                    recovery=recovery,
+                    source_sha=SOURCE_SHA,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    release_artifact_id="11111111-1111-4111-8111-111111111111",
+                    release_artifact_sha256="sha256:" + ("b" * 64),
+                    runtime=runtime,
+                )
+                production_host._issue_production_host_runtime_occurrence(
+                    runtime.journal,
+                    runtime.config,
+                )
+                with self.assertRaises(PermissionError):
+                    require_current_chronology_challenge(
+                        challenge=challenge,
+                        store=store,
+                        recovery=recovery,
+                        runtime=runtime,
+                    )
+            finally:
+                runtime.close()
 
     def test_measurement_must_echo_exact_fresh_challenge(self):
         with TemporaryDirectory() as directory:

@@ -25,13 +25,19 @@ from .persistence import (
 )
 from .recovery import RecoveryController
 from .recovery_clock_incident import load_clock_incident_chain
+from .production_host import (
+    ProductionHostRuntime,
+    ProductionHostRuntimeOccurrence,
+    require_current_production_host_runtime_occurrence,
+)
 from .store_identity import (
     JournalStoreIdentity,
     require_exact_journal_store_identity,
 )
 
 
-_SCHEMA_VERSION = "1.0.0"
+_CHALLENGE_SCHEMA_VERSION = "1.1.0"
+_MEASUREMENT_SCHEMA_VERSION = "1.0.0"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -64,6 +70,10 @@ class ChronologyChallenge:
     runtime_environment: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    runtime_host_id: str | None
+    runtime_occurrence_id: str | None
+    runtime_occurrence_version: int | None
+    runtime_occurrence_journal_sequence: int | None
     request_nonce: str
     challenge_digest: str
 
@@ -76,6 +86,18 @@ class ChronologyChallenge:
             "owner_scope": self.owner_scope,
             "release_artifact_id": self.release_artifact_id,
             "release_artifact_sha256": self.release_artifact_sha256,
+            "runtime_host_id": self.runtime_host_id,
+            "runtime_occurrence_id": self.runtime_occurrence_id,
+            "runtime_occurrence_journal_sequence": (
+                None
+                if self.runtime_occurrence_journal_sequence is None
+                else str(self.runtime_occurrence_journal_sequence)
+            ),
+            "runtime_occurrence_version": (
+                None
+                if self.runtime_occurrence_version is None
+                else str(self.runtime_occurrence_version)
+            ),
             "request_nonce": self.request_nonce,
             "runtime_environment": self.runtime_environment,
             "schema_version": self.schema_version,
@@ -282,6 +304,109 @@ def _release_binding(
     )
 
 
+def _account_from_owner_scope(owner_scope: str) -> str:
+    _environment_from_owner_scope(owner_scope)
+    _environment, _separator, account_id = owner_scope.partition(":")
+    if not account_id or account_id != account_id.strip():
+        raise PermissionError(
+            "chronology challenge requires canonical account-scoped recovery owner"
+        )
+    return account_id
+
+
+def _release_runtime_binding(
+    *,
+    scope: ChronologyScope,
+    runtime: ProductionHostRuntime | None,
+    store: JournalStore,
+    owner_scope: str,
+    runtime_environment: str,
+) -> tuple[str | None, str | None, int | None, int | None]:
+    if scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if runtime is not None:
+            raise ValueError(
+                "SOURCE_QUALIFICATION chronology cannot carry runtime occurrence"
+            )
+        return None, None, None, None
+
+    if runtime is None:
+        raise ValueError(
+            "RELEASE_RUNTIME requires canonical production runtime occurrence"
+        )
+    if type(runtime) is not ProductionHostRuntime:
+        raise TypeError("runtime must be exact ProductionHostRuntime")
+
+    selected_identity = _selected_store_identity(store)
+    runtime_identity = require_exact_journal_store_authority(
+        runtime.journal,
+        subject="chronology production runtime JournalStore",
+    )
+    if runtime_identity != selected_identity:
+        raise PermissionError(
+            "production runtime does not share chronology JournalStore generation"
+        )
+
+    occurrence = runtime.runtime_occurrence
+    if type(occurrence) is not ProductionHostRuntimeOccurrence:
+        raise TypeError(
+            "production runtime occurrence must be exact canonical value"
+        )
+    occurrence = require_current_production_host_runtime_occurrence(
+        journal=store,
+        occurrence=occurrence,
+    )
+    if occurrence.environment != runtime_environment:
+        raise PermissionError(
+            "production runtime environment does not match recovery owner scope"
+        )
+    if occurrence.account_id != _account_from_owner_scope(owner_scope):
+        raise PermissionError(
+            "production runtime account does not match recovery owner scope"
+        )
+    return (
+        occurrence.host_id,
+        occurrence.runtime_occurrence_id,
+        occurrence.aggregate_version,
+        occurrence.journal_sequence,
+    )
+
+
+def _validate_runtime_binding(challenge: ChronologyChallenge) -> None:
+    values = (
+        challenge.runtime_host_id,
+        challenge.runtime_occurrence_id,
+        challenge.runtime_occurrence_version,
+        challenge.runtime_occurrence_journal_sequence,
+    )
+    if challenge.scope is ChronologyScope.SOURCE_QUALIFICATION:
+        if any(value is not None for value in values):
+            raise ValueError(
+                "SOURCE_QUALIFICATION chronology cannot carry runtime occurrence"
+            )
+        return
+
+    if any(value is None for value in values):
+        raise ValueError(
+            "RELEASE_RUNTIME chronology requires complete runtime occurrence binding"
+        )
+    _token(challenge.runtime_host_id, name="runtime_host_id")
+    _uuid(challenge.runtime_occurrence_id, name="runtime_occurrence_id")
+    for value, name in (
+        (challenge.runtime_occurrence_version, "runtime_occurrence_version"),
+        (
+            challenge.runtime_occurrence_journal_sequence,
+            "runtime_occurrence_journal_sequence",
+        ),
+    ):
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{name} is not a canonical positive integer")
+    assert challenge.runtime_occurrence_journal_sequence is not None
+    if challenge.runtime_occurrence_journal_sequence > challenge.journal_sequence:
+        raise ValueError(
+            "runtime occurrence cannot postdate chronology journal frontier"
+        )
+
+
 def prepare_chronology_challenge(
     *,
     store: JournalStore,
@@ -290,6 +415,7 @@ def prepare_chronology_challenge(
     scope: ChronologyScope,
     release_artifact_id: str | None = None,
     release_artifact_sha256: str | None = None,
+    runtime: ProductionHostRuntime | None = None,
 ) -> ChronologyChallenge:
     """Capture one stable durable frontier and generate a fresh request challenge."""
 
@@ -318,6 +444,13 @@ def prepare_chronology_challenge(
     if owner is None:
         raise PermissionError("chronology requires an active recovery owner")
 
+    runtime_binding = _release_runtime_binding(
+        scope=scope,
+        runtime=runtime,
+        store=store,
+        owner_scope=owner_scope,
+        runtime_environment=runtime_environment,
+    )
     journal_sequence = _current_journal_sequence(store)
     owner_chain = recovery.durable_owner_chain()
     if not owner_chain or owner_chain[-1] != owner:
@@ -361,6 +494,23 @@ def prepare_chronology_challenge(
         raise PermissionError(
             "durable journal changed during chronology frontier capture"
         )
+    if (
+        _release_runtime_binding(
+            scope=scope,
+            runtime=runtime,
+            store=store,
+            owner_scope=owner_scope,
+            runtime_environment=runtime_environment,
+        )
+        != runtime_binding
+    ):
+        raise PermissionError(
+            "production runtime occurrence changed during chronology frontier capture"
+        )
+    if _current_journal_sequence(store) != journal_sequence:
+        raise PermissionError(
+            "durable journal changed during runtime occurrence revalidation"
+        )
     # Nothing authority-bearing runs between this post-sequence selector check
     # and challenge construction; all challenge fields below use captured values.
     if (
@@ -375,7 +525,7 @@ def prepare_chronology_challenge(
 
     request_nonce = secrets.token_hex(32)
     challenge = ChronologyChallenge(
-        schema_version=_SCHEMA_VERSION,
+        schema_version=_CHALLENGE_SCHEMA_VERSION,
         scope=scope,
         source_sha=source_sha,
         store_identity_digest=journal_store_identity_digest(store_identity),
@@ -387,6 +537,10 @@ def prepare_chronology_challenge(
         runtime_environment=runtime_environment,
         release_artifact_id=release_artifact_id,
         release_artifact_sha256=release_artifact_sha256,
+        runtime_host_id=runtime_binding[0],
+        runtime_occurrence_id=runtime_binding[1],
+        runtime_occurrence_version=runtime_binding[2],
+        runtime_occurrence_journal_sequence=runtime_binding[3],
         request_nonce=request_nonce,
         challenge_digest="",
     )
@@ -399,7 +553,11 @@ def prepare_chronology_challenge(
 def _validate_challenge(challenge: ChronologyChallenge) -> ChronologyChallenge:
     if type(challenge) is not ChronologyChallenge:
         raise TypeError("challenge must be exact ChronologyChallenge")
-    if challenge.schema_version != _SCHEMA_VERSION:
+    # frozen=True blocks ordinary assignment, not object.__setattr__() on a
+    # caller-retained object. Detach once before validation so every consumer
+    # operates on one private, self-consistent challenge value.
+    challenge = replace(challenge)
+    if challenge.schema_version != _CHALLENGE_SCHEMA_VERSION:
         raise ValueError("chronology challenge schema version is unsupported")
     if type(challenge.scope) is not ChronologyScope:
         raise TypeError("chronology challenge scope is invalid")
@@ -432,6 +590,7 @@ def _validate_challenge(challenge: ChronologyChallenge) -> ChronologyChallenge:
         challenge.release_artifact_id,
         challenge.release_artifact_sha256,
     )
+    _validate_runtime_binding(challenge)
     if (
         type(challenge.request_nonce) is not str
         or _NONCE_RE.fullmatch(challenge.request_nonce) is None
@@ -448,6 +607,7 @@ def require_current_chronology_challenge(
     challenge: ChronologyChallenge,
     store: JournalStore,
     recovery: RecoveryController,
+    runtime: ProductionHostRuntime | None = None,
 ) -> None:
     """Fail if any durable/runtime generation changed after the request frontier."""
 
@@ -487,6 +647,24 @@ def require_current_chronology_challenge(
     if _current_journal_sequence(store) != current_sequence:
         raise PermissionError(
             "durable journal advanced during chronology currentness validation"
+        )
+    runtime_binding = _release_runtime_binding(
+        scope=challenge.scope,
+        runtime=runtime,
+        store=store,
+        owner_scope=challenge.owner_scope,
+        runtime_environment=challenge.runtime_environment,
+    )
+    if runtime_binding != (
+        challenge.runtime_host_id,
+        challenge.runtime_occurrence_id,
+        challenge.runtime_occurrence_version,
+        challenge.runtime_occurrence_journal_sequence,
+    ):
+        raise PermissionError("production runtime occurrence binding changed")
+    if _current_journal_sequence(store) != challenge.journal_sequence:
+        raise PermissionError(
+            "durable journal advanced during runtime occurrence revalidation"
         )
     # Catch caller-side rebinding that occurs inside the final durable read.
     # All durable generation changes advance the journal sequence; these
@@ -611,7 +789,7 @@ def parse_challenge_bound_measurement(
     }
     if set(payload) != expected_keys:
         raise ValueError("chronology measurement schema is not closed")
-    if payload["schema_version"] != _SCHEMA_VERSION:
+    if payload["schema_version"] != _MEASUREMENT_SCHEMA_VERSION:
         raise ValueError("chronology measurement schema version is unsupported")
     if payload["challenge_digest"] != challenge.challenge_digest:
         raise PermissionError(
@@ -639,7 +817,7 @@ def parse_challenge_bound_measurement(
     if upper < lower:
         raise ValueError("chronology UTC interval is reversed")
     return ChronologyMeasurementTranscript(
-        schema_version=_SCHEMA_VERSION,
+        schema_version=_MEASUREMENT_SCHEMA_VERSION,
         challenge_digest=challenge.challenge_digest,
         request_nonce=challenge.request_nonce,
         authority_id=authority_id,

@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 import ssl
-from threading import Condition, Thread, current_thread
+from threading import Condition, RLock, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 from autotrade_runtime.artifacts import require_product_trusted_authenticated_reader
 from autotrade_runtime.artifacts._root_authority import (
@@ -66,6 +67,33 @@ _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 _RUNTIME_OCCURRENCE_SCHEMA_VERSION = "1.0.0"
 _RUNTIME_OCCURRENCE_AGGREGATE_TYPE = "production_host_runtime"
 _RUNTIME_OCCURRENCE_EVENT_TYPE = "ProductionHostRuntimeOccurrenceIssued"
+
+
+def _runtime_occurrence_binding_authority():
+    """Create one process-private runtime-object occurrence selector authority."""
+
+    bindings = WeakKeyDictionary()
+    lock = RLock()
+
+    def bind(runtime: object, occurrence_id: str) -> None:
+        if type(occurrence_id) is not str or not occurrence_id:
+            raise TypeError("runtime occurrence binding id must be exact non-empty str")
+        with lock:
+            if runtime in bindings:
+                raise RuntimeError("production host runtime occurrence is already bound")
+            bindings[runtime] = occurrence_id
+
+    def read(runtime: object) -> str | None:
+        with lock:
+            return bindings.get(runtime)
+
+    return bind, read
+
+
+_RUNTIME_OCCURRENCE_BIND, _RUNTIME_OCCURRENCE_READ = (
+    _runtime_occurrence_binding_authority()
+)
+
 _RUNTIME_OCCURRENCE_PAYLOAD_FIELDS = frozenset(
     {
         "account_id",
@@ -733,26 +761,39 @@ class ProductionHostRuntime:
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
         self._product_artifact_reader: object | None = None
-        self._runtime_occurrence: ProductionHostRuntimeOccurrence | None = None
 
     def _bind_runtime_occurrence(
         self,
         occurrence: ProductionHostRuntimeOccurrence,
+        *,
+        _bind=_RUNTIME_OCCURRENCE_BIND,
     ) -> None:
         if type(occurrence) is not ProductionHostRuntimeOccurrence:
             raise TypeError(
                 "runtime occurrence must be exact ProductionHostRuntimeOccurrence"
             )
-        if self._runtime_occurrence is not None:
-            raise RuntimeError("production host runtime occurrence is already bound")
-        self._runtime_occurrence = occurrence
+        # Keep the selector outside both caller-writable runtime instance state
+        # and replaceable module-global container state. The captured closure
+        # owns the one-shot runtime-object binding for this process.
+        _bind(self, occurrence.runtime_occurrence_id)
 
     @property
-    def runtime_occurrence(self) -> ProductionHostRuntimeOccurrence:
-        occurrence = self._runtime_occurrence
-        if occurrence is None:
+    def runtime_occurrence(
+        self,
+        _read=_RUNTIME_OCCURRENCE_READ,
+    ) -> ProductionHostRuntimeOccurrence:
+        occurrence_id = _read(self)
+        if type(occurrence_id) is not str:
             raise RuntimeError("production host runtime occurrence is not bound")
-        return occurrence
+        durable = _load_production_host_runtime_occurrences(
+            self.journal,
+            self.config,
+        )
+        if not durable or durable[-1].runtime_occurrence_id != occurrence_id:
+            raise RuntimeError(
+                "bound runtime occurrence is no longer the latest durable occurrence"
+            )
+        return durable[-1]
 
     def _bind_product_artifact_reader(self, reader: object) -> None:
         if self._product_artifact_reader is not None:
@@ -970,15 +1011,13 @@ def build_production_host(
         raise ValueError("TLS listener requires HTTPS public_origin")
 
     instance_fence = _InstanceFence.acquire(config.journal_path)
+    server: AuthenticatedHostServer | None = None
+    runtime: ProductionHostRuntime | None = None
     try:
         artifact_reader = _product_trusted_authenticated_reader(
             _product_artifact_root(config.journal_path)
         )
         journal = JournalStore(config.journal_path)
-        runtime_occurrence = _issue_production_host_runtime_occurrence(
-            journal,
-            config,
-        )
         application = AuthenticatedHostApplication(
             journal,
             security_boundary=security_boundary,
@@ -1000,17 +1039,36 @@ def build_production_host(
         )
         server.daemon_threads = False
         server.block_on_close = True
-    except BaseException:
-        instance_fence.release()
+        runtime = ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=application,
+            server=server,
+            instance_fence=instance_fence,
+            admission_gate=admission_gate,
+        )
+        runtime._bind_product_artifact_reader(artifact_reader)
+
+        # Only a successfully composed host may become the current durable
+        # runtime occurrence. A listener/bootstrap failure must not leave a
+        # chronology-eligible occurrence for a runtime that never existed.
+        runtime_occurrence = _issue_production_host_runtime_occurrence(
+            journal,
+            config,
+        )
+        runtime._bind_runtime_occurrence(runtime_occurrence)
+        return runtime
+    except BaseException as error:
+        try:
+            if runtime is not None:
+                runtime.close()
+            else:
+                if server is not None:
+                    server.server_close()
+                instance_fence.release()
+        except BaseException as cleanup_error:
+            error.add_note(
+                "production host bootstrap cleanup also failed: "
+                + repr(cleanup_error)
+            )
         raise
-    runtime = ProductionHostRuntime(
-        config=config,
-        journal=journal,
-        application=application,
-        server=server,
-        instance_fence=instance_fence,
-        admission_gate=admission_gate,
-    )
-    runtime._bind_runtime_occurrence(runtime_occurrence)
-    runtime._bind_product_artifact_reader(artifact_reader)
-    return runtime

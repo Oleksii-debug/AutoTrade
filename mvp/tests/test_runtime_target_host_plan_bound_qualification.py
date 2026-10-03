@@ -270,6 +270,48 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
 
             terminal.assert_not_called()
 
+    def test_selected_store_generation_is_revalidated_after_terminal_verifier(self) -> None:
+        with TemporaryDirectory() as directory:
+            selected = JournalStore(Path(directory) / "selected.sqlite3")
+            alternate = JournalStore(Path(directory) / "alternate.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                selected,
+                plan_id="terminal-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+            accepted = object()
+
+            def rebound_after_verification(*args, **kwargs):
+                selected.path = alternate.path
+                selected._store_identity = alternate.store_identity
+                return accepted
+
+            with patch.object(
+                plan_bound_module,
+                "verify_composed_runtime_target_host_qualification",
+                side_effect=rebound_after_verification,
+            ) as terminal, self.assertRaisesRegex(
+                RuntimeError,
+                "journal operation authority changed",
+            ):
+                verify_declared_plan_runtime_target_host_qualification(
+                    object(),
+                    evidence_store=object(),
+                    evidence_root=directory,
+                    journal_store=selected,
+                    plan_id=plan.plan_id,
+                    spec=spec,
+                    expected_release_artifact_id=RELEASE_ID,
+                    expected_release_artifact_sha256=RELEASE_SHA,
+                    campaign_plan=object(),
+                    campaign_cut=object(),
+                    measurement=object(),
+                )
+
+            terminal.assert_called_once()
+
     def test_legacy_signed_pass_cannot_bypass_missing_composed_authority(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

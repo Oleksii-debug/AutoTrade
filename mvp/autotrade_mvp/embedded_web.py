@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from ._generated_common_scalars import CONTRACT_VERSION as HOST_API_CONTRACT_VERSION
 from .host_network import AuthenticatedHostApplication, TransportResponse
 from .security import _authenticated_origin
 

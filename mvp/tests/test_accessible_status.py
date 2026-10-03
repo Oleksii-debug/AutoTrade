@@ -102,6 +102,13 @@ class AccessibleStatusTests(unittest.TestCase):
                 ],
             }
         )
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 1", text)
+        self.assertNotIn("Active reservations: 3", text)
+        self.assertIn("inspect or restore reservation state", text)
         self.assertIn("Reservation detail: unavailable; malformed state", text)
         self.assertIn("malformed remaining resources", text)
         self.assertIn("Reserved USD: 25.00; state: HELD", text)

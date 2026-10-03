@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -10,6 +11,7 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
@@ -64,6 +66,7 @@ def _borrow_evidence(capacity="100"):
         locate_id="locate-authority-1",
         provider_revision="borrow-snapshot-r1",
         capacity_quantity=capacity,
+        quantity_unit="share",
         hard_to_borrow=True,
         observed_at="2026-09-25T05:00:30Z",
         effective_at="2026-09-25T05:00:00Z",
@@ -206,10 +209,41 @@ def _checkpoint(store, *, recalled=False, local_borrow="40", provider_borrow="40
     )
 
 
-def _authority(store):
+def _instrument_registry(*, quantity_unit="share"):
+    return InstrumentRegistry(
+        versions=(
+            InstrumentVersion(
+                instrument_id=INSTRUMENT_ID,
+                version=1,
+                provider_id=PROVIDER_ID,
+                venue_id="TEST_VENUE",
+                provider_symbol="ABC",
+                asset_class="CASH_EQUITY",
+                base_currency="ABC",
+                quote_currency="USD",
+                settlement_currency="USD",
+                quantity_unit=quantity_unit,
+                contract_multiplier="1",
+                price_tick="0.01",
+                quantity_step="1",
+                minimum_quantity="1",
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            ),
+        )
+    )
+
+
+def _authority(store, *, quantity_unit="share", include_instrument_registry=True):
     service = AuthorityService(
         store,
         evidence_artifact_store=artifact_store_for(store),
+        instrument_registry=(
+            _instrument_registry(quantity_unit=quantity_unit)
+            if include_instrument_registry
+            else None
+        ),
     )
     service.register_policy(_policy())
     return service
@@ -303,6 +337,151 @@ def _admit_short(
 
 
 class SecuritiesBorrowAuthorityTests(unittest.TestCase):
+    def test_increasing_short_requires_canonical_instrument_registry_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = _authority(
+                store,
+                include_instrument_registry=False,
+            )
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "canonical InstrumentRegistry",
+            ):
+                _admit_short(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    suffix="missing-instrument-registry",
+                    reserved=None,
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(
+                reservations.total_reserved(_borrow_key()),
+                Decimal("0"),
+            )
+
+    def test_borrow_unit_must_match_canonical_instrument_contract(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = _authority(store, quantity_unit="contract")
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "quantity unit|instrument scope",
+            ):
+                _admit_short(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    suffix="unit-mismatch",
+                    reserved=None,
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(
+                reservations.total_reserved(_borrow_key()),
+                Decimal("0"),
+            )
+
+    def test_matching_canonical_instrument_unit_survives_restart_and_dispatch(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority = _authority(store, quantity_unit="share")
+            checkpoint = _checkpoint(store)
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit_short(
+                authority,
+                reservations,
+                checkpoint,
+                suffix="canonical-unit",
+                reserved=None,
+                max_age_seconds="120",
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + ("a" * 64),
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-25T05:01:05Z",
+                    capability_snapshot_id="borrow-capability-1",
+                ),
+                (True, "allowed"),
+            )
+
+            restarted_store = JournalStore(path)
+            restarted = _authority(
+                restarted_store,
+                quantity_unit="share",
+            )
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit_short(
+                restarted,
+                restarted_reservations,
+                checkpoint,
+                suffix="canonical-unit",
+                reserved=None,
+                max_age_seconds="120",
+            )
+            self.assertEqual(replay, admitted)
+            self.assertEqual(
+                restarted.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + ("a" * 64),
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-25T05:01:05Z",
+                    capability_snapshot_id="borrow-capability-1",
+                ),
+                (True, "allowed"),
+            )
+
+            wrong_contract = _authority(
+                restarted_store,
+                quantity_unit="contract",
+            )
+            self.assertEqual(
+                wrong_contract.dispatch_allowed(
+                    admitted.admission_id,
+                    intent_hash="sha256:" + ("a" * 64),
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    now="2026-09-25T05:01:05Z",
+                    capability_snapshot_id="borrow-capability-1",
+                ),
+                (False, "financial_evidence_invalid"),
+            )
+
     def test_incremental_short_quantity_handles_crossing_flat_and_reserved_orders(self):
         self.assertEqual(
             incremental_short_borrow_quantity(
@@ -499,6 +678,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
             )
             projection.record_recall(
                 BorrowRecallEvidence(
@@ -510,6 +690,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     instrument_version=1,
                     provider_revision="dispatch-recall-r1",
                     quantity="2",
+                    quantity_unit="share",
                     observed_at="2026-09-25T05:01:20Z",
                     effective_at="2026-09-25T05:01:10Z",
                     evidence_ref="provider:dispatch-recall-r1",
@@ -533,6 +714,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     instrument_version=1,
                     provider_revision="dispatch-recall-r2",
                     resolved_quantity="2",
+                    quantity_unit="share",
                     observed_at="2026-09-25T05:01:45Z",
                     effective_at="2026-09-25T05:01:40Z",
                     evidence_ref="provider:dispatch-recall-r2",
@@ -545,6 +727,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=authority.evidence_artifact_store,
             )
             self.assertEqual(reloaded_projection.active_quantity, Decimal("0"))

@@ -31,7 +31,7 @@ BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE = (
     "application/vnd.autotrade.securities-borrow-evidence+json"
 )
 BORROW_PROVIDER_EVIDENCE_TYPE = "AUTOTRADE_SECURITIES_BORROW_EVIDENCE"
-BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION = 1
+BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION = 2
 
 
 class BorrowEvidenceError(ValueError):
@@ -204,6 +204,7 @@ def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
         "environment": evidence.environment,
         "instrument_id": evidence.instrument_id,
         "instrument_version": evidence.instrument_version,
+        "quantity_unit": evidence.quantity_unit,
         "provider_revision": evidence.provider_revision,
     }
     if isinstance(evidence, BorrowAvailabilityEvidence):
@@ -220,9 +221,9 @@ def verify_provider_borrow_evidence(
     evidence: object,
     artifact_store: ArtifactStore,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise BorrowEvidenceError(
-            "provider borrow evidence requires trusted ArtifactStore"
+            "provider borrow evidence requires canonical ArtifactStore"
         )
     artifact_id, digest, canonical_ref = _immutable_evidence_ref(
         evidence.evidence_ref
@@ -230,7 +231,10 @@ def verify_provider_borrow_evidence(
     expected_receipt = provider_borrow_evidence_receipt(evidence)
     expected_metadata = provider_borrow_evidence_metadata(evidence)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -257,11 +261,10 @@ def verify_provider_borrow_evidence(
             raise ArtifactIntegrityError(
                 "borrow evidence lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
-        FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -322,6 +325,7 @@ class BorrowAvailabilityEvidence:
     locate_id: str
     provider_revision: str
     capacity_quantity: Decimal
+    quantity_unit: str
     hard_to_borrow: bool
     observed_at: str
     effective_at: str
@@ -338,6 +342,7 @@ class BorrowAvailabilityEvidence:
         object.__setattr__(self, "locate_id", _text(self.locate_id, name="locate_id"))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "capacity_quantity", _decimal(self.capacity_quantity, name="capacity_quantity"))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         if not isinstance(self.hard_to_borrow, bool):
             raise TypeError("hard_to_borrow must be boolean")
         observed = _instant(self.observed_at, name="observed_at")
@@ -380,6 +385,7 @@ class BorrowAvailabilityEvidence:
             "locate_id": self.locate_id,
             "provider_revision": self.provider_revision,
             "capacity_quantity": _decimal_text(self.capacity_quantity),
+            "quantity_unit": self.quantity_unit,
             "hard_to_borrow": "true" if self.hard_to_borrow else "false",
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
@@ -415,6 +421,7 @@ class BorrowAvailabilityEvidence:
             locate_id=detail.get("locate_id"),
             provider_revision=detail.get("provider_revision"),
             capacity_quantity=detail.get("capacity_quantity"),
+            quantity_unit=detail.get("quantity_unit"),
             hard_to_borrow=(hard == "true"),
             observed_at=detail.get("observed_at"),
             effective_at=detail.get("effective_at"),
@@ -434,6 +441,7 @@ class BorrowRecallEvidence:
     instrument_version: int
     provider_revision: str
     quantity: Decimal
+    quantity_unit: str
     observed_at: str
     effective_at: str
     evidence_ref: str
@@ -448,6 +456,7 @@ class BorrowRecallEvidence:
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "quantity", _decimal(self.quantity, name="quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         observed = _instant(self.observed_at, name="observed_at")
         effective = _instant(self.effective_at, name="effective_at")
         if _dt(effective) > _dt(observed):
@@ -480,6 +489,7 @@ class BorrowRecallEvidence:
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
             "quantity": _decimal_text(self.quantity),
+            "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
             "evidence_ref": self.evidence_ref,
@@ -502,6 +512,7 @@ class BorrowRecallResolutionEvidence:
     instrument_version: int
     provider_revision: str
     resolved_quantity: Decimal
+    quantity_unit: str
     observed_at: str
     effective_at: str
     evidence_ref: str
@@ -516,6 +527,7 @@ class BorrowRecallResolutionEvidence:
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "resolved_quantity", _decimal(self.resolved_quantity, name="resolved_quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         observed = _instant(self.observed_at, name="observed_at")
         effective = _instant(self.effective_at, name="effective_at")
         if _dt(effective) > _dt(observed):
@@ -545,6 +557,7 @@ class BorrowRecallResolutionEvidence:
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
             "resolved_quantity": _decimal_text(self.resolved_quantity),
+            "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
             "evidence_ref": self.evidence_ref,
@@ -567,12 +580,13 @@ class DurableBorrowRecallProjection:
         environment: str,
         instrument_id: str,
         instrument_version: int,
+        quantity_unit: str,
         evidence_artifact_store: ArtifactStore,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
-        if not isinstance(evidence_artifact_store, ArtifactStore):
-            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError("evidence_artifact_store must be canonical ArtifactStore")
         self.store = store
         self.evidence_artifact_store = evidence_artifact_store
         self.provider_id = _text(provider_id, name="provider_id").upper()
@@ -580,6 +594,7 @@ class DurableBorrowRecallProjection:
         self.environment = _environment(environment)
         self.instrument_id = _instrument_id(instrument_id)
         self.instrument_version = _version(instrument_version)
+        self.quantity_unit = _text(quantity_unit, name="quantity_unit")
         self.resource_key = borrow_resource_key(
             provider_id=self.provider_id,
             account_id=self.account_id,
@@ -602,6 +617,7 @@ class DurableBorrowRecallProjection:
             and evidence.environment == self.environment
             and evidence.instrument_id == self.instrument_id
             and evidence.instrument_version == self.instrument_version
+            and evidence.quantity_unit == self.quantity_unit
             and evidence.resource_key == self.resource_key
         )
 
@@ -671,6 +687,54 @@ class DurableBorrowRecallProjection:
         if recall is None:
             raise KeyError(rid)
         return recall.quantity - self._resolved.get(rid, Decimal("0"))
+
+    def remaining_at(self, recall_id: str, now: str) -> Decimal:
+        """Recall obligation at one financial decision cut.
+
+        Durable future evidence remains in the journal, but a resolution cannot
+        release exposure before both its provider effective time and the time at
+        which that fact was observed by AutoTrade.
+        """
+        rid = _text(recall_id, name="recall_id")
+        recall = self._recalls.get(rid)
+        if recall is None:
+            raise KeyError(rid)
+        point = _dt(_instant(now, name="now"))
+        if _dt(recall.effective_at) > point or _dt(recall.observed_at) > point:
+            return Decimal("0")
+        resolved = sum(
+            (
+                evidence.resolved_quantity
+                for evidence in self._resolutions.values()
+                if evidence.recall_id == rid
+                and _dt(evidence.effective_at) <= point
+                and _dt(evidence.observed_at) <= point
+            ),
+            Decimal("0"),
+        )
+        if resolved > recall.quantity:
+            raise BorrowRecallConflict(
+                "decision-cut resolution exceeds recalled quantity"
+            )
+        return recall.quantity - resolved
+
+    def active_quantity_at(self, now: str) -> Decimal:
+        return sum(
+            (self.remaining_at(rid, now) for rid in self._recalls),
+            Decimal("0"),
+        )
+
+    def active_recall_ids_at(self, now: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                rid
+                for rid in self._recalls
+                if self.remaining_at(rid, now) > 0
+            )
+        )
+
+    def active_blocking_resources_at(self, now: str) -> tuple[str, ...]:
+        return (self.resource_key,) if self.active_quantity_at(now) > 0 else ()
 
     @property
     def active_quantity(self) -> Decimal:

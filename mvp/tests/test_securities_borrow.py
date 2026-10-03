@@ -3,15 +3,19 @@ from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
+    BorrowEvidenceError,
     BorrowRecallConflict,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
     borrow_resource_key,
+    verify_provider_borrow_evidence,
 )
 from mvp.tests.securities_borrow_evidence_helpers import (
     EvidencedBorrowRecallProjection,
@@ -36,6 +40,7 @@ def availability(**overrides):
         locate_id="locate-1",
         provider_revision="borrow-r7",
         capacity_quantity="100",
+        quantity_unit="share",
         hard_to_borrow=True,
         observed_at="2026-09-25T05:00:30Z",
         effective_at="2026-09-25T05:00:00Z",
@@ -57,6 +62,7 @@ def recall(**overrides):
         instrument_version=1,
         provider_revision="recall-r1",
         quantity="3",
+        quantity_unit="share",
         observed_at="2026-09-25T05:01:00Z",
         effective_at="2026-09-25T05:00:45Z",
         deadline="2026-09-25T06:00:00Z",
@@ -77,6 +83,7 @@ def resolution(**overrides):
         instrument_version=1,
         provider_revision="recall-r2",
         resolved_quantity="1",
+        quantity_unit="share",
         observed_at="2026-09-25T05:10:00Z",
         effective_at="2026-09-25T05:09:30Z",
         evidence_ref="provider:recall-r2",
@@ -85,7 +92,36 @@ def resolution(**overrides):
     return BorrowRecallResolutionEvidence(**values)
 
 
+class ForgedArtifactStore(ArtifactStore):
+    def __init__(self):
+        pass
+
+    def read_authenticated_snapshot(self, artifact_id):
+        raise AssertionError("forged ArtifactStore method must never be trusted")
+
+
 class SecuritiesBorrowEvidenceTests(unittest.TestCase):
+    def test_financial_evidence_rejects_polymorphic_artifact_store_authority(self):
+        forged = ForgedArtifactStore()
+        with self.assertRaisesRegex(
+            BorrowEvidenceError,
+            "canonical ArtifactStore",
+        ):
+            verify_provider_borrow_evidence(recall(), forged)
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                DurableBorrowRecallProjection(
+                    JournalStore(f"{directory}/journal.sqlite3"),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    quantity_unit="share",
+                    evidence_artifact_store=forged,
+                )
+
     def test_resource_identity_is_scope_and_version_bound(self):
         base = borrow_resource_key(
             provider_id=PROVIDER_ID,
@@ -127,6 +163,25 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
         self.assertTrue(restored.hard_to_borrow)
         self.assertEqual(restored.indicative_rate, Decimal("0.0125"))
 
+    def test_quantity_unit_is_part_of_provider_evidence_identity(self):
+        evidence = availability()
+        self.assertEqual(evidence.resource_detail()["quantity_unit"], "share")
+        restored = BorrowAvailabilityEvidence.from_resource_detail(
+            evidence.resource_detail()
+        )
+        self.assertEqual(restored.quantity_unit, "share")
+        self.assertEqual(recall().payload()["quantity_unit"], "share")
+        self.assertEqual(resolution().payload()["quantity_unit"], "share")
+
+        with self.assertRaisesRegex(ValueError, "quantity_unit"):
+            BorrowAvailabilityEvidence.from_resource_detail(
+                {
+                    key: value
+                    for key, value in evidence.resource_detail().items()
+                    if key != "quantity_unit"
+                }
+            )
+
     def test_availability_rejects_ambiguous_or_non_exact_inputs(self):
         with self.assertRaises(TypeError):
             availability(capacity_quantity=100.0)
@@ -154,9 +209,21 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
         )
         values.update(overrides)
         return EvidencedBorrowRecallProjection(store or self.store, **values)
+
+    def test_recall_projection_rejects_quantity_unit_mismatch(self):
+        projection = self.projection()
+        with self.assertRaisesRegex(BorrowRecallConflict, "scope mismatch"):
+            projection.record_recall(recall(quantity_unit="contract"))
+
+        projection.record_recall(recall())
+        with self.assertRaisesRegex(BorrowRecallConflict, "scope mismatch"):
+            projection.resolve_recall(
+                resolution(quantity_unit="contract")
+            )
 
     def test_recall_survives_restart_and_projects_existing_equity_state(self):
         projection = self.projection()
@@ -227,6 +294,113 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         self.assertEqual(restarted.active_quantity, Decimal("3"))
         self.assertEqual(restarted.version, 1)
 
+    def test_future_recall_is_invisible_before_provider_fact_is_observed(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:00:30Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:00:50Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:01:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:01:00Z"),
+            (availability().resource_key,),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:00:50Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:01:00Z"),
+            Decimal("3"),
+        )
+
+    def test_future_resolution_cannot_release_before_observation_cut_and_survives_restart(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+        projection.resolve_recall(
+            resolution(
+                resolved_quantity="3",
+                effective_at="2026-09-25T05:09:30Z",
+                observed_at="2026-09-25T05:10:00Z",
+            )
+        )
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:02:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:02:00Z"),
+            (availability().resource_key,),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:09:45Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:10:00Z"),
+            Decimal("0"),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:02:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:10:00Z"),
+            Decimal("0"),
+        )
+
+    def test_partial_future_resolution_chain_is_projected_at_decision_cut(self):
+        projection = self.projection()
+        projection.record_recall(recall(quantity="5"))
+        projection.resolve_recall(
+            resolution(
+                resolved_quantity="2",
+                effective_at="2026-09-25T05:04:00Z",
+                observed_at="2026-09-25T05:05:00Z",
+            )
+        )
+        projection.resolve_recall(
+            resolution(
+                resolution_id="resolution-2",
+                provider_revision="recall-r3",
+                resolved_quantity="3",
+                effective_at="2026-09-25T05:11:00Z",
+                observed_at="2026-09-25T05:12:00Z",
+                evidence_ref="provider:recall-r3",
+            )
+        )
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:04:30Z"),
+            Decimal("5"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:05:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:11:30Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:12:00Z"),
+            Decimal("0"),
+        )
+
     def test_resolution_cannot_over_release_or_cross_scope(self):
         projection = self.projection()
         projection.record_recall(recall())
@@ -279,6 +453,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         return store, artifacts, projection
@@ -351,6 +526,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
+                    quantity_unit="share",
                     evidence_artifact_store=artifact_store_for(store),
                 )
 

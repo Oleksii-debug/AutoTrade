@@ -157,6 +157,17 @@ class ExecutionQualificationTests(unittest.TestCase):
                 **self.validation_kwargs(exec_model)
             )
 
+    def test_artifact_store_instance_snapshot_shadow_is_not_authority(self):
+        exec_model = model()
+        self.store.read_authenticated_snapshot = lambda _artifact_id: (
+            {"sha256": "0" * 64, "manifest_hash": "shadow"},
+            b"shadow evidence",
+        )
+
+        validate_execution_qualification(
+            **self.validation_kwargs(exec_model)
+        )
+
     def test_artifact_store_subclass_cannot_supply_execution_evidence_authority(self):
         class DerivedArtifactStore(ArtifactStore):
             pass

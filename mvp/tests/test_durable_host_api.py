@@ -378,6 +378,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_fresh_submit_concurrent_exact_winner_is_idempotent_without_growth(self):
         store = self.store()
         original_commit = store._journal.commit_command
+        original_class_commit = JournalStore.commit_command
         raced = False
 
         def race_then_commit(*args, **kwargs):
@@ -391,9 +392,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
             return original_commit(*args, **kwargs)
 
         with patch.object(
-            store._journal,
+            JournalStore,
             "commit_command",
-            side_effect=race_then_commit,
+            autospec=True,
+            side_effect=lambda journal, *args, **kwargs: race_then_commit(*args, **kwargs) if journal is store._journal else original_class_commit(journal, *args, **kwargs),
         ):
             accepted = store.submit(self.command())
 
@@ -414,6 +416,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_fresh_submit_rejects_concurrent_domain_inconsistent_saved_result(self):
         store = self.store()
         original_commit = store._journal.commit_command
+        original_class_commit = JournalStore.commit_command
         raced = False
 
         def race_then_commit(*args, **kwargs):
@@ -434,9 +437,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
             return original_commit(*args, **kwargs)
 
         with patch.object(
-            store._journal,
+            JournalStore,
             "commit_command",
-            side_effect=race_then_commit,
+            autospec=True,
+            side_effect=lambda journal, *args, **kwargs: race_then_commit(*args, **kwargs) if journal is store._journal else original_class_commit(journal, *args, **kwargs),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -2153,6 +2157,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_true_concurrent_commit_fence_returns_state_conflict(self):
         first = self.store()
         original_commit = first._journal.commit_command
+        original_class_commit = JournalStore.commit_command
         raced = False
 
         def race_then_commit(*args, **kwargs):
@@ -2173,9 +2178,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
             return original_commit(*args, **kwargs)
 
         with patch.object(
-            first._journal,
+            JournalStore,
             "commit_command",
-            side_effect=race_then_commit,
+            autospec=True,
+            side_effect=lambda journal, *args, **kwargs: race_then_commit(*args, **kwargs) if journal is first._journal else original_class_commit(journal, *args, **kwargs),
         ):
             loser = first.submit(self.command())
 

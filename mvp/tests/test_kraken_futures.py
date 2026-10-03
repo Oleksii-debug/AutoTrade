@@ -26,6 +26,10 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reconciliation import (
+    SnapshotConsistencyEvidence,
+    reconcile_account,
+)
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -582,6 +586,67 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+
+    def test_position_history_fallback_cannot_complete_financial_reconciliation(self):
+        fills = parse_position_executions(
+            futures_position_observation(
+                {
+                    "elements": [
+                        {
+                            "tradeable": "PI_XBTUSD",
+                            "fillTime": 1790280000123,
+                            "fee": "1.25",
+                            "feeCurrency": "USD",
+                            "executionUid": "exec-diagnostic",
+                            "executionPrice": "65000.10",
+                            "executionSize": "0.25",
+                            "timestamp": 1790280000123,
+                            "updateReason": "trade",
+                        }
+                    ]
+                }
+            ),
+            instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            execution_client_ids={"exec-diagnostic": "hedge-diagnostic"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertIsNone(fills[0].side)
+        self.assertEqual(fills[0].evidence_refs, ())
+
+        result = reconcile_account(
+            provider_id="KRAKEN",
+            account_id="paper-1",
+            environment="PAPER",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=["exec-diagnostic"],
+            provider_fills=fills,
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="KRAKEN",
+                account_id="paper-1",
+                environment="PAPER",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:59:00Z",
+                query_completed_at="2026-09-24T20:01:00Z",
+            ),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.matched_execution_ids, ())
+        self.assertEqual(
+            result.missing_local_execution_ids,
+            ("exec-diagnostic",),
+        )
+        self.assertEqual(result.unexpected_provider_fills, ())
+        self.assertIn("ACCOUNT", result.blocking_resources)
+        self.assertIn(
+            "provider execution evidence lacks reconciliation financial direction/provenance authority",
+            result.reasons,
+        )
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(

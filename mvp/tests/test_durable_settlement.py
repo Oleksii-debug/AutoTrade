@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
@@ -483,11 +484,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             settlements = durable(store)
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected settlement commit failure")
 
-            store.commit_command = fail
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     settlements.register_obligations(
                         (obligation(store),),
@@ -495,8 +495,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                         idempotency_key="register",
                         committed_at="2026-09-25T09:00:02Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
 
@@ -728,11 +726,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             before_obligations = settlements.obligations
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected correction commit failure")
 
-            store.commit_command = fail
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     commit_economic_correction_with_settlement_replacement(
                         economic,
@@ -744,8 +741,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                         settlement_obligations=(replacement_obligation,),
                         committed_at="2026-09-25T10:00:02Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             self.assertEqual(economic.audit_digest(), before_economic)
             self.assertEqual(settlements.obligations, before_obligations)

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import threading
+import weakref
 from types import MappingProxyType
 from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -20,7 +22,14 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
-from .persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import exact_add, exact_subtract, exact_abs
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -36,13 +45,18 @@ from .risk import (
     RiskDecision,
     RiskIntent,
     RiskPolicy,
+    RISK_ARITHMETIC_POLICY_ID,
     evaluate_bound_risk,
     normalize_reservation_requirements,
     reservation_requirements_payload,
     risk_decision_fingerprint,
     validate_bound_risk_decision,
 )
-from .risk_policy_authority import canonical_risk_policy, risk_policy_payload
+from .risk_policy_authority import (
+    DurableRiskPolicyRegistry, ResolvedRiskPolicy, RiskPolicyScope,
+    canonical_risk_policy, risk_policy_payload,
+    require_registry_issued_resolved_policy, journal_store_identity_digest,
+)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -398,6 +412,159 @@ class AdmissionRecord:
 
 class AuthorityConflict(ValueError):
     """Raised when immutable authority identity is reused inconsistently."""
+
+
+def _authority_service_store_operations():
+    """Seal one AuthorityService to one exact JournalStore generation.
+
+    The selected store and physical identity live in closure-owned process state,
+    not in caller-writable AuthorityService instance/module data. Callback-free
+    weakrefs let dead services/stores be reclaimed; stale object-id entries are
+    discarded lazily on reuse without reopening a live one-shot binding.
+    """
+
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType | None,
+            object | None,
+            tuple[str, ...] | None,
+        ],
+    ] = {}
+    state_lock = threading.RLock()
+    missing = object()
+
+    def register(service: object, store: JournalStore | None, risk_policy_scope: RiskPolicyScope | None = None) -> None:
+        scope_payload = None
+        if risk_policy_scope is not None:
+            if type(risk_policy_scope) is not RiskPolicyScope or store is None:
+                raise TypeError("durable RiskPolicy scope requires exact scope and JournalStore")
+            scope_payload = tuple(risk_policy_scope.payload().values())
+        identity = None
+        store_ref = None
+        if store is not None:
+            identity = require_exact_journal_store_authority(
+                store,
+                subject="AuthorityService journal store",
+            )
+            # Keep process registry references callback-free. A weakref callback
+            # is discoverable from the live referent and can otherwise be
+            # invoked manually to erase a one-shot authority binding.
+            store_ref = weakref.ref(store)
+
+        object_id = id(service)
+        with state_lock:
+            current = states.get(object_id)
+            if current is not None:
+                current_service = current[0]()
+                if current_service is service:
+                    raise AuthorityConflict(
+                        "AuthorityService journal composition is already initialized"
+                    )
+                if current_service is not None:
+                    raise AuthorityConflict(
+                        "AuthorityService journal binding identity collision"
+                    )
+                states.pop(object_id, None)
+            states[object_id] = (
+                weakref.ref(service),
+                store_ref,
+                identity,
+                scope_payload,
+            )
+
+    def binding(
+        service: object,
+        *,
+        required: bool = False,
+    ) -> tuple[JournalStore | None, object | None]:
+        with state_lock:
+            state = states.get(id(service))
+        if state is None or state[0]() is not service:
+            raise AuthorityConflict(
+                "AuthorityService journal process state is unavailable"
+            )
+
+        expected_identity = state[2]
+        store = None if state[1] is None else state[1]()
+        if expected_identity is not None and store is None:
+            raise AuthorityConflict(
+                "AuthorityService selected journal store was lost"
+            )
+        visible_store = vars(service).get("store", missing)
+        if visible_store is not store:
+            raise AuthorityConflict(
+                "AuthorityService journal store binding was modified"
+            )
+
+        if store is None:
+            if required:
+                raise AuthorityConflict(
+                    "AuthorityService operation requires a JournalStore"
+                )
+            return None, None
+
+        try:
+            current_identity = require_exact_journal_store_authority(
+                store,
+                subject="AuthorityService selected journal store",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise AuthorityConflict(
+                "AuthorityService selected journal authority is no longer valid"
+            ) from error
+        if current_identity != expected_identity:
+            raise AuthorityConflict(
+                "AuthorityService journal store generation changed"
+            )
+        return store, expected_identity
+
+    def policy_scope(service: object) -> RiskPolicyScope | None:
+        binding(service)
+        with state_lock:
+            payload = states[id(service)][3]
+        return None if payload is None else RiskPolicyScope(*payload)
+
+    return register, binding, policy_scope
+
+
+(
+    _register_authority_service_store,
+    _authority_service_store_binding,
+    _authority_service_risk_policy_scope,
+) = _authority_service_store_operations()
+del _authority_service_store_operations
+
+
+def _authority_service_store(
+    service: object,
+    *,
+    required: bool = False,
+) -> JournalStore | None:
+    return _authority_service_store_binding(service, required=required)[0]
+
+
+def _authority_store_call(
+    service: object,
+    method_name: str,
+    /,
+    *args,
+    **kwargs,
+):
+    store, expected_identity = _authority_service_store_binding(
+        service,
+        required=True,
+    )
+    assert store is not None
+    assert expected_identity is not None
+    method = getattr(JournalStore, method_name, None)
+    if not callable(method):
+        raise AuthorityConflict(
+            f"unsupported AuthorityService journal operation: {method_name}"
+        )
+    with journal_store_authority_scope(store, expected_identity):
+        return method(store, *args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -781,6 +948,10 @@ class RiskAuthorityRequest:
     authority_policy_id: str
     authority_policy_version: int
     evaluated_at: str
+    resolved_risk_policy: ResolvedRiskPolicy | None = None
+    provider_environment: str | None = None
+    entity_policy_id: str | None = None
+    instrument_family: str | None = None
 
     def __post_init__(self) -> None:
         canonical_intent = _canonical_risk_intent(self.risk_intent)
@@ -793,6 +964,19 @@ class RiskAuthorityRequest:
         provider = _text(
             self.provider_id, name="risk authority provider_id"
         ).upper()
+        if self.resolved_risk_policy is not None:
+            resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
+            scope = resolved.identity.scope
+            if (scope.provider_id, scope.account_id, scope.environment,
+                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
+                provider, account, environment, self.provider_environment,
+                self.entity_policy_id, self.instrument_family):
+                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
+                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+        elif any(value is not None for value in (
+            self.provider_environment, self.entity_policy_id, self.instrument_family)):
+            raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -932,6 +1116,10 @@ class AuthoritativeRiskSnapshot:
     evaluated_at: str
     valid_until: str
     evidence_refs: Mapping[str, str]
+    resolved_risk_policy: ResolvedRiskPolicy | None = None
+    provider_environment: str | None = None
+    entity_policy_id: str | None = None
+    instrument_family: str | None = None
 
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
@@ -945,6 +1133,21 @@ class AuthoritativeRiskSnapshot:
         provider = _text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
+        if self.resolved_risk_policy is not None:
+            resolved = require_registry_issued_resolved_policy(self.resolved_risk_policy)
+            scope = resolved.identity.scope
+            if (scope.provider_id, scope.account_id, scope.environment,
+                scope.provider_environment, scope.entity_policy_id, scope.instrument_family) != (
+                provider, account, environment, self.provider_environment,
+                self.entity_policy_id, self.instrument_family):
+                raise AuthorityConflict("resolved RiskPolicy scope differs from financial cut")
+            if resolved.resolved_journal_sequence_cut != self.journal_sequence_cut:
+                raise AuthorityConflict("resolved RiskPolicy journal cut differs from financial cut")
+        elif any(value is not None for value in (
+            self.provider_environment, self.entity_policy_id, self.instrument_family)):
+            raise AuthorityConflict("provider-domain dimensions require resolved RiskPolicy authority")
+        if self.resolved_risk_policy is not None and risk_policy_payload(canonical_policy) != risk_policy_payload(resolved.policy):
+            raise AuthorityConflict("snapshot RiskPolicy content differs from registry authority")
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -1028,6 +1231,8 @@ class AuthoritativeRiskSnapshot:
             required.add("OPTION_LIFECYCLE")
         if normalized_context.futures_delivery_headroom_seconds:
             required.add("FUTURES_LIFECYCLE")
+        if self.resolved_risk_policy is not None and refs.get("POLICY") != resolved.registration_event_id:
+            raise AuthorityConflict("POLICY evidence differs from durable registration")
         missing = sorted(required - set(refs))
         if missing:
             raise ValueError(
@@ -1088,7 +1293,18 @@ class AuthoritativeRiskSnapshot:
         )
 
     def _identity_payload(self) -> dict[str, Any]:
+        resolved_risk_policy = self.resolved_risk_policy
+        if resolved_risk_policy is not None:
+            require_registry_issued_resolved_policy(resolved_risk_policy)
+        # Keep every activation/registration/cut/store field from evidence_payload.
+        # registration_event_id, activation_event_id, resolved_journal_sequence_cut,
+        # journal_store_identity_digest are canonical registry-owned identities.
         return {
+            **({"resolved_risk_policy": resolved_risk_policy.evidence_payload,
+                "provider_environment": self.provider_environment,
+                "entity_policy_id": self.entity_policy_id,
+                "instrument_family": self.instrument_family}
+               if resolved_risk_policy is not None else {}),
             "context_fingerprint": _risk_context_fingerprint(self.context),
             "context_state_version": self.context.state_version,
             "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),
@@ -1147,32 +1363,40 @@ class AuthorityService:
             AllocationAuthoritySnapshot,
         ]
         | None = None,
+        risk_policy_scope: RiskPolicyScope | None = None,
         risk_authority_resolver: Callable[
             [RiskAuthorityRequest],
             AuthoritativeRiskSnapshot,
         ]
         | None = None,
     ):
-        self.store = store
+        # Validate all composition inputs before publishing any process binding.
+        # Explicit __init__ re-entry must fail before it can reset established
+        # in-memory authority state or retarget durable journal history.
         if (
             evidence_artifact_store is not None
             and not isinstance(evidence_artifact_store, ArtifactStore)
         ):
             raise TypeError("evidence_artifact_store must be ArtifactStore")
-        self.evidence_artifact_store = evidence_artifact_store
-        # Generic callable resolver injection is a SIMULATION-only seam. PAPER/LIVE
-        # must use the product-owned typed issuer/composition tracked by #987;
-        # a caller callback remains untrusted even when its returned value is sealed.
         if (
             allocation_authority_resolver is not None
             and not callable(allocation_authority_resolver)
         ):
             raise TypeError("allocation_authority_resolver must be callable")
-        self.allocation_authority_resolver = allocation_authority_resolver
         if risk_authority_resolver is not None and not callable(
             risk_authority_resolver
         ):
             raise TypeError("risk_authority_resolver must be callable")
+
+        _register_authority_service_store(self, store, risk_policy_scope)
+        # Compatibility/diagnostic view only. Internal authority always resolves
+        # the closure-owned binding and rejects caller retargeting.
+        self.store = store
+        self.evidence_artifact_store = evidence_artifact_store
+        # Generic callable resolver injection is a SIMULATION-only seam. PAPER/LIVE
+        # must use the product-owned typed issuer/composition tracked by #987;
+        # a caller callback remains untrusted even when its returned value is sealed.
+        self.allocation_authority_resolver = allocation_authority_resolver
         self.risk_authority_resolver = risk_authority_resolver
         self._policies: dict[str, AuthorityPolicy] = {}
         self._revocations: dict[str, tuple[str, str]] = {}
@@ -1186,8 +1410,27 @@ class AuthorityService:
         # confirmations/admissions advance the journal even when they do not
         # change the policy/revocation epoch.
         self._journal_version = 0
-        if self.store is not None:
+        if store is not None:
             self._restore_journal()
+
+    def _risk_policy_cut(self, *, provider_id: str, account_id: str,
+                         environment: str, journal_sequence_cut: int) -> dict[str, object]:
+        scope = _authority_service_risk_policy_scope(self)
+        if scope is None:
+            return {}
+        if (scope.provider_id, scope.account_id, scope.environment) != (
+            provider_id.upper(), account_id, environment.upper()):
+            raise AuthorityConflict("service RiskPolicy scope differs from financial request")
+        store, identity = _authority_service_store_binding(self, required=True)
+        resolved = DurableRiskPolicyRegistry(store).resolve_current(
+            scope, journal_sequence_cut=journal_sequence_cut)
+        require_registry_issued_resolved_policy(resolved)
+        if resolved.journal_store_identity_digest != journal_store_identity_digest(identity):
+            raise AuthorityConflict("RiskPolicy belongs to another JournalStore generation")
+        return {"resolved_risk_policy": resolved,
+                "provider_environment": scope.provider_environment,
+                "entity_policy_id": scope.entity_policy_id,
+                "instrument_family": scope.instrument_family}
 
     def _resolve_authoritative_risk_snapshot(
         self,
@@ -1205,12 +1448,22 @@ class AuthorityService:
             raise AuthorityConflict(
                 "financial admission requires a service-owned authoritative risk resolver"
             )
+        request = replace(request)  # revalidate frozen-object mutation at use time
+        if request.resolved_risk_policy is not None:
+            selected = self._risk_policy_cut(provider_id=request.provider_id,
+                account_id=request.account_id, environment=request.environment,
+                journal_sequence_cut=request.journal_sequence_cut)
+            if not selected or selected["resolved_risk_policy"].evidence_payload != request.resolved_risk_policy.evidence_payload:
+                raise AuthorityConflict("request RiskPolicy differs from service-selected journal authority")
         snapshot = self.risk_authority_resolver(request)
         if type(snapshot) is not AuthoritativeRiskSnapshot:
             raise AuthorityConflict(
                 "risk authority resolver must return exact AuthoritativeRiskSnapshot"
             )
+        snapshot = replace(snapshot)
         expected = (
+            request.resolved_risk_policy.evidence_payload if request.resolved_risk_policy else None,
+            request.provider_environment, request.entity_policy_id, request.instrument_family,
             request.account_id,
             request.environment,
             request.provider_id,
@@ -1225,6 +1478,8 @@ class AuthorityService:
             request.evaluated_at,
         )
         actual = (
+            snapshot.resolved_risk_policy.evidence_payload if snapshot.resolved_risk_policy else None,
+            snapshot.provider_environment, snapshot.entity_policy_id, snapshot.instrument_family,
             snapshot.account_id,
             snapshot.environment,
             snapshot.provider_id,
@@ -1307,14 +1562,14 @@ class AuthorityService:
         }
 
     def _persist(self, event_type: str, key: str, payload: dict[str, Any], *, committed_at: str) -> None:
-        if self.store is None:
+        if _authority_service_store(self) is None:
             return
 
         # Compare-and-append from this process's observed journal position.
         # Reading "next version" from the shared DB here would let a stale
         # AuthorityService silently append after another process and make
         # decisions from obsolete confirmation/revocation state.
-        durable_next = self.store.next_aggregate_version(
+        durable_next = _authority_store_call(self, "next_aggregate_version",
             "authority_state", "canonical"
         )
         durable_version = durable_next - 1
@@ -1324,7 +1579,7 @@ class AuthorityService:
             )
 
         event_id = _authority_event_id(event_type, key)
-        existing = self.store.get_event(event_id)
+        existing = _authority_store_call(self, "get_event", event_id)
         if existing is not None:
             if existing["event_type"] != event_type or existing["payload"] != payload:
                 raise AuthorityConflict("durable authority event conflicts with existing content")
@@ -1343,17 +1598,17 @@ class AuthorityService:
             "committed_at": committed_at,
         }
         try:
-            result = self.store.append_event(envelope)
+            result = _authority_store_call(self, "append_event", envelope)
         except ValueError as error:
             # A concurrent writer may have won after the version check but
             # before our append. Never reinterpret that race as idempotency:
             # the caller must reload and re-evaluate authority state.
-            existing = self.store.get_event(event_id)
+            existing = _authority_store_call(self, "get_event", event_id)
             if (
                 existing is not None
                 and existing["event_type"] == event_type
                 and existing["payload"] == payload
-                and self.store.next_aggregate_version(
+                and _authority_store_call(self, "next_aggregate_version",
                     "authority_state", "canonical"
                 ) - 1 == self._journal_version
             ):
@@ -1365,8 +1620,8 @@ class AuthorityService:
             self._journal_version += 1
 
     def _restore_journal(self) -> None:
-        assert self.store is not None
-        for event in self.store.load_events("authority_state", "canonical"):
+        assert _authority_service_store(self, required=True) is not None
+        for event in _authority_store_call(self, "load_events", "authority_state", "canonical"):
             payload = event["payload"]
             event_type = event["event_type"]
             event_version = int(event["aggregate_version"])
@@ -1645,7 +1900,7 @@ class AuthorityService:
         evidence are durably self-consistent.
         """
 
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "historical financial retry requires a JournalStore"
             )
@@ -1666,7 +1921,7 @@ class AuthorityService:
                 "historical financial retry policy identity is inconsistent"
             )
 
-        risk_events = self.store.load_events(
+        risk_events = _authority_store_call(self, "load_events",
             "risk_decision", record.risk_decision_id
         )
         if (
@@ -1679,6 +1934,16 @@ class AuthorityService:
             )
         risk_event = risk_events[0]
         risk_payload = risk_event["payload"]
+        historical_arithmetic_policy_id = risk_payload.get(
+            "arithmetic_policy_id"
+        )
+        if (
+            historical_arithmetic_policy_id is not None
+            and historical_arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID
+        ):
+            raise AuthorityConflict(
+                "historical risk arithmetic policy is unsupported"
+            )
 
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
@@ -1819,11 +2084,11 @@ class AuthorityService:
                     "historical reservation identity is inconsistent"
                 )
             reservation_book = DurableReservationBook(
-                self.store,
+                _authority_service_store(self, required=True),
                 environment=record.environment,
                 account_id=record.account_id,
             )
-            reservation_events = self.store.load_events(
+            reservation_events = _authority_store_call(self, "load_events",
                 "reservation_book",
                 reservation_book.scope_id,
             )
@@ -1866,7 +2131,7 @@ class AuthorityService:
                 availability_evidence.get("checkpoint_event_id"),
                 name="checkpoint_event_id",
             )
-            checkpoint = self.store.get_event(checkpoint_event_id)
+            checkpoint = _authority_store_call(self, "get_event", checkpoint_event_id)
             if checkpoint is None:
                 raise AuthorityConflict(
                     "historical availability checkpoint is missing"
@@ -1943,6 +2208,10 @@ class AuthorityService:
             "risk_reducing": record.risk_reducing,
             "journal_sequence_cut": journal_sequence_cut,
         }
+        if historical_arithmetic_policy_id is not None:
+            request["risk_arithmetic_policy_id"] = (
+                historical_arithmetic_policy_id
+            )
         if "allocation_evidence" in risk_payload:
             allocation_evidence = risk_payload.get(
                 "allocation_evidence"
@@ -1976,7 +2245,7 @@ class AuthorityService:
         *,
         require_transaction_cut: bool = False,
     ) -> None:
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "durable financial evidence requires a JournalStore"
             )
@@ -1998,7 +2267,7 @@ class AuthorityService:
                 "durable admitted record policy version is stale"
             )
 
-        risk_events = self.store.load_events(
+        risk_events = _authority_store_call(self, "load_events",
             "risk_decision", record.risk_decision_id
         )
         if len(risk_events) != 1 or risk_events[0]["event_type"] != "RiskDecisionRecorded":
@@ -2009,6 +2278,10 @@ class AuthorityService:
         risk_payload = risk_event["payload"]
         if type(risk_payload) is not dict:
             raise AuthorityConflict("durable risk decision payload is malformed")
+        if risk_payload.get("arithmetic_policy_id") != RISK_ARITHMETIC_POLICY_ID:
+            raise AuthorityConflict(
+                "durable risk arithmetic policy is missing or stale"
+            )
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
             "financial_idempotency_key"
@@ -2136,7 +2409,7 @@ class AuthorityService:
             raise AuthorityConflict("risk decision was expired at admission")
 
         reservation_book = DurableReservationBook(
-            self.store,
+            _authority_service_store(self, required=True),
             environment=record.environment,
             account_id=record.account_id,
         )
@@ -2151,7 +2424,7 @@ class AuthorityService:
                 "durable reservation intent does not match admission"
             )
 
-        reservation_events = self.store.load_events(
+        reservation_events = _authority_store_call(self, "load_events",
             "reservation_book", reservation_book.scope_id
         )
         matching_reservations = [
@@ -2194,7 +2467,7 @@ class AuthorityService:
         try:
             regenerated_availability = (
                 load_account_resource_availability_evidence(
-                    self.store,
+                    _authority_service_store(self, required=True),
                     checkpoint_event_id=_text(
                         availability_evidence.get("checkpoint_event_id"),
                         name="checkpoint_event_id",
@@ -2252,7 +2525,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "durable latest reconciliation journal sequence is invalid"
                 )
-            scope_checkpoint = self.store.get_event(scope_latest_event_id)
+            scope_checkpoint = _authority_store_call(self, "get_event", scope_latest_event_id)
             if (
                 scope_checkpoint is None
                 or scope_checkpoint.get("journal_sequence")
@@ -2381,7 +2654,7 @@ class AuthorityService:
                     or total_capacity != provider_total
                     or current_borrowed > total_capacity
                     or reservable_capacity
-                    != total_capacity - current_borrowed
+                    != exact_subtract(total_capacity, current_borrowed)
                     or required_increment != required
                     or required > reservable_capacity
                 ):
@@ -2451,6 +2724,7 @@ class AuthorityService:
             "capability_snapshot_id": record.capability_snapshot_id,
             "risk_decision_id": record.risk_decision_id,
             "risk_decision_fingerprint": risk_payload.get("fingerprint"),
+            "risk_arithmetic_policy_id": RISK_ARITHMETIC_POLICY_ID,
             "reservation_id": record.reservation_id,
             "reservation": reservation_event["payload"].get("request"),
             "reservation_availability_evidence": availability_evidence,
@@ -2529,7 +2803,7 @@ class AuthorityService:
         specified and qualified durable transition.
         """
 
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "durable new-exposure block requires a JournalStore"
             )
@@ -2571,7 +2845,7 @@ class AuthorityService:
             "AuthorityNewExposureBlocked",
             event_key,
         )
-        existing = self.store.get_event(event_id)
+        existing = _authority_store_call(self, "get_event", event_id)
         if existing is not None:
             if (
                 existing["event_type"] != "AuthorityNewExposureBlocked"
@@ -2614,7 +2888,7 @@ class AuthorityService:
         still match.
         """
 
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "durable new-exposure restore requires a JournalStore"
             )
@@ -2662,7 +2936,7 @@ class AuthorityService:
             "AuthorityNewExposureRestored",
             event_key,
         )
-        existing_event = self.store.get_event(event_id)
+        existing_event = _authority_store_call(self, "get_event", event_id)
         if existing_event is not None:
             if (
                 existing_event["event_type"] != "AuthorityNewExposureRestored"
@@ -2886,7 +3160,7 @@ class AuthorityService:
 
         if (
             outcome == "ADMITTED"
-            and self.store is not None
+            and _authority_service_store(self) is not None
             and env in {"PAPER", "LIVE"}
         ):
             raise AuthorityConflict(
@@ -2946,11 +3220,11 @@ class AuthorityService:
             )
 
         if existing is not None:
-            if existing.risk_decision_id is None or self.store is None:
+            if existing.risk_decision_id is None or _authority_service_store(self) is None:
                 raise AuthorityConflict(
                     "existing allocation admission lacks durable risk evidence"
                 )
-            events = self.store.load_events(
+            events = _authority_store_call(self, "load_events",
                 "risk_decision",
                 existing.risk_decision_id,
             )
@@ -3104,8 +3378,8 @@ class AuthorityService:
             risk_intent.symbol,
             Decimal("0"),
         )
-        effective_position = current_position + reserved_delta
-        remaining = target.quantity - effective_position
+        effective_position = exact_add(current_position, reserved_delta)
+        remaining = exact_subtract(target.quantity, effective_position)
         if remaining == 0:
             raise AuthorityConflict(
                 "allocation target already has no remaining quantity"
@@ -3115,7 +3389,7 @@ class AuthorityService:
             raise AuthorityConflict(
                 "risk intent side moves away from allocation target"
             )
-        if risk_intent.quantity > abs(remaining):
+        if risk_intent.quantity > exact_abs(remaining):
             raise AuthorityConflict(
                 "risk intent quantity exceeds remaining allocation target"
             )
@@ -3210,13 +3484,13 @@ class AuthorityService:
         risk_intent = _canonical_risk_intent(risk_intent)
         canonical_caller_risk_context = _canonical_risk_context(risk_context)
         canonical_caller_risk_policy = canonical_risk_policy(risk_policy)
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "durable financial admission requires a JournalStore"
             )
         if not isinstance(reservation_book, DurableReservationBook):
             raise TypeError("reservation_book must be DurableReservationBook")
-        if reservation_book.store is not self.store:
+        if reservation_book.store is not _authority_service_store(self, required=True):
             raise AuthorityConflict(
                 "authority and reservation book must share one JournalStore"
             )
@@ -3447,7 +3721,7 @@ class AuthorityService:
             return existing
 
         if existing is None:
-            journal_sequence_cut = self.store.current_journal_sequence()
+            journal_sequence_cut = _authority_store_call(self, "current_journal_sequence")
             reservation_version = reservation_book.version
             evaluated_at = _text(now, name="now")
             caller_valid_until = _text(
@@ -3469,6 +3743,9 @@ class AuthorityService:
                 authority_policy_id=policy.policy_id,
                 authority_policy_version=policy.version,
                 evaluated_at=evaluated_at,
+                **self._risk_policy_cut(provider_id=snapshot_provider_id,
+                    account_id=account_id, environment=environment,
+                    journal_sequence_cut=journal_sequence_cut),
             )
             risk_snapshot = self._resolve_authoritative_risk_snapshot(
                 risk_authority_request
@@ -3594,7 +3871,7 @@ class AuthorityService:
             normalized_max_age = _canonical_decimal_text(max_age)
 
             if existing is not None:
-                durable_risk_events = self.store.load_events(
+                durable_risk_events = _authority_store_call(self, "load_events",
                     "risk_decision", existing.risk_decision_id
                 )
                 if (
@@ -3627,7 +3904,7 @@ class AuthorityService:
             else:
                 try:
                     loaded = load_account_resource_availability_evidence(
-                        self.store,
+                        _authority_service_store(self, required=True),
                         checkpoint_event_id=checkpoint_event_id,
                         provider_id=provider_id,
                         account_id=account_id,
@@ -3749,7 +4026,7 @@ class AuthorityService:
                     or durable_required_increment != required_borrow_quantity
                     or durable_current_borrowed > total_capacity
                     or reservable_capacity
-                    != total_capacity - durable_current_borrowed
+                    != exact_subtract(total_capacity, durable_current_borrowed)
                     or durable_available
                     not in {total_capacity, reservable_capacity}
                 ):
@@ -3791,7 +4068,7 @@ class AuthorityService:
                             "provider borrow capacity is below current local borrow"
                         )
                     reservable_capacity = (
-                        total_capacity - current_borrowed_quantity
+                        exact_subtract(total_capacity, current_borrowed_quantity)
                     )
                     authoritative_available[required_borrow_resource] = (
                         reservable_capacity
@@ -3839,6 +4116,7 @@ class AuthorityService:
 
         if existing is None:
             reservation_book.refresh()
+            current_cut = _authority_store_call(self, "current_journal_sequence")
             current_risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
                 account_id=account_id,
@@ -3849,12 +4127,15 @@ class AuthorityService:
                 reconciliation_checkpoint_event_id=(
                     snapshot_checkpoint_event_id
                 ),
-                journal_sequence_cut=self.store.current_journal_sequence(),
+                journal_sequence_cut=current_cut,
                 reservation_version=reservation_book.version,
                 reservation_state_digest=reservation_book.state_digest,
                 authority_policy_id=policy.policy_id,
                 authority_policy_version=policy.version,
                 evaluated_at=evaluated_at,
+                **self._risk_policy_cut(provider_id=snapshot_provider_id,
+                    account_id=account_id, environment=environment,
+                    journal_sequence_cut=current_cut),
             )
             current_risk_snapshot = self._resolve_authoritative_risk_snapshot(
                 current_risk_authority_request
@@ -3937,13 +4218,13 @@ class AuthorityService:
         event, and execution outbox intent share one JournalStore transaction.
         """
 
-        if self.store is None:
+        if _authority_service_store(self) is None:
             raise AuthorityConflict(
                 "durable financial admission requires a JournalStore"
             )
         if not isinstance(reservation_book, DurableReservationBook):
             raise TypeError("reservation_book must be DurableReservationBook")
-        if reservation_book.store is not self.store:
+        if reservation_book.store is not _authority_service_store(self, required=True):
             raise AuthorityConflict(
                 "authority and reservation book must share one JournalStore"
             )
@@ -4082,7 +4363,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "admission_id already belongs to another financial command"
                 )
-            durable_risk_events = self.store.load_events(
+            durable_risk_events = _authority_store_call(self, "load_events",
                 "risk_decision", existing.risk_decision_id
             )
             if (
@@ -4116,6 +4397,15 @@ class AuthorityService:
             ):
                 raise AuthorityConflict(
                     "authoritative risk snapshot changed for an existing financial command"
+                )
+            if (
+                durable_risk_payload.get("arithmetic_policy_id")
+                != RISK_ARITHMETIC_POLICY_ID
+                or risk_decision.arithmetic_policy_id
+                != RISK_ARITHMETIC_POLICY_ID
+            ):
+                raise AuthorityConflict(
+                    "risk arithmetic policy changed for an existing financial command"
                 )
             return existing
 
@@ -4189,6 +4479,7 @@ class AuthorityService:
             "capability_snapshot_id": capability,
             "risk_decision_id": risk_decision.decision_id,
             "risk_decision_fingerprint": risk_decision_fingerprint(risk_decision),
+            "risk_arithmetic_policy_id": risk_decision.arithmetic_policy_id,
             "reservation_id": rid,
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
@@ -4220,6 +4511,7 @@ class AuthorityService:
         risk_payload = {
             "decision_id": risk_decision.decision_id,
             "fingerprint": risk_decision_fingerprint(risk_decision),
+            "arithmetic_policy_id": risk_decision.arithmetic_policy_id,
             "intent_hash": risk_decision.intent_hash,
             "risk_intent": canonical_risk_intent_payload,
             "financial_idempotency_key": scoped_idempotency_key,
@@ -4301,7 +4593,7 @@ class AuthorityService:
             ),
         }
         try:
-            self.store.commit_command(
+            _authority_store_call(self, "commit_command",
                 command_id=scoped_command_id,
                 actor="autotrade-financial-writer",
                 environment=env,
@@ -4324,10 +4616,10 @@ class AuthorityService:
         return record
 
     def _durable_authority_state_current(self) -> bool:
-        if self.store is None:
+        if _authority_service_store(self) is None:
             return True
         durable_version = (
-            self.store.next_aggregate_version("authority_state", "canonical") - 1
+            _authority_store_call(self, "next_aggregate_version", "authority_state", "canonical") - 1
         )
         return durable_version == self._journal_version
 
@@ -4418,12 +4710,12 @@ class AuthorityService:
                     require_transaction_cut=True,
                 )
                 reservation_book = DurableReservationBook(
-                    self.store,
+                    _authority_service_store(self, required=True),
                     environment=record.environment,
                     account_id=record.account_id,
                 )
                 reservation = reservation_book.get(record.reservation_id)
-                risk_event = self.store.load_events(
+                risk_event = _authority_store_call(self, "load_events",
                     "risk_decision", record.risk_decision_id
                 )[0]
                 risk_payload = risk_event["payload"]
@@ -4462,7 +4754,7 @@ class AuthorityService:
                 # Sending is a distinct authority boundary: the exact persisted
                 # checkpoint/resources must still be current *now*.
                 load_account_resource_availability_evidence(
-                    self.store,
+                    _authority_service_store(self, required=True),
                     checkpoint_event_id=_text(
                         availability_evidence.get("checkpoint_event_id"),
                         name="checkpoint_event_id",
@@ -4527,7 +4819,7 @@ class AuthorityService:
                                 "borrow dispatch requires trusted ArtifactStore"
                             )
                         projection = DurableBorrowRecallProjection(
-                            self.store,
+                            _authority_service_store(self, required=True),
                             provider_id=borrow.provider_id,
                             account_id=borrow.account_id,
                             environment=borrow.environment,

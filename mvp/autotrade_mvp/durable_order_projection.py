@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
 from typing import Mapping, Sequence
+from threading import RLock
+import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -29,7 +32,8 @@ from .order_projection import (
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (JournalStore, canonical_json, payload_digest,
+    require_exact_journal_store_authority, journal_store_authority_scope)
 
 
 _AGGREGATE_TYPE = "order_projection_book"
@@ -42,6 +46,7 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
         "BUST_FILL",
         "CONFIRM_CANCEL",
         "REJECT_CANCEL",
+        "REJECT_REPLACE",
         "CONFIRM_EXPIRED",
     }
 )
@@ -72,15 +77,13 @@ def _instant(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
+
 
 
 def _decimal_text(value, *, name: str) -> str:
@@ -207,8 +210,91 @@ class DurableOrderMutationResult:
     snapshot: OrderSnapshot
 
 
+@dataclass(frozen=True)
+class PreparedOrderMutation:
+    """One canonical OMS mutation prepared without durable side effects."""
+
+    event_key: str
+    operation: str
+    request: dict[str, object]
+    snapshot: OrderSnapshot
+    snapshot_payload: dict[str, object]
+    event_id: str
+    envelope: dict[str, object] | None
+    aggregate_version: int
+    mutation_hash: str
+    already_committed: bool = False
+
+
+_ORDER_STATE_FIELDS = frozenset({
+    "store", "provider_id", "account_id", "environment", "host_id", "owner_epoch",
+    "evidence_artifact_store", "aggregate_id", "_book", "_idempotency",
+})
+_ORDER_SCOPE_FIELDS = ("provider_id", "account_id", "environment", "host_id", "owner_epoch", "aggregate_id")
+
+
+def _order_projection_binding_operations():
+    bindings = {}
+    lock = RLock()
+
+    def registered(value):
+        with lock:
+            entry = bindings.get(id(value))
+            return entry is not None and entry[0]() is value
+
+    def bind(value):
+        with lock:
+            if registered(value):
+                raise OrderProjectionConflict("durable OMS composition is already initialized")
+            for key in [key for key, entry in bindings.items() if entry[0]() is None]:
+                bindings.pop(key)
+            state = object.__getattribute__(value, "__dict__")
+            store = state["store"]
+            identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
+            scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
+            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+
+    def require(value):
+        if type(value) is not DurableOrderBookProjection:
+            raise TypeError("OMS must be exact DurableOrderBookProjection")
+        with lock:
+            entry = bindings.get(id(value))
+            if entry is None or entry[0]() is not value:
+                raise OrderProjectionConflict("durable OMS selection authority is unavailable")
+            _, store, identity, scope, evidence = entry
+            state = object.__getattribute__(value, "__dict__")
+            if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
+                raise OrderProjectionConflict("durable OMS instance state is shadowed")
+            if any(type(state[name]) is not str or state[name] != selected
+                   for name, selected in zip(_ORDER_SCOPE_FIELDS, scope)):
+                raise OrderProjectionConflict("durable OMS scope changed")
+            if state["store"] is not store or state["evidence_artifact_store"] is not evidence:
+                raise OrderProjectionConflict("durable OMS selected store changed")
+            if require_exact_journal_store_authority(store, subject="durable OMS JournalStore") != identity:
+                raise OrderProjectionConflict("durable OMS JournalStore generation changed")
+            return store, identity
+
+    return registered, bind, require
+
+
+_order_projection_is_registered, _bind_order_projection, require_exact_order_projection_authority = _order_projection_binding_operations()
+
+
 class DurableOrderBookProjection:
     """Crash-recoverable adapter over the single canonical OrderBookProjection."""
+
+    def __getattribute__(self, name):
+        if not name.startswith("__") and _order_projection_is_registered(self):
+            require_exact_order_projection_authority(self)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        if _order_projection_is_registered(self) and (
+            name in _ORDER_STATE_FIELDS - {"_book", "_idempotency"}
+            or any(name in base.__dict__ for base in DurableOrderBookProjection.__mro__)
+        ):
+            raise OrderProjectionConflict("durable OMS authority state is immutable")
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -221,8 +307,11 @@ class DurableOrderBookProjection:
         owner_epoch: str,
         evidence_artifact_store: ArtifactStore | None = None,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        if type(self) is not DurableOrderBookProjection:
+            raise TypeError("OMS must be exact DurableOrderBookProjection")
+        if _order_projection_is_registered(self):
+            raise OrderProjectionConflict("durable OMS composition is already initialized")
+        require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -244,6 +333,7 @@ class DurableOrderBookProjection:
             str,
             tuple[str, OrderSnapshot, str],
         ] = {}
+        _bind_order_projection(self)
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -254,7 +344,9 @@ class DurableOrderBookProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        store, identity = require_exact_order_projection_authority(self)
+        with journal_store_authority_scope(store, identity):
+            return JournalStore.load_events(store, _AGGREGATE_TYPE, self.aggregate_id)
 
     @staticmethod
     def _requires_provider_evidence(
@@ -424,6 +516,11 @@ class DurableOrderBookProjection:
             )
         elif operation == "REQUEST_REPLACE":
             order.request_replace(command_id=request.get("command_id"))
+        elif operation == "REJECT_REPLACE":
+            order.reject_replace(
+                command_id=request.get("command_id"),
+                reason_code=request.get("reason_code"),
+            )
         elif operation == "CONFIRM_EXPIRED":
             order.confirm_expired()
         else:
@@ -524,7 +621,7 @@ class DurableOrderBookProjection:
     def _reload(self) -> None:
         self._book, self._idempotency = self._replay(self._events())
 
-    def _commit(
+    def _prepare_mutation(
         self,
         *,
         event_key: str,
@@ -532,7 +629,9 @@ class DurableOrderBookProjection:
         request: dict[str, object],
         committed_at: str,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
-    ) -> DurableOrderMutationResult:
+    ) -> PreparedOrderMutation:
+        """Prepare one canonical OMS event from one immutable replay cut."""
+
         key = _text(event_key, name="event_key")
         timestamp = _instant(committed_at, name="committed_at")
         request_hash = payload_digest(request)
@@ -549,22 +648,38 @@ class DurableOrderBookProjection:
             }
         )
 
-        self._reload()
-        prior = self._idempotency.get(key)
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        prior = idempotency.get(key)
         if prior is not None:
             if prior[0] != mutation_hash:
                 raise OrderProjectionConflict(
                     "event_key was already used for a different order request"
                 )
-            return DurableOrderMutationResult(
-                event_id=prior[2],
-                inserted=False,
+            matching = [
+                event
+                for event in events
+                if str(event.get("event_id")) == prior[2]
+            ]
+            if len(matching) != 1:
+                raise OrderProjectionConflict(
+                    "committed order mutation lacks one canonical durable event"
+                )
+            return PreparedOrderMutation(
+                event_key=key,
+                operation=operation,
+                request=dict(request),
                 snapshot=prior[1],
+                snapshot_payload=_snapshot_payload(prior[1]),
+                event_id=prior[2],
+                envelope=None,
+                aggregate_version=int(matching[0]["aggregate_version"]),
+                mutation_hash=mutation_hash,
+                already_committed=True,
             )
 
-        events = self._events()
-        candidate, _ = self._replay(events)
         snapshot = self._apply(candidate, operation, request)
+        snapshot_value = _snapshot_payload(snapshot)
         payload = {
             "schema_version": "1.0.0",
             "scope": self._scope_payload(),
@@ -572,19 +687,14 @@ class DurableOrderBookProjection:
             "operation": operation,
             "request": request,
             "request_hash": request_hash,
-            "snapshot": _snapshot_payload(snapshot),
+            "snapshot": snapshot_value,
         }
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            self.aggregate_id,
-        )
+        version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
         event_id = str(
             uuid5(
                 NAMESPACE_URL,
                 "https://events.autotrade.local/order-projection/"
-                + canonical_json(
-                    [self.aggregate_id, key, mutation_hash]
-                ),
+                + canonical_json([self.aggregate_id, key, mutation_hash]),
             )
         )
         envelope = {
@@ -606,17 +716,59 @@ class DurableOrderBookProjection:
             "payload_hash": payload_digest(payload),
             "evidence_refs": [dict(ref) for ref in verified_evidence],
         }
+        return PreparedOrderMutation(
+            event_key=key,
+            operation=operation,
+            request=dict(request),
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            event_id=event_id,
+            envelope=envelope,
+            aggregate_version=version,
+            mutation_hash=mutation_hash,
+        )
+
+    def refresh(self) -> None:
+        """Reload the OMS projection after an external atomic commit."""
+
+        self._reload()
+
+    def _commit(
+        self,
+        *,
+        event_key: str,
+        operation: str,
+        request: dict[str, object],
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> DurableOrderMutationResult:
+        plan = self._prepare_mutation(
+            event_key=event_key,
+            operation=operation,
+            request=request,
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
+        )
+        if plan.already_committed:
+            self._reload()
+            return DurableOrderMutationResult(
+                event_id=plan.event_id,
+                inserted=False,
+                snapshot=plan.snapshot,
+            )
+        if plan.envelope is None:
+            raise RuntimeError("fresh durable order mutation is missing its event")
         try:
             append_result = self.store.append_event(
-                envelope,
+                plan.envelope,
                 outbox_topic=_OUTBOX_TOPIC,
             )
         except Exception:
             self._reload()
             raise
         self._reload()
-        recorded = self._idempotency.get(key)
-        if recorded is None:
+        recorded = self._idempotency.get(plan.event_key)
+        if recorded is None or recorded[2] != plan.event_id:
             raise RuntimeError("durable order event was not replayed after commit")
         return DurableOrderMutationResult(
             event_id=recorded[2],
@@ -626,18 +778,23 @@ class DurableOrderBookProjection:
 
     @property
     def snapshots(self) -> tuple[OrderSnapshot, ...]:
+        self._reload()
         return self._book.snapshots()
 
     def order(self, client_order_id: str):
+        self._reload()
         return self._book.order(client_order_id)
 
     def effective_fills(self):
+        self._reload()
         return self._book.effective_fills()
 
     def oco_breaches(self):
+        self._reload()
         return self._book.oco_breaches()
 
     def active_oco_breaches(self):
+        self._reload()
         return self._book.active_oco_breaches()
 
     def create_order(
@@ -909,6 +1066,43 @@ class DurableOrderBookProjection:
 
         return tuple(results)
 
+    def prepare_record_fill_mutation(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        fill_id: str,
+        provider_execution_id: str,
+        quantity,
+        price,
+        committed_at: str,
+        provider_revision: str | None = None,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> PreparedOrderMutation:
+        """Prepare RECORD_FILL for a shared journal transaction without mutation."""
+
+        request = {
+            "client_order_id": _text(client_order_id, name="client_order_id"),
+            "fill_id": _text(fill_id, name="fill_id"),
+            "provider_execution_id": _text(
+                provider_execution_id,
+                name="provider_execution_id",
+            ),
+            "quantity": _decimal_text(quantity, name="quantity"),
+            "price": _decimal_text(price, name="price"),
+            "provider_revision": _optional_text(
+                provider_revision,
+                name="provider_revision",
+            ),
+        }
+        return self._prepare_mutation(
+            event_key=event_key,
+            operation="RECORD_FILL",
+            request=request,
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
+        )
+
     def record_fill(
         self,
         *,
@@ -1094,6 +1288,28 @@ class DurableOrderBookProjection:
                 "command_id": _text(command_id, name="command_id"),
             },
             committed_at=committed_at,
+        )
+
+    def reject_replace(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        command_id: str,
+        reason_code: str,
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> DurableOrderMutationResult:
+        return self._commit(
+            event_key=event_key,
+            operation="REJECT_REPLACE",
+            request={
+                "client_order_id": _text(client_order_id, name="client_order_id"),
+                "command_id": _text(command_id, name="command_id"),
+                "reason_code": _text(reason_code, name="reason_code"),
+            },
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def confirm_expired(self, **kwargs) -> DurableOrderMutationResult:

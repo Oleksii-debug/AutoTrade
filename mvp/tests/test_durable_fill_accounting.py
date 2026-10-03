@@ -2,6 +2,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
@@ -256,10 +257,9 @@ class DurableFillAccountingTests(unittest.TestCase):
             before = tuple(book.transactions)
 
             original_commit = store.commit_command
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(_store, **kwargs):
                 raise RuntimeError("injected pre-commit failure")
-            store.commit_command = fail_before_commit
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail_before_commit):
                 with self.assertRaisesRegex(RuntimeError, "pre-commit"):
                     correct(
                         book,
@@ -267,8 +267,6 @@ class DurableFillAccountingTests(unittest.TestCase):
                         corrected,
                         observed_at="2026-01-03T10:00:00Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             reopened = durable_book(JournalStore(path))
             self.assertEqual(reopened.transactions, before)
@@ -289,15 +287,14 @@ class DurableFillAccountingTests(unittest.TestCase):
 
             original_commit = store.commit_command
             injected = False
-            def lose_ack_after_commit(**kwargs):
+            def lose_ack_after_commit(_store, **kwargs):
                 nonlocal injected
                 result = original_commit(**kwargs)
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected acknowledgement loss")
                 return result
-            store.commit_command = lose_ack_after_commit
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=lose_ack_after_commit):
                 with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
                     correct(
                         book,
@@ -305,8 +302,6 @@ class DurableFillAccountingTests(unittest.TestCase):
                         corrected,
                         observed_at="2026-01-03T10:00:00Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             reopened = durable_book(JournalStore(path))
             self.assertEqual(projection(reopened).realized_pnl, Decimal("9"))

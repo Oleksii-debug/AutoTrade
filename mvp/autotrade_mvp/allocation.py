@@ -1944,7 +1944,7 @@ def _candidate_evidence_matches(
     market: ImmutableAllocationEvidence,
     *,
     decision_time: str,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str]:
     symbol = item.candidate.symbol
     if _payload_text(objective, "symbol") != symbol:
         raise ValueError(f"objective evidence symbol mismatch for {symbol}")
@@ -1967,8 +1967,20 @@ def _candidate_evidence_matches(
         _payload_text(objective, "information_cutoff"),
         name="objective information_cutoff",
     )
-    if cutoff > _instant(decision_time, name="decision_time"):
+    decision_point = _instant(decision_time, name="decision_time")
+    if cutoff > decision_point:
         raise ValueError(f"objective evidence information_cutoff is in the future for {symbol}")
+    forecast_horizon_end = _instant(
+        _payload_text(objective, "forecast_horizon_end"),
+        name="objective forecast_horizon_end",
+    )
+    if forecast_horizon_end <= decision_point:
+        raise ValueError(
+            f"objective evidence forecast_horizon_end must be after decision_time for {symbol}"
+        )
+    normalized_forecast_horizon_end = (
+        forecast_horizon_end.isoformat().replace("+00:00", "Z")
+    )
 
     candidate = item.candidate
     if _payload_text(market, "symbol") != symbol:
@@ -2016,11 +2028,13 @@ def _candidate_evidence_matches(
         _payload_text(market, "account_id"),
         _payload_text(market, "instrument_version"),
         _payload_text(market, "capability_snapshot_id"),
+        normalized_forecast_horizon_end,
     )
 
 
 _EXECUTION_SEARCH_ALGORITHM = "bounded-execution-state-enumeration-v1"
 _OBJECTIVE_SEARCH_ALGORITHM = "complete-subset-enumeration-with-hard-infeasible-de-risk-turnover-tie-v8"
+_OBJECTIVE_HORIZON_BINDING_ALGORITHM = "forecast-holding-cost-horizon-binding-v1"
 _STRESS_EVIDENCE_POLICY_ALGORITHM = "independent-freshness-gate-v1"
 _ALLOCATION_FX_PROJECTION_ALGORITHM = "role-side-conservative-fx-projection-exact-unit-v4"
 
@@ -2030,6 +2044,7 @@ def _allocation_policy_digest(policy: AllocationPolicy) -> str:
         raise TypeError("policy must be an AllocationPolicy")
     payload = {
         "execution_search_algorithm": _EXECUTION_SEARCH_ALGORITHM,
+        "objective_horizon_binding_algorithm": _OBJECTIVE_HORIZON_BINDING_ALGORITHM,
         "stress_evidence_policy_algorithm": _STRESS_EVIDENCE_POLICY_ALGORITHM,
         "allocation_fx_projection_algorithm": _ALLOCATION_FX_PROJECTION_ALGORITHM,
         "cash_available": policy.cash_available,
@@ -2160,7 +2175,9 @@ def allocate_evidence_bound_objective_targets(
     This wrapper remains proposal-only.  It binds all decision-relevant inputs
     to immutable evidence and emits a deterministic digest that a later
     financial authority can revalidate against current account/reservation
-    versions before admission.
+    versions before admission. Forecast return and holding-cost evidence must
+    share one explicit future horizon, so financing/funding/borrow economics
+    cannot be compared against a return rate from a different time interval.
     """
 
     normalized_environment = _text(environment, name="allocation environment").upper()
@@ -2195,6 +2212,7 @@ def allocate_evidence_bound_objective_targets(
     account_ids = set()
     instrument_versions = {}
     capability_snapshot_ids = {}
+    forecast_horizon_ends = {}
     for item in materialized:
         symbol = item.candidate.symbol
         objective = _resolve_allocation_evidence(
@@ -2216,6 +2234,7 @@ def allocate_evidence_bound_objective_targets(
             account_id,
             instrument_version,
             capability_snapshot_id,
+            forecast_horizon_end,
         ) = _candidate_evidence_matches(
             item,
             objective,
@@ -2228,6 +2247,7 @@ def allocate_evidence_bound_objective_targets(
         account_ids.add(account_id)
         instrument_versions[symbol] = instrument_version
         capability_snapshot_ids[symbol] = capability_snapshot_id
+        forecast_horizon_ends[symbol] = forecast_horizon_end
     if len(provider_ids) != 1:
         raise ValueError("market evidence candidates must share one provider_id")
     if len(account_ids) != 1:
@@ -2305,6 +2325,15 @@ def allocate_evidence_bound_objective_targets(
             expected_environment=normalized_environment,
             at=normalized_decision_time,
         )
+        holding_cost_horizon_end = _instant(
+            _payload_text(valuation, "holding_cost_horizon_end"),
+            name="valuation holding_cost_horizon_end",
+        ).isoformat().replace("+00:00", "Z")
+        if holding_cost_horizon_end != forecast_horizon_ends[symbol]:
+            raise ValueError(
+                "valuation holding-cost horizon does not match objective "
+                f"forecast horizon for {symbol}"
+            )
         quote_currency = _payload_text(
             resolved_market[symbol],
             "quote_currency",

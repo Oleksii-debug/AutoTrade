@@ -11,7 +11,7 @@ import sys
 from .accessibility import format_accessible_status
 from .economics import build_economic_report
 from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
-from .simulation_session import run_canonical_simulation
+from .simulation_session import run_canonical_simulation, run_autonomous_simulation
 from .simulation_status import inspect_canonical_simulation, SimulationStateChanging
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -112,14 +112,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--history-limit", type=int, default=100, help="History rows, from 1 to 1000 (default 100)")
     modes.add_argument("--multi-episode", action="store_true", help="Run semicolon-separated legacy episodes")
     modes.add_argument("--canonical-simulation", action="store_true", help="Run one journal-backed canonical simulated episode")
+    modes.add_argument("--autonomous-simulation", action="store_true", help="Run/resume a frozen provider-free ZERO price stream through canonical risk, OMS and accounting")
+    parser.add_argument("--stop-after-episodes", type=int, help="Pause the autonomous stream after this many observations")
+    parser.add_argument("--fault-episode", type=int, help="Inject ambiguous internal send at this frozen episode")
+    parser.add_argument("--emergency-episode", type=int, help="Enter frozen emergency NO_TRADE state at this episode")
     parser.add_argument("--episode-id", default="episode-1", help="Stable canonical simulation episode identity")
     parser.add_argument("--at", help="Optional ISO timestamp for deterministic simulation evidence")
     parser.add_argument("--fault-after-send", action="store_true", help="Inject an ambiguous simulated send, which will never be retried")
     args = parser.parse_args(argv)
     if not 1 <= args.history_limit <= 1000:
         parser.error("--history-limit must be between 1 and 1000")
-    if (args.at is not None or args.fault_after_send) and not args.canonical_simulation:
-        parser.error("--at and --fault-after-send require --canonical-simulation")
+    if args.autonomous_simulation and args.at is None:
+        parser.error("--autonomous-simulation requires --at to freeze deterministic chronology")
+    if args.at is not None and not (args.canonical_simulation or args.autonomous_simulation):
+        parser.error("--at requires canonical or autonomous simulation")
+    if args.fault_after_send and not args.canonical_simulation:
+        parser.error("--fault-after-send requires --canonical-simulation")
+    if any(value is not None for value in (args.stop_after_episodes, args.fault_episode, args.emergency_episode)) and not args.autonomous_simulation:
+        parser.error("episode controls require --autonomous-simulation")
     try:
         return _execute(args)
     except SimulationStateChanging:
@@ -133,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _execute(args) -> int:
+    if args.autonomous_simulation:
+        result = run_autonomous_simulation(args.prices.split(","), args.state_dir,
+            run_id=args.episode_id, now=args.at, stop_after_episodes=args.stop_after_episodes,
+            fault_at_episode=args.fault_episode, emergency_at_episode=args.emergency_episode)
+        print(json.dumps(result, indent=2))
+        return 2 if result["status"] == "UNKNOWN" else 0
     if args.canonical_simulation:
         if any((Path(args.state_dir) / name).exists()
                for name in ("checkpoint.json", "learning-evidence.jsonl")):

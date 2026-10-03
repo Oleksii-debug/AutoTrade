@@ -19,6 +19,38 @@ from autotrade_research.jobs import (
 )
 
 
+class HostileText(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile text strip executed")
+
+
+class HostileList(list):
+    def __iter__(self):
+        raise AssertionError("hostile list iteration executed")
+
+
+class HostileDict(dict):
+    def items(self):
+        raise AssertionError("hostile dict items executed")
+
+
+class HostileInt(int):
+    def __lt__(self, other):
+        raise AssertionError("hostile int ordering executed")
+
+    def __float__(self):
+        raise AssertionError("hostile int float conversion executed")
+
+
+class HostileDateTime(datetime):
+    def astimezone(self, *args, **kwargs):
+        raise AssertionError("hostile datetime astimezone executed")
+
+
+class HostileBytes(bytes):
+    pass
+
+
 def digest(text: str) -> str:
     return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
 
@@ -1842,6 +1874,121 @@ class ResearchJobStoreTests(unittest.TestCase):
                 )
             self.assertEqual(jobs.get(external["job_id"])["state"], "WAITING_EXTERNAL")
 
+
+
+    def test_public_ingress_rejects_polymorphic_scalars_before_virtual_dispatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ResearchJobStore(root / "jobs.sqlite3")
+            common = dict(
+                dedupe_key="subtype-fence",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+
+            with self.assertRaisesRegex(ValueError, "kind"):
+                store.enqueue(kind=HostileText("research.replay"), **common)
+
+            with self.assertRaisesRegex(ValueError, "input_hashes"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="hostile-list",
+                    input_hashes=HostileList([digest("dataset")]),
+                    resource_budget={"wall_seconds": 60},
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(ValueError, "resource_budget"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="hostile-budget-map",
+                    input_hashes=[digest("dataset")],
+                    resource_budget=HostileDict({"wall_seconds": 60}),
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(ValueError, "exact numeric scalars"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="hostile-budget-value",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": HostileInt(60)},
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="oversized-budget-value",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 10 ** 10000},
+                    now=self.now,
+                )
+
+            hostile_now = HostileDateTime(
+                2026, 9, 24, 16, 0, tzinfo=timezone.utc
+            )
+            with self.assertRaisesRegex(TypeError, "exact datetime"):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="hostile-now",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 60},
+                    now=hostile_now,
+                )
+
+            job, _ = self._enqueue(store, "scalar-fence-job")
+            with self.assertRaisesRegex(ValueError, "lease_seconds"):
+                store.claim(
+                    "worker-a",
+                    now=self.now,
+                    lease_seconds=HostileInt(30),
+                )
+
+            with self.assertRaisesRegex(ValueError, "output_refs"):
+                store.succeed(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=1,
+                    output_refs=HostileList(["artifact:never-read"]),
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(TypeError, "data must be bytes"):
+                store.publish_checkpoint_bytes(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=1,
+                    artifact_store=ArtifactStore(root / "artifacts"),
+                    data=HostileBytes(b"checkpoint"),
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                    resource_usage={"wall_seconds": 1},
+                    now=self.now,
+                )
+
+            evidence_ref = (
+                f"artifact:{uuid4()}@" + digest("external-resolution")
+            )
+            with self.assertRaisesRegex(ValueError, "output_refs"):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=1,
+                    verdict="PROVEN_FAILED",
+                    evidence_ref=evidence_ref,
+                    output_refs=HostileList([]),
+                    now=self.now,
+                )
+
+            with self.assertRaisesRegex(ValueError, "error must be a non-empty object"):
+                store.fail(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=1,
+                    error=HostileDict({"code": "never-read"}),
+                    now=self.now,
+                )
 
 if __name__ == "__main__":
     unittest.main()

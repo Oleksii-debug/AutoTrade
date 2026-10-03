@@ -23,7 +23,10 @@ _CONTROL_ROLES = {"OWNER", "RESEARCHER"}
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # This is an authorization/identity ingress.  A str subclass can execute
+    # caller code through strip()/encode()/comparison before the host has
+    # authenticated the request, so accept only the canonical wire type.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     return value.strip()
 
@@ -51,10 +54,13 @@ class ResearchJobHostService:
         security: SecurityBoundary,
         request_origin_provider: Callable[[], str],
     ) -> None:
-        if not isinstance(jobs, ResearchJobStore):
-            raise TypeError("jobs must be ResearchJobStore")
-        if not isinstance(security, SecurityBoundary):
-            raise TypeError("security must be SecurityBoundary")
+        # The host adapter is a composition boundary over the canonical durable
+        # job and session authorities.  Polymorphic substitutes could override
+        # enqueue/get/validate_session and execute caller-selected authority.
+        if type(jobs) is not ResearchJobStore:
+            raise TypeError("jobs must be the canonical ResearchJobStore")
+        if type(security) is not SecurityBoundary:
+            raise TypeError("security must be the canonical SecurityBoundary")
         if not callable(request_origin_provider):
             raise TypeError("request_origin_provider must be callable")
         self._jobs = jobs
@@ -111,8 +117,10 @@ class ResearchJobHostService:
         if role == "OWNER":
             return normalized_actor
         job = self._jobs.get(job_id)
+        if type(job) is not dict:
+            raise PermissionError("Research job identity record is not canonical")
         submitted_by = job.get("submitted_by")
-        if not isinstance(submitted_by, str) or not secrets.compare_digest(
+        if type(submitted_by) is not str or not secrets.compare_digest(
             submitted_by,
             normalized_actor,
         ):

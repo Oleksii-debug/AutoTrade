@@ -54,6 +54,8 @@ class JobBudgetError(JobError):
 
 
 def _utc(value: datetime) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError("timestamp must be an exact datetime")
     if value.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
     return value.astimezone(timezone.utc)
@@ -72,8 +74,8 @@ def _json(value: Any) -> str:
 
 
 def _require_text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be non-empty text")
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be non-empty exact text")
     return value.strip()
 
 
@@ -269,8 +271,8 @@ def _require_research_kind(kind: str) -> str:
 
 
 def _validate_hashes(input_hashes: list[str]) -> list[str]:
-    if not isinstance(input_hashes, list) or not input_hashes:
-        raise ValueError("input_hashes must be a non-empty list")
+    if type(input_hashes) is not list or not input_hashes:
+        raise ValueError("input_hashes must be a non-empty exact list")
     result: list[str] = []
     for digest in input_hashes:
         value = _require_text(digest, "input hash")
@@ -284,14 +286,19 @@ def _validate_hashes(input_hashes: list[str]) -> list[str]:
 
 
 def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
-    if not isinstance(budget, dict) or not budget:
-        raise ValueError("resource_budget must be a non-empty object")
+    if type(budget) is not dict or not budget:
+        raise ValueError("resource_budget must be a non-empty exact object")
     normalized: dict[str, float] = {}
     for name, raw in budget.items():
         key = _require_text(name, "budget key")
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            raise ValueError("resource budget values must be numeric")
-        value = float(raw)
+        if type(raw) not in (int, float):
+            raise ValueError("resource budget values must use exact numeric scalars")
+        try:
+            value = float(raw)
+        except OverflowError as error:
+            raise ValueError(
+                "resource budget values must be finite and non-negative"
+            ) from error
         if value < 0 or value == float("inf") or value != value:
             raise ValueError("resource budget values must be finite and non-negative")
         normalized[key] = value
@@ -548,7 +555,7 @@ class ResearchJobStore:
             if submitted_by is None
             else _require_text(submitted_by, "submitted_by")
         )
-        if not isinstance(lease_requeueable, bool):
+        if type(lease_requeueable) is not bool:
             raise ValueError("lease_requeueable must be boolean")
         if lease_requeueable and job_kind not in _REQUEUEABLE_JOB_KINDS:
             raise ValueError(
@@ -615,7 +622,7 @@ class ResearchJobStore:
         lease_seconds: int = 60,
     ) -> dict[str, Any] | None:
         worker = _require_text(worker_id, "worker_id")
-        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+        if type(lease_seconds) is not int or lease_seconds < 1:
             raise ValueError("lease_seconds must be a positive integer")
         current = _utc(now or datetime.now(timezone.utc))
         lease_until = current + timedelta(seconds=lease_seconds)
@@ -717,14 +724,14 @@ class ResearchJobStore:
         """
 
         identifier = str(UUID(_require_text(job_id, "job_id")))
-        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        if type(generation) is not int or generation < 1:
             raise ValueError("generation must be a positive integer")
         normalized_verdict = _require_text(verdict, "verdict").upper()
         allowed = {"PROVEN_NOT_RUN", "PROVEN_SUCCEEDED", "PROVEN_FAILED"}
         if normalized_verdict not in allowed:
             raise ValueError("unsupported external-resolution verdict")
         evidence = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
-        if output_refs is not None and not isinstance(output_refs, list):
+        if output_refs is not None and type(output_refs) is not list:
             raise ValueError("output_refs must be a list when provided")
         raw_outputs = [] if output_refs is None else [
             _require_text(value, "output_ref") for value in output_refs
@@ -865,9 +872,9 @@ class ResearchJobStore:
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
-        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        if type(generation) is not int or generation < 1:
             raise ValueError("generation must be a positive integer")
-        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+        if type(lease_seconds) is not int or lease_seconds < 1:
             raise ValueError("lease_seconds must be a positive integer")
         current = _utc(now or datetime.now(timezone.utc))
         with self._connect() as connection:
@@ -978,9 +985,9 @@ class ResearchJobStore:
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
         checkpoint_slot = _require_text(slot, "slot")
-        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        if type(generation) is not int or generation < 1:
             raise ValueError("generation must be a positive integer")
-        if not isinstance(data, bytes):
+        if type(data) is not bytes:
             raise TypeError("data must be bytes")
         current = _utc(now or datetime.now(timezone.utc))
 
@@ -1235,7 +1242,7 @@ class ResearchJobStore:
             raise ValueError("generation must be a positive exact integer")
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
-        if not isinstance(output_refs, list) or not output_refs:
+        if type(output_refs) is not list or not output_refs:
             raise ValueError("output_refs must be a non-empty list")
         current = _utc(now or datetime.now(timezone.utc))
 
@@ -1323,9 +1330,9 @@ class ResearchJobStore:
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
         result_slot = _require_text(slot, "slot")
-        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        if type(generation) is not int or generation < 1:
             raise ValueError("generation must be a positive integer")
-        if not isinstance(data, bytes):
+        if type(data) is not bytes:
             raise TypeError("data must be bytes")
         current = _utc(now or datetime.now(timezone.utc))
 
@@ -1374,7 +1381,7 @@ class ResearchJobStore:
     ) -> None:
         identifier = str(UUID(_require_text(job_id, "job_id")))
         worker = _require_text(worker_id, "worker_id")
-        if not isinstance(error, dict) or not error:
+        if type(error) is not dict or not error:
             raise ValueError("error must be a non-empty object")
         current = _utc(now or datetime.now(timezone.utc))
         with self._connect() as connection:

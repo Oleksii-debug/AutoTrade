@@ -537,8 +537,8 @@ class ProtectedCredentialVault:
             purpose=purpose,
             provider_environment=provider_environment,
         )
-        if not isinstance(secret_value, str) or not secret_value:
-            raise SecretVaultError("secret_value must not be empty")
+        if type(secret_value) is not str or not secret_value:
+            raise SecretVaultError("secret_value must be exact non-empty text")
         hid = (
             _text(handle_id, name="handle_id")
             if handle_id is not None
@@ -915,8 +915,8 @@ class ProtectedCredentialVault:
     ) -> PersistentCredentialHandle:
         if not isinstance(handle, PersistentCredentialHandle):
             raise TypeError("handle must be a PersistentCredentialHandle")
-        if not isinstance(new_secret_value, str) or not new_secret_value:
-            raise SecretVaultError("new_secret_value must not be empty")
+        if type(new_secret_value) is not str or not new_secret_value:
+            raise SecretVaultError("new_secret_value must be exact non-empty text")
         owner = _text(execution_identity, name="execution_identity")
         with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()

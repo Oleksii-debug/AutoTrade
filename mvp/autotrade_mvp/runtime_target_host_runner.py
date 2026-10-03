@@ -105,8 +105,13 @@ def _snapshot_operations(
         raise RuntimeTargetHostRunnerError(
             "operations must be an exact dict keyed by durable planned event_id"
         )
+    provided_ids = tuple(operations)
+    if any(type(event_id) is not str for event_id in provided_ids):
+        raise RuntimeTargetHostRunnerError(
+            "operation keys must be exact built-in str event ids"
+        )
     expected_ids = plan.expected_event_ids
-    if set(operations) != set(expected_ids):
+    if set(provided_ids) != set(expected_ids):
         raise RuntimeTargetHostRunnerError(
             "operation key set must exactly match the durable pre-run event plan"
         )
@@ -158,9 +163,102 @@ def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] |
     return value
 
 
+def _build_callback_authority_guard() -> Callable[[], None]:
+    """Freeze clock/resource bindings that caller callbacks must not retarget.
+
+    Campaign callbacks are workload, not measurement authority. The runner uses
+    system monotonic/process clocks, JournalStore class methods and the latency
+    module's retained ``perf_counter_ns`` binding after caller code executes.
+    Capture those exact bindings before the first callback and recheck them
+    immediately after every caller-controlled operation, before any post-callback
+    measurement/readback can consume a replacement.
+    """
+
+    runner_namespace = globals()
+    time_module = time
+    threading_module = threading
+    journal_type = JournalStore
+    measurement_function = measure_declared_financial_operation
+    error_type = RuntimeTargetHostRunnerError
+
+    expected_runner_bindings = (
+        ("time", time_module, "runner time module"),
+        ("threading", threading_module, "runner threading module"),
+        ("JournalStore", journal_type, "JournalStore type"),
+        (
+            "measure_declared_financial_operation",
+            measurement_function,
+            "durable financial measurement function",
+        ),
+    )
+    expected_time_bindings = (
+        ("monotonic_ns", time_module.__dict__.get("monotonic_ns")),
+        ("process_time_ns", time_module.__dict__.get("process_time_ns")),
+    )
+    expected_threading_binding = threading_module.__dict__.get("active_count")
+    expected_journal_bindings = tuple(
+        (name, getattr(journal_type, name, None))
+        for name in (
+            "append_event",
+            "current_journal_sequence",
+            "get_event",
+            "pending_outbox_count",
+        )
+    )
+    measurement_namespace = measurement_function.__globals__
+    expected_perf_counter = measurement_namespace.get("perf_counter_ns")
+
+    if any(value is None for _name, value in expected_time_bindings):
+        raise RuntimeTargetHostRunnerError(
+            "target-host clock authority is unavailable"
+        )
+    if expected_threading_binding is None or expected_perf_counter is None:
+        raise RuntimeTargetHostRunnerError(
+            "target-host measurement authority is unavailable"
+        )
+    if any(value is None for _name, value in expected_journal_bindings):
+        raise RuntimeTargetHostRunnerError(
+            "target-host JournalStore measurement authority is unavailable"
+        )
+
+    def require_callback_authority() -> None:
+        for name, expected, label in expected_runner_bindings:
+            if runner_namespace.get(name) is not expected:
+                raise error_type(
+                    "callback changed target-host measurement authority: " + label
+                )
+        for name, expected in expected_time_bindings:
+            if time_module.__dict__.get(name) is not expected:
+                raise error_type(
+                    "callback changed target-host measurement authority: time." + name
+                )
+        if threading_module.__dict__.get("active_count") is not expected_threading_binding:
+            raise error_type(
+                "callback changed target-host measurement authority: "
+                "threading.active_count"
+            )
+        for name, expected in expected_journal_bindings:
+            current = getattr(journal_type, name, None)
+            if current is not expected:
+                raise error_type(
+                    "callback changed target-host measurement authority: "
+                    + "JournalStore."
+                    + name
+                )
+        if measurement_namespace.get("perf_counter_ns") is not expected_perf_counter:
+            raise error_type(
+                "callback changed target-host measurement authority: "
+                "runtime_load_measurement.perf_counter_ns"
+            )
+
+    return require_callback_authority
+
+
 def _capture_resource_metrics(
     store: JournalStore,
     resource_probe: Callable[[], Mapping[str, int]] | None,
+    *,
+    require_callback_authority: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     """Capture one cut-consistent portable/optional resource observation.
 
@@ -170,12 +268,18 @@ def _capture_resource_metrics(
     invalidates the sample instead of producing mixed-cut resource evidence.
     Returned optional values must be exact non-negative integers and cannot
     replace runner-owned metric keys.
+
+    When ``require_callback_authority`` is supplied by the executable campaign,
+    the optional probe cannot retarget the runner's clock/resource/JournalStore
+    authorities before built-in metrics are read.
     """
 
     sequence_before = JournalStore.current_journal_sequence(store)
     extras: dict[str, int] = {}
     if resource_probe is not None:
         raw = resource_probe()
+        if require_callback_authority is not None:
+            require_callback_authority()
         if type(raw) is not dict:
             raise RuntimeTargetHostRunnerError(
                 "resource_probe must return an exact dict"
@@ -315,6 +419,7 @@ def run_declared_target_host_campaign(
         spec=spec,
         plan=campaign_plan,
     )
+    require_callback_authority = _build_callback_authority_guard()
 
     resource_samples: list[ResourceTargetHostSample] = []
     research_samples: list[ResearchInterferenceSample] = []
@@ -325,7 +430,11 @@ def run_declared_target_host_campaign(
                 sample_id=f"resource-{len(resource_samples) + 1}",
                 monotonic_ns=time.monotonic_ns(),
                 phase=phase,
-                metrics=_capture_resource_metrics(journal, resource_probe),
+                metrics=_capture_resource_metrics(
+                    journal,
+                    resource_probe,
+                    require_callback_authority=require_callback_authority,
+                ),
             )
         )
 
@@ -333,6 +442,7 @@ def run_declared_target_host_campaign(
     for phase, research_operation in research_snapshot:
         started = time.monotonic_ns()
         research_operation()
+        require_callback_authority()
         ended = time.monotonic_ns()
         if type(started) is not int or type(ended) is not int or started < 0 or ended < started:
             raise RuntimeTargetHostRunnerError(
@@ -350,12 +460,19 @@ def run_declared_target_host_campaign(
 
     durable_samples: list[DurableFinancialLatencySample] = []
     for event_id, operation in operation_snapshot:
+        def guarded_operation(
+            operation: Callable[[], object] = operation,
+        ) -> object:
+            result = operation()
+            require_callback_authority()
+            return result
+
         _result, durable_sample = measure_declared_financial_operation(
             journal,
             spec,
             plan_id=declared.plan_id,
             event_id=event_id,
-            operation=operation,
+            operation=guarded_operation,
         )
         durable_samples.append(durable_sample)
         capture_resource(f"after-financial:{event_id}")

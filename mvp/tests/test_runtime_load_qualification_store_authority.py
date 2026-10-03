@@ -393,6 +393,96 @@ class RuntimeLoadQualificationStoreAuthorityTests(unittest.TestCase):
                 before_sequence,
             )
 
+    def test_collect_rejects_executable_resource_metric_key_before_terminal_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
+
+            class InjectingMetricName(str):
+                def strip(self, *args, **kwargs):
+                    journal.append_event(_envelope("fin-expected"))
+                    return super().strip(*args, **kwargs)
+
+            hostile = InjectingMetricName("cpu_peak_millis")
+            before_sequence = JournalStore.current_journal_sequence(journal)
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "resource metric names must be exact strings",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(),
+                    financial_staleness_us=(),
+                    research_interference_us=(),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={hostile: 1},
+                )
+
+            self.assertEqual(
+                JournalStore.current_journal_sequence(journal),
+                before_sequence,
+            )
+
+    def test_collect_rejects_unbounded_event_limit_before_terminal_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = _spec()
+            current_plan = _plan(spec)
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                return_value=1_000_000_000,
+            ):
+                cut = begin_runtime_campaign(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                )
+
+            before_sequence = JournalStore.current_journal_sequence(journal)
+            for max_events in (-1, 0, 100001, True):
+                terminal_clock_called = False
+
+                def terminal_clock() -> int:
+                    nonlocal terminal_clock_called
+                    terminal_clock_called = True
+                    return 1_000_001_000
+
+                with self.subTest(max_events=max_events), patch(
+                    "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+                    side_effect=terminal_clock,
+                ), self.assertRaises(RuntimeBudgetError):
+                    collect_runtime_campaign_evidence(
+                        journal=journal,
+                        spec=spec,
+                        plan=current_plan,
+                        cut=cut,
+                        financial_latency_us=(),
+                        financial_staleness_us=(),
+                        research_interference_us=(),
+                        resource_evidence_hash=RESOURCE,
+                        resource_metrics={"cpu_peak_millis": 1},
+                        max_events=max_events,
+                    )
+
+                self.assertFalse(terminal_clock_called)
+                self.assertEqual(
+                    JournalStore.current_journal_sequence(journal),
+                    before_sequence,
+                )
+
     def test_terminal_clock_shadow_cannot_hide_undeclared_financial_event(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

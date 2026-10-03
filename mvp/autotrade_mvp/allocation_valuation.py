@@ -112,8 +112,14 @@ def _sha256(value, *, name: str) -> str:
 
 
 def _mapping(value, *, name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise AllocationValuationError(f"{name} must be a mapping")
+    # This boundary consumes a detached snapshot from ImmutableAllocationEvidence
+    # or an exact built-in dictionary supplied by a direct caller.  Accepting a
+    # generic Mapping (including an arbitrary MappingProxyType) would execute
+    # caller-defined lookup/iteration code during financial normalization.
+    if type(value) is not dict:
+        raise AllocationValuationError(
+            f"{name} must be an exact built-in dictionary"
+        )
     return value
 
 

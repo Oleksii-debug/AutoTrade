@@ -59,7 +59,7 @@ from mvp.autotrade_mvp.settlement import (
 
 PROVIDER = "PROVIDER-A"
 ACCOUNT = "acct-1"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 
 
 def reservation_book(store: JournalStore) -> DurableReservationBook:

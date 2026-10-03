@@ -26,8 +26,16 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
         )
 
     @classmethod
-    def _build(cls, *, signed_verifier, signed_dependency_guard):
+    def _build(
+        cls,
+        *,
+        signed_verifier,
+        signed_dependency_guard,
+        signed_campaign_matcher=None,
+    ):
         measurement = cls._measurement()
+        if signed_campaign_matcher is None:
+            signed_campaign_matcher = lambda *_args, **_kwargs: None
 
         def durable_binder(**_kwargs):
             return SimpleNamespace(
@@ -49,7 +57,7 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             durable_plan_matcher=lambda *_args: None,
             signed_verifier=signed_verifier,
             accepted_type=object,
-            signed_campaign_matcher=lambda *_args, **_kwargs: None,
+            signed_campaign_matcher=signed_campaign_matcher,
             projection_digest_builder=lambda _measurement: {},
             composed_type=lambda **kwargs: kwargs,
             signed_dependency_guard=signed_dependency_guard,
@@ -106,6 +114,30 @@ class RuntimeTargetHostSignedVerifierAuthorityTests(unittest.TestCase):
             signed_dependency_guard=(
                 composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
             ),
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "signed target-host verifier sealed dependency changed: _identity_tuple",
+            ):
+                self._invoke(verifier, measurement)
+        finally:
+            signed_module._identity_tuple = original
+
+        composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD()
+
+    def test_return_boundary_guard_rejects_campaign_callback_rebinding(self) -> None:
+        original = signed_module._identity_tuple
+
+        def mutating_campaign_matcher(*_args, **_kwargs):
+            signed_module._identity_tuple = lambda **_values: ("forged",)
+
+        verifier, measurement = self._build(
+            signed_verifier=Mock(return_value=object()),
+            signed_dependency_guard=(
+                composed_authority._PRODUCTION_SIGNED_VERIFIER_GUARD
+            ),
+            signed_campaign_matcher=mutating_campaign_matcher,
         )
         try:
             with self.assertRaisesRegex(

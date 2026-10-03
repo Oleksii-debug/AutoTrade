@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from autotrade_research.artifacts import ArtifactStore
+import autotrade_research.data.vintages as vintages_module
 from autotrade_research.data.vintages import (
     HistoricalConflict,
     HistoricalDataError,
@@ -485,16 +486,21 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
     def test_market_population_rechecks_artifact_identity_and_digest(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)
-        original = ArtifactStore.read_authenticated_snapshot
+        original_factory = vintages_module.trusted_authenticated_reader
 
-        def wrong_identity(store, artifact_id):
-            artifact_manifest, raw = original(store, artifact_id)
-            return {**dict(artifact_manifest), "artifact_id": _uuid(99, 1)}, raw
+        def wrong_identity_factory(root, *, publication_store=None):
+            reader = original_factory(root, publication_store=publication_store)
+
+            def wrong_identity(artifact_id):
+                artifact_manifest, raw = reader(artifact_id)
+                return {**dict(artifact_manifest), "artifact_id": _uuid(99, 1)}, raw
+
+            return wrong_identity
 
         with patch.object(
-            ArtifactStore,
-            "read_authenticated_snapshot",
-            new=wrong_identity,
+            vintages_module,
+            "trusted_authenticated_reader",
+            new=wrong_identity_factory,
         ):
             with self.assertRaisesRegex(
                 HistoricalConflict,
@@ -510,17 +516,22 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                     spec=self.spec,
                 )
 
-        def wrong_digest(store, artifact_id):
-            artifact_manifest, raw = original(store, artifact_id)
-            return {
-                **dict(artifact_manifest),
-                "sha256": "sha256:" + "0" * 64,
-            }, raw
+        def wrong_digest_factory(root, *, publication_store=None):
+            reader = original_factory(root, publication_store=publication_store)
+
+            def wrong_digest(artifact_id):
+                artifact_manifest, raw = reader(artifact_id)
+                return {
+                    **dict(artifact_manifest),
+                    "sha256": "sha256:" + "0" * 64,
+                }, raw
+
+            return wrong_digest
 
         with patch.object(
-            ArtifactStore,
-            "read_authenticated_snapshot",
-            new=wrong_digest,
+            vintages_module,
+            "trusted_authenticated_reader",
+            new=wrong_digest_factory,
         ):
             with self.assertRaisesRegex(
                 HistoricalConflict,
@@ -539,16 +550,21 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
     def test_market_population_rechecks_authenticated_bytes(self):
         rows = self._base_events()
         manifest_digest = self._register(rows)
-        original = ArtifactStore.read_authenticated_snapshot
+        original_factory = vintages_module.trusted_authenticated_reader
 
-        def altered_bytes(store, artifact_id):
-            artifact_manifest, raw = original(store, artifact_id)
-            return artifact_manifest, raw + b" "
+        def altered_bytes_factory(root, *, publication_store=None):
+            reader = original_factory(root, publication_store=publication_store)
+
+            def altered_bytes(artifact_id):
+                artifact_manifest, raw = reader(artifact_id)
+                return artifact_manifest, raw + b" "
+
+            return altered_bytes
 
         with patch.object(
-            ArtifactStore,
-            "read_authenticated_snapshot",
-            new=altered_bytes,
+            vintages_module,
+            "trusted_authenticated_reader",
+            new=altered_bytes_factory,
         ):
             with self.assertRaisesRegex(
                 HistoricalConflict,
@@ -665,7 +681,7 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
         rows = self._base_events()
         manifest_digest = self._register(rows)
         state = {"authority_read": False}
-        original = ArtifactStore.read_authenticated_snapshot
+        original_factory = vintages_module.trusted_authenticated_reader
 
         class ProbeIterable:
             def __iter__(self_inner):
@@ -675,15 +691,20 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                     )
                 return iter(rows)
 
-        def counted_snapshot(store, artifact_id):
-            manifest, raw = original(store, artifact_id)
-            state["authority_read"] = True
-            return manifest, raw
+        def counted_factory(root, *, publication_store=None):
+            reader = original_factory(root, publication_store=publication_store)
+
+            def counted_snapshot(artifact_id):
+                manifest, raw = reader(artifact_id)
+                state["authority_read"] = True
+                return manifest, raw
+
+            return counted_snapshot
 
         with patch.object(
-            ArtifactStore,
-            "read_authenticated_snapshot",
-            new=counted_snapshot,
+            vintages_module,
+            "trusted_authenticated_reader",
+            new=counted_factory,
         ):
             fitted = fit_authoritative_fold_normalizer(
                 registry=self.registry,

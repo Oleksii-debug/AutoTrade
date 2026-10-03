@@ -289,7 +289,7 @@ def _latest_known_vintages(
             latest_by_identity.values(),
             key=lambda item: (
                 item.event_time,
-                -1 if item.stream_generation is None else item.stream_generation,
+                0 if item.stream_generation is None else item.stream_generation,
                 -1 if item.source_sequence is None else item.source_sequence,
                 item.source_identity or item.observation_id,
                 item.available_at,

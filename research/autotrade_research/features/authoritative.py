@@ -285,7 +285,7 @@ def authoritative_source_values(
         key=lambda item: (
             item.available_at,
             item.event_time,
-            -1 if item.stream_generation is None else item.stream_generation,
+            0 if item.stream_generation is None else item.stream_generation,
             -1 if item.source_sequence is None else item.source_sequence,
             item.symbol,
             item.source_identity or item.observation_id,

@@ -775,12 +775,15 @@ def _install_instrument_registry_calendar_authority():
             {default.calendar_id: default},
         )
 
-    def snapshot(value: object) -> dict[str, TradingCalendar]:
+    def calendar_for(
+        value: object,
+        calendar_id: str,
+    ) -> TradingCalendar | None:
         state = bound_state(value)
-        return {
-            calendar_id: _detached_trading_calendar(calendar)
-            for calendar_id, calendar in state.items()
-        }
+        calendar = state.get(calendar_id)
+        if calendar is None:
+            return None
+        return _detached_trading_calendar(calendar)
 
     def commit(value: object, calendar: TradingCalendar) -> None:
         state = bound_state(value)
@@ -790,11 +793,11 @@ def _install_instrument_registry_calendar_authority():
             raise InstrumentConflict("calendar_id is immutable")
         state[detached.calendar_id] = detached
 
-    return initialize, snapshot, commit
+    return initialize, calendar_for, commit
 
 
 _registry_calendars_initialize = None
-_registry_calendars_snapshot = None
+_registry_calendar_for = None
 _registry_calendars_commit = None
 
 
@@ -849,6 +852,20 @@ def _install_instrument_registry_version_authority():
             for instrument_id, versions in state.items()
         }
 
+    def versions_for(
+        value: object,
+        instrument_id: str,
+    ) -> tuple[InstrumentVersion, ...]:
+        state = bound_state(value)
+        return tuple(
+            _detached_instrument_version(version)
+            for version in state.get(instrument_id, ())
+        )
+
+    def instrument_ids(value: object) -> tuple[str, ...]:
+        state = bound_state(value)
+        return tuple(state)
+
     def commit(value: object, candidate: InstrumentVersion) -> None:
         state = bound_state(value)
         detached = _detached_instrument_version(candidate)
@@ -857,11 +874,13 @@ def _install_instrument_registry_version_authority():
         versions.sort(key=lambda item: item.version)
         state[detached.instrument_id] = versions
 
-    return initialize, snapshot, commit
+    return initialize, snapshot, versions_for, instrument_ids, commit
 
 
 _registry_versions_initialize = None
 _registry_versions_snapshot = None
+_registry_versions_for = None
+_registry_instrument_ids = None
 _registry_versions_commit = None
 
 
@@ -917,13 +936,13 @@ class InstrumentRegistry:
 
     def add(self, version: InstrumentVersion) -> None:
         version = _detached_instrument_version(version)
-        calendar = _registry_calendars_snapshot(self).get(version.calendar_id)
+        calendar = _registry_calendar_for(self, version.calendar_id)
         if calendar is None:
             raise InstrumentRegistryError("calendar_id is unknown")
         if calendar.timezone_id != version.timezone_id:
             raise InstrumentRegistryError("instrument timezone_id conflicts with its calendar")
 
-        existing = _registry_versions_snapshot(self).get(version.instrument_id, [])
+        existing = list(_registry_versions_for(self, version.instrument_id))
         if existing:
             same_version = tuple(
                 item for item in existing if item.version == version.version
@@ -960,19 +979,19 @@ class InstrumentRegistry:
         _registry_versions_commit(self, version)
 
     def versions(self, instrument_id: str) -> tuple[InstrumentVersion, ...]:
-        return tuple(_registry_versions_snapshot(self).get(instrument_id, ()))
+        return _registry_versions_for(self, instrument_id)
 
     def exact(self, instrument_version: str) -> InstrumentVersion:
         instrument_id, version_number = _split_instrument_version_ref(
             instrument_version, "instrument_version"
         )
-        for version in _registry_versions_snapshot(self).get(instrument_id, ()):
+        for version in _registry_versions_for(self, instrument_id):
             if version.version == version_number:
                 return version
         raise InstrumentNotFound("instrument_version is unknown")
 
     def at(self, instrument_id: str, instant: datetime) -> InstrumentVersion:
-        versions = _registry_versions_snapshot(self).get(instrument_id)
+        versions = _registry_versions_for(self, instrument_id)
         if not versions:
             raise InstrumentNotFound("instrument_id is unknown")
         for index in range(len(versions) - 1, -1, -1):
@@ -995,7 +1014,7 @@ class InstrumentRegistry:
         venue = _text(venue_id, "venue_id")
         symbol = _text(provider_symbol, "provider_symbol")
         matches = []
-        for instrument_id in _registry_versions_snapshot(self):
+        for instrument_id in _registry_instrument_ids(self):
             try:
                 version = InstrumentRegistry.at(self, instrument_id, instant)
             except InstrumentNotFound:
@@ -1016,7 +1035,9 @@ class InstrumentRegistry:
         version = InstrumentRegistry.at(self, instrument_id, instant)
         if version.status != "ACTIVE":
             raise InstrumentRegistryError(f"instrument status is {version.status}")
-        calendar = _registry_calendars_snapshot(self)[version.calendar_id]
+        calendar = _registry_calendar_for(self, version.calendar_id)
+        if calendar is None:
+            raise InstrumentRegistryError("calendar_id is unknown")
         if not calendar.is_open(instant):
             raise InstrumentRegistryError("instrument calendar is closed")
         point = _utc(instant, "instant")
@@ -1029,11 +1050,13 @@ class InstrumentRegistry:
 (
     _registry_versions_initialize,
     _registry_versions_snapshot,
+    _registry_versions_for,
+    _registry_instrument_ids,
     _registry_versions_commit,
 ) = _install_instrument_registry_version_authority()
 (
     _registry_calendars_initialize,
-    _registry_calendars_snapshot,
+    _registry_calendar_for,
     _registry_calendars_commit,
 ) = _install_instrument_registry_calendar_authority()
 

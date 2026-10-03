@@ -1114,8 +1114,10 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         recovery_now=_now(now),
                     )
                     if recovery.status == "IN_PROGRESS":
+                        # Dispatcher lease activity is an internal recovery
+                        # phase, not a new product-level simulation status.
                         return {
-                            "status": "IN_PROGRESS",
+                            "status": "UNKNOWN",
                             "environment": ENVIRONMENT,
                             "episode_id": episode_id,
                             "reason": recovery.reason,

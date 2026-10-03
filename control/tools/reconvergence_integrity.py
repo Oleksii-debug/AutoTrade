@@ -18,10 +18,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
+
+TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_SCORED_CHANGE_STATUS = re.compile(r"^[RC](?:100|0[0-9]{2})$")
 
 PROTECTED_SENTINELS = frozenset(
     {
@@ -41,13 +46,67 @@ PROTECTED_SENTINELS = frozenset(
         "control/INDEX.json",
         "control/qualification.json",
         "control/work-packages/bank.json",
+        "control/__init__.py",
+        "control/tools/__init__.py",
         "control/tools/reconvergence_integrity.py",
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
         "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
         "requirements-dev.txt",
+        "contracts/fixtures/common-scalars.corpus.json",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "tools/baseline.py",
+        "tools/build_provenance_manifest.py",
+        "tools/check_nvda_qualification.py",
         "tools/verify.py",
+        "tools/write_ci_evidence.py",
     }
+)
+
+BOOTSTRAP_TRUST_ROOTS = frozenset(
+    {
+        "control/__init__.py",
+        "control/tools/__init__.py",
+        "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
+    }
+)
+
+WORKFLOW_AUTHORITY_ROOTS = frozenset(
+    path
+    for path in PROTECTED_SENTINELS
+    if path.startswith(".github/workflows/")
+)
+
+INTEGRATION_HARNESS_ROOTS = frozenset(
+    {
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
+        "requirements-dev.txt",
+        "contracts/fixtures/common-scalars.corpus.json",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "tools/baseline.py",
+        "tools/build_provenance_manifest.py",
+        "tools/check_nvda_qualification.py",
+        "tools/verify.py",
+        "tools/write_ci_evidence.py",
+    }
+)
+
+MUTATION_AUTHORITY_ROOTS = (
+    BOOTSTRAP_TRUST_ROOTS
+    | WORKFLOW_AUTHORITY_ROOTS
+    | INTEGRATION_HARNESS_ROOTS
 )
 
 
@@ -74,6 +133,10 @@ class IntegrityAssessment:
 _SIMPLE_CHANGE_STATUSES = frozenset({"A", "D", "M", "T"})
 
 
+def _is_workflow_authority_path(path: str) -> bool:
+    return path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+
+
 def _validate_repository_path(value: str, *, field: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{field} must be an exact string")
@@ -81,8 +144,8 @@ def _validate_repository_path(value: str, *, field: str) -> str:
         raise ValueError(f"{field} must not be empty")
     if any(character in value for character in ("\x00", "\n", "\r", "\t")):
         raise ValueError(f"{field} contains a forbidden control character")
-    if "\\" in value:
-        raise ValueError(f"{field} must use repository POSIX separators")
+    if "\\" in value or ":" in value:
+        raise ValueError(f"{field} must use canonical repository POSIX separators")
     if value.startswith("/") or value.endswith("/"):
         raise ValueError(f"{field} must be a repository-relative file path")
     parts = value.split("/")

@@ -1,3 +1,4 @@
+from copy import copy as real_copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -175,6 +176,44 @@ class RuntimeTargetHostPlanBoundCutSnapshotTests(unittest.TestCase):
         self.assertIs(result, accepted)
         verifier.assert_called_once()
         self.assertNotEqual(cut.started_monotonic_ns, original_started)
+
+    def test_cut_mutation_during_copy_is_validated_on_detached_snapshot(self):
+        root, store, spec, declared, campaign_plan, cut = self._prepared()
+
+        class ExecutableStarted:
+            pass
+
+        hostile = ExecutableStarted()
+
+        def mutating_copy(value):
+            object.__setattr__(cut, "started_monotonic_ns", hostile)
+            return real_copy(value)
+
+        with patch.object(
+            terminal_module,
+            "copy",
+            side_effect=mutating_copy,
+        ), patch.object(
+            terminal_module,
+            "verify_composed_runtime_target_host_qualification",
+        ) as verifier, self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "started_monotonic_ns must remain a non-negative integer",
+        ):
+            terminal_module.verify_declared_plan_runtime_target_host_qualification(
+                object(),
+                evidence_store=object(),
+                evidence_root=root,
+                journal_store=store,
+                plan_id=declared.plan_id,
+                spec=spec,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+                campaign_plan=campaign_plan,
+                campaign_cut=cut,
+                measurement=object(),
+            )
+        verifier.assert_not_called()
 
     def test_post_issuance_executable_cut_field_fails_before_composed_dispatch(self):
         root, store, spec, declared, campaign_plan, cut = self._prepared()

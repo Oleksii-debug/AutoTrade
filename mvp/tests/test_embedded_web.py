@@ -358,6 +358,7 @@ class EmbeddedWebTests(unittest.TestCase):
         self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         csp = headers["Content-Security-Policy"]
         for directive in (
             "default-src 'self'",
@@ -370,6 +371,18 @@ class EmbeddedWebTests(unittest.TestCase):
         ):
             self.assertIn(directive, csp)
         self.assertNotIn("Location", headers)
+
+    def test_static_error_responses_disable_content_sniffing(self):
+        response = self.app.dispatch(
+            method="GET",
+            target="/app.js?v=1",
+            headers={},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            dict(response.headers)["X-Content-Type-Options"],
+            "nosniff",
+        )
 
     def test_static_query_method_and_body_fail_closed(self):
         self.assertEqual(

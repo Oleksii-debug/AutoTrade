@@ -164,8 +164,8 @@ class IntegrityAssessment:
 
 
 def _validate_changed_path(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be non-empty text")
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be non-empty exact text")
     if (
         value.startswith("/")
         or "\\" in value
@@ -192,16 +192,16 @@ def parse_trusted_scope_approval(
     fail closed with ``ValueError``.
     """
 
-    if not isinstance(body, str):
+    if type(body) is not str:
         return None
     lines = body.splitlines()
-    if not lines or lines[0].strip() != TRUSTED_SCOPE_APPROVAL_MARKER:
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
         return None
-    if not _SHA40.fullmatch(expected_head_sha):
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
         raise ValueError("expected approval head must be a lowercase 40-hex SHA")
     if len(lines) < 2 or not lines[1].startswith("head: "):
         raise ValueError("trusted scope approval requires one exact head line")
-    approved_head = lines[1].removeprefix("head: ").strip()
+    approved_head = lines[1].removeprefix("head: ")
     if not _SHA40.fullmatch(approved_head):
         raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
     if approved_head != expected_head_sha:
@@ -214,7 +214,7 @@ def parse_trusted_scope_approval(
         if not line.startswith("path: "):
             raise ValueError("trusted scope approval permits only path lines after head")
         path = _validate_changed_path(
-            line.removeprefix("path: ").strip(),
+            line.removeprefix("path: "),
             name="approved scope path",
         )
         paths.append(path)
@@ -226,10 +226,10 @@ def parse_trusted_scope_approval(
 
 
 def _validated_change(change: Change) -> Change:
-    if not isinstance(change, Change):
-        raise TypeError("changes must contain Change values")
-    if not isinstance(change.status, str):
-        raise ValueError("Git name-status must be text")
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    if type(change.status) is not str:
+        raise ValueError("Git name-status must be exact text")
 
     if change.status in _SIMPLE_STATUS:
         if change.previous_path is not None:
@@ -252,6 +252,10 @@ def _validated_change(change: Change) -> Change:
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
+        if type(raw) is not str:
+            raise TypeError("Git name-status records must be exact text")
+        if "\x00" in raw:
+            raise ValueError("Git name-status record contains NUL")
         line = raw.rstrip("\n")
         if not line:
             continue
@@ -273,6 +277,31 @@ def _is_workflow_authority_path(path: str) -> bool:
     return path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
 
 
+def _normalized_trust_root_approvals(
+    values: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    roots = (
+        SELF_PROTECTING_TRUST_ROOTS
+        | BOOTSTRAP_TRUST_ROOTS
+        | WORKFLOW_AUTHORITY_ROOTS
+        | INTEGRATION_HARNESS_ROOTS
+    )
+    approved: list[str] = []
+    for raw in values:
+        path = _validate_changed_path(raw, name="trusted root approval")
+        if path not in roots and not _is_workflow_authority_path(path):
+            raise ValueError(
+                "trusted root approval must name one exact executable trust root "
+                f"or workflow authority: {path!r}"
+            )
+        approved.append(path)
+    if len(set(approved)) != len(approved):
+        raise ValueError("trusted root approvals must be unique exact paths")
+    return tuple(approved)
+
+
 def assess_reconvergence(
     *,
     base_paths: Sequence[str],
@@ -289,7 +318,12 @@ def assess_reconvergence(
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _validate_changed_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
@@ -299,19 +333,17 @@ def assess_reconvergence(
 
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:
+        if any(type(scope) is not str for scope in allowed_scopes):
+            raise TypeError("allowed scopes must contain exact strings")
         normalized_scopes = _normalized_scopes(allowed_scopes)
 
-    normalized_trust_root_approvals: tuple[str, ...] = ()
-    if trusted_root_approvals is not None:
-        normalized_trust_root_approvals = _normalized_scopes(
-            trusted_root_approvals
-        )
+    normalized_trust_root_approvals = _normalized_trust_root_approvals(
+        trusted_root_approvals
+    )
 
     def exactly_authorized(path: str) -> bool:
-        return (
-            path in normalized_trust_root_approvals
-            or (normalized_scopes is not None and path in normalized_scopes)
-        )
+        # Ordinary mutation ownership never grants executable trust-root authority.
+        return path in normalized_trust_root_approvals
 
     disappeared_paths: set[str] = set()
     direct_deletions: set[str] = set()
@@ -378,15 +410,6 @@ def assess_reconvergence(
             )
             protected_damage.add(
                 f"{change.path} (unauthorized {authority_kind} creation)"
-            )
-        if (
-            kind in {"A", "R", "C"}
-            and change.path in BOOTSTRAP_TRUST_ROOTS
-            and change.path not in base_path_set
-            and not exactly_authorized(change.path)
-        ):
-            protected_damage.add(
-                f"{change.path} (unauthorized bootstrap trust-root creation)"
             )
     protected_violations = tuple(sorted(protected_damage))
 

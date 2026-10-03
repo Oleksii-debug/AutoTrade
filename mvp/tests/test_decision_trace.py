@@ -14,6 +14,8 @@ def trace(trace_id: str, *, decision: str = "BUY") -> dict:
         "decision": decision,
         "decision_reason": "fast_above_slow" if decision == "BUY" else "averages_equal",
         "risk_outcome": "admitted" if decision == "BUY" else "not_applicable",
+        "source_sha": "1" * 40,
+        "build_id": "autotrade-test-build-1",
         "order_id": "intent-1" if decision == "BUY" else None,
         "fill_id": "fill-1" if decision == "BUY" else None,
         "evidence_refs": ["evidence-1"],
@@ -399,6 +401,51 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "https://provider.test/orders?"
                 "api%5Fsecret%5Frotation%5Fcount=4&symbol=BTC",
             )
+
+
+    def test_source_and_build_identity_validation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            bad_source = trace("trace-bad-source")
+            bad_source["source_sha"] = "G" * 40
+            with self.assertRaisesRegex(ValueError, "source_sha"):
+                store.append(bad_source)
+
+            bad_build = trace("trace-bad-build")
+            bad_build["build_id"] = " bad build "
+            with self.assertRaisesRegex(ValueError, "build_id"):
+                store.append(bad_build)
+
+    def test_exact_reconstruction_requires_matching_source_and_build(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-exact"))
+            exact = store.reconstruct_exact(
+                "trace-exact",
+                expected_source_sha="1" * 40,
+                expected_build_id="autotrade-test-build-1",
+                available_event_ids=[],
+                available_evidence_ids=["evidence-1"],
+            )
+            self.assertEqual(exact["source_sha"], "1" * 40)
+            self.assertEqual(exact["build_id"], "autotrade-test-build-1")
+
+            with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_ids=[],
+                    available_evidence_ids=["evidence-1"],
+                )
+            with self.assertRaisesRegex(ValueError, "build identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-2",
+                    available_event_ids=[],
+                    available_evidence_ids=["evidence-1"],
+                )
 
 
 if __name__ == "__main__":

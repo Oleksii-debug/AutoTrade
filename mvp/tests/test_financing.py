@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_DOWN, localcontext
 import unittest
 
@@ -281,6 +281,194 @@ class FinancingTests(unittest.TestCase):
             "FINANCING_EXPENSE:USD",
         )
 
+
+    def test_financing_event_rejects_decimal_subclass_before_dispatch(self):
+        class HostileDecimal(Decimal):
+            calls = 0
+
+            def is_finite(self):
+                type(self).calls += 1
+                raise AssertionError("hostile Decimal dispatch")
+
+        hostile = HostileDecimal("1.25")
+        with self.assertRaisesRegex(FinancingError, "exact decimal input"):
+            FinancingEvent.create(
+                charge_id="hostile-decimal",
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount=hostile,
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        self.assertEqual(HostileDecimal.calls, 0)
+
+    def test_financing_event_rejects_text_subclass_before_normalization(self):
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile text strip")
+
+            def upper(self):
+                type(self).calls += 1
+                raise AssertionError("hostile text upper")
+
+        hostile = HostileText("charge")
+        with self.assertRaisesRegex(FinancingError, "charge_id is required"):
+            FinancingEvent.create(
+                charge_id=hostile,
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount="1",
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+    def test_financing_event_rejects_revision_subclass_before_comparison(self):
+        class HostileInt(int):
+            calls = 0
+
+            def __lt__(self, other):
+                type(self).calls += 1
+                raise AssertionError("hostile revision comparison")
+
+        with self.assertRaisesRegex(FinancingError, "positive integer"):
+            FinancingEvent.create(
+                charge_id="hostile-revision",
+                revision=HostileInt(1),
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount="1",
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        self.assertEqual(HostileInt.calls, 0)
+
+    def test_financing_event_rejects_datetime_and_timezone_subclasses_before_callbacks(self):
+        calls = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                calls.append("datetime-utcoffset")
+                raise AssertionError("hostile datetime utcoffset")
+
+            def astimezone(self, *args, **kwargs):
+                calls.append("datetime-astimezone")
+                raise AssertionError("hostile datetime astimezone")
+
+        hostile_datetime = HostileDateTime(
+            2026,
+            9,
+            24,
+            18,
+            tzinfo=timezone.utc,
+        )
+        calls.clear()
+        with self.assertRaisesRegex(FinancingError, "timezone-aware"):
+            FinancingEvent.create(
+                charge_id="hostile-time",
+                revision=1,
+                kind="FINAL",
+                effective_at=hostile_datetime,
+                available_at=BASE,
+                unit="USD",
+                amount="1",
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        self.assertEqual(calls, [])
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, dt):
+                calls.append("tz-utcoffset")
+                raise AssertionError("hostile timezone utcoffset")
+
+            def dst(self, dt):
+                calls.append("tz-dst")
+                raise AssertionError("hostile timezone dst")
+
+        custom_zone = HostileTimezone()
+        hostile_zone_datetime = datetime(
+            2026,
+            9,
+            24,
+            18,
+            tzinfo=custom_zone,
+        )
+        calls.clear()
+        with self.assertRaisesRegex(FinancingError, "timezone-aware"):
+            FinancingEvent.create(
+                charge_id="hostile-zone",
+                revision=1,
+                kind="FINAL",
+                effective_at=hostile_zone_datetime,
+                available_at=BASE,
+                unit="USD",
+                amount="1",
+                source_account="CASH:USD",
+                evidence_ref="artifact:hostile",
+            )
+        self.assertEqual(calls, [])
+
+    def test_financing_event_subclass_and_forged_exact_event_fail_closed(self):
+        class EventSubclass(FinancingEvent):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact FinancingEvent class"):
+            EventSubclass.create(
+                charge_id="subclass",
+                revision=1,
+                kind="FINAL",
+                effective_at=BASE,
+                available_at=BASE,
+                unit="USD",
+                amount="1",
+                source_account="CASH:USD",
+                evidence_ref="artifact:subclass",
+            )
+
+        class HostileDecimal(Decimal):
+            calls = 0
+
+            def is_finite(self):
+                type(self).calls += 1
+                raise AssertionError("forged Decimal dispatch")
+
+        forged = event(revision=1, kind="FINAL", amount="1")
+        object.__setattr__(forged, "amount", HostileDecimal("1"))
+        book = FinancingRevisionBook()
+        with self.assertRaisesRegex(FinancingError, "exact decimal input"):
+            book.record(forged)
+        self.assertEqual(HostileDecimal.calls, 0)
+        self.assertEqual(book.events, ())
+
+    def test_history_subclass_is_rejected_before_iteration_and_exact_list_is_supported(self):
+        class HostileList(list):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("hostile history iteration")
+
+        hostile = HostileList([event()])
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            FinancingRevisionBook(hostile)
+        self.assertEqual(HostileList.calls, 0)
+
+        restored = FinancingRevisionBook([event()])
+        self.assertEqual(len(restored.events), 1)
+        self.assertEqual(restored.events[0].revision, 1)
 
     def test_financing_delta_and_postings_ignore_ambient_decimal_context(self):
         book = FinancingRevisionBook()

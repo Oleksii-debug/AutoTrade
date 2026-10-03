@@ -129,6 +129,7 @@ _DESCRIPTORS = (
     _descriptor("runtime_qualification_plan", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
     _descriptor("securities_borrow_recall", FINANCIAL, QUALIFICATION_FINANCIAL),
     _descriptor("settlement_book", FINANCIAL, QUALIFICATION_FINANCIAL),
+    _descriptor("simulation_portfolio", NON_FINANCIAL, QUALIFICATION_NON_FINANCIAL),
     _descriptor("submission_attempt", FINANCIAL_CONTROL, QUALIFICATION_FINANCIAL),
 )
 

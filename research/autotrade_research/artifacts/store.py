@@ -889,7 +889,9 @@ class ArtifactStore:
         ArtifactStore._assert_no_instance_method_shadows(self)
         normalized_id = ArtifactStore._artifact_id(artifact_id)
         manifest_path = ArtifactStore._manifest_path(self, normalized_id)
-        descriptor, opened = ArtifactStore._open_manifest_descriptor(\n            self, manifest_path\n        )
+        descriptor, opened = ArtifactStore._open_manifest_descriptor(
+            self, manifest_path
+        )
         try:
             raw_bytes = ArtifactStore._read_manifest_descriptor(self, 
                 manifest_path,

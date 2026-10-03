@@ -357,7 +357,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             settlement_currency="USD",
             side="BUY",
             quantity=Decimal("123456789012345678901234567890"),
-            price=Decimal("0"),
+            price=Decimal("1"),
         )
         prior_retirement = book_equity_fill(
             transaction_id="projection-prior",
@@ -366,7 +366,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             settlement_currency="USD",
             side="SELL",
             quantity=Decimal("1"),
-            price=Decimal("0"),
+            price=Decimal("1"),
         )
         cut = EconomicBookCut(
             provider_id="BYBIT",

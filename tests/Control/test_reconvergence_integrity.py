@@ -346,6 +346,37 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, ())
 
+    def test_trust_root_approval_does_not_constrain_unrelated_changes(self):
+        guard_path = "control/tools/reconvergence_integrity.py"
+        ordinary_path = "owned/change.py"
+        result = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=[
+                Change(status="M", path=guard_path),
+                Change(status="M", path=ordinary_path),
+            ],
+            trusted_root_approvals=(guard_path,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, ())
+
+    def test_trust_root_approval_is_exact_path_not_directory_authority(self):
+        guard_path = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[guard_path, "owned/change.py"],
+            changes=[Change(status="M", path=guard_path)],
+            trusted_root_approvals=("control/tools",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            f"{guard_path} (unauthorized trust-root modification)",
+            result.protected_violations,
+        )
+        self.assertEqual(result.scope_violations, ())
+
     def test_parser_rejects_unsupported_and_malformed_git_statuses(self):
         bad = (
             "U\tfile.py",

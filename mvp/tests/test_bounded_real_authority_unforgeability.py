@@ -204,9 +204,12 @@ class BoundedRealAuthorityUnforgeabilityTests(unittest.TestCase):
             vars(verifier)["_store_identity"] = "sha256:" + "f" * 64
             vars(verifier)["_read_snapshot"] = hostile_reader
 
-            self.assertIs(verifier.store, selected_store)
-            self.assertEqual(verifier.evidence_root, original_root)
-            self.assertEqual(verifier.identity, original_identity)
+            with self.assertRaisesRegex(ValueError, "composition was modified"):
+                _ = verifier.store
+            with self.assertRaisesRegex(ValueError, "composition was modified"):
+                _ = verifier.evidence_root
+            with self.assertRaisesRegex(ValueError, "composition was modified"):
+                _ = verifier.identity
 
             missing_ref = ImmutableEvidenceRef(
                 artifact_id="22222222-2222-4222-8222-222222222222",
@@ -218,9 +221,21 @@ class BoundedRealAuthorityUnforgeabilityTests(unittest.TestCase):
                 provider_id=envelope.provider_id,
                 account_id=envelope.account_id,
             )
-            result = ArtifactStoreEvidenceVerifier.verify(verifier, missing_ref)
-            self.assertFalse(result.valid)
+            with self.assertRaisesRegex(ValueError, "composition was modified"):
+                ArtifactStoreEvidenceVerifier.verify(verifier, missing_ref)
             self.assertEqual(calls, [])
+
+    def test_verifier_binding_exposes_no_erasable_weakref_callback(self):
+        with TemporaryDirectory() as directory:
+            verifier = ArtifactStoreEvidenceVerifier(
+                ArtifactStore(directory),
+                evidence_root=directory,
+            )
+            registry_refs = weakref.getweakrefs(verifier)
+            self.assertTrue(registry_refs)
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in registry_refs)
+            )
 
     def test_exact_verifier_explicit_reinit_cannot_change_binding(self):
         with TemporaryDirectory() as selected_directory, TemporaryDirectory() as replacement_directory:

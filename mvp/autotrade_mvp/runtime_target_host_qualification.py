@@ -699,7 +699,8 @@ def verify_runtime_target_host_qualification(
 
     # Freeze direct executable seams before the first callback-capable trust/read
     # operation. A later callback cannot swap a global and restore it from inside
-    # the forged parser because all dispatch below uses these retained callables.
+    # a forged consumer because all dispatch below uses retained callables plus
+    # authority guards rechecked at each callback boundary.
     canonical_verifier = verify_canonical_qualification_attestation
     reader_factory = trusted_authenticated_reader
     required_refs = _required_refs
@@ -752,6 +753,60 @@ def verify_runtime_target_host_qualification(
             label="target-host retained-payload read helper",
         ),
     )
+    direct_consumer_guards = (
+        _build_module_authority_guard(
+            root=required_refs,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host evidence-ref consumer",
+        ),
+        _build_module_authority_guard(
+            root=identity_tuple,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host identity consumer",
+        ),
+        _build_module_authority_guard(
+            root=provenance_identity,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host provenance-identity consumer",
+        ),
+        _build_module_authority_guard(
+            root=campaign_payload_verifier,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host campaign semantic verifier",
+        ),
+        _build_module_authority_guard(
+            root=inventory_payload_verifier,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host inventory semantic verifier",
+        ),
+        _build_module_authority_guard(
+            root=canonical_uuid,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host UUID canonicalizer",
+        ),
+        _build_module_authority_guard(
+            root=canonical_digest,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host digest canonicalizer",
+        ),
+        _build_module_authority_guard(
+            root=reader_factory,
+            error_type=RuntimeTargetHostQualificationError,
+            label="target-host authenticated reader factory",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=AcceptedQualificationAttestation,
+            label="accepted qualification attestation",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=EvidenceArtifactRef,
+            label="target-host evidence ref",
+        ),
+        _build_exact_class_authority_guard(
+            owner_type=AcceptedRuntimeTargetHostQualification,
+            label="accepted target-host result",
+        ),
+    )
 
     def require_parser_authority() -> None:
         for guard in parser_guards:
@@ -760,6 +815,15 @@ def verify_runtime_target_host_qualification(
     def require_read_helper_authority() -> None:
         for guard in read_helper_guards:
             guard()
+
+    def require_direct_consumer_authority() -> None:
+        for guard in direct_consumer_guards:
+            guard()
+
+    def require_post_callback_authority() -> None:
+        require_read_helper_authority()
+        require_direct_consumer_authority()
+        require_parser_authority()
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     scenario_id = _text(expected_scenario_id, name="expected_scenario_id")
@@ -811,8 +875,7 @@ def verify_runtime_target_host_qualification(
         expected_release_artifact_id=release_artifact_id,
         expected_release_artifact_sha256=release_artifact_sha256,
     )
-    require_read_helper_authority()
-    require_parser_authority()
+    require_post_callback_authority()
     if type(accepted) is not AcceptedQualificationAttestation:
         raise RuntimeTargetHostQualificationError(
             "canonical verifier returned non-canonical accepted attestation"
@@ -858,19 +921,18 @@ def verify_runtime_target_host_qualification(
         raise RuntimeTargetHostQualificationError(
             "target-host evidence authority cannot be bound"
         ) from error
-    require_read_helper_authority()
-    require_parser_authority()
+    require_post_callback_authority()
 
     binding_ref = refs[BINDING_EVIDENCE_KIND]
     binding_raw = read_artifact_bytes(
         reader,
         binding_ref,
         digest_factory=digest_factory,
-        post_read_authority_guard=require_read_helper_authority,
+        post_read_authority_guard=require_post_callback_authority,
     )
     require_parser_authority()
     binding = binding_parser(binding_raw)
-    require_parser_authority()
+    require_post_callback_authority()
     binding_identity = identity_tuple(
         source_sha=binding.source_sha,
         scenario_id=binding.scenario_id,
@@ -911,11 +973,11 @@ def verify_runtime_target_host_qualification(
             reader,
             ref,
             digest_factory=digest_factory,
-            post_read_authority_guard=require_read_helper_authority,
+            post_read_authority_guard=require_post_callback_authority,
         )
         require_parser_authority()
         provenance = provenance_parser(provenance_raw)
-        require_parser_authority()
+        require_post_callback_authority()
         if provenance.evidence_kind != kind:
             raise RuntimeTargetHostQualificationError(
                 f"target-host provenance kind conflicts for {kind}"
@@ -934,7 +996,7 @@ def verify_runtime_target_host_qualification(
                 top_level_sha256 | payload_sha256 | {release_artifact_sha256}
             ),
             digest_factory=digest_factory,
-            post_read_authority_guard=require_read_helper_authority,
+            post_read_authority_guard=require_post_callback_authority,
         )
         require_parser_authority()
         if kind == CAMPAIGN_EVIDENCE_KIND:
@@ -948,7 +1010,7 @@ def verify_runtime_target_host_qualification(
                 expected_configuration_hash=configuration_hash,
                 expected_host_fingerprint=host_fingerprint,
             )
-            require_parser_authority()
+            require_post_callback_authority()
         elif kind == HOST_INVENTORY_EVIDENCE_KIND:
             inventory_payload_verifier(
                 raw_payload,
@@ -956,15 +1018,14 @@ def verify_runtime_target_host_qualification(
                 parser=inventory_parser,
                 expected_host_fingerprint=host_fingerprint,
             )
-            require_parser_authority()
+            require_post_callback_authority()
         payload_artifact_ids.add(provenance.payload_artifact_id)
         payload_sha256.add(provenance.payload_sha256)
         payload_id_by_kind[kind] = provenance.payload_artifact_id
         payload_digest_by_kind[kind] = provenance.payload_sha256
         collectors[kind] = f"{provenance.collector_id}@{provenance.collector_version}"
 
-    require_read_helper_authority()
-    require_parser_authority()
+    require_post_callback_authority()
     return AcceptedRuntimeTargetHostQualification(
         attestation_id=attestation_id,
         attestation_digest=attestation_digest,

@@ -143,7 +143,7 @@ def _canonical_observation_from_sealed_response(
                 "cash_settlement_amount",
             )
         )
-    except (InvalidOperation, TypeError, ValueError) as error:
+    except (TypeError, ValueError) as error:
         raise OptionLifecycleError(
             "provider lifecycle payload contains invalid financial values"
         ) from error

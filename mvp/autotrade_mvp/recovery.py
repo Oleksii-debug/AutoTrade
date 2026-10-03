@@ -412,6 +412,7 @@ class RecoveryController:
             type(envelope_epoch) is not str
             or not envelope_epoch.isdigit()
             or int(envelope_epoch) <= 0
+            or envelope_epoch != str(int(envelope_epoch))
         ):
             raise RuntimeError("SubmissionPrepared owner epoch is invalid")
         prepared_epoch = prepared_payload.get("owner_epoch")

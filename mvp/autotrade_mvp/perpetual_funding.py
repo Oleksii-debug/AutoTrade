@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from threading import Lock
+import weakref
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
@@ -36,7 +38,13 @@ from .perpetuals import (
     PerpetualError,
     funding_cashflow,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_activity_accounting import AccountingConflict, DurableProviderEconomicBook
 from .provider_core import ProviderResponseObservation, Surface
 
@@ -332,6 +340,10 @@ class FundingApplyResult:
     currency: str
 
 
+_FUNDING_AUTHORITY_BINDING_LOCK = Lock()
+_FUNDING_AUTHORITY_BINDINGS: dict[int, tuple[object, ...]] = {}
+
+
 class DurablePerpetualFundingAuthority:
     """Exactly-once provider funding bridge over the canonical economic book."""
 
@@ -376,41 +388,86 @@ class DurablePerpetualFundingAuthority:
             economic_book.account_id,
             economic_book.environment,
         )
-        self._bound_store = store
-        self._bound_economic_book = economic_book
-        self._bound_economic_scope = (
+        bound_identity = require_exact_journal_store_authority(
+            store,
+            subject="perpetual funding JournalStore",
+        )
+        bound_scope = (
             economic_book.provider_id,
             economic_book.account_id,
             economic_book.environment,
             economic_book.book_id,
         )
+        binding_key = id(self)
 
-    def _require_bound_financial_authority(self) -> None:
+        def cleanup(ref: weakref.ReferenceType[DurablePerpetualFundingAuthority]) -> None:
+            with _FUNDING_AUTHORITY_BINDING_LOCK:
+                current = _FUNDING_AUTHORITY_BINDINGS.get(binding_key)
+                if current is not None and current[0] is ref:
+                    _FUNDING_AUTHORITY_BINDINGS.pop(binding_key, None)
+
+        ref = weakref.ref(self, cleanup)
+        with _FUNDING_AUTHORITY_BINDING_LOCK:
+            _FUNDING_AUTHORITY_BINDINGS[binding_key] = (
+                ref,
+                store,
+                economic_book,
+                bound_identity,
+                bound_scope,
+            )
+
+    def _require_bound_financial_authority(self) -> object:
+        with _FUNDING_AUTHORITY_BINDING_LOCK:
+            binding = _FUNDING_AUTHORITY_BINDINGS.get(id(self))
+        if binding is None or binding[0]() is not self:
+            raise PerpetualFundingConflict(
+                "funding authority durable binding is not canonically issued"
+            )
+        _, bound_store, bound_book, bound_identity, bound_scope = binding
         if (
-            self.store is not self._bound_store
-            or self.economic_book is not self._bound_economic_book
-            or self._bound_economic_book.store is not self._bound_store
+            self.store is not bound_store
+            or self.economic_book is not bound_book
+            or bound_book.store is not bound_store
         ):
             raise PerpetualFundingConflict(
                 "funding authority durable store binding changed after construction"
             )
         current_scope = (
-            self._bound_economic_book.provider_id,
-            self._bound_economic_book.account_id,
-            self._bound_economic_book.environment,
-            self._bound_economic_book.book_id,
+            bound_book.provider_id,
+            bound_book.account_id,
+            bound_book.environment,
+            bound_book.book_id,
         )
         if (
             any(type(value) is not str for value in current_scope)
-            or current_scope != self._bound_economic_scope
+            or current_scope != bound_scope
         ):
             raise PerpetualFundingConflict(
                 "funding authority economic-book scope changed after construction"
             )
+        try:
+            current_identity = require_exact_journal_store_authority(
+                bound_store,
+                subject="perpetual funding bound JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise PerpetualFundingConflict(
+                "funding authority durable store identity is no longer valid"
+            ) from error
+        if current_identity != bound_identity:
+            raise PerpetualFundingConflict(
+                "funding authority durable store generation changed after construction"
+            )
+        return bound_identity
 
     def _events(self) -> list[dict[str, object]]:
-        self._require_bound_financial_authority()
-        return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
+        identity = self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            return JournalStore.load_events(
+                self.store,
+                self._AGGREGATE_TYPE,
+                self.aggregate_id,
+            )
 
     @staticmethod
     def _payload(event: Mapping[str, object]) -> Mapping[str, object]:
@@ -540,9 +597,11 @@ class DurablePerpetualFundingAuthority:
         owns the original visibility and evidence-observation boundaries.
         """
 
-        self._require_bound_financial_authority()
+        identity = self._require_bound_financial_authority()
         DurableProviderEconomicBook.refresh(self.economic_book)
-        journal_sequence = JournalStore.current_journal_sequence(self.store)
+        self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            journal_sequence = JournalStore.current_journal_sequence(self.store)
         observed_cut = observation.observed_at
         if frozen is not None:
             if type(frozen) is not dict or type(frozen.get("journal_sequence")) is not int:
@@ -557,7 +616,13 @@ class DurablePerpetualFundingAuthority:
                 raise PerpetualFundingConflict("frozen funding cut has invalid observation boundary") from error
             if observed_cut > observation.observed_at:
                 raise PerpetualFundingConflict("funding correction predates its original evidence")
-        economic_events = JournalStore.load_events(self.store, "economic_book", self.economic_book.book_id)
+        self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            economic_events = JournalStore.load_events(
+                self.store,
+                "economic_book",
+                self.economic_book.book_id,
+            )
         visible = [event for event in economic_events if event["journal_sequence"] <= journal_sequence]
         if not visible:
             raise PerpetualFundingConflict("provider funding position does not match canonical position at funding cut")
@@ -923,9 +988,12 @@ class DurablePerpetualFundingAuthority:
             )
             batch = (reversal, replacement)
 
-        economic_plan = self.economic_book.prepare_batch_mutation(
-            batch, committed_at=_utc_text(observation.observed_at)
+        economic_plan = DurableProviderEconomicBook.prepare_batch_mutation(
+            self.economic_book,
+            batch,
+            committed_at=_utc_text(observation.observed_at),
         )
+        self._require_bound_financial_authority()
         if economic_plan.already_committed:
             raise PerpetualFundingConflict(
                 "funding economics exist without the canonical funding authority event"
@@ -1010,9 +1078,12 @@ class DurablePerpetualFundingAuthority:
                 ),
             )
         )
+        identity = self._require_bound_financial_authority()
         try:
-            _, inserted, _ = self.store.commit_command(
-                command_id=command_id,
+            with journal_store_authority_scope(self.store, identity):
+                _, inserted, _ = JournalStore.commit_command(
+                    self.store,
+                    command_id=command_id,
                 actor=self._ACTOR,
                 environment=observation.environment,
                 idempotency_key=(
@@ -1032,11 +1103,13 @@ class DurablePerpetualFundingAuthority:
                     (envelope, None),
                     (economic_plan.envelope, "autotrade.economic.events"),
                 ],
-            )
+                )
         except Exception:
-            self.economic_book.refresh()
+            DurableProviderEconomicBook.refresh(self.economic_book)
             raise
-        self.economic_book.refresh()
+        self._require_bound_financial_authority()
+        DurableProviderEconomicBook.refresh(self.economic_book)
+        self._require_bound_financial_authority()
         return FundingApplyResult(
             funding_event_id=event_id,
             inserted=inserted,

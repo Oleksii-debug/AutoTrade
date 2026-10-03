@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from types import MappingProxyType
 import unittest
 from unittest.mock import Mock
+from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as plan_bound
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -23,9 +24,66 @@ from mvp.tests.test_runtime_target_host_plan_bound_qualification import (
 )
 
 
+def _qualification():
+    retained = RuntimeTargetHostChronologyBoundTests._qualification()
+    accepted = retained.qualification
+    evidence_kinds = sorted(plan_bound._REQUIRED_ACCEPTED_EVIDENCE_KINDS)
+    provenance_kinds = sorted(plan_bound._PROVENANCE_ACCEPTED_KINDS)
+    projection_kinds = sorted(plan_bound._PROJECTION_ACCEPTED_KINDS)
+
+    object.__setattr__(
+        accepted,
+        "evidence_sha256_by_kind",
+        MappingProxyType(
+            {
+                kind: "sha256:" + format(index + 5, "x") * 64
+                for index, kind in enumerate(evidence_kinds)
+            }
+        ),
+    )
+    object.__setattr__(
+        accepted,
+        "payload_artifact_id_by_kind",
+        MappingProxyType(
+            {
+                kind: str(uuid5(NAMESPACE_URL, f"snapshot-payload-{kind}"))
+                for kind in provenance_kinds
+            }
+        ),
+    )
+    object.__setattr__(
+        accepted,
+        "payload_sha256_by_kind",
+        MappingProxyType(
+            {
+                kind: "sha256:" + format(index + 10, "x")[-1] * 64
+                for index, kind in enumerate(provenance_kinds)
+            }
+        ),
+    )
+    object.__setattr__(
+        accepted,
+        "collector_by_kind",
+        MappingProxyType(
+            {kind: f"collector-{index}@1.0.0" for index, kind in enumerate(provenance_kinds)}
+        ),
+    )
+    object.__setattr__(
+        retained,
+        "projection_sha256_by_kind",
+        MappingProxyType(
+            {
+                kind: "sha256:" + format(index + 12, "x")[-1] * 64
+                for index, kind in enumerate(projection_kinds)
+            }
+        ),
+    )
+    return retained
+
+
 class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
     def test_snapshot_detaches_composed_and_nested_acceptance(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 
         self.assertIsNot(detached, retained)
@@ -50,7 +108,7 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
         )
 
     def test_snapshot_rejects_mutable_mapping_substitution(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         object.__setattr__(
             retained.qualification,
             "evidence_sha256_by_kind",
@@ -63,8 +121,22 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
         ):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 
+    def test_snapshot_rejects_changed_evidence_key_set(self) -> None:
+        retained = _qualification()
+        object.__setattr__(
+            retained.qualification,
+            "evidence_sha256_by_kind",
+            MappingProxyType({"FORGED": "sha256:" + "5" * 64}),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "key set changed after canonical verification",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
     def test_snapshot_rejects_post_pass_noncanonical_authority_text(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         object.__setattr__(retained.qualification, "source_sha", "F" * 40)
 
         with self.assertRaisesRegex(
@@ -73,7 +145,7 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
         ):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         object.__setattr__(retained.qualification, "attestation_digest", "forged")
         with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
@@ -82,7 +154,7 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 
     def test_snapshot_rejects_noncanonical_nested_acceptance_type(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         object.__setattr__(retained, "qualification", object())
 
         with self.assertRaisesRegex(
@@ -92,10 +164,10 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 
     def test_snapshot_detaches_external_mapping_proxy_backing(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
-        backing = {
-            "RUNTIME_TARGET_HOST_BINDING": "sha256:" + "5" * 64,
-        }
+        retained = _qualification()
+        backing = dict(retained.qualification.evidence_sha256_by_kind)
+        selected_kind = sorted(backing)[0]
+        original_digest = backing[selected_kind]
         object.__setattr__(
             retained.qualification,
             "evidence_sha256_by_kind",
@@ -103,17 +175,15 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
         )
 
         detached = plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
-        backing["RUNTIME_TARGET_HOST_BINDING"] = "sha256:" + "6" * 64
+        backing[selected_kind] = "sha256:" + "f" * 64
 
         self.assertEqual(
-            detached.qualification.evidence_sha256_by_kind[
-                "RUNTIME_TARGET_HOST_BINDING"
-            ],
-            "sha256:" + "5" * 64,
+            detached.qualification.evidence_sha256_by_kind[selected_kind],
+            original_digest,
         )
 
     def test_verifier_snapshots_before_post_verification_plan_revalidation(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         composed = Mock(return_value=retained)
         original_loader = plan_bound.load_declared_runtime_event_plan
         load_count = 0
@@ -162,12 +232,26 @@ class RuntimeTargetHostPlanBoundOutputSnapshotTests(unittest.TestCase):
         composed.assert_called_once()
 
     def test_snapshot_rejects_mutable_projection_map_substitution(self) -> None:
-        retained = RuntimeTargetHostChronologyBoundTests._qualification()
+        retained = _qualification()
         object.__setattr__(retained, "projection_sha256_by_kind", {})
 
         with self.assertRaisesRegex(
             RuntimeTargetHostCompositionError,
             "exact immutable mapping state",
+        ):
+            plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
+
+    def test_snapshot_rejects_changed_projection_key_set(self) -> None:
+        retained = _qualification()
+        object.__setattr__(
+            retained,
+            "projection_sha256_by_kind",
+            MappingProxyType({"FORGED": "sha256:" + "5" * 64}),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostCompositionError,
+            "key set changed after canonical verification",
         ):
             plan_bound._PRODUCTION_ACCEPTANCE_SNAPSHOTTER(retained)
 

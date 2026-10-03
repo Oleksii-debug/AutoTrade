@@ -73,11 +73,31 @@ def _utc_text(value: object, *, name: str) -> str:
 
 
 def _clock_utc_text(value: object) -> str:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ProviderCoreError(
             "Bybit credential probe clock_utc must return exact timezone-aware datetime"
         )
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _exact_request_timestamp(value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise ProviderCoreError(
+            "Bybit credential probe timestamp must be an exact non-negative integer"
+        )
+    return value
+
+
+def _exact_recv_window(value: object) -> int:
+    if type(value) is not int or value < 1 or value > 60000:
+        raise ProviderCoreError(
+            "Bybit credential probe recv_window_ms must be exact integer 1..60000"
+        )
+    return value
 
 
 def _require_exact_json_data(value: object, *, path: str = "$") -> None:
@@ -151,27 +171,21 @@ class BybitCredentialProbeWireResponse:
         _require_exact_json_data(self.response)
 
 
-BybitCredentialProbeWireQuery = Callable[
-    ..., BybitCredentialProbeWireResponse
-]
+BybitCredentialProbeWireQuery = Callable[..., BybitCredentialProbeWireResponse]
 
 
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeEvidence:
-    """Detached non-secret evidence for one exact credential-generation probe.
-
-    ``credential_handle`` identifies the local historical generation selected
-    for the authenticated request. ``source_uri`` identifies the exact
-    environment-specific Bybit endpoint. Neither claim is self-authenticating:
-    the transport boundary that creates this value must already have performed
-    TLS/origin validation and used the selected credential generation.
-    """
+    """Detached non-secret evidence for one exact credential-generation probe."""
 
     credential_handle: PersistentCredentialHandle
     provider_environment: str
     source_uri: str
     response_surface: str
     product_family: str
+    request_timestamp_ms: int
+    recv_window_ms: int
+    http_status: int
     ret_code: int
     response_sha256: str
     observed_at: str
@@ -224,6 +238,12 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe product_family must be canonical and supported"
             )
+        request_timestamp_ms = _exact_request_timestamp(self.request_timestamp_ms)
+        recv_window_ms = _exact_recv_window(self.recv_window_ms)
+        if type(self.http_status) is not int or self.http_status != 200:
+            raise ProviderCoreError(
+                "Bybit credential probe evidence requires exact HTTP 200"
+            )
         if type(self.ret_code) is not int:
             raise ProviderCoreError(
                 "Bybit credential probe ret_code must be exact integer"
@@ -240,39 +260,28 @@ class BybitCredentialProbeEvidence:
             product_family=product_family,
             response_surface=response_surface,
         )
+        object.__setattr__(self, "request_timestamp_ms", request_timestamp_ms)
+        object.__setattr__(self, "recv_window_ms", recv_window_ms)
         object.__setattr__(self, "observed_at", observed_at)
         object.__setattr__(self, "classification", classification)
 
     @property
     def send_authority(self) -> bool:
-        """Provider probe evidence can never authorize an external send."""
-
         return False
 
     @property
     def retirement_authority(self) -> bool:
-        """Provider probe evidence cannot mutate or replace vault retirement truth."""
-
         return False
 
     @property
     def takeover_authority(self) -> bool:
-        """Provider probe evidence alone can never authorize recovery takeover."""
-
         return False
 
 
 def bybit_credential_probe_receipt_metadata(
     evidence: BybitCredentialProbeEvidence,
 ) -> dict[str, object]:
-    """Return deterministic non-secret metadata for an immutable receipt.
-
-    This helper intentionally carries the exact credential generation and both
-    environment namespaces so a later qualification consumer cannot detach the
-    provider observation from the credential-generation scope that produced it.
-    The metadata repeats explicit negative-authority flags to make that boundary
-    durable when serialized outside the Python type system.
-    """
+    """Return deterministic non-secret metadata for an immutable receipt."""
 
     if type(evidence) is not BybitCredentialProbeEvidence:
         raise TypeError("evidence must be exact BybitCredentialProbeEvidence")
@@ -290,6 +299,9 @@ def bybit_credential_probe_receipt_metadata(
         "source_uri": evidence.source_uri,
         "response_surface": evidence.response_surface,
         "product_family": evidence.product_family,
+        "request_timestamp_ms": evidence.request_timestamp_ms,
+        "recv_window_ms": evidence.recv_window_ms,
+        "http_status": evidence.http_status,
         "ret_code": evidence.ret_code,
         "response_sha256": evidence.response_sha256,
         "observed_at": evidence.observed_at,
@@ -307,18 +319,13 @@ def capture_bybit_credential_probe_evidence(
     source_uri: str,
     product_family: str,
     response_surface: str,
+    request_timestamp_ms: int,
+    recv_window_ms: int,
+    http_status: int,
     response: dict[str, Any],
     observed_at: str,
 ) -> BybitCredentialProbeEvidence:
-    """Scrub one authenticated ``query-api`` response into detached evidence.
-
-    The caller must pass the exact ``PersistentCredentialHandle`` whose secret
-    material was used to authenticate the request. This function stores no API
-    key, API secret, provider response body, session token, or permission set.
-    A successful ``query-api`` response may therefore prove that the selected
-    credential was accepted at that instant, but the returned evidence still
-    grants no trading or takeover authority.
-    """
+    """Scrub one authenticated ``query-api`` response into detached evidence."""
 
     ret_code, response_sha256 = _response_digest(response)
     return BybitCredentialProbeEvidence(
@@ -327,6 +334,9 @@ def capture_bybit_credential_probe_evidence(
         source_uri=source_uri,
         response_surface=response_surface,
         product_family=product_family,
+        request_timestamp_ms=request_timestamp_ms,
+        recv_window_ms=recv_window_ms,
+        http_status=http_status,
         ret_code=ret_code,
         response_sha256=response_sha256,
         observed_at=observed_at,
@@ -339,18 +349,8 @@ def _probe_headers(
     timestamp_ms: object,
     recv_window_ms: object,
 ) -> Mapping[str, str]:
-    if type(timestamp_ms) is not int or timestamp_ms < 0:
-        raise ProviderCoreError(
-            "Bybit credential probe timestamp must be an exact non-negative integer"
-        )
-    if (
-        type(recv_window_ms) is not int
-        or recv_window_ms < 1
-        or recv_window_ms > 60000
-    ):
-        raise ProviderCoreError(
-            "Bybit credential probe recv_window_ms must be exact integer 1..60000"
-        )
+    timestamp_ms = _exact_request_timestamp(timestamp_ms)
+    recv_window_ms = _exact_recv_window(recv_window_ms)
     try:
         credential = BybitV5Credential.parse(credential_plaintext)
     except ProviderTransportScopeError as error:
@@ -358,9 +358,7 @@ def _probe_headers(
             "Bybit credential probe TRADE credential material is invalid"
         ) from error
     signing_material = (
-        str(timestamp_ms)
-        + credential.api_key
-        + str(recv_window_ms)
+        str(timestamp_ms) + credential.api_key + str(recv_window_ms)
     ).encode("utf-8")
     signature = hmac.new(
         credential.api_secret.encode("utf-8"),
@@ -391,18 +389,11 @@ def probe_bybit_credential_with_vault(
 ) -> BybitCredentialProbeEvidence:
     """Perform one generation-locked authenticated credential probe.
 
-    The source URI and provider domain are derived from the leased credential
-    handle; callers cannot supply or retarget either. The vault generation lock
-    remains held through signing, wire I/O, response validation and evidence
-    capture, so rotate/revoke cannot interleave after the handle check and
-    before the response digest is bound to that generation.
-
-    ``wire_query`` receives only the exact URL, authentication headers and
-    timeout. It never receives the API secret plaintext. It must perform one
-    HTTPS GET without redirects and return the exact HTTP status plus decoded
-    JSON object. Only an HTTP 200 provider envelope is admitted as credential
-    acceptance/non-acceptance evidence; network/proxy/HTTP failures remain
-    unknown rather than being misclassified as credential rejection.
+    Source origin and provider domain are derived from the leased credential.
+    The generation lock remains held through signing, I/O, HTTP/JSON validation
+    and evidence capture. The wire callback receives the URL, headers and
+    timeout only; it never receives API-secret plaintext. A non-200 HTTP result
+    remains unknown instead of being converted into credential-rejection proof.
     """
 
     if type(vault) is not ProtectedCredentialVault:
@@ -436,14 +427,7 @@ def probe_bybit_credential_with_vault(
         raise TypeError("wire_query must be callable")
     if not callable(clock_millis) or not callable(clock_utc):
         raise TypeError("probe clocks must be callable")
-    if (
-        type(recv_window_ms) is not int
-        or recv_window_ms < 1
-        or recv_window_ms > 60000
-    ):
-        raise ProviderCoreError(
-            "Bybit credential probe recv_window_ms must be exact integer 1..60000"
-        )
+    recv_window_ms = _exact_recv_window(recv_window_ms)
 
     policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
     if policy is None or policy.environment != credential_handle.environment:
@@ -470,10 +454,10 @@ def probe_bybit_credential_with_vault(
         purpose="TRADE",
     ) as credential_plaintext:
         try:
-            timestamp_ms = clock_millis()
+            request_timestamp_ms = _exact_request_timestamp(clock_millis())
             headers = _probe_headers(
                 credential_plaintext=credential_plaintext,
-                timestamp_ms=timestamp_ms,
+                timestamp_ms=request_timestamp_ms,
                 recv_window_ms=recv_window_ms,
             )
         finally:
@@ -499,6 +483,9 @@ def probe_bybit_credential_with_vault(
             source_uri=source_uri,
             product_family=product_family,
             response_surface="V5_UTA_REST",
+            request_timestamp_ms=request_timestamp_ms,
+            recv_window_ms=recv_window_ms,
+            http_status=wire_response.http_status,
             response=wire_response.response,
             observed_at=observed_at,
         )

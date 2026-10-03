@@ -307,8 +307,8 @@ class FuturesSettlementEvidence:
             or self.instrument_version < 1
         ):
             raise FuturesError("instrument_version must be a positive integer")
-        if not isinstance(self.scope, FuturesSettlementScope):
-            raise FuturesError("settlement scope is required")
+        if type(self.scope) is not FuturesSettlementScope:
+            raise FuturesError("settlement scope must be exact FuturesSettlementScope")
         object.__setattr__(
             self, "effective_at", _utc(self.effective_at, "effective_at")
         )
@@ -518,6 +518,8 @@ class InverseVariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("inverse variation-margin state requires exact FuturesContract")
         if self.contract.payoff != "INVERSE":
             raise FuturesError("inverse variation-margin state requires INVERSE futures")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
@@ -554,6 +556,8 @@ class VariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("linear variation-margin state requires exact FuturesContract")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")

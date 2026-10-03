@@ -375,53 +375,76 @@ class TrustedChronologyCutTests(unittest.TestCase):
     def test_release_runtime_cut_binds_exact_delivered_release(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
-            attempt = self._prepare(
-                store,
-                recovery,
-                occurrence,
-                scope=ChronologyScope.RELEASE_RUNTIME,
-            )
-            measurement = self._measurement(attempt)
-            accepted = self._accepted(attempt, measurement)
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
-            cut = self._accept(
-                store, recovery, attempt, measurement, accepted, artifacts
-            )
+            runtime = self._runtime(directory)
+            try:
+                runtime_occurrence = runtime.runtime_occurrence
+                attempt = self._prepare(
+                    store,
+                    recovery,
+                    occurrence,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    runtime=runtime,
+                )
+                measurement = self._measurement(attempt)
+                accepted = self._accepted(attempt, measurement)
+                artifacts = ArtifactStore(Path(directory) / "artifacts")
+                cut = self._accept(
+                    store,
+                    recovery,
+                    attempt,
+                    measurement,
+                    accepted,
+                    artifacts,
+                    runtime=runtime,
+                )
 
-            self.assertEqual(cut.release_artifact_id, RELEASE_ID)
-            self.assertEqual(cut.release_artifact_sha256, RELEASE_SHA)
-            require_current_trusted_chronology_cut(
-                store=store,
-                recovery=recovery,
-                runtime_occurrence=occurrence,
-                cut=cut,
-                expected_source_sha=SOURCE_SHA,
-                expected_scope=ChronologyScope.RELEASE_RUNTIME,
-                expected_release_artifact_id=RELEASE_ID,
-                expected_release_artifact_sha256=RELEASE_SHA,
-            )
-            with self.assertRaisesRegex(PermissionError, "release identity"):
-                require_current_trusted_chronology_cut(
-                    store=store,
-                    recovery=recovery,
-                    runtime_occurrence=occurrence,
-                    cut=cut,
-                    expected_source_sha=SOURCE_SHA,
-                    expected_scope=ChronologyScope.RELEASE_RUNTIME,
-                    expected_release_artifact_id=str(
-                        uuid5(NAMESPACE_URL, "other-release")
+                self.assertEqual(cut.release_artifact_id, RELEASE_ID)
+                self.assertEqual(cut.release_artifact_sha256, RELEASE_SHA)
+                self.assertEqual(
+                    cut.runtime_occurrence_id,
+                    runtime_occurrence.runtime_occurrence_id,
+                )
+                self.assertEqual(cut.runtime_host_id, runtime_occurrence.host_id)
+                self.assertEqual(
+                    self._require_current(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        accepted=accepted,
+                        artifact_store=artifacts,
+                        expected_scope=ChronologyScope.RELEASE_RUNTIME,
+                        expected_release_artifact_id=RELEASE_ID,
+                        expected_release_artifact_sha256=RELEASE_SHA,
+                        runtime=runtime,
                     ),
-                    expected_release_artifact_sha256=RELEASE_SHA,
+                    cut,
                 )
-            with self.assertRaisesRegex(PermissionError, "source/scope"):
-                require_current_trusted_chronology_cut(
-                    store=store,
-                    recovery=recovery,
-                    runtime_occurrence=occurrence,
-                    cut=cut,
-                    expected_source_sha=SOURCE_SHA,
-                    expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
-                )
+                with self.assertRaisesRegex(PermissionError, "release identity"):
+                    self._require_current(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        accepted=accepted,
+                        artifact_store=artifacts,
+                        expected_scope=ChronologyScope.RELEASE_RUNTIME,
+                        expected_release_artifact_id=str(
+                            uuid5(NAMESPACE_URL, "other-release")
+                        ),
+                        expected_release_artifact_sha256=RELEASE_SHA,
+                        runtime=runtime,
+                    )
+                with self.assertRaisesRegex(PermissionError, "source/scope"):
+                    self._require_current(
+                        store=store,
+                        recovery=recovery,
+                        cut=cut,
+                        accepted=accepted,
+                        artifact_store=artifacts,
+                        expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
+                        runtime=runtime,
+                    )
+            finally:
+                runtime.close()
 
     def test_new_runtime_occurrence_invalidates_prepared_attempt(self):
         with TemporaryDirectory() as directory:
@@ -588,31 +611,37 @@ class TrustedChronologyCutTests(unittest.TestCase):
     def test_release_attestation_mismatch_is_rejected_defensively(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
-            attempt = self._prepare(
-                store,
-                recovery,
-                occurrence,
-                scope=ChronologyScope.RELEASE_RUNTIME,
-            )
-            measurement = self._measurement(attempt)
-            accepted = self._accepted(
-                attempt,
-                measurement,
-                release_marker="wrong",
-            )
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
-            with self.assertRaisesRegex(
-                TrustedChronologyError,
-                "release identity mismatch",
-            ):
-                self._accept(
+            runtime = self._runtime(directory)
+            try:
+                attempt = self._prepare(
                     store,
                     recovery,
+                    occurrence,
+                    scope=ChronologyScope.RELEASE_RUNTIME,
+                    runtime=runtime,
+                )
+                measurement = self._measurement(attempt)
+                accepted = self._accepted(
                     attempt,
                     measurement,
-                    accepted,
-                    artifacts,
+                    release_marker="wrong",
                 )
+                artifacts = ArtifactStore(Path(directory) / "artifacts")
+                with self.assertRaisesRegex(
+                    TrustedChronologyError,
+                    "release identity mismatch",
+                ):
+                    self._accept(
+                        store,
+                        recovery,
+                        attempt,
+                        measurement,
+                        accepted,
+                        artifacts,
+                        runtime=runtime,
+                    )
+            finally:
+                runtime.close()
 
     def test_concurrent_durable_write_during_verification_prevents_cut(self):
         with TemporaryDirectory() as directory:
@@ -639,8 +668,8 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 return accepted
 
             with self.assertRaisesRegex(
-                TrustedChronologyError,
-                "journal changed",
+                PermissionError,
+                "journal advanced",
             ):
                 self._accept(
                     store,
@@ -710,21 +739,21 @@ class TrustedChronologyCutTests(unittest.TestCase):
                             artifacts,
                         )
 
-    def test_measurement_requirement_detaches_runtime_occurrence_from_parser_side_effect(self):
+    def test_measurement_requirement_detaches_challenge_from_parser_side_effect(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
             attempt = self._prepare(store, recovery, occurrence)
             measurement = self._measurement(attempt)
             expected = chronology_measurement_requirement(attempt, measurement)
-            original_host_id = attempt.runtime_occurrence.host_id
+            original_owner_id = attempt.challenge.owner_id
             real_parser = chronology.parse_challenge_bound_measurement
 
             def mutating_parser(data, *, challenge):
                 transcript = real_parser(data, challenge=challenge)
                 object.__setattr__(
-                    attempt.runtime_occurrence,
-                    "host_id",
-                    "attacker-controlled-host",
+                    attempt.challenge,
+                    "owner_id",
+                    "attacker-controlled-owner",
                 )
                 return transcript
 
@@ -740,9 +769,9 @@ class TrustedChronologyCutTests(unittest.TestCase):
                     )
             finally:
                 object.__setattr__(
-                    attempt.runtime_occurrence,
-                    "host_id",
-                    original_host_id,
+                    attempt.challenge,
+                    "owner_id",
+                    original_owner_id,
                 )
 
             self.assertEqual(observed, expected)
@@ -755,7 +784,6 @@ class TrustedChronologyCutTests(unittest.TestCase):
             accepted = self._accepted(attempt, measurement)
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             original_owner_id = attempt.challenge.owner_id
-            original_host_id = attempt.runtime_occurrence.host_id
             real_current_sequence = chronology._current_sequence
             current_sequence_calls = 0
 
@@ -768,11 +796,6 @@ class TrustedChronologyCutTests(unittest.TestCase):
                         attempt.challenge,
                         "owner_id",
                         "attacker-controlled-owner",
-                    )
-                    object.__setattr__(
-                        attempt.runtime_occurrence,
-                        "host_id",
-                        "attacker-controlled-host",
                     )
                 return sequence
 
@@ -796,17 +819,12 @@ class TrustedChronologyCutTests(unittest.TestCase):
                     "owner_id",
                     original_owner_id,
                 )
-                object.__setattr__(
-                    attempt.runtime_occurrence,
-                    "host_id",
-                    original_host_id,
-                )
 
             self.assertGreaterEqual(current_sequence_calls, 2)
             self.assertEqual(cut.owner_id, original_owner_id)
-            self.assertEqual(cut.host_id, original_host_id)
+            self.assertIsNone(cut.runtime_occurrence_id)
 
-    def test_current_cut_validation_detaches_caller_cut_before_runtime_read(self):
+    def test_current_cut_validation_detaches_caller_cut_before_durable_read(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
             attempt = self._prepare(store, recovery, occurrence)
@@ -822,29 +840,29 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 artifacts,
             )
             original_owner_id = cut.owner_id
-            real_snapshot = chronology._snapshot_occurrence
+            real_load_events = chronology._load_events
 
-            def mutating_snapshot(*, store, occurrence):
-                snapshot = real_snapshot(store=store, occurrence=occurrence)
+            def mutating_load_events(selected_store, aggregate_id):
+                events = real_load_events(selected_store, aggregate_id)
                 object.__setattr__(
                     cut,
                     "owner_id",
                     "attacker-controlled-owner",
                 )
-                return snapshot
+                return events
 
             try:
                 with patch.object(
                     chronology,
-                    "_snapshot_occurrence",
-                    side_effect=mutating_snapshot,
+                    "_load_events",
+                    side_effect=mutating_load_events,
                 ):
-                    durable = require_current_trusted_chronology_cut(
+                    durable = self._require_current(
                         store=store,
                         recovery=recovery,
-                        runtime_occurrence=occurrence,
                         cut=cut,
-                        expected_source_sha=SOURCE_SHA,
+                        accepted=accepted,
+                        artifact_store=artifacts,
                         expected_scope=ChronologyScope.SOURCE_QUALIFICATION,
                     )
             finally:
@@ -872,7 +890,7 @@ class TrustedChronologyCutTests(unittest.TestCase):
             ):
                 chronology._validate_prepared_event(event)
 
-    def test_prepared_event_rejects_rehashed_projection_tamper(self):
+    def test_prepared_event_rejects_rehashed_protocol_limit_tamper(self):
         with TemporaryDirectory() as directory:
             store, recovery, _config, occurrence = self._state(directory)
             self._prepare(store, recovery, occurrence)
@@ -880,13 +898,15 @@ class TrustedChronologyCutTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("trusted_chronology")[0]
             )
             payload = dict(event["payload"])
-            payload["owner_id"] = "attacker-controlled-owner"
+            limits = dict(payload["limits"])
+            limits["max_request_elapsed_ns"] = "1"
+            payload["limits"] = limits
             event["payload"] = payload
             event["payload_hash"] = payload_digest(payload)
 
             with self.assertRaisesRegex(
                 TrustedChronologyError,
-                "challenge projection mismatch",
+                "limits differ",
             ):
                 chronology._validate_prepared_event(event)
 

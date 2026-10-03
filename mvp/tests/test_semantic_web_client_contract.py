@@ -958,6 +958,55 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ]
         self.assertIn("state.scopeEpoch += 1", pagehide)
 
+    def test_superseded_snapshot_does_not_announce_false_refresh_success(self):
+        js = APP.read_text(encoding="utf-8")
+        refresh_user = js[
+            js.index("async function refreshStateFromUser()"):
+            js.index("async function start()")
+        ]
+        self.assertIn("const refreshed = await refreshSnapshot()", refresh_user)
+        self.assertIn("if (refreshed)", refresh_user)
+        self.assertLess(
+            refresh_user.index("if (refreshed)"),
+            refresh_user.index("Host state refreshed from the canonical snapshot."),
+        )
+
+        pageshow = js[js.index('window.addEventListener("pageshow"'):]
+        self.assertIn("const restored = await refreshSnapshot()", pageshow)
+        self.assertIn("if (restored)", pageshow)
+        self.assertLess(
+            pageshow.index("if (restored)"),
+            pageshow.index("Host state refreshed after page restoration."),
+        )
+
+        poll = js[
+            js.index("async function pollEvents()"):
+            js.index("function newCommandPayload")
+        ]
+        self.assertIn("const recovered = await refreshSnapshot()", poll)
+        self.assertIn("if (!recovered)", poll)
+        self.assertLess(
+            poll.index("if (!recovered)"),
+            poll.index("const pollEpoch = state.scopeEpoch"),
+        )
+
+    def test_scope_change_is_explicitly_announced_with_new_account_and_environment(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot")
+        ]
+        self.assertIn("Host scope changed to account ", snapshot)
+        self.assertIn('" in " + parsed.environment', snapshot)
+        self.assertIn(
+            "Old-scope operation, event, notification, and command-validation evidence was cleared.",
+            snapshot,
+        )
+        self.assertIn('parsed.environment === "LIVE"', snapshot)
+        markers = snapshot.index("state.renderedEnvironment = parsed.environment")
+        announcement = snapshot.index("Host scope changed to account ")
+        self.assertLess(markers, announcement)
+
     def test_snapshot_and_event_stream_responses_are_generation_fenced(self):
         js = APP.read_text(encoding="utf-8")
         refresh = js[

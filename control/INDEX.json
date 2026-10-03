@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "repository": "Oleksii-debug/AutoTrade",
   "objective": "TIME_TO_WHOLE_FINISHED_AUTOTRADE",
-  "mode": "UNBOUNDED_AUTONOMOUS_PARALLEL_DELIVERY",
+  "mode": "SINGLE_PRIMARY_DEVELOPER",
   "baseline_date": "2026-09-22",
   "product_spec": "docs/product/AutoTrade_Final_Product_Specification_EN.docx",
   "engineering_master": "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
@@ -36,7 +36,7 @@
       "control/tools/registry_store.py"
     ],
     "tests": "tests/Control/test_registry_state.py",
-    "note": "Registry/control-plane qualification remains a correctness concern, but it does not impose a worker cap, serialized execution, or a stop condition for independent safe work. Claims/leases are advisory coordination metadata until a trusted service is qualified."
+    "note": "State/guard and Git storage primitives locally tested. Concurrent mutation disabled pending trusted service admission, per-claim fencing, protected branch publication and Windows/GitHub integration qualification."
   },
   "canonical_precedence": [
     "approved product and engineering contracts define intended behavior",
@@ -59,6 +59,5 @@
   "implementation_start": "docs/engineering/15_FAST_IMPLEMENTATION_START.md",
   "finalization_audit": "docs/engineering/16_BASELINE_FINALIZATION_AUDIT.md",
   "local_verification": "tools/verify.py",
-  "baseline_export": "tools/baseline.py",
-  "canonical_worker_policy": "AGENTS.md"
+  "baseline_export": "tools/baseline.py"
 }

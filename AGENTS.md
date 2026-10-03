@@ -2,26 +2,18 @@
 
 Objective: TIME_TO_WHOLE_FINISHED_AUTOTRADE.
 
-Read `control/INDEX.json` before work.
+Read `control/INDEX.json` before work and refresh live GitHub truth before mutating shared state.
 
-Current mode: `UNBOUNDED_AUTONOMOUS_PARALLEL_DELIVERY`.
+Current mode: `SINGLE_PRIMARY_DEVELOPER`. One autonomous primary developer may inspect, modify, test, and commit bounded product changes directly on the currently designated canonical integration lineage. Do not create a second architecture or duplicate an already-active canonical authority. Re-read the live branch head before each write and treat exact-head verification as the integration authority.
 
-Canonical worker-coordination override:
-- No repository-defined worker, coordinator, WIP, work-package, branch, or PR cap.
-- Any older fixed worker count, WIP limit, serialized lane, ownership/claim lock, exclusive integration owner, mandatory PR-order waiting rule, or CI-wait stop rule is non-binding if it conflicts with this section.
-- Claims, leases, ownership, assignments, queues, and coordinator labels are advisory coordination metadata only; they never block useful safe work.
-- Workers may create branches, commits, pull requests, tests, fixes, integration commits, and merges when GitHub permissions allow and the change is honestly verified.
-- Dependencies constrain final integration order only. They must not stop independent implementation, testing, hardening, research, documentation, accessibility, packaging, fixtures, adapters, or other non-conflicting work.
-- Queued, pending, slow, or unavailable CI is never by itself a reason to terminate. Record the pending state and immediately continue another valuable independent task.
-- A blocked first workline is never by itself a reason to terminate. STATUS: BLOCKED is allowed only after all reasonably available safe independent work is exhausted.
-- Do not idle because another PR, branch, worker, check, review, claim, or queue is active. Switch to non-conflicting work or reconcile/rebase instead of abandoning the run.
-- No repository-defined exclusive integration owner is required.
-- Use the full execution window while useful safe work remains.
-
-This removes orchestration throttles only. The product/domain hard rules below remain mandatory.
+Provider/live boundary for the current development phase:
+- real provider integration and provider qualification are deferred unless the owner explicitly re-authorizes them;
+- do not access, create, rotate, or expose real credentials/secrets;
+- do not submit real or paper-provider financial orders and do not perform live trading;
+- provider-free simulation and internal deterministic trading workflows may be implemented and qualified.
 
 Hard rules:
-- provider reconciliation + durable journal establish financial truth;
+- provider reconciliation + durable journal establish financial truth when provider-backed operation is later enabled;
 - acknowledgement is not a fill;
 - UNKNOWN outbound financial state is never blindly retried;
 - authoritative money/quantity uses exact unit/currency semantics;

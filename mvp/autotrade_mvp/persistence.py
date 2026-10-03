@@ -212,39 +212,33 @@ class JournalStore(_JournalStoreImpl):
                     raise
         return _impl.AppendResult(event_id, 1, True)
 
-    def whole_store_state_counts(self) -> dict[str, int]:
-        """Return exact durable business-table cardinalities at one read cut."""
+    def whole_store_state_cut(self) -> dict[str, Any]:
+        """Return global journal cursor and business cardinalities from one snapshot."""
 
         identity = require_exact_journal_store_authority(
             self,
-            subject="whole-store state inventory",
-        )
-        tables = (
-            "events",
-            "outbox",
-            "command_dedupe",
-            "projection_checkpoints",
-            "global_projection_checkpoints",
+            subject="whole-store state cut",
         )
         with journal_store_authority_scope(self, identity):
             with JournalStore._connect(self) as connection:
                 connection.execute("BEGIN")
                 try:
-                    counts: dict[str, int] = {}
-                    for table in tables:
-                        row = connection.execute(
-                            f"SELECT COUNT(*) AS row_count FROM {table}"
-                        ).fetchone()
-                        if row is None or type(row["row_count"]) is not int:
-                            raise RuntimeError(
-                                f"whole-store state count failed for {table}"
-                            )
-                        counts[table] = row["row_count"]
+                    result = {
+                        "journal_sequence": JournalStore._journal_sequence_value(
+                            connection
+                        ),
+                        "counts": _impl._whole_store_state_counts(connection),
+                    }
                     connection.commit()
-                    return counts
+                    return result
                 except Exception:
                     connection.rollback()
                     raise
+
+    def whole_store_state_counts(self) -> dict[str, int]:
+        """Return exact durable business-table cardinalities at one read cut."""
+
+        return dict(self.whole_store_state_cut()["counts"])
 
     def outbox_delivery_state(
         self,

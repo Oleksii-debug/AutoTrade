@@ -124,9 +124,23 @@ def _event_envelope(
     }
 
 
-def _event(store: JournalStore, kind: str, episode_id: str, payload: dict, now: str) -> dict:
+def _event(
+    store: JournalStore,
+    kind: str,
+    episode_id: str,
+    payload: dict,
+    now: str,
+    *,
+    expected_cut: dict[str, object] | None = None,
+) -> dict:
     envelope = _event_envelope(store, kind, episode_id, payload, now)
-    store.append_event(envelope)
+    kwargs = {}
+    if expected_cut is not None:
+        kwargs = {
+            "expected_journal_sequence": expected_cut["journal_sequence"],
+            "expected_whole_store_counts": expected_cut["counts"],
+        }
+    store.append_event(envelope, **kwargs)
     return envelope
 
 
@@ -219,15 +233,12 @@ def _require_prestart_cut(
     *,
     economic_events: list[dict],
     reconciliation_events: list[dict],
-) -> None:
+) -> dict[str, object]:
     events = [*economic_events, *reconciliation_events]
     expected = set(range(2, 2 + len(events)))
     observed = {event.get("journal_sequence") for event in events}
     if observed != expected:
         raise ValueError("canonical simulation bootstrap prefix is not contiguous")
-    if JournalStore.current_journal_sequence(store) != 1 + len(events):
-        raise ValueError("state directory contains foreign durable journal authority")
-    counts = JournalStore.whole_store_state_counts(store)
     expected_counts = {
         "events": 1 + len(events),
         "outbox": len(events),
@@ -235,13 +246,23 @@ def _require_prestart_cut(
         "projection_checkpoints": 0,
         "global_projection_checkpoints": 0,
     }
-    if counts != expected_counts:
+    cut = JournalStore.whole_store_state_cut(store)
+    if cut.get("journal_sequence") != 1 + len(events):
+        raise ValueError("state directory contains foreign durable journal authority")
+    if cut.get("counts") != expected_counts:
         raise ValueError(
             "canonical simulation bootstrap durable state is not exact"
         )
+    return cut
 
 
-def _deliver_event(store: JournalStore, event_id: str, *, topic: str) -> None:
+def _deliver_event(
+    store: JournalStore,
+    event_id: str,
+    *,
+    topic: str,
+    expected_cut: dict[str, object],
+) -> None:
     state = JournalStore.outbox_delivery_state(
         store, event_id, topic=topic
     )
@@ -251,7 +272,13 @@ def _deliver_event(store: JournalStore, event_id: str, *, topic: str) -> None:
         store,
         state["outbox_id"],
         expected_envelope_hash=state["envelope_hash"],
+        expected_journal_sequence=expected_cut["journal_sequence"],
+        expected_whole_store_counts=expected_cut["counts"],
     )
+    if not JournalStore.outbox_delivery_state(
+        store, event_id, topic=topic
+    )["delivered"]:
+        raise RuntimeError("bootstrap outbox delivery did not become durable")
 
 
 def _require_zero_wire_blocked_submission(
@@ -340,7 +367,7 @@ def _hold_projection(
     *,
     episode_id: str,
     completed: bool,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object]]:
     if JournalStore.load_events_by_aggregate_type(store, "submission_attempt"):
         raise ValueError("HOLD terminal projection cannot contain submission attempts")
     if JournalStore.load_events_by_aggregate_type(store, "reservation_book"):
@@ -366,9 +393,13 @@ def _hold_projection(
         "projection_checkpoints": 0,
         "global_projection_checkpoints": 0,
     }
-    if JournalStore.whole_store_state_counts(store) != expected_counts:
+    cut = JournalStore.whole_store_state_cut(store)
+    if (
+        cut.get("journal_sequence") != expected_counts["events"]
+        or cut.get("counts") != expected_counts
+    ):
         raise ValueError("HOLD terminal durable state is not exact")
-    return {
+    result = {
         "status": "HOLD",
         "decision": "HOLD",
         "environment": ENVIRONMENT,
@@ -381,6 +412,7 @@ def _hold_projection(
         "reconciliation_event_id": checkpoint["event_id"],
         "new_outbound_requests": 0,
     }
+    return result, cut
 
 
 def _zero_wire_blocked_projection(
@@ -449,6 +481,7 @@ def _finalize_zero_wire_blocked(
     timestamp: str,
     resumed: bool,
 ) -> dict[str, object]:
+    validation_start_cut = JournalStore.whole_store_state_cut(store)
     result, reservations, attempt_id, client_order_id = (
         _zero_wire_blocked_projection(
             store,
@@ -457,7 +490,11 @@ def _finalize_zero_wire_blocked(
             required_reservation_state="WORKING",
         )
     )
-    journal_cut = JournalStore.current_journal_sequence(store)
+    terminal_cut = JournalStore.whole_store_state_cut(store)
+    if terminal_cut != validation_start_cut:
+        raise ValueError(
+            "whole-store state changed while validating zero-wire terminal facts"
+        )
     terminal_plan = reservations.prepare_zero_wire_blocked_terminal_mutation(
         event_key=_uuid("blocked-terminal-reservation-event", episode_id),
         idempotency_key=_uuid("blocked-terminal-reservation-idempotency", episode_id),
@@ -507,7 +544,8 @@ def _finalize_zero_wire_blocked(
             (terminal_plan.envelope, None),
             (completed, None),
         ],
-        expected_journal_sequence=journal_cut,
+        expected_journal_sequence=terminal_cut["journal_sequence"],
+        expected_whole_store_counts=terminal_cut["counts"],
     )
     reservations.refresh()
     terminal = reservations.get(_uuid("reservation", episode_id))
@@ -693,7 +731,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         "completed BLOCKED session does not match durable zero-wire facts"
                     )
             elif result.get("status") == "HOLD":
-                expected = _hold_projection(
+                expected, _completed_cut = _hold_projection(
                     store,
                     episode_id=episode_id,
                     completed=True,
@@ -706,7 +744,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             result["new_outbound_requests"] = 0
             return result
         if decision.side == "HOLD":
-            result = _hold_projection(
+            result, terminal_cut = _hold_projection(
                 store,
                 episode_id=episode_id,
                 completed=False,
@@ -717,6 +755,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 episode_id,
                 result,
                 timestamp,
+                expected_cut=terminal_cut,
             )
             return {**result, "resumed": True}
         if decision.side == "BUY":
@@ -770,7 +809,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     reconciliation_events = JournalStore.load_events_by_aggregate_type(
         store, "account_reconciliation"
     )
-    _require_prestart_cut(
+    bootstrap_cut = _require_prestart_cut(
         store,
         economic_events=economic_events,
         reconciliation_events=reconciliation_events,
@@ -780,16 +819,26 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         if len(economic_events) != 1 or not plan.already_committed:
             raise ValueError("canonical simulation seed bootstrap is invalid")
     else:
-        economic.append(seed)
+        economic.append(
+            seed,
+            expected_journal_sequence=bootstrap_cut["journal_sequence"],
+            expected_whole_store_counts=bootstrap_cut["counts"],
+        )
         economic_events = JournalStore.load_events(
             store, "economic_book", economic.book_id
         )
         if len(economic_events) != 1:
             raise RuntimeError("canonical simulation seed bootstrap was not persisted")
+    bootstrap_cut = _require_prestart_cut(
+        store,
+        economic_events=economic_events,
+        reconciliation_events=reconciliation_events,
+    )
     _deliver_event(
         store,
         economic_events[0]["event_id"],
         topic="autotrade.economic.events",
+        expected_cut=bootstrap_cut,
     )
 
     admission_reconciliation, snapshot = _reconcile(provider, economic, timestamp)
@@ -805,7 +854,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     reconciliation_events = JournalStore.load_events_by_aggregate_type(
         store, "account_reconciliation"
     )
-    _require_prestart_cut(
+    bootstrap_cut = _require_prestart_cut(
         store,
         economic_events=economic_events,
         reconciliation_events=reconciliation_events,
@@ -824,14 +873,22 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             store, reconciliation_id="canonical-simulation-admission",
             result=admission_reconciliation, observed_at=timestamp,
             host_id="local-simulation", owner_epoch="1",
+            expected_journal_sequence=bootstrap_cut["journal_sequence"],
+            expected_whole_store_counts=bootstrap_cut["counts"],
         )
         reconciliation_events = [availability]
+    bootstrap_cut = _require_prestart_cut(
+        store,
+        economic_events=economic_events,
+        reconciliation_events=reconciliation_events,
+    )
     _deliver_event(
         store,
         availability["event_id"],
         topic="autotrade.reconciliation.events",
+        expected_cut=bootstrap_cut,
     )
-    _require_prestart_cut(
+    bootstrap_cut = _require_prestart_cut(
         store,
         economic_events=economic_events,
         reconciliation_events=reconciliation_events,
@@ -839,14 +896,21 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     _event(store, "SimulationSessionStarted", episode_id, {
         "input_hash": input_hash, "decision": decision.side,
         "episode_id": episode_id, "environment": ENVIRONMENT,
-    }, timestamp)
+    }, timestamp, expected_cut=bootstrap_cut)
     if decision.side == "HOLD":
-        result = _hold_projection(
+        result, terminal_cut = _hold_projection(
             store,
             episode_id=episode_id,
             completed=False,
         )
-        _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
+        _event(
+            store,
+            "SimulationSessionCompleted",
+            episode_id,
+            result,
+            timestamp,
+            expected_cut=terminal_cut,
+        )
         return {**result, "resumed": resumed_from_owner}
 
     policy = _risk_policy()

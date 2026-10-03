@@ -106,8 +106,67 @@ class AccessibleStatusTests(unittest.TestCase):
             "Maximum drawdown: Unavailable",
         ):
             self.assertIn(expected, text)
-        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn(
+            "Economic report validation: unavailable; malformed or incomplete canonical state",
+            text,
+        )
         self.assertIn("Economic edge: unproven", text)
+
+    def test_valid_canonical_cash_only_report_can_confirm_reconciliation(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "7",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "CASH_ONLY",
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "reconciled": True,
+            },
+        )
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertNotIn("Economic report validation: unavailable", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_valid_canonical_mark_unavailable_report_can_confirm_reconciliation(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "900",
+                "position": "1",
+                "journal_sequence": "8",
+                "fills": {"fill-1": {}},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "MARK_UNAVAILABLE",
+                "final_equity": None,
+                "net_pnl": None,
+                "total_fees": "1",
+                "turnover": "100",
+                "reconciled": True,
+            },
+        )
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn(
+            "Portfolio valuation and profit or loss: unavailable; no retained current market mark",
+            text,
+        )
+        self.assertNotIn("Economic report validation: unavailable", text)
 
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(

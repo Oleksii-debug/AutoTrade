@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.runtime_target_host_qualification import (
     RuntimeTargetHostQualificationError,
     _read_bound_payload,
 )
+from mvp.tests import test_runtime_target_host_qualification as fixtures
 
 
 SOURCE_SHA = "a" * 40
@@ -40,6 +41,10 @@ def _provenance(
         payload_artifact_id=payload_artifact_id,
         payload_sha256=payload_sha256,
     )
+
+
+def _fixture_verifier() -> fixtures.RuntimeTargetHostQualificationTests:
+    return fixtures.RuntimeTargetHostQualificationTests(methodName="runTest")
 
 
 class RuntimeTargetHostPayloadIndependenceTests(unittest.TestCase):
@@ -99,6 +104,74 @@ class RuntimeTargetHostPayloadIndependenceTests(unittest.TestCase):
 
         self.assertEqual(result, RAW)
         self.assertEqual(reads, [PAYLOAD_ID])
+
+    def test_verifier_rejects_release_artifact_as_raw_payload(self) -> None:
+        raw_by_id, evidence_refs, _binding = fixtures.material(
+            provenance_overrides={
+                fixtures.CAMPAIGN_EVIDENCE_KIND: {
+                    "payload_artifact_id": fixtures.RELEASE_ID,
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "artifact is not independent",
+        ):
+            _fixture_verifier()._verify(raw_by_id, evidence_refs)
+
+    def test_verifier_rejects_release_bytes_republished_as_raw_payload(self) -> None:
+        raw_by_id, evidence_refs, _binding = fixtures.material(
+            provenance_overrides={
+                fixtures.CAMPAIGN_EVIDENCE_KIND: {
+                    "payload_sha256": fixtures.RELEASE_SHA,
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "bytes are not independent",
+        ):
+            _fixture_verifier()._verify(raw_by_id, evidence_refs)
+
+    def test_verifier_rejects_signed_envelope_bytes_as_raw_payload(self) -> None:
+        _raw, normal_refs, _binding = fixtures.material()
+        campaign_envelope_digest = next(
+            ref.sha256
+            for ref in normal_refs
+            if ref.evidence_kind == fixtures.CAMPAIGN_EVIDENCE_KIND
+        )
+        raw_by_id, evidence_refs, _binding = fixtures.material(
+            provenance_overrides={
+                fixtures.STALENESS_EVIDENCE_KIND: {
+                    "payload_sha256": campaign_envelope_digest,
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "bytes are not independent",
+        ):
+            _fixture_verifier()._verify(raw_by_id, evidence_refs)
+
+    def test_verifier_rejects_same_raw_bytes_under_distinct_artifact_ids(self) -> None:
+        raw_by_id, evidence_refs, _binding = fixtures.material(
+            provenance_overrides={
+                fixtures.STALENESS_EVIDENCE_KIND: {
+                    "payload_sha256": fixtures._PAYLOAD_DIGEST[
+                        fixtures.CAMPAIGN_EVIDENCE_KIND
+                    ],
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "bytes are not independent",
+        ):
+            _fixture_verifier()._verify(raw_by_id, evidence_refs)
 
 
 if __name__ == "__main__":

@@ -286,20 +286,29 @@ class EvidenceVerification:
 
 
 def _artifact_store_evidence_verifier_operations():
-    """Keep verifier authority outside caller-writable instance state."""
+    """Seal verifier state without discoverable weakref callbacks."""
 
-    states: dict[int, tuple[weakref.ReferenceType, ArtifactStore, Path, object, str]] = {}
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            Path,
+            str,
+        ],
+    ] = {}
     state_lock = threading.RLock()
 
-    def cleanup(object_id: int, verifier_ref: weakref.ReferenceType) -> None:
-        with state_lock:
-            current = states.get(object_id)
-            if current is not None and current[0] is verifier_ref:
-                states.pop(object_id, None)
+    def prune_dead() -> None:
+        dead = [key for key, state in states.items() if state[0]() is None]
+        for key in dead:
+            states.pop(key, None)
 
     def require_unbound(verifier: object) -> None:
         object_id = id(verifier)
         with state_lock:
+            prune_dead()
             current = states.get(object_id)
             if current is None:
                 return
@@ -324,6 +333,7 @@ def _artifact_store_evidence_verifier_operations():
     ) -> None:
         object_id = id(verifier)
         with state_lock:
+            prune_dead()
             current = states.get(object_id)
             if current is not None:
                 current_verifier = current[0]()
@@ -336,15 +346,11 @@ def _artifact_store_evidence_verifier_operations():
                         "ArtifactStoreEvidenceVerifier binding identity collision"
                     )
                 states.pop(object_id, None)
-            verifier_ref = weakref.ref(
-                verifier,
-                lambda ref, object_id=object_id: cleanup(object_id, ref),
-            )
             states[object_id] = (
-                verifier_ref,
-                store,
+                weakref.ref(verifier),
+                weakref.ref(store),
+                weakref.ref(read_snapshot),
                 evidence_root,
-                read_snapshot,
                 store_identity,
             )
 
@@ -357,7 +363,25 @@ def _artifact_store_evidence_verifier_operations():
             raise ValueError(
                 "ArtifactStoreEvidenceVerifier process binding is unavailable"
             )
-        return state[1], state[2], state[3], state[4]
+        store = state[1]()
+        read_snapshot = state[2]()
+        evidence_root = state[3]
+        store_identity = state[4]
+        if store is None or read_snapshot is None:
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier selected authority was lost"
+            )
+        visible = vars(verifier)
+        if (
+            visible.get("_store") is not store
+            or visible.get("_read_snapshot") is not read_snapshot
+            or visible.get("_evidence_root") != evidence_root
+            or visible.get("_store_identity") != store_identity
+        ):
+            raise ValueError(
+                "ArtifactStoreEvidenceVerifier composition was modified"
+            )
+        return store, evidence_root, read_snapshot, store_identity
 
     return require_unbound, register, binding
 
@@ -368,7 +392,6 @@ def _artifact_store_evidence_verifier_operations():
     _artifact_store_evidence_verifier_binding,
 ) = _artifact_store_evidence_verifier_operations()
 del _artifact_store_evidence_verifier_operations
-
 
 class ArtifactStoreEvidenceVerifier:
     """Immutable-evidence integrity verifier backed by the canonical ArtifactStore.
@@ -411,6 +434,12 @@ class ArtifactStoreEvidenceVerifier:
             read_snapshot=read_snapshot,
             store_identity=store_identity,
         )
+        # Strong lifetime anchors only. Closure-owned weak references and exact
+        # values remain the authority and detect any caller retargeting.
+        self._store = store
+        self._evidence_root = root
+        self._read_snapshot = read_snapshot
+        self._store_identity = store_identity
 
     @property
     def identity(self) -> str:

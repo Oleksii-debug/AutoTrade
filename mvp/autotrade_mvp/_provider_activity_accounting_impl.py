@@ -358,6 +358,103 @@ def _provider_fill_binding_payload(
     }
 
 
+_PROJECTED_FILL_BINDING_FIELDS = frozenset({
+    "fill_id",
+    "provider_execution_id",
+    "intent_id",
+    "client_order_id",
+    "side",
+    "position_side",
+    "position_effect",
+    "quantity",
+    "price",
+    "provider_revision",
+    "correction_of",
+})
+_PROVIDER_FILL_BINDING_FIELDS = frozenset({
+    "provider_id",
+    "account_id",
+    "environment",
+    "provider_execution_id",
+    "client_order_id",
+    "instrument",
+    "quantity",
+    "price",
+    "fee_amount",
+    "fee_currency",
+    "trade_time",
+    "side",
+    "position_side",
+    "position_effect",
+    "evidence_refs",
+})
+
+
+def _projected_fill_from_binding_payload(
+    payload: Mapping[str, Any],
+    *,
+    name: str,
+) -> ProjectedFillEvidence:
+    if not isinstance(payload, Mapping) or set(payload) != _PROJECTED_FILL_BINDING_FIELDS:
+        raise AccountingConflict(f"{name} shape is invalid")
+    raw = dict(payload)
+    try:
+        evidence = ProjectedFillEvidence.create(
+            fill_id=raw["fill_id"],
+            provider_execution_id=raw["provider_execution_id"],
+            intent_id=raw["intent_id"],
+            client_order_id=raw["client_order_id"],
+            side=raw["side"],
+            quantity=raw["quantity"],
+            price=raw["price"],
+            position_side=raw["position_side"],
+            position_effect=raw["position_effect"],
+            provider_revision=raw["provider_revision"],
+            correction_of=raw["correction_of"],
+        )
+    except (TypeError, ValueError) as error:
+        raise AccountingConflict(f"{name} is invalid") from error
+    if _projected_fill_binding_payload(evidence) != raw:
+        raise AccountingConflict(f"{name} is not canonical")
+    return evidence
+
+
+def _provider_fill_from_binding_payload(
+    payload: Mapping[str, Any],
+    *,
+    name: str,
+) -> ProviderFillEvidence:
+    if not isinstance(payload, Mapping) or set(payload) != _PROVIDER_FILL_BINDING_FIELDS:
+        raise AccountingConflict(f"{name} shape is invalid")
+    raw = dict(payload)
+    refs = raw["evidence_refs"]
+    if not isinstance(refs, list):
+        raise AccountingConflict(f"{name} evidence_refs are invalid")
+    try:
+        evidence = ProviderFillEvidence.create(
+            provider_id=raw["provider_id"],
+            account_id=raw["account_id"],
+            environment=raw["environment"],
+            provider_execution_id=raw["provider_execution_id"],
+            client_order_id=raw["client_order_id"],
+            instrument=raw["instrument"],
+            quantity=raw["quantity"],
+            price=raw["price"],
+            fee_amount=raw["fee_amount"],
+            fee_currency=raw["fee_currency"],
+            trade_time=raw["trade_time"],
+            side=raw["side"],
+            position_side=raw["position_side"],
+            position_effect=raw["position_effect"],
+            evidence_refs=tuple(refs),
+        )
+    except (TypeError, ValueError) as error:
+        raise AccountingConflict(f"{name} is invalid") from error
+    if _provider_fill_binding_payload(evidence) != raw:
+        raise AccountingConflict(f"{name} is not canonical")
+    return evidence
+
+
 def _prepare_provider_fill_binding(
     economic_book: "DurableProviderEconomicBook",
     *,
@@ -761,18 +858,39 @@ def _prepare_provider_fill_correction_binding(
             "provider fill correction does not match the initial financial binding"
         )
     initial_provider = initial_request.get("provider_fill")
+    initial_projected = initial_request.get("projected_fill")
+    initial_projected_evidence = _projected_fill_from_binding_payload(
+        initial_projected,
+        name="initial provider fill projected evidence",
+    )
+    initial_provider_evidence = _provider_fill_from_binding_payload(
+        initial_provider,
+        name="initial provider fill evidence",
+    )
     if (
-        not isinstance(initial_provider, Mapping)
-        or initial_provider.get("side") != "BUY"
-        or initial_provider.get("position_side") is not None
+        initial_projected_evidence.fill_id != initial_request.get("fill_id")
+        or initial_projected_evidence.provider_execution_id != execution_id
+        or initial_projected_evidence.intent_id != corrected_projected_fill.intent_id
+        or initial_projected_evidence.correction_of is not None
+        or initial_provider_evidence.provider_id != economic_book.provider_id
+        or initial_provider_evidence.account_id != economic_book.account_id
+        or initial_provider_evidence.environment != economic_book.environment
+        or initial_provider_evidence.provider_execution_id != execution_id
+        or initial_provider_evidence.client_order_id
+        != initial_projected_evidence.client_order_id
+        or initial_provider_evidence.side != "BUY"
+        or initial_projected_evidence.side != "BUY"
+        or initial_provider_evidence.side != initial_projected_evidence.side
+        or initial_provider_evidence.position_side is not None
+        or initial_provider_evidence.position_side
+        != initial_projected_evidence.position_side
+        or initial_provider_evidence.position_effect
+        != initial_projected_evidence.position_effect
+        or initial_provider_evidence.quantity != initial_projected_evidence.quantity
+        or initial_provider_evidence.price != initial_projected_evidence.price
     ):
         raise AccountingConflict(
-            "initial provider fill binding is not qualified cash-equity BUY evidence"
-        )
-    initial_projected = initial_request.get("projected_fill")
-    if not isinstance(initial_projected, Mapping):
-        raise AccountingConflict(
-            "initial provider fill projected evidence is invalid"
+            "initial provider fill binding evidence semantics are invalid"
         )
     active_projected_digest = _text(
         initial_request.get("projected_fill_digest"),
@@ -935,6 +1053,46 @@ def _prepare_provider_fill_correction_binding(
         ):
             raise AccountingConflict(
                 "provider fill correction corrected evidence digests are invalid"
+            )
+        historical_projected = _projected_fill_from_binding_payload(
+            corrected_projected_payload,
+            name="historical corrected projected fill evidence",
+        )
+        historical_provider = _provider_fill_from_binding_payload(
+            corrected_provider_payload,
+            name="historical corrected provider fill evidence",
+        )
+        if (
+            request.get("correction_of") != active_fill_id
+            or historical_projected.fill_id != corrected_fill_id
+            or historical_projected.correction_of != active_fill_id
+            or historical_projected.provider_execution_id != execution_id
+            or historical_projected.intent_id
+            != initial_projected_evidence.intent_id
+            or historical_projected.client_order_id
+            != initial_projected_evidence.client_order_id
+            or historical_projected.side != initial_projected_evidence.side
+            or historical_projected.position_side
+            != initial_projected_evidence.position_side
+            or historical_projected.position_effect
+            != initial_projected_evidence.position_effect
+            or historical_provider.provider_id != economic_book.provider_id
+            or historical_provider.account_id != economic_book.account_id
+            or historical_provider.environment != economic_book.environment
+            or historical_provider.provider_execution_id != execution_id
+            or historical_provider.client_order_id
+            != historical_projected.client_order_id
+            or historical_provider.instrument != initial_provider_evidence.instrument
+            or historical_provider.side != historical_projected.side
+            or historical_provider.position_side
+            != historical_projected.position_side
+            or historical_provider.position_effect
+            != historical_projected.position_effect
+            or historical_provider.quantity != historical_projected.quantity
+            or historical_provider.price != historical_projected.price
+        ):
+            raise AccountingConflict(
+                "provider fill correction corrected evidence semantics are invalid"
             )
         seen_fill_ids.add(corrected_fill_id)
         active_fill_id = corrected_fill_id

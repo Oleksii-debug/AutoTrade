@@ -192,10 +192,10 @@ def accepted_for(
     payload_overrides=None,
 ) -> AcceptedRuntimeTargetHostQualification:
     projections = dict(target_host_measurement_projection_digests(current))
-    if payload_overrides:
-        projections.update(payload_overrides)
     projections[CAMPAIGN_EVIDENCE_KIND] = "sha256:" + "7" * 64
     projections[HOST_INVENTORY_EVIDENCE_KIND] = "sha256:" + "8" * 64
+    if payload_overrides:
+        projections.update(payload_overrides)
     return AcceptedRuntimeTargetHostQualification(
         attestation_id="60000000-0000-4000-8000-000000000001",
         attestation_digest="sha256:" + "a" * 64,

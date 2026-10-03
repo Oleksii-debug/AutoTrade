@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.runtime_target_host_durable_financial import (
     TARGET_HOST_SHARED_CLOCK_ID,
     RuntimeTargetHostDurableFinancialError,
     bind_durable_financial_latency_to_target_host_measurement,
+    bind_release_bound_durable_financial_latency_to_target_host_measurement,
 )
 from mvp.autotrade_mvp.runtime_target_host_measurement import (
     FinancialTargetHostSample,
@@ -101,11 +102,13 @@ def target_measurement(
     monotonic_clock_id=TARGET_HOST_SHARED_CLOCK_ID,
     journal_store_identity_digest=None,
     scenario_id=None,
+    release_artifact_id=RELEASE_ID,
+    release_artifact_sha256=RELEASE_SHA,
 ):
     return TargetHostMeasurementArtifact(
         source_sha=SOURCE,
-        release_artifact_id=RELEASE_ID,
-        release_artifact_sha256=RELEASE_SHA,
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
         scenario_id=current_plan.scenario_id if scenario_id is None else scenario_id,
         spec_digest=current_spec.digest,
         configuration_hash=CONFIG,
@@ -153,6 +156,12 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
         current_spec = spec()
         event = expected()
         current_plan = campaign_plan(current_spec, event.event_id)
+        declared = declare_runtime_event_plan(
+            store,
+            plan_id="durable-financial-plan",
+            spec=current_spec,
+            expected_events=(event,),
+        )
         with patch(
             "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
             return_value=1_000_000_000,
@@ -162,12 +171,6 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
                 spec=current_spec,
                 plan=current_plan,
             )
-        declared = declare_runtime_event_plan(
-            store,
-            plan_id="durable-financial-plan",
-            spec=current_spec,
-            expected_events=(event,),
-        )
         with patch(
             "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
             side_effect=(1_100_000_000, 1_100_100_000),
@@ -230,6 +233,69 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
             durable.event_payload_hash,
         )
         self.assertTrue(binding.digest.startswith("sha256:"))
+
+    def test_release_bound_facade_accepts_exact_external_release_pair(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        with self._python_313():
+            binding = bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        self.assertEqual(binding.target_host_measurement_digest, measurement.digest)
+
+    def test_release_bound_facade_rejects_external_release_uuid_mismatch_before_mechanics(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        with patch.object(
+            durable_financial_module,
+            "bind_durable_financial_latency_to_target_host_measurement",
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "another delivered release artifact",
+        ):
+            bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id="50000000-0000-4000-8000-000000000002",
+                expected_release_artifact_sha256=RELEASE_SHA,
+            )
+        mechanics.assert_not_called()
+
+    def test_release_bound_facade_rejects_external_release_digest_mismatch_before_mechanics(self):
+        temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
+        self.addCleanup(temporary.cleanup)
+        measurement = self._measurement(
+            store, current_spec, current_plan, cut, durable
+        )
+        with patch.object(
+            durable_financial_module,
+            "bind_durable_financial_latency_to_target_host_measurement",
+        ) as mechanics, self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "another delivered release digest",
+        ):
+            bind_release_bound_durable_financial_latency_to_target_host_measurement(
+                store=store,
+                spec=current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+                expected_release_artifact_id=RELEASE_ID,
+                expected_release_artifact_sha256="sha256:" + "9" * 64,
+            )
+        mechanics.assert_not_called()
 
     def test_target_measurement_must_bind_exact_journal_store_generation(self):
         temporary, store, current_spec, current_plan, cut, declared, durable = self._prepared()
@@ -296,6 +362,63 @@ class RuntimeTargetHostDurableFinancialTests(unittest.TestCase):
         with self._python_313(), self.assertRaisesRegex(
             RuntimeTargetHostDurableFinancialError,
             "outside target-host journal cut",
+        ):
+            bind_durable_financial_latency_to_target_host_measurement(
+                store,
+                current_spec,
+                declared_plan_id=declared.plan_id,
+                measurement=measurement,
+            )
+
+    def test_post_start_declared_plan_cannot_validate_target_host_measurement(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = JournalStore(Path(temporary.name) / "journal.sqlite3")
+        current_spec = spec()
+        event = expected()
+        current_plan = campaign_plan(current_spec, event.event_id)
+
+        with patch(
+            "mvp.autotrade_mvp.runtime_load_qualification.time.monotonic_ns",
+            return_value=1_000_000_000,
+        ):
+            cut = begin_runtime_campaign(
+                journal=store,
+                spec=current_spec,
+                plan=current_plan,
+            )
+        declared = declare_runtime_event_plan(
+            store,
+            plan_id="post-start-durable-financial-plan",
+            spec=current_spec,
+            expected_events=(event,),
+        )
+        self.assertGreater(
+            declared.declared_journal_sequence,
+            cut.start_journal_sequence,
+        )
+        with patch(
+            "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+            side_effect=(1_100_000_000, 1_100_100_000),
+        ):
+            _result, durable = measure_declared_financial_operation(
+                store,
+                current_spec,
+                plan_id=declared.plan_id,
+                event_id=event.event_id,
+                operation=lambda: append_expected(store, event),
+            )
+        measurement = self._measurement(
+            store,
+            current_spec,
+            current_plan,
+            cut,
+            durable,
+        )
+
+        with self._python_313(), self.assertRaisesRegex(
+            RuntimeTargetHostDurableFinancialError,
+            "declared after target-host campaign start",
         ):
             bind_durable_financial_latency_to_target_host_measurement(
                 store,

@@ -21,6 +21,7 @@ import re
 import sys
 from types import MappingProxyType
 from typing import Mapping
+from uuid import UUID
 
 from .performance_qualification import RuntimeBudgetSpec
 from .persistence import (
@@ -56,6 +57,21 @@ def _text(value: object, *, name: str) -> str:
             f"{name} must be canonical non-empty text"
         )
     return value
+
+
+def _canonical_uuid(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        canonical = str(UUID(text))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise RuntimeTargetHostDurableFinancialError(
+            f"{name} must be a canonical UUID"
+        ) from error
+    if canonical != text:
+        raise RuntimeTargetHostDurableFinancialError(
+            f"{name} must be a canonical UUID"
+        )
+    return canonical
 
 
 def _git_sha(value: object, *, name: str) -> str:
@@ -389,6 +405,10 @@ def bind_durable_financial_latency_to_target_host_measurement(
             raise RuntimeTargetHostDurableFinancialError(
                 "target-host measurement belongs to another JournalStore generation"
             )
+        if declared_plan.declared_journal_sequence > measurement.start_journal_sequence:
+            raise RuntimeTargetHostDurableFinancialError(
+                "durable runtime event plan was declared after target-host campaign start"
+            )
         durable_samples = load_declared_financial_latency_samples(
             store,
             spec,
@@ -469,4 +489,48 @@ def bind_durable_financial_latency_to_target_host_measurement(
         declared_plan_digest=declared_plan.digest,
         clock_contract_id=CLOCK_CONTRACT_ID,
         bindings=tuple(bindings),
+    )
+
+
+def bind_release_bound_durable_financial_latency_to_target_host_measurement(
+    *,
+    store: JournalStore,
+    spec: RuntimeBudgetSpec,
+    declared_plan_id: str,
+    measurement: TargetHostMeasurementArtifact,
+    expected_release_artifact_id: str,
+    expected_release_artifact_sha256: str,
+) -> DurableTargetHostFinancialBinding:
+    """Terminal facade for one externally frozen delivered-release identity.
+
+    The low-level durable bridge proves JournalStore/measurement identity. Terminal
+    consumers must additionally freeze the delivered artifact UUID and SHA-256
+    outside caller-owned measurement state so a favorable measurement bundle
+    cannot self-assert which release it qualifies.
+    """
+
+    if type(measurement) is not TargetHostMeasurementArtifact:
+        raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
+    measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    frozen_release_artifact_id = _canonical_uuid(
+        expected_release_artifact_id,
+        name="expected_release_artifact_id",
+    )
+    frozen_release_artifact_sha256 = _digest(
+        expected_release_artifact_sha256,
+        name="expected_release_artifact_sha256",
+    )
+    if measurement.release_artifact_id != frozen_release_artifact_id:
+        raise RuntimeTargetHostDurableFinancialError(
+            "target-host measurement belongs to another delivered release artifact"
+        )
+    if measurement.release_artifact_sha256 != frozen_release_artifact_sha256:
+        raise RuntimeTargetHostDurableFinancialError(
+            "target-host measurement belongs to another delivered release digest"
+        )
+    return bind_durable_financial_latency_to_target_host_measurement(
+        store,
+        spec,
+        declared_plan_id=declared_plan_id,
+        measurement=measurement,
     )

@@ -61,6 +61,72 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             payload=payload,
         )
 
+    @staticmethod
+    def market():
+        return {
+            "instrument_version": "instrument:test:v1",
+            "capability_snapshot_id": "capability:test:v1",
+            "asset_class": "CASH_EQUITY",
+            "payoff": "LINEAR",
+            "quantity_unit": "SHARE",
+            "contract_multiplier": "1",
+            "quote_currency": "USD",
+            "settlement_currency": "USD",
+        }
+
+    @staticmethod
+    def valuation():
+        return {
+            "symbol": "AAA",
+            "instrument_version": "instrument:test:v1",
+            "capability_snapshot_id": "capability:test:v1",
+            "asset_class": "CASH_EQUITY",
+            "payoff": "LINEAR",
+            "quantity_unit": "SHARE",
+            "contract_multiplier": "1",
+            "quote_currency": "USD",
+            "settlement_currency": "USD",
+            "source_price": "10",
+            "portfolio_base_currency": "USD",
+            "fx_rate": "1",
+            "fx_source_id": "IDENTITY",
+            "unit_base_notional": "10",
+            "capital_requirement_rate": "1",
+            "min_notional_base": "0",
+            "fee_floor_base": "0",
+            "max_executable_notional_base": "100",
+            "payoff_identity": "cash_equity:linear:v1",
+            "cost_rate_components": {
+                "execution": "0.001",
+                "financing": "0",
+                "funding": "0",
+                "borrow": "0",
+                "fx": "0",
+            },
+            "cost_evidence_refs": {
+                "execution": "execution:test:v1",
+                "financing": "financing:none:test:v1",
+                "funding": "funding:none:test:v1",
+                "borrow": "borrow:none:test:v1",
+                "fx": "fx:identity:test:v1",
+            },
+        }
+
+    def normalize(self, market=None, valuation=None):
+        return normalize_allocation_valuation(
+            symbol="AAA",
+            market_payload=self.market() if market is None else market,
+            valuation_payload=self.valuation() if valuation is None else valuation,
+            source_price="10",
+            expected_cost_rate="0.001",
+            expected_capital_requirement_rate="1",
+            expected_min_notional_base="0",
+            expected_fee_floor_base="0",
+            expected_max_executable_notional_base="100",
+            decision_time="2026-09-25T18:30:00Z",
+            portfolio_base_currency="USD",
+        )
+
     def test_direct_hostile_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileMapping()
 
@@ -123,6 +189,50 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         self.assertEqual(first.digest, from_nested.digest)
         with self.assertRaises(TypeError):
             first.payload["fx_quote"]["source_id"] = "changed"
+
+    def test_direct_valuation_rejects_hostile_outer_key_before_callbacks(self):
+        key = _HostileText("instrument_version")
+        market = self.market()
+        market[key] = market.pop("instrument_version")
+        _HostileText.calls.clear()
+
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "keys must be exact built-in strings",
+        ):
+            self.normalize(market=market)
+
+        self.assertEqual(_HostileText.calls, [])
+
+    def test_identity_fx_rejects_nested_hostile_mapping_before_callbacks(self):
+        hostile = _HostileMapping()
+        valuation = self.valuation()
+        valuation["fx_quote"] = MappingProxyType(hostile)
+        hostile.calls.clear()
+
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "fx_quote must be an exact built-in dictionary",
+        ):
+            self.normalize(valuation=valuation)
+
+        self.assertEqual(hostile.calls, [])
+
+    def test_cost_mapping_rejects_hostile_key_before_callbacks(self):
+        key = _HostileText("execution")
+        valuation = self.valuation()
+        components = dict(valuation["cost_rate_components"])
+        components[key] = components.pop("execution")
+        valuation["cost_rate_components"] = components
+        _HostileText.calls.clear()
+
+        with self.assertRaisesRegex(
+            AllocationValuationError,
+            "cost_rate_components keys must be exact built-in strings",
+        ):
+            self.normalize(valuation=valuation)
+
+        self.assertEqual(_HostileText.calls, [])
 
     def test_direct_valuation_boundary_rejects_hostile_mapping_without_callbacks(self):
         hostile = _HostileMapping()

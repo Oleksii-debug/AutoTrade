@@ -1045,7 +1045,9 @@ class DurableOptionLifecycleAuthority:
             observation.environment,
             observation.external_event_id,
         )
-        _, inserted, _ = self.store.commit_command(
+        self._require_canonical_authorities()
+        _, inserted, _ = JournalStore.commit_command(
+            self.store,
             command_id=command_id,
             actor=self._ACTOR,
             environment=observation.environment,
@@ -1057,7 +1059,7 @@ class DurableOptionLifecycleAuthority:
             state_version=next_version,
             events=commit_events,
         )
-        self.economic_book.refresh()
+        DurableProviderEconomicBook.refresh(self.economic_book)
         return OptionLifecycleApplyResult(
             lifecycle_event_id=lifecycle_event_id,
             inserted=inserted,

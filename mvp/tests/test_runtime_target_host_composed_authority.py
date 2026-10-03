@@ -8,7 +8,10 @@ from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as pl
 from mvp.autotrade_mvp import runtime_target_host_composed_qualification as composed
 from mvp.autotrade_mvp import runtime_target_host_durable_financial as durable
 from mvp.autotrade_mvp import runtime_target_host_qualification as signed
+from mvp.autotrade_mvp import performance_qualification as performance
 from mvp.autotrade_mvp.runtime_target_host_composed_authority import (
+    _PRODUCTION_PROJECTION_DIGEST_BUILDER,
+    _PRODUCTION_SIGNED_CAMPAIGN_MATCHER,
     _build_composed_production_verifier,
     verify_sealed_composed_runtime_target_host_qualification,
 )
@@ -112,6 +115,29 @@ class RuntimeTargetHostComposedAuthorityTests(unittest.TestCase):
 
         forged_binder.assert_not_called()
         forged_signed.assert_not_called()
+
+    def test_signed_campaign_matcher_retains_canonical_budget_evaluator(self) -> None:
+        before = getclosurevars(_PRODUCTION_SIGNED_CAMPAIGN_MATCHER).nonlocals
+        original = performance.evaluate_runtime_budget
+        self.assertIs(before["budget_evaluator"], original)
+
+        forged = Mock()
+        with patch.object(performance, "evaluate_runtime_budget", forged), patch.object(
+            composed,
+            "evaluate_runtime_budget",
+            forged,
+        ):
+            after = getclosurevars(_PRODUCTION_SIGNED_CAMPAIGN_MATCHER).nonlocals
+            self.assertIs(after["budget_evaluator"], original)
+        forged.assert_not_called()
+
+    def test_sealed_projection_digests_match_canonical_public_projection(self) -> None:
+        current = measurement()
+        expected = composed.target_host_measurement_projection_digests(current)
+        observed = _PRODUCTION_PROJECTION_DIGEST_BUILDER(current)
+        self.assertEqual(dict(observed), dict(expected))
+        with self.assertRaises(TypeError):
+            observed["forged"] = "sha256:" + "0" * 64
 
     def test_plan_bound_production_closure_captures_sealed_composed_adapter(self) -> None:
         private = (

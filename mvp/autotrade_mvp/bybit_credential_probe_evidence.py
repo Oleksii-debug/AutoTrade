@@ -31,8 +31,11 @@ from .bybit_credential_nonacceptance import (
 from .provider_core import ProviderCoreError
 from .provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
+    AuthenticatedReadHttpRequest,
+    AuthenticatedReadWireResponse,
     BybitV5Credential,
     ProviderTransportScopeError,
+    UrllibJsonWireClient,
 )
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
@@ -43,6 +46,10 @@ _REST_BASE_BY_PROVIDER_ENVIRONMENT = {
     "TESTNET": "https://api-testnet.bybit.com",
     "DEMO": "https://api-demo.bybit.com",
 }
+_ALLOWED_PROBE_SOURCE_URIS = frozenset(
+    base + _BYBIT_QUERY_API_PATH
+    for base in _REST_BASE_BY_PROVIDER_ENVIRONMENT.values()
+)
 _SUPPORTED_FAMILIES = frozenset(
     {
         "SPOT",
@@ -52,7 +59,17 @@ _SUPPORTED_FAMILIES = frozenset(
         "OPTIONS",
     }
 )
+_PROBE_HEADER_NAMES = frozenset(
+    {
+        "Accept",
+        "X-BAPI-API-KEY",
+        "X-BAPI-TIMESTAMP",
+        "X-BAPI-RECV-WINDOW",
+        "X-BAPI-SIGN",
+    }
+)
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -152,9 +169,55 @@ def _response_digest(response: object) -> tuple[int, str]:
     return ret_code, "sha256:" + sha256(encoded).hexdigest()
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProviderCoreError(
+                "Bybit credential probe wire JSON contains duplicate object key"
+            )
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ProviderCoreError(
+        f"Bybit credential probe wire JSON contains non-finite constant {value}"
+    )
+
+
+def _decode_wire_json(body: object) -> dict[str, Any]:
+    if type(body) is not bytes or not body:
+        raise ProviderCoreError(
+            "Bybit credential probe wire body must be exact non-empty bytes"
+        )
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProviderCoreError(
+            "Bybit credential probe wire body must be UTF-8 JSON"
+        ) from error
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except json.JSONDecodeError as error:
+        raise ProviderCoreError(
+            "Bybit credential probe wire body must be valid JSON"
+        ) from error
+    if type(value) is not dict:
+        raise ProviderCoreError(
+            "Bybit credential probe wire JSON must be an exact object"
+        )
+    _require_exact_json_data(value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class BybitCredentialProbeWireResponse:
-    """Exact HTTP+JSON result returned by the probe's injected wire boundary."""
+    """Exact HTTP+JSON result returned by the probe's wire boundary."""
 
     http_status: int
     response: dict[str, Any]
@@ -376,6 +439,77 @@ def _probe_headers(
     )
 
 
+def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
+    if not isinstance(headers, Mapping) or set(headers) != _PROBE_HEADER_NAMES:
+        raise ProviderCoreError(
+            "Bybit credential probe wire headers must have exact auth shape"
+        )
+    normalized: dict[str, str] = {}
+    for key in _PROBE_HEADER_NAMES:
+        value = _exact_text(headers[key], name=f"header {key}")
+        normalized[key] = value
+    if normalized["Accept"] != "application/json":
+        raise ProviderCoreError("Bybit credential probe Accept header is not canonical")
+    timestamp = normalized["X-BAPI-TIMESTAMP"]
+    recv_window = normalized["X-BAPI-RECV-WINDOW"]
+    if not timestamp.isascii() or not timestamp.isdigit() or str(int(timestamp)) != timestamp:
+        raise ProviderCoreError("Bybit credential probe timestamp header is not canonical")
+    if (
+        not recv_window.isascii()
+        or not recv_window.isdigit()
+        or str(int(recv_window)) != recv_window
+    ):
+        raise ProviderCoreError("Bybit credential probe recv-window header is not canonical")
+    _exact_request_timestamp(int(timestamp))
+    _exact_recv_window(int(recv_window))
+    if _HEX_SHA256.fullmatch(normalized["X-BAPI-SIGN"]) is None:
+        raise ProviderCoreError("Bybit credential probe signature header is not canonical")
+    return MappingProxyType(normalized)
+
+
+def execute_bybit_credential_probe_wire_query(
+    *,
+    source_uri: str,
+    headers: Mapping[str, str],
+    timeout_seconds: int,
+    wire_client: object | None = None,
+) -> BybitCredentialProbeWireResponse:
+    """Execute one redirect-safe query-api GET through the shared wire client.
+
+    This adapter is deliberately endpoint-closed: even a direct caller cannot
+    reuse probe authentication headers for an arbitrary URL. The shared urllib
+    client supplies the existing bounded-response/no-redirect/no-retry policy.
+    """
+
+    source_uri = _exact_text(source_uri, name="source_uri")
+    if source_uri not in _ALLOWED_PROBE_SOURCE_URIS:
+        raise ProviderCoreError(
+            "Bybit credential probe wire source is outside exact query-api origins"
+        )
+    headers = _validate_probe_wire_headers(headers)
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
+        raise ProviderCoreError(
+            "Bybit credential probe timeout must be exact integer 1..120"
+        )
+    client = wire_client if wire_client is not None else UrllibJsonWireClient()
+    if not hasattr(client, "send"):
+        raise TypeError("wire_client must implement send")
+    request = AuthenticatedReadHttpRequest(
+        url=source_uri,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+    )
+    raw_response = client.send(request)
+    if type(raw_response) is not AuthenticatedReadWireResponse:
+        raise TypeError(
+            "Bybit credential probe wire client must return exact AuthenticatedReadWireResponse"
+        )
+    return BybitCredentialProbeWireResponse(
+        http_status=raw_response.http_status,
+        response=_decode_wire_json(raw_response.body),
+    )
+
+
 def probe_bybit_credential_with_vault(
     *,
     vault: ProtectedCredentialVault,
@@ -387,14 +521,7 @@ def probe_bybit_credential_with_vault(
     clock_utc: Callable[[], datetime],
     recv_window_ms: int = 5000,
 ) -> BybitCredentialProbeEvidence:
-    """Perform one generation-locked authenticated credential probe.
-
-    Source origin and provider domain are derived from the leased credential.
-    The generation lock remains held through signing, I/O, HTTP/JSON validation
-    and evidence capture. The wire callback receives the URL, headers and
-    timeout only; it never receives API-secret plaintext. A non-200 HTTP result
-    remains unknown instead of being converted into credential-rejection proof.
-    """
+    """Perform one generation-locked authenticated credential probe."""
 
     if type(vault) is not ProtectedCredentialVault:
         raise TypeError("vault must be exact ProtectedCredentialVault")
@@ -489,3 +616,36 @@ def probe_bybit_credential_with_vault(
             response=wire_response.response,
             observed_at=observed_at,
         )
+
+
+def probe_bybit_credential_with_shared_wire(
+    *,
+    vault: ProtectedCredentialVault,
+    credential_handle: PersistentCredentialHandle,
+    execution_identity: str,
+    product_family: str,
+    clock_millis: Callable[[], int],
+    clock_utc: Callable[[], datetime],
+    recv_window_ms: int = 5000,
+    wire_client: object | None = None,
+) -> BybitCredentialProbeEvidence:
+    """Production-capable probe using the repository's redirect-safe wire seam."""
+
+    def wire_query(**kwargs: object) -> BybitCredentialProbeWireResponse:
+        return execute_bybit_credential_probe_wire_query(
+            source_uri=kwargs["source_uri"],
+            headers=kwargs["headers"],
+            timeout_seconds=kwargs["timeout_seconds"],
+            wire_client=wire_client,
+        )
+
+    return probe_bybit_credential_with_vault(
+        vault=vault,
+        credential_handle=credential_handle,
+        execution_identity=execution_identity,
+        product_family=product_family,
+        wire_query=wire_query,
+        clock_millis=clock_millis,
+        clock_utc=clock_utc,
+        recv_window_ms=recv_window_ms,
+    )

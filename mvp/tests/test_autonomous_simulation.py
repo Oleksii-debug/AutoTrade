@@ -162,6 +162,7 @@ class AutonomousSimulationTests(unittest.TestCase):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
                 connection.sendto(b"x", ("127.0.0.1", 1))
         for action in (lambda: socket.getaddrinfo("localhost", 80),
+                       lambda: socket.getnameinfo(("127.0.0.1", 80), 0),
                        lambda: socket.create_connection(("127.0.0.1", 1)),
                        udp):
             with self.subTest(action=action), self.assertRaisesRegex(RuntimeError, "ZERO mode"):

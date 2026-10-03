@@ -22,7 +22,7 @@ def deny_python_network():
     with _LOCK, ExitStack() as stack:
         for target, names in (
             (socket.socket, ("connect", "connect_ex", "send", "sendall", "sendto", "sendmsg", "sendfile")),
-            (socket, ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr")),
+            (socket, ("create_connection", "getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr")),
         ):
             for name in names:
                 if hasattr(target, name):

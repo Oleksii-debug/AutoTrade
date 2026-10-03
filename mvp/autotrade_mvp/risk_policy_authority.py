@@ -530,7 +530,12 @@ def require_registry_issued_resolved_policy(
             "resolved RiskPolicy was not issued by DurableRiskPolicyRegistry"
         )
     issued_digest = binding[1]
-    current_digest = _resolved_policy_authority_digest(value)
+    try:
+        current_digest = _resolved_policy_authority_digest(value)
+    except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy authority changed after registry issuance"
+        ) from error
     if value._authority_digest != issued_digest or current_digest != issued_digest:
         raise RiskPolicyAuthorityError(
             "resolved RiskPolicy authority changed after registry issuance"

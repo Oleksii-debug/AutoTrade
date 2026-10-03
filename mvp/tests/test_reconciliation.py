@@ -241,6 +241,11 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact ProviderFillEvidence"):
             self.base(provider_fills=[subclass])
 
+        injected = fill()
+        object.__setattr__(injected, "unreviewed_state", "must-not-enter-authority")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            self.base(provider_fills=[injected])
+
     def test_incomplete_provider_fill_cannot_match_complete_or_resolve_unknown(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-diagnostic-fill",

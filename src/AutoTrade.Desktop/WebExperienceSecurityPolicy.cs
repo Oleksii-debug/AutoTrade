@@ -150,6 +150,13 @@ public sealed class WebExperienceSecurityPolicy
     public bool AllowsDeveloperTools => false;
 
     /// <summary>
+    /// Service workers are forbidden in the trusted financial web surface.
+    /// A background same-origin worker must not gain interception authority over
+    /// authenticated Host API traffic or outlive the visible trusted document.
+    /// </summary>
+    public bool AllowsServiceWorkers => false;
+
+    /// <summary>
     /// Downloads are not an authority-bearing path for the embedded product UI.
     /// </summary>
     public bool AllowsDownloads => false;

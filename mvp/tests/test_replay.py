@@ -383,14 +383,20 @@ class CausalReplayTests(unittest.TestCase):
             authority_id=checkpoint.runtime_authority_id,
             secret=b"attacker-runtime-authority-secret-00000001",
         )
-        attacker.verify_snapshot = lambda snapshot: None
-        attacker.capture = lambda: RuntimeStateSnapshot(
-            cut_id=checkpoint.runtime_cut_id,
-            replay=checkpoint.replay,
-            runtime_components=checkpoint.runtime_components,
-            authority_id=checkpoint.runtime_authority_id,
-            authority_seal=checkpoint.runtime_authority_seal,
-        )
+        self.assertFalse(hasattr(attacker, "__dict__"))
+        self.assertFalse(hasattr(attacker, "_secret"))
+        self.assertFalse(hasattr(attacker, "_cut_resolver"))
+        self.assertFalse(hasattr(attacker, "_authority_id"))
+        with self.assertRaises(AttributeError):
+            attacker.verify_snapshot = lambda snapshot: None
+        with self.assertRaises(AttributeError):
+            attacker.capture = lambda: RuntimeStateSnapshot(
+                cut_id=checkpoint.runtime_cut_id,
+                replay=checkpoint.replay,
+                runtime_components=checkpoint.runtime_components,
+                authority_id=checkpoint.runtime_authority_id,
+                authority_seal=checkpoint.runtime_authority_seal,
+            )
 
         with self.assertRaisesRegex(ReplayError, "authority seal mismatch"):
             resume_from_composite_checkpoint(
@@ -401,6 +407,18 @@ class CausalReplayTests(unittest.TestCase):
                 build_sha="e" * 64,
                 protocol_ref="protocol:sealed-v1",
             )
+
+    def test_runtime_authority_does_not_expose_signing_key_or_cut_resolver(self):
+        replay = CausalReplay(
+            [event(1, "2026-09-24T10:00:00Z", 1)],
+            start_at="2026-09-24T09:59:00Z",
+        )
+        authority = self._state_authority(replay, self._runtime_components())
+        self.assertEqual(authority.authority_id, "runtime:test")
+        self.assertFalse(hasattr(authority, "__dict__"))
+        self.assertFalse(hasattr(authority, "_secret"))
+        self.assertFalse(hasattr(authority, "_cut_resolver"))
+        self.assertFalse(hasattr(authority, "_authority_id"))
 
     def test_composite_checkpoint_subclass_cannot_override_verdict_identity(self):
         events = [event(1, "2026-09-24T10:00:00Z", 1)]

@@ -923,6 +923,49 @@ def _prepare_provider_fill_correction_binding(
                 "initial provider fill usage exceeds the admitted reservation envelope"
             )
 
+    initial_transaction_id = _text(
+        initial_request.get("transaction_id"),
+        name="initial transaction_id",
+    )
+    initial_transactions = [
+        transaction
+        for transaction in economic_book.transactions
+        if transaction.transaction_id == initial_transaction_id
+    ]
+    if len(initial_transactions) != 1:
+        raise AccountingConflict(
+            "initial provider fill binding does not identify one durable economic transaction"
+        )
+    initial_transaction = initial_transactions[0]
+    initial_transaction_digest = _text(
+        initial_request.get("transaction_digest"),
+        name="initial transaction_digest",
+    )
+    if initial_transaction_digest != payload_digest(
+        canonical_transaction(initial_transaction)
+    ):
+        raise AccountingConflict(
+            "initial provider fill binding transaction digest is invalid"
+        )
+    expected_order_key = (
+        f"provider:{economic_book.provider_id}:execution:{execution_id}"
+    )
+    expected_cause_event_id = (
+        f"provider:{economic_book.provider_id}:environment:{economic_book.environment}:"
+        f"account:{economic_book.account_id}:execution:{execution_id}"
+    )
+    if (
+        initial_transaction.economic_order_key != expected_order_key
+        or initial_transaction.cause_event_id != expected_cause_event_id
+    ):
+        raise AccountingConflict(
+            "initial provider fill binding transaction identity is invalid"
+        )
+    if _cash_outflow_usage(initial_transaction) != initial_usage:
+        raise AccountingConflict(
+            "initial provider fill usage does not match durable economic transaction"
+        )
+
     aggregate_id = _provider_fill_correction_binding_aggregate_id(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,

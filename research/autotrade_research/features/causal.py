@@ -42,6 +42,9 @@ class SourceValue:
     available_at: datetime
     value: Decimal
     source_revision: str
+    source_identity: str | None = None
+    source_sequence: int | None = None
+    stream_generation: int | None = None
 
     def __post_init__(self) -> None:
         event = _time(self.event_time, name="event_time")
@@ -58,6 +61,20 @@ class SourceValue:
             "source_revision",
             _text(self.source_revision, name="source_revision"),
         )
+        if self.source_identity is not None:
+            object.__setattr__(
+                self,
+                "source_identity",
+                _text(self.source_identity, name="source_identity"),
+            )
+        for field_name in ("source_sequence", "stream_generation"):
+            field_value = getattr(self, field_name)
+            if field_value is not None and (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, int)
+                or field_value < 0
+            ):
+                raise ValueError(f"{field_name} must be a non-negative integer")
 
     @classmethod
     def create(
@@ -69,6 +86,9 @@ class SourceValue:
         available_at: datetime,
         value,
         source_revision: str,
+        source_identity: str | None = None,
+        source_sequence: int | None = None,
+        stream_generation: int | None = None,
     ) -> "SourceValue":
         event = _time(event_time, name="event_time")
         available = _time(available_at, name="available_at")
@@ -81,6 +101,9 @@ class SourceValue:
             available_at=available,
             value=_decimal(value, name="value"),
             source_revision=_text(source_revision, name="source_revision"),
+            source_identity=source_identity,
+            source_sequence=source_sequence,
+            stream_generation=stream_generation,
         )
 
 
@@ -220,14 +243,27 @@ def _latest_known_vintages(
 ) -> tuple[SourceValue, ...]:
     """Collapse revisions per economic event using only causally visible vintages."""
 
-    candidates_by_event_time: dict[datetime, list[SourceValue]] = {}
+    candidates_by_identity: dict[tuple[str, object], list[SourceValue]] = {}
     for item in observations:
         if item.symbol != symbol or item.available_at > cutoff:
             continue
-        candidates_by_event_time.setdefault(item.event_time, []).append(item)
+        identity = (
+            ("source_identity", item.source_identity)
+            if item.source_identity is not None
+            else ("event_time", item.event_time)
+        )
+        candidates_by_identity.setdefault(identity, []).append(item)
 
-    latest_by_event_time: dict[datetime, SourceValue] = {}
-    for event_time, candidates in candidates_by_event_time.items():
+    latest_by_identity: dict[tuple[str, object], SourceValue] = {}
+    for identity, candidates in candidates_by_identity.items():
+        event_times = {item.event_time for item in candidates}
+        if len(event_times) != 1:
+            raise ValueError("source identity changed event_time across revisions")
+        source_sequences = {item.source_sequence for item in candidates}
+        stream_generations = {item.stream_generation for item in candidates}
+        if len(source_sequences) != 1 or len(stream_generations) != 1:
+            raise ValueError("source identity changed provider order across revisions")
+        event_time = next(iter(event_times))
         latest_available_at = max(item.available_at for item in candidates)
         latest = [
             item
@@ -243,16 +279,19 @@ def _latest_known_vintages(
                 "ambiguous simultaneously available revisions for "
                 f"{symbol} at {event_time.isoformat()}"
             )
-        latest_by_event_time[event_time] = min(
+        latest_by_identity[identity] = min(
             latest,
             key=lambda item: item.observation_id,
         )
 
     return tuple(
         sorted(
-            latest_by_event_time.values(),
+            latest_by_identity.values(),
             key=lambda item: (
                 item.event_time,
+                -1 if item.stream_generation is None else item.stream_generation,
+                -1 if item.source_sequence is None else item.source_sequence,
+                item.source_identity or item.observation_id,
                 item.available_at,
                 item.observation_id,
             ),

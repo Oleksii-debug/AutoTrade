@@ -751,7 +751,7 @@ class HistoricalVintageRegistry:
     def commit(self, manifest: Mapping[str, Any]) -> str:
         normalized = _validate_manifest(manifest)
         version = _sequence(normalized["version"], "version")
-        path = self._path(normalized["dataset_id"], version)
+        path = HistoricalVintageRegistry._path(self, normalized["dataset_id"], version)
         digest = "sha256:" + sha256(_canonical_bytes(normalized)).hexdigest()
         # The immutable check and publication share one cross-process
         # critical section. Otherwise two writers can both observe absence and
@@ -771,7 +771,7 @@ class HistoricalVintageRegistry:
     def load(self, dataset_id: str, version: int) -> dict[str, Any]:
         canonical_id = _uuid(dataset_id, "dataset_id")
         canonical_version = _sequence(version, "version")
-        path = self._path(canonical_id, canonical_version)
+        path = HistoricalVintageRegistry._path(self, canonical_id, canonical_version)
         if not path.is_file():
             raise FileNotFoundError(path)
         try:
@@ -787,7 +787,9 @@ class HistoricalVintageRegistry:
         return manifest
 
     def digest(self, dataset_id: str, version: int) -> str:
-        manifest = self.load(dataset_id, version)
+        if type(self) is not HistoricalVintageRegistry:
+            raise TypeError("registry must be exact HistoricalVintageRegistry")
+        manifest = HistoricalVintageRegistry.load(self, dataset_id, version)
         return "sha256:" + sha256(_canonical_bytes(manifest)).hexdigest()
 
 

@@ -13,7 +13,7 @@ financial subset is selected. Unknown durable aggregate families fail closed.
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+from dataclasses import InitVar, dataclass, replace
 from hashlib import sha256
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -218,6 +218,7 @@ class RuntimeCampaignPlan:
     ) -> "RuntimeCampaignPlan":
         if type(spec) is not RuntimeBudgetSpec:
             raise TypeError("spec must be exact RuntimeBudgetSpec")
+        spec = replace(spec)
         if (
             isinstance(expected_financial_event_ids, (str, bytes))
             or not isinstance(expected_financial_event_ids, Sequence)
@@ -521,6 +522,7 @@ class RuntimeCampaignEvidence:
     def to_observation(self, spec: RuntimeBudgetSpec) -> RuntimeLoadObservation:
         if type(spec) is not RuntimeBudgetSpec:
             raise TypeError("spec must be exact RuntimeBudgetSpec")
+        spec = replace(spec)
         if (
             spec.digest != self.spec_digest
             or spec.release_sha != self.release_sha
@@ -561,6 +563,8 @@ def begin_runtime_campaign(
         raise TypeError("spec must be exact RuntimeBudgetSpec")
     if type(plan) is not RuntimeCampaignPlan:
         raise TypeError("plan must be exact RuntimeCampaignPlan")
+    spec = replace(spec)
+    plan = replace(plan)
     if (
         plan.scenario_id != spec.scenario_id
         or plan.spec_digest != spec.digest
@@ -619,6 +623,25 @@ def collect_runtime_campaign_evidence(
         raise TypeError("plan must be exact RuntimeCampaignPlan")
     if type(cut) is not RuntimeCampaignCut:
         raise TypeError("cut must be exact RuntimeCampaignCut")
+    spec = replace(spec)
+    plan = replace(plan)
+    cut = replace(cut, _token=_CUT_TOKEN)
+    financial_latency_us = _series(financial_latency_us, name="financial_latency_us")
+    financial_staleness_us = _series(
+        financial_staleness_us,
+        name="financial_staleness_us",
+    )
+    research_interference_us = _series(
+        research_interference_us,
+        name="research_interference_us",
+    )
+    resource_evidence_hash = _sha256_identity(
+        resource_evidence_hash,
+        name="resource_evidence_hash",
+    )
+    if not isinstance(resource_metrics, Mapping):
+        raise RuntimeBudgetError("resource_metrics must be a mapping")
+    resource_metrics = dict(resource_metrics)
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
     if plan.journal_taxonomy_digest != _CURRENT_TAXONOMY_DIGEST:
@@ -719,9 +742,9 @@ def collect_runtime_campaign_evidence(
         end_journal_sequence=end_sequence,
         expected_financial_event_ids=plan.expected_financial_event_ids,
         recovered_financial_event_bindings=tuple(recovered),
-        financial_latency_us=tuple(financial_latency_us),
-        financial_staleness_us=tuple(financial_staleness_us),
-        research_interference_us=tuple(research_interference_us),
+        financial_latency_us=financial_latency_us,
+        financial_staleness_us=financial_staleness_us,
+        research_interference_us=research_interference_us,
         reconnect_backlog_remaining=backlog_remaining,
         resource_evidence_hash=resource_evidence_hash,
         resource_metrics=resource_metrics,
@@ -739,4 +762,6 @@ def evaluate_runtime_campaign(
         raise TypeError("spec must be exact RuntimeBudgetSpec")
     if type(evidence) is not RuntimeCampaignEvidence:
         raise TypeError("evidence must be exact RuntimeCampaignEvidence")
+    spec = replace(spec)
+    evidence = replace(evidence, _token=_EVIDENCE_TOKEN)
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

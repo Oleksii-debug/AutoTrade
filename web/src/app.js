@@ -45,6 +45,7 @@
     environment: null,
     renderedAccountId: null,
     renderedEnvironment: null,
+    scopeEpoch: 0,
     snapshotReady: false,
     polling: false,
     stopped: false,
@@ -816,9 +817,19 @@
   }
 
   async function refreshOperation(operationId) {
+    const scopeEpoch = state.scopeEpoch;
+    const renderedAccountId = state.renderedAccountId;
+    const renderedEnvironment = state.renderedEnvironment;
     const raw = await jsonFetch(
       HOST_API.route("getOperation", {operation_id: operationId}));
     const operation = parseOperationResult(raw, operationId);
+    if (
+      scopeEpoch !== state.scopeEpoch ||
+      renderedAccountId !== state.renderedAccountId ||
+      renderedEnvironment !== state.renderedEnvironment
+    ) {
+      return null;
+    }
     renderOperation(operation);
     return operation;
   }
@@ -892,6 +903,7 @@
       parsed.accountId !== state.renderedAccountId ||
       parsed.environment !== state.renderedEnvironment);
     if (scopeChanged) {
+      state.scopeEpoch += 1;
       state.cursor = 0n;
       state.version = 0n;
       resetTableFiltersForScopeChange();
@@ -1021,7 +1033,10 @@
           const operationId = requiredText(
             payload.operation_id,
             "event.payload.operation_id");
-          await refreshOperation(operationId);
+          const operation = await refreshOperation(operationId);
+          if (operation === null) {
+            return;
+          }
         }
         if (MATERIAL_EVENTS.has(kind)) {
           announce(eventMessage(event), URGENT_EVENTS.has(kind));
@@ -1048,7 +1063,9 @@
         try {
           await refreshSnapshot({announceRefresh: true});
         } catch {
-          state.snapshotReady = false;
+          state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
           state.sessionIdentity = null;
           state.accountId = null;
           state.environment = null;
@@ -1061,7 +1078,9 @@
             true);
         }
       } else {
-        state.snapshotReady = false;
+        state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
         state.environment = null;
@@ -1102,6 +1121,15 @@
     if (state.pendingCommand === payload) {
       state.pendingCommand = null;
     }
+  }
+
+  function commandScopeMatchesCurrentSnapshot(payload) {
+    return state.snapshotReady &&
+      state.sessionIdentity !== null &&
+      payload.actor === state.sessionIdentity.actor &&
+      payload.session === state.sessionIdentity.session &&
+      payload.account_id === state.accountId &&
+      payload.environment === state.environment;
   }
 
   async function submitCommand(event) {
@@ -1160,7 +1188,24 @@
         : "Submitting host command " + commandId + ".");
     try {
       const result = await submitCanonicalCommand(payload);
+      const responseScopeCurrent = commandScopeMatchesCurrentSnapshot(payload);
       clearConfirmedCommand(payload);
+      if (!responseScopeCurrent) {
+        renderCommandValidationDetails([], "unavailable");
+        const acceptanceCaveat = result.status === "ACCEPTED"
+          ? " Acceptance is not a completed financial outcome."
+          : "";
+        text(
+          "command-result",
+          "Confirmed host response " + result.status + " for command " + commandId +
+            " belongs to the original account/environment scope " +
+            payload.account_id + " / " + payload.environment +
+            ", but the authenticated host scope changed before the response was displayed." +
+            acceptanceCaveat +
+            " Operation and field-validation details from the original scope were not rendered into the current scope.");
+        byId("command-result").focus();
+        return;
+      }
       renderCommandValidationDetails(result.fieldErrors, "confirmed");
       if (result.status === "ACCEPTED") {
         let acceptedMessage =
@@ -1169,12 +1214,17 @@
         if (result.operationId !== null) {
           try {
             const operation = await refreshOperation(result.operationId);
-            const uncertainty = operation.remainingUncertainty.length > 0
-              ? " Remaining uncertainty: " +
-                operation.remainingUncertainty.join(", ") + "."
-              : "";
-            acceptedMessage +=
-              " Operation phase is " + operation.phase + "." + uncertainty;
+            if (operation === null) {
+              acceptedMessage +=
+                " Operation status was not rendered because the account/environment scope changed while it was loading.";
+            } else {
+              const uncertainty = operation.remainingUncertainty.length > 0
+                ? " Remaining uncertainty: " +
+                  operation.remainingUncertainty.join(", ") + "."
+                : "";
+              acceptedMessage +=
+                " Operation phase is " + operation.phase + "." + uncertainty;
+            }
           } catch {
             acceptedMessage +=
               " Current operation status could not be loaded; the accepted command response remains unchanged.";
@@ -1198,7 +1248,9 @@
       try {
         await refreshSnapshot();
       } catch {
-        state.snapshotReady = false;
+        state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
         state.sessionIdentity = null;
         state.accountId = null;
         state.environment = null;
@@ -1208,7 +1260,9 @@
           true);
       }
     } catch {
-      state.snapshotReady = false;
+      state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1231,7 +1285,9 @@
       await refreshSnapshot();
       announce("Host state refreshed from the canonical snapshot.");
     } catch {
-      state.snapshotReady = false;
+      state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1254,7 +1310,9 @@
     try {
       await refreshSnapshot();
     } catch {
-      state.snapshotReady = false;
+      state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;
@@ -1268,6 +1326,7 @@
   window.addEventListener("pagehide", () => {
     captureFocusForRestoration();
     state.stopped = true;
+    state.scopeEpoch += 1;
     state.snapshotReady = false;
     state.sessionIdentity = null;
     state.accountId = null;
@@ -1278,6 +1337,7 @@
   window.addEventListener("pageshow", async (event) => {
     if (!event.persisted) return;
     state.stopped = false;
+    state.scopeEpoch += 1;
     state.snapshotReady = false;
     state.sessionIdentity = null;
     state.accountId = null;
@@ -1287,7 +1347,9 @@
       await refreshSnapshot();
       announce("Host state refreshed after page restoration.");
     } catch {
-      state.snapshotReady = false;
+      state.scopeEpoch += 1;
+      state.scopeEpoch += 1;
+    state.snapshotReady = false;
       state.sessionIdentity = null;
       state.accountId = null;
       state.environment = null;

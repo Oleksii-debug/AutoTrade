@@ -16,16 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mvp.autotrade_mvp.qualification_attestation import (
-    QualificationTrustError,
-    QualificationTrustPolicy,
-    SignedQualificationAttestation,
-    parse_qualification_trust_policy,
-    parse_signed_qualification_attestation,
-    verify_qualification_attestation,
-)
-from research.autotrade_research.artifacts.store import ArtifactStore
-
 DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -333,6 +323,11 @@ def validate_trusted_nvda_qualification(
     expected_policy_id: str,
     expected_policy_version: str,
 ) -> dict[str, object]:
+    from mvp.autotrade_mvp.qualification_attestation import (
+        QualificationTrustError,
+        verify_qualification_attestation,
+    )
+
     result = validate_evidence(evidence, requirements)
     if SHA256.fullmatch(evidence_sha256) is None:
         raise NvdaQualificationError("evidence_sha256 must be canonical")
@@ -451,6 +446,14 @@ def _load_trust_inputs(args):
         )
     if not all(value is not None for value in values):
         return None
+
+    from mvp.autotrade_mvp.qualification_attestation import (
+        QualificationTrustError,
+        parse_qualification_trust_policy,
+        parse_signed_qualification_attestation,
+    )
+    from research.autotrade_research.artifacts.store import ArtifactStore
+
     if not args.evidence_store.is_dir():
         raise NvdaQualificationError(
             "NVDA evidence store must be an existing directory"

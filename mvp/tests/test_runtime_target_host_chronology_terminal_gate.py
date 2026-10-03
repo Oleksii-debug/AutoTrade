@@ -136,6 +136,37 @@ class RuntimeTargetHostChronologyTerminalGateTests(unittest.TestCase):
         captured_dispatch.assert_called_once()
         forged_dispatch.assert_not_called()
 
+    def test_product_gate_ignores_rebound_receipt_error_and_legacy_globals(self):
+        class ForgedReceipt:
+            pass
+
+        class ForgedCompositionError(Exception):
+            pass
+
+        forged_legacy = Mock(
+            side_effect=AssertionError("rebound chronology-free verifier ran")
+        )
+        with (
+            patch.object(plan_bound, "SignedQualificationAttestation", ForgedReceipt),
+            patch.object(
+                plan_bound,
+                "RuntimeTargetHostCompositionError",
+                ForgedCompositionError,
+            ),
+            patch.object(
+                plan_bound,
+                "_verify_declared_plan_runtime_target_host_qualification_without_chronology",
+                forged_legacy,
+            ),
+            self.assertRaisesRegex(
+                RuntimeTargetHostCompositionError,
+                "accepted RELEASE_RUNTIME chronology authority",
+            ),
+        ):
+            self._call(verify_declared_plan_runtime_target_host_qualification)
+
+        forged_legacy.assert_not_called()
+
     def test_production_dispatch_ignores_rebound_public_terminal_symbol(self):
         forged_terminal = Mock(
             side_effect=AssertionError("rebound public terminal verifier ran")

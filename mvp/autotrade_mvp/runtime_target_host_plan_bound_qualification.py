@@ -19,6 +19,7 @@ from __future__ import annotations
 from copy import copy
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from autotrade_runtime.artifacts import ArtifactStore
 
@@ -40,7 +41,15 @@ from .runtime_target_host_composed_qualification import (
     verify_composed_runtime_target_host_qualification,
 )
 from .runtime_target_host_measurement import TargetHostMeasurementArtifact
-from .runtime_target_host_qualification import AcceptedRuntimeTargetHostQualification
+from .runtime_target_host_qualification import (
+    AcceptedRuntimeTargetHostQualification,
+    BINDING_EVIDENCE_KIND,
+    CAMPAIGN_EVIDENCE_KIND,
+    HOST_INVENTORY_EVIDENCE_KIND,
+    INTERFERENCE_EVIDENCE_KIND,
+    RESOURCE_EVIDENCE_KIND,
+    STALENESS_EVIDENCE_KIND,
+)
 
 if TYPE_CHECKING:
     from .production_host import ProductionHostRuntime
@@ -71,6 +80,25 @@ _ACCEPTED_MAPPING_FIELDS = (
     "payload_artifact_id_by_kind",
     "payload_sha256_by_kind",
     "collector_by_kind",
+)
+_PROVENANCE_ACCEPTED_KINDS = frozenset(
+    {
+        CAMPAIGN_EVIDENCE_KIND,
+        STALENESS_EVIDENCE_KIND,
+        INTERFERENCE_EVIDENCE_KIND,
+        RESOURCE_EVIDENCE_KIND,
+        HOST_INVENTORY_EVIDENCE_KIND,
+    }
+)
+_REQUIRED_ACCEPTED_EVIDENCE_KINDS = _PROVENANCE_ACCEPTED_KINDS | {
+    BINDING_EVIDENCE_KIND
+}
+_PROJECTION_ACCEPTED_KINDS = frozenset(
+    {
+        STALENESS_EVIDENCE_KIND,
+        INTERFERENCE_EVIDENCE_KIND,
+        RESOURCE_EVIDENCE_KIND,
+    }
 )
 
 
@@ -232,6 +260,255 @@ _PRODUCTION_ACCEPTANCE_SNAPSHOTTER = _build_composed_acceptance_snapshotter(
 )
 
 
+def _build_composed_acceptance_binding_validator(
+    *,
+    composed_type,
+    accepted_type,
+    composition_error_type,
+    mapping_proxy_type,
+    uuid_type,
+    binding_evidence_kind,
+    required_evidence_kinds,
+    provenance_kinds,
+    projection_kinds,
+):
+    """Revalidate detached PASS relationships against captured outer authority."""
+
+    def exact_text(value: object, *, name: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise composition_error_type(f"{name} must remain exact non-empty text")
+        return value
+
+    def canonical_sha256(value: object, *, name: str) -> str:
+        if type(value) is not str or (
+            not value.startswith("sha256:")
+            or len(value) != 71
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value[7:])
+        ):
+            raise composition_error_type(
+                f"{name} must remain exact canonical sha256 text"
+            )
+        return value
+
+    def canonical_git_sha(value: object, *, name: str) -> str:
+        if type(value) is not str or (
+            len(value) != 40
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise composition_error_type(
+                f"{name} must remain exact lowercase 40-character Git SHA"
+            )
+        return value
+
+    def canonical_uuid(value: object, *, name: str) -> str:
+        if type(value) is not str:
+            raise composition_error_type(f"{name} must remain exact canonical UUID")
+        try:
+            parsed = uuid_type(value)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise composition_error_type(
+                f"{name} must remain exact canonical UUID"
+            ) from error
+        if str(parsed) != value:
+            raise composition_error_type(f"{name} must remain exact canonical UUID")
+        return value
+
+    def require_map(
+        value: object,
+        *,
+        name: str,
+        expected_keys,
+        value_validator,
+    ) -> dict[str, str]:
+        if type(value) is not mapping_proxy_type:
+            raise composition_error_type(
+                f"{name} must remain exact immutable mapping state"
+            )
+        detached = dict(value)
+        if frozenset(detached) != expected_keys:
+            raise composition_error_type(
+                f"{name} key set changed after canonical verification"
+            )
+        for key, item in detached.items():
+            exact_text(key, name=f"{name} key")
+            value_validator(item, name=f"{name}[{key}]")
+        return detached
+
+    def validate(
+        value,
+        *,
+        spec,
+        durable_plan_digest: str,
+        expected_release_artifact_id: str,
+        expected_release_artifact_sha256: str,
+    ):
+        if type(value) is not composed_type:
+            raise composition_error_type(
+                "detached composed acceptance lost canonical result type"
+            )
+        accepted = value.qualification
+        if type(accepted) is not accepted_type:
+            raise composition_error_type(
+                "detached composed acceptance lost canonical signed result type"
+            )
+
+        canonical_uuid(
+            accepted.attestation_id,
+            name="detached target-host attestation_id",
+        )
+        canonical_sha256(
+            accepted.attestation_digest,
+            name="detached target-host attestation_digest",
+        )
+        canonical_git_sha(
+            accepted.source_sha,
+            name="detached target-host source_sha",
+        )
+        exact_text(accepted.scenario_id, name="detached target-host scenario_id")
+        for field in (
+            "spec_digest",
+            "configuration_hash",
+            "host_fingerprint",
+            "workload_profile_hash",
+            "journal_store_identity_digest",
+            "release_artifact_sha256",
+            "binding_sha256",
+        ):
+            canonical_sha256(
+                getattr(accepted, field),
+                name=f"detached target-host {field}",
+            )
+        canonical_uuid(
+            accepted.release_artifact_id,
+            name="detached target-host release_artifact_id",
+        )
+        canonical_uuid(
+            accepted.binding_artifact_id,
+            name="detached target-host binding_artifact_id",
+        )
+        canonical_sha256(
+            value.target_host_measurement_digest,
+            name="detached target-host measurement digest",
+        )
+        canonical_sha256(
+            value.durable_financial_binding_digest,
+            name="detached durable financial binding digest",
+        )
+
+        evidence_digests = require_map(
+            accepted.evidence_sha256_by_kind,
+            name="detached target-host evidence digest map",
+            expected_keys=required_evidence_kinds,
+            value_validator=canonical_sha256,
+        )
+        payload_ids = require_map(
+            accepted.payload_artifact_id_by_kind,
+            name="detached target-host payload artifact map",
+            expected_keys=provenance_kinds,
+            value_validator=canonical_uuid,
+        )
+        payload_digests = require_map(
+            accepted.payload_sha256_by_kind,
+            name="detached target-host payload digest map",
+            expected_keys=provenance_kinds,
+            value_validator=canonical_sha256,
+        )
+        require_map(
+            accepted.collector_by_kind,
+            name="detached target-host collector map",
+            expected_keys=provenance_kinds,
+            value_validator=exact_text,
+        )
+        projections = require_map(
+            value.projection_sha256_by_kind,
+            name="detached target-host projection map",
+            expected_keys=projection_kinds,
+            value_validator=canonical_sha256,
+        )
+
+        expected_release_id = canonical_uuid(
+            expected_release_artifact_id,
+            name="expected release artifact id",
+        )
+        expected_release_sha = canonical_sha256(
+            expected_release_artifact_sha256,
+            name="expected release artifact digest",
+        )
+        bindings = (
+            ("source SHA", accepted.source_sha, spec.release_sha),
+            ("scenario id", accepted.scenario_id, spec.scenario_id),
+            ("spec digest", accepted.spec_digest, spec.digest),
+            ("configuration hash", accepted.configuration_hash, spec.configuration_hash),
+            ("host fingerprint", accepted.host_fingerprint, spec.host_fingerprint),
+            ("workload identity", accepted.workload_profile_hash, durable_plan_digest),
+            ("release artifact id", accepted.release_artifact_id, expected_release_id),
+            (
+                "release artifact digest",
+                accepted.release_artifact_sha256,
+                expected_release_sha,
+            ),
+        )
+        for name, observed, expected in bindings:
+            if type(expected) is not str or observed != expected:
+                raise composition_error_type(
+                    f"detached target-host {name} differs from captured authority"
+                )
+
+        if accepted.binding_sha256 != evidence_digests[binding_evidence_kind]:
+            raise composition_error_type(
+                "detached target-host binding digest differs from accepted evidence map"
+            )
+        for kind in projection_kinds:
+            if projections[kind] != payload_digests[kind]:
+                raise composition_error_type(
+                    f"detached target-host projection differs from retained payload for {kind}"
+                )
+
+        payload_id_values = tuple(payload_ids[kind] for kind in provenance_kinds)
+        payload_digest_values = tuple(
+            payload_digests[kind] for kind in provenance_kinds
+        )
+        if len(set(payload_id_values)) != len(provenance_kinds):
+            raise composition_error_type(
+                "detached target-host payload artifact identities are not independent"
+            )
+        if len(set(payload_digest_values)) != len(provenance_kinds):
+            raise composition_error_type(
+                "detached target-host payload digests are not independent"
+            )
+        if (
+            accepted.release_artifact_id in payload_id_values
+            or accepted.binding_artifact_id in payload_id_values
+        ):
+            raise composition_error_type(
+                "detached target-host payload artifact aliases retained authority artifact"
+            )
+        if accepted.release_artifact_sha256 in payload_digest_values or (
+            set(payload_digest_values) & set(evidence_digests.values())
+        ):
+            raise composition_error_type(
+                "detached target-host payload bytes alias retained authority bytes"
+            )
+        return value
+
+    return validate
+
+
+_PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR = _build_composed_acceptance_binding_validator(
+    composed_type=AcceptedComposedRuntimeTargetHostQualification,
+    accepted_type=AcceptedRuntimeTargetHostQualification,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    mapping_proxy_type=type(MappingProxyType({})),
+    uuid_type=UUID,
+    binding_evidence_kind=BINDING_EVIDENCE_KIND,
+    required_evidence_kinds=_REQUIRED_ACCEPTED_EVIDENCE_KINDS,
+    provenance_kinds=_PROVENANCE_ACCEPTED_KINDS,
+    projection_kinds=_PROJECTION_ACCEPTED_KINDS,
+)
+
+
 def _build_chronology_free_verifier(
     *,
     journal_store_type=JournalStore,
@@ -247,6 +524,7 @@ def _build_chronology_free_verifier(
     snapshot_campaign_cut=_snapshot_campaign_cut,
     verify_composed=verify_composed_runtime_target_host_qualification,
     acceptance_snapshotter=lambda value: value,
+    acceptance_binding_validator=lambda value, **_kwargs: value,
 ):
     """Capture the durable-plan/composed authority graph behind one private closure."""
 
@@ -324,6 +602,13 @@ def _build_chronology_free_verifier(
                     expected_release_artifact_sha256=expected_release_artifact_sha256,
                 )
             )
+            accepted = acceptance_binding_validator(
+                accepted,
+                spec=spec,
+                durable_plan_digest=durable_plan_digest,
+                expected_release_artifact_id=expected_release_artifact_id,
+                expected_release_artifact_sha256=expected_release_artifact_sha256,
+            )
 
             final_plan = load_declared_plan(
                 journal_store,
@@ -352,14 +637,16 @@ def _build_chronology_free_verifier(
 
 
 # Canonical chronology-bound verification captures this closure during module
-# initialization. All authority-bearing dependencies are captured above, and the
-# verifier-owned result is detached before post-verification durable revalidation.
-# Focused tests build an injected verifier explicitly instead of rebinding the
+# initialization. All authority-bearing dependencies are captured above, the
+# verifier-owned result is detached, and its canonical relationships are rebound
+# to the outer plan/spec/release authority before post-verification revalidation.
+# Focused tests build injected verifiers explicitly instead of rebinding the
 # production closure.
 _verify_declared_plan_runtime_target_host_qualification_without_chronology = (
     _build_chronology_free_verifier(
         verify_composed=verify_sealed_composed_runtime_target_host_qualification,
         acceptance_snapshotter=_PRODUCTION_ACCEPTANCE_SNAPSHOTTER,
+        acceptance_binding_validator=_PRODUCTION_ACCEPTANCE_BINDING_VALIDATOR,
     )
 )
 

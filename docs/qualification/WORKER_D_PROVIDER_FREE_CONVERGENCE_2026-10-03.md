@@ -149,3 +149,28 @@ Remaining provider-free blockers preventing section closure:
 
 Real providers, credentials, PAPER/LIVE execution, real-money readiness and
 profitability/economic-edge claims are outside this candidate.
+
+## Canonical #1346 continuation: amendment rejection and protocol v2
+
+The narrow continuation adds `REJECT_REPLACE` to the existing order projection
+and durable adapter. Only the exact pending amendment command may be rejected;
+original requested quantity and all racing partial/full/overfill observations
+are conserved. Durable event-key retry is idempotent, changed-content retry
+conflicts, and a new amendment still needs a distinct command and admission.
+No replacement successor, changed quantity, transport or authority is issued.
+
+Protocol `provider-free-zero-loop-v2` additionally freezes the canonical
+quantitative RiskPolicy content digest, selecting its detached value once for
+both protocol and durable registration. Resume under changed quantitative
+limits rejects before journal mutation. Existing v1 journals remain frozen and
+are deliberately not relabelled as v2 evidence.
+
+The ZERO Python fence now also denies platform-supported `sendmsg` and
+`sendfile`, including suppressed unconnected UDP send attempts. It remains a
+Python boundary with the native/process limitation above.
+
+New adversarial coverage conserves racing fills through rejected replacement,
+rejects foreign command responses without journal mutation, checks duplicate
+and conflicting response replay after restart, and freezes changed policy
+content before resume mutation. Exact-head full qualification is recorded in
+the associated continuation PR; none of the five sections is CLOSED.

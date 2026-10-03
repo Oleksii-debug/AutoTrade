@@ -130,6 +130,7 @@ class OrderProjection:
         self.cancel_command_id: str | None = None
         self.replace_requested = False
         self.replace_command_id: str | None = None
+        self._resolved_replace_commands: set[str] = set()
         self.expired = False
         self.rejected = False
         self._fills: dict[str, FillRecord] = {}
@@ -394,6 +395,8 @@ class OrderProjection:
     def request_replace(self, *, command_id: str) -> None:
         """Record one pending replace command without inventing completion."""
         command = _text(command_id, name="command_id")
+        if command in self._resolved_replace_commands:
+            raise OrderProjectionConflict("resolved replace command_id cannot be reused")
         if self.replace_command_id is not None:
             if self.replace_command_id == command:
                 return
@@ -414,6 +417,25 @@ class OrderProjection:
             )
         self.replace_command_id = command
         self.replace_requested = True
+
+    def reject_replace(self, *, command_id: str, reason_code: str) -> None:
+        """Reject only the pending amendment; preserve original order/fills.
+
+        A fill racing the response stays authoritative, including a complete
+        fill or overfill. Rejection never changes requested quantity, invents a
+        successor, or grants permission to submit a replacement.
+        """
+        command = _text(command_id, name="command_id")
+        _text(reason_code, name="reason_code")
+        if not self.replace_requested or self.replace_command_id is None:
+            raise OrderProjectionConflict("order has no pending replace request")
+        if self.replace_command_id != command:
+            raise OrderProjectionConflict(
+                "replace rejection command_id does not match pending request"
+            )
+        self._resolved_replace_commands.add(command)
+        self.replace_requested = False
+        self.replace_command_id = None
 
     def confirm_expired(self) -> None:
         """Record provider-evidenced expiry of the remaining quantity."""

@@ -134,12 +134,12 @@ def _exact_state_snapshot(
     if type(state) is not dict:
         raise FxValuationError(f"{name} exact state must be a built-in dict")
     snapshot = dict.copy(state)
+    for key in snapshot:
+        if type(key) is not str or key not in fields:
+            raise FxValuationError(f"{name} contains unexpected fields")
     for field in fields:
         if field not in snapshot:
             raise FxValuationError(f"{name} is missing required field {field}")
-    extras = set(snapshot) - set(fields)
-    if extras:
-        raise FxValuationError(f"{name} contains unexpected fields")
     return snapshot
 
 

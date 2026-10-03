@@ -718,7 +718,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 evidence_refs=[ref],
             )
 
-            self.assertEqual(acknowledged.snapshot.state, "ACKNOWLEDGED")
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
             self.assertEqual(artifacts.authenticated_snapshot_reads, 1)
 
     def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):

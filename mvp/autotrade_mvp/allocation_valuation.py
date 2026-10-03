@@ -120,6 +120,14 @@ def _mapping(value, *, name: str) -> Mapping[str, object]:
         raise AllocationValuationError(
             f"{name} must be an exact built-in dictionary"
         )
+    # Iterating an exact dict is non-polymorphic, but hashing/equality on a
+    # caller-defined key subclass later (set(), membership, lookup) is not.
+    # Reject every non-exact key before any such operation can occur.
+    for key in dict.keys(value):
+        if type(key) is not str:
+            raise AllocationValuationError(
+                f"{name} keys must be exact built-in strings"
+            )
     return value
 
 
@@ -425,10 +433,15 @@ def normalize_allocation_valuation(
     liability_rate_denominator: int
 
     if quote_currency == base_currency:
-        if fx_quote_payload not in (None, {}):
-            raise AllocationValuationError(
-                f"{symbol_text} identity FX conversion must not carry a quote"
+        if fx_quote_payload is not None:
+            identity_quote_payload = _mapping(
+                fx_quote_payload,
+                name=f"{symbol_text} valuation fx_quote",
             )
+            if identity_quote_payload:
+                raise AllocationValuationError(
+                    f"{symbol_text} identity FX conversion must not carry a quote"
+                )
         if expected_fx_rate != Decimal("1") or fx_source_id != "IDENTITY":
             raise AllocationValuationError(
                 f"{symbol_text} identity FX conversion must use rate 1 and IDENTITY source"

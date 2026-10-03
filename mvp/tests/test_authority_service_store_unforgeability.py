@@ -1,6 +1,8 @@
+import gc
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.authority import AuthorityConflict, AuthorityService
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -97,6 +99,21 @@ class AuthorityServiceStoreUnforgeabilityTests(unittest.TestCase):
                 AuthorityService.__init__(service, replacement)
 
             self.assertIsNone(service.store)
+
+    def test_dead_service_releases_selected_store_binding(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "selected.sqlite3"
+
+            def create_refs():
+                store = JournalStore(database_path)
+                service = AuthorityService(store)
+                return weakref.ref(service), weakref.ref(store)
+
+            service_ref, store_ref = create_refs()
+            gc.collect()
+
+            self.assertIsNone(service_ref())
+            self.assertIsNone(store_ref())
 
     def test_selected_physical_store_path_cannot_be_retargeted(self):
         with TemporaryDirectory() as directory:

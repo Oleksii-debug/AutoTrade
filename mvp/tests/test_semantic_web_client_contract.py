@@ -646,6 +646,27 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
 
 
+    def test_exact_authority_payload_locks_visible_policy_before_network_wait(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        payload = submit.index("payload = commandForSubmission(action)")
+        lock = submit.index(
+            "syncHostActionOptions(state.sessionIdentity.role)",
+            payload,
+        )
+        restore = submit.index("renderPendingAuthorityPolicyForRetry()", lock)
+        network = submit.index("await submitCanonicalCommand(payload)", restore)
+        self.assertLess(payload, lock)
+        self.assertLess(lock, restore)
+        self.assertLess(restore, network)
+        self.assertIn(
+            "The operator must never see editable values",
+            submit,
+        )
+
     def test_invalid_policy_form_does_not_invalidate_fresh_host_snapshot(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
@@ -807,7 +828,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         submit = js.index("async function submitCommand(event)")
         payload = js.index("payload = commandForSubmission(action)", submit)
         role_fence = js.index(
-            "if (recovering && !roleCanSubmitAction(",
+            "if (recovering && !actionCanSubmitInCurrentScope(",
             submit,
         )
         self.assertLess(role_fence, payload)

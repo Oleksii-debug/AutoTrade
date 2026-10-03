@@ -1,8 +1,9 @@
 """Registered scientific evaluation gate foundation."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -36,6 +37,29 @@ _REVIEW_GATE = "EVALUATION-GATES"
 _REVIEW_PACKAGE_ID = "WP-36"
 _REVIEW_PROTOCOL_VERSION = "1.0.0"
 _REVIEW_REQUIREMENT_PREFIX = "WP36-INDEPENDENT-REVIEW-"
+
+
+def _qualification_time(value: str, *, name: str) -> datetime:
+    if type(value) is not str or value != value.strip():
+        raise ValueError(f"{name} must be exact timezone-aware ISO text")
+    try:
+        point = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be timezone-aware ISO text") from error
+    if point.tzinfo is None or point.utcoffset() is None:
+        raise ValueError(f"{name} must include timezone")
+    return point.astimezone(timezone.utc)
+
+
+def _detached_gate_input(value, expected_type):
+    if type(value) is not expected_type:
+        raise TypeError(f"scientific gate requires exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict or set(state) != {field.name for field in fields(expected_type)}:
+        raise TypeError("scientific gate input has unexpected state fields")
+    # Frozen dataclasses can still be changed through object.__setattr__.
+    # Reconstruct before consulting any scalar or nested authority-bearing fact.
+    return replace(value)
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -588,6 +612,7 @@ def _reviewed_graph_identity(
     manifests: Mapping[str, Mapping[str, object]],
     *,
     expected_source_sha: str,
+    qualification_at: str | None = None,
 ) -> tuple[str, str]:
     artifacts: list[dict[str, str]] = []
     for kind in sorted(_REVIEWED_EVIDENCE_KINDS):
@@ -613,6 +638,8 @@ def _reviewed_graph_identity(
         "schema_version": "1.0.0",
         "source_sha": expected_source_sha,
     }
+    if qualification_at is not None:
+        payload["qualification_at"] = qualification_at
     digest = "sha256:" + sha256(
         json.dumps(
             payload,
@@ -634,12 +661,20 @@ def _verify_independent_review(
     expected_source_sha: str,
     evidence_bundle_id: str,
     requirement_id: str,
+    qualification_at: str | None = None,
 ) -> tuple[bool | None, Mapping[str, str]]:
     """Verify externally issued review through canonical qualification trust."""
 
     try:
         decoded = payload.decode("utf-8")
         receipt = parse_signed_qualification_attestation(strict_json_loads(decoded))
+        if qualification_at is not None:
+            cutoff = _qualification_time(qualification_at, name="qualification_at")
+            attestation = receipt.attestation
+            if any(_qualification_time(value, name="review chronology") > cutoff for value in (
+                attestation.started_at, attestation.completed_at, attestation.signed_at,
+            )):
+                return False, MappingProxyType({})
     except (UnicodeError, ValueError, TypeError, QualificationTrustError):
         return False, MappingProxyType({})
 
@@ -688,6 +723,7 @@ def _verify_evidence_bundle(
     *,
     evidence_root: str | Path | None = None,
     expected_source_sha: str | None = None,
+    qualification_at: str | None = None,
 ) -> tuple[bool | None, Mapping[str, str]]:
     """Verify the immutable G0/G1/G2/G3/G4 evidence graph and review authority.
 
@@ -737,6 +773,12 @@ def _verify_evidence_bundle(
             return False, MappingProxyType({})
         if manifest.get("manifest_hash") is None:
             return False, MappingProxyType({})
+        if qualification_at is not None:
+            try:
+                if _qualification_time(manifest.get("created_at"), name="artifact created_at") > _qualification_time(qualification_at, name="qualification_at"):
+                    return False, MappingProxyType({})
+            except (TypeError, ValueError):
+                return False, MappingProxyType({})
         if manifest.get("sha256") != ref.sha256:
             return False, MappingProxyType({})
         metadata = manifest.get("metadata")
@@ -782,6 +824,7 @@ def _verify_evidence_bundle(
             evidence,
             manifests,
             expected_source_sha=expected_source_sha,
+            qualification_at=qualification_at,
         )
     except (KeyError, TypeError, ValueError):
         return False, MappingProxyType({})
@@ -793,6 +836,7 @@ def _verify_evidence_bundle(
         expected_source_sha=expected_source_sha,
         evidence_bundle_id=evidence.evidence_bundle_id,
         requirement_id=requirement_id,
+        qualification_at=qualification_at,
     )
     if review_status is not True:
         return review_status, review_provenance
@@ -804,6 +848,8 @@ def _verify_evidence_bundle(
         "independent_review_artifact_sha256": refs["independent_review"].sha256,
         **dict(review_provenance),
     }
+    if qualification_at is not None:
+        provenance["qualification_at"] = qualification_at
     return True, MappingProxyType(provenance)
 
 
@@ -814,7 +860,12 @@ def evaluate_gates(
     artifact_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     expected_source_sha: str | None = None,
+    qualification_at: str | None = None,
 ) -> GateDecision:
+    profile = _detached_gate_input(profile, GateProfile)
+    evidence = _detached_gate_input(evidence, EvaluationEvidence)
+    if qualification_at is not None:
+        qualification_at = _qualification_time(qualification_at, name="qualification_at").isoformat().replace("+00:00", "Z")
     checks: dict[str, str] = {}
     failures: list[str] = []
     unknowns: list[str] = []
@@ -841,6 +892,13 @@ def evaluate_gates(
         artifact_store,
         evidence_root=evidence_root,
         expected_source_sha=expected_source_sha,
+        qualification_at=qualification_at,
+    )
+    check(
+        "frozen_qualification_cut",
+        True if qualification_at is not None else None,
+        "",
+        "scientific qualification time has not been frozen",
     )
     check(
         "evidence_bundle",

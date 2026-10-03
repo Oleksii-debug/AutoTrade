@@ -108,7 +108,13 @@ independent-review verification. Locally produced favorable evidence cannot
 self-issue terminal PASS. The semantic-owner gate deliberately remains
 INCONCLUSIVE until trial/holdout/causal/after-cost facts are reconstructed from
 canonical owners. Future or self-authored favorable claims cannot use this
-candidate to issue earlier frozen scientific PASS.
+candidate to issue earlier frozen scientific PASS. A normalized `qualification_at`
+cut is now part of the signed graph/review requirement identity. Artifacts created
+after that cut and reviews started/completed/signed after it are rejected; changing
+the cut cannot reuse the earlier review. Missing frozen time remains INCONCLUSIVE.
+Gate inputs are detached and revalidated at use time, rejecting raw mutation,
+subclasses and hidden extra authority state. The 48 scientific tests include
+future publication, later signed review and frozen-cut replay adversaries.
 
 Full-repository integration exposed stale fixtures that lacked execution direction
 and provenance, and fault injection that shadowed sealed owner instances. Fixtures
@@ -117,7 +123,11 @@ production authority. Borrow mismatch/recall checkpoints remain incomplete and
 cannot admit cash-only trades through that conflicted financial cut. The existing
 atomic cash-replay facade now consumes the canonical exact store-generation scope
 and detached activity validator rather than bypassing its retained implementation.
-A targeted 221-test integration packet passed after these repairs.
+A targeted 221-test integration packet passed after these repairs. A further
+108-test cash replay, qualification and scientific packet passed. Verification
+uses an isolated temporary parent outside any source checkout so competing
+ArtifactStore processes and packaged-source tests retain their real boundaries.
+The full exact-head run and remote CI status remain recorded in the PR.
 
 Remaining provider-free blockers preventing section closure:
 

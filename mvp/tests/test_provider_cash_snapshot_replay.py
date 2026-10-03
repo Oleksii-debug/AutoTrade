@@ -54,10 +54,12 @@ class ProviderCashSnapshotReplayTests(unittest.TestCase):
         activity_id: str,
     ):
         source = JournalStore(Path(directory) / "source.sqlite3")
+        original_commit = source.commit_command
         with patch.object(
-            source,
+            JournalStore,
             "commit_command",
-            wraps=source.commit_command,
+            autospec=True,
+            side_effect=lambda _store, **kwargs: original_commit(**kwargs),
         ) as source_commit:
             transaction, inserted = book_cash(
                 source,
@@ -81,7 +83,7 @@ class ProviderCashSnapshotReplayTests(unittest.TestCase):
             original_snapshot = target.load_command_event_batch
             snapshot_calls = 0
 
-            def absent_then_competing_commit(**kwargs):
+            def absent_then_competing_commit(_store, **kwargs):
                 nonlocal snapshot_calls
                 snapshot_calls += 1
                 snapshot = original_snapshot(**kwargs)
@@ -93,8 +95,9 @@ class ProviderCashSnapshotReplayTests(unittest.TestCase):
                 return snapshot
 
             with patch.object(
-                target,
+                JournalStore,
                 "load_command_event_batch",
+                autospec=True,
                 side_effect=absent_then_competing_commit,
             ):
                 transaction, inserted = book_cash(

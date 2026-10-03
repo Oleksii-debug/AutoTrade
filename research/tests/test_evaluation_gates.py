@@ -911,3 +911,78 @@ class EvaluationGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrozenScientificQualificationTests(unittest.TestCase):
+    def test_missing_frozen_time_remains_inconclusive(self):
+        decision = evaluate_with_verified_bundle(profile(), evidence())
+        self.assertEqual(decision.checks["frozen_qualification_cut"], "INCONCLUSIVE")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+
+    def test_future_artifact_cannot_enter_earlier_qualification(self):
+        p, e = profile(), evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = _publish_bundle(store, p, e)
+            with patch.object(gate_module, "_verify_independent_review", side_effect=AssertionError("future evidence reached review")):
+                decision = evaluate_gates(p, replace(e, evidence_refs=refs), artifact_store=store,
+                    evidence_root=directory, expected_source_sha=SOURCE_SHA, qualification_at="2000-01-01T00:00:00Z")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(dict(decision.provenance), {})
+
+    def test_review_of_one_frozen_cut_cannot_authorize_another(self):
+        p, e = profile(), evidence()
+        approved = []
+        def review(*args, **kwargs):
+            identity = kwargs["requirement_id"]
+            if not approved:
+                approved.append(identity)
+            return _accepted_review(*args, **kwargs) if identity == approved[0] else (False, {})
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = _publish_bundle(store, p, e)
+            with patch.object(gate_module, "_verify_independent_review", side_effect=review):
+                common = dict(artifact_store=store, evidence_root=directory, expected_source_sha=SOURCE_SHA)
+                first = evaluate_gates(p, replace(e, evidence_refs=refs), qualification_at="2100-01-01T00:00:00Z", **common)
+                second = evaluate_gates(p, replace(e, evidence_refs=refs), qualification_at="2100-01-01T00:00:01Z", **common)
+        self.assertEqual(first.checks["evidence_bundle"], "PASS")
+        self.assertEqual(first.checks["semantic_owner_evidence"], "INCONCLUSIVE")
+        self.assertEqual(first.status, "INCONCLUSIVE")
+        self.assertEqual(first.provenance["qualification_at"], "2100-01-01T00:00:00Z")
+        self.assertEqual(second.status, "FAIL")
+
+    def test_later_signed_review_is_rejected_before_trust_dispatch(self):
+        from mvp.tests.test_qualification_attestation import root, attestation, sign
+        from mvp.autotrade_mvp.qualification_attestation import SignedQualificationAttestation
+        a = attestation(root())
+        receipt = SignedQualificationAttestation(attestation=a, signature_b64=sign(a))
+        payload = json.dumps({"attestation": a.canonical_payload(), "signature_b64": receipt.signature_b64}).encode()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            with patch.object(gate_module, "verify_canonical_qualification_attestation", side_effect=AssertionError("future review reached trust")):
+                accepted, provenance = gate_module._verify_independent_review(payload, artifact_store=store,
+                    evidence_root=directory, expected_source_sha=SOURCE_SHA, evidence_bundle_id=BUNDLE_ID,
+                    requirement_id="test-frozen-cut", qualification_at="2026-09-25T02:10:30Z")
+        self.assertFalse(accepted)
+        self.assertEqual(dict(provenance), {})
+
+    def test_mutated_and_hidden_frozen_input_are_rejected(self):
+        p, e = profile(), evidence()
+        object.__setattr__(e, "trials_attempted", True)
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            evaluate_gates(p, e)
+        e = evidence()
+        object.__setattr__(e, "future_owner_override", True)
+        with self.assertRaisesRegex(TypeError, "unexpected state"):
+            evaluate_gates(p, e)
+        class EvidenceSubclass(EvaluationEvidence):
+            pass
+        hostile = EvidenceSubclass(**evidence().__dict__)
+        with self.assertRaisesRegex(TypeError, "exact EvaluationEvidence"):
+            evaluate_gates(p, hostile)
+
+    def test_timezone_and_scalar_cut_types_are_exact(self):
+        for cutoff in (True, "2026-10-03T00:00:00", "nonsense", " 2026-10-03T00:00:00Z"):
+            with self.subTest(cutoff=cutoff), self.assertRaises(ValueError):
+                evaluate_gates(profile(), evidence(), qualification_at=cutoff)

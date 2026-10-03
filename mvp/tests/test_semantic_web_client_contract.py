@@ -1514,6 +1514,29 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("announce(message", copy)
 
 
+    def test_set_authority_preserves_generated_routes_and_canonical_operation_ids(self):
+        js = APP.read_text(encoding="utf-8")
+        html = INDEX.read_text(encoding="utf-8")
+        self.assertIn("const HOST_API = window.AutoTradeHostApi", js)
+        self.assertNotIn('const API = "/api/v1"', js)
+        self.assertIn('HOST_API.route("submitCommand")', js)
+        self.assertIn(
+            'HOST_API.route("getOperation", {operation_id: operationId})',
+            js,
+        )
+        self.assertIn(
+            'const operationId = canonicalId(result.operation_id, "operation_id")',
+            js,
+        )
+        self.assertIn(
+            'const commandId = canonicalId(result.command_id, "command_id")',
+            js,
+        )
+        self.assertEqual(js.count("async function submitCanonicalCommand(payload)"), 1)
+        routes = html.index('<script src="/host-api-routes.js" defer></script>')
+        app = html.index('<script src="/app.js" defer></script>')
+        self.assertLess(routes, app)
+
     def test_set_authority_payload_matches_current_host_validator_shape(self):
         js = APP.read_text(encoding="utf-8")
         host = (ROOT / "mvp" / "autotrade_mvp" / "operator_authority_commands.py").read_text(

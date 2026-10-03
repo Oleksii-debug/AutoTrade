@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from . import _supply_chain_qualification_impl as _impl
 

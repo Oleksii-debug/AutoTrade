@@ -203,6 +203,69 @@ class RuntimeTargetHostPlanBoundQualificationTests(unittest.TestCase):
                     )
             terminal.assert_not_called()
 
+    def test_selected_store_generation_is_held_through_plan_read(self) -> None:
+        with TemporaryDirectory() as directory:
+            selected = JournalStore(Path(directory) / "selected.sqlite3")
+            alternate = JournalStore(Path(directory) / "alternate.sqlite3")
+            spec = _spec()
+            plan = declare_runtime_event_plan(
+                selected,
+                plan_id="terminal-plan",
+                spec=spec,
+                expected_events=(_expected_event(),),
+            )
+
+            selected_event = JournalStore.get_event(selected, plan.event_id)
+            self.assertIsNotNone(selected_event)
+            assert selected_event is not None
+            JournalStore.append_event(
+                alternate,
+                {
+                    "event_id": selected_event["event_id"],
+                    "event_type": selected_event["event_type"],
+                    "aggregate_type": selected_event["aggregate_type"],
+                    "aggregate_id": selected_event["aggregate_id"],
+                    "aggregate_version": str(selected_event["aggregate_version"]),
+                    "payload": selected_event["payload"],
+                    "payload_hash": selected_event["payload_hash"],
+                    "committed_at": selected_event["committed_at"],
+                },
+            )
+
+            original_get_event = JournalStore.get_event
+
+            def rebound_get_event(store: JournalStore, event_id: str):
+                store.path = alternate.path
+                store._store_identity = alternate.store_identity
+                return original_get_event(store, event_id)
+
+            accepted = object()
+            with patch.object(
+                JournalStore,
+                "get_event",
+                new=rebound_get_event,
+            ), patch.object(
+                plan_bound_module,
+                "verify_runtime_target_host_qualification",
+                return_value=accepted,
+            ) as terminal:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "journal operation authority changed",
+                ):
+                    verify_declared_plan_runtime_target_host_qualification(
+                        object(),
+                        evidence_store=object(),
+                        evidence_root=directory,
+                        journal_store=selected,
+                        plan_id=plan.plan_id,
+                        spec=spec,
+                        expected_release_artifact_id=RELEASE_ID,
+                        expected_release_artifact_sha256=RELEASE_SHA,
+                    )
+
+            terminal.assert_not_called()
+
     def test_adapter_requires_exact_journal_store_and_budget_spec_types(self) -> None:
         with self.assertRaisesRegex(TypeError, "journal_store must be exact JournalStore"):
             verify_declared_plan_runtime_target_host_qualification(

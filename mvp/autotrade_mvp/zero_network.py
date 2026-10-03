@@ -21,11 +21,12 @@ def deny_python_network():
 
     with _LOCK, ExitStack() as stack:
         for target, names in (
-            (socket.socket, ("connect", "connect_ex", "send", "sendall", "sendto")),
+            (socket.socket, ("connect", "connect_ex", "send", "sendall", "sendto", "sendmsg", "sendfile")),
             (socket, ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr")),
         ):
             for name in names:
-                stack.enter_context(patch.object(target, name, blocked))
+                if hasattr(target, name):
+                    stack.enter_context(patch.object(target, name, blocked))
         yield attempts
         if attempts:
             raise RuntimeError("ZERO mode observed a blocked network attempt")

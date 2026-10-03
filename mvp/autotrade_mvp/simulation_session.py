@@ -452,7 +452,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 # Multi-episode orchestration shares the existing financial authorities and OMS.
 # It owns no ledger, risk engine, strategy, transport or allocation algorithm.
 _LOOP_AGGREGATE = "canonical_autonomous_simulation"
-_LOOP_PROTOCOL = "provider-free-zero-loop-v1"
+_LOOP_PROTOCOL = "provider-free-zero-loop-v2"
 
 
 def _loop_event(store, run_id, kind, key, payload, now):
@@ -501,6 +501,7 @@ def run_autonomous_simulation(
     DurableProviderEconomicBook. All evidence remains simulation-only.
     """
     from .zero_network import deny_python_network
+    from .risk_policy_authority import canonical_risk_policy, risk_policy_digest
 
     if type(run_id) is not str or not run_id or run_id != run_id.strip():
         raise ValueError("run_id must be canonical nonempty text")
@@ -517,10 +518,14 @@ def run_autonomous_simulation(
                         ("emergency_at_episode", emergency_at_episode)):
         if value is not None and (type(value) is not int or not 1 <= value <= len(values)):
             raise ValueError(f"{name} must be an exact episode index within the stream")
+    # Freeze quantitative content, not merely a reusable policy label. Resolve
+    # once so preflight and journal registration cannot select different limits.
+    selected_policy = canonical_risk_policy(_risk_policy())
     protocol = {
         "protocol": _LOOP_PROTOCOL, "run_id": run_id,
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",
+        "risk_policy_digest": risk_policy_digest(selected_policy),
         "strategy": "moving-average-2-3-long-only-target-1",
         "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(INITIAL_CASH),
         "fault_at_episode": fault_at_episode, "emergency_at_episode": emergency_at_episode,
@@ -531,10 +536,10 @@ def run_autonomous_simulation(
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
     with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
-        return _run_autonomous_locked(root, values, protocol, stop_after_episodes)
+        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
 
 
-def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
+def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_abs, exact_subtract, exact_sum, as_fraction, round_fraction_to_quantum
@@ -595,7 +600,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes):
         environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
     registry = DurableRiskPolicyRegistry(store)
-    policy = _risk_policy()
+    policy = selected_policy
     registry.register(scope=scope, policy_id="canonical-provider-free-risk-v1", version=1,
         policy=policy, committed_at=started_at)
     if not completed:

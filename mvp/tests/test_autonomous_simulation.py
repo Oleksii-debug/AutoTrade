@@ -175,6 +175,16 @@ class AutonomousSimulationTests(unittest.TestCase):
         with TemporaryDirectory() as d, patch("mvp.autotrade_mvp.model_gateway.route_model", side_effect=AssertionError("ZERO model invocation")):
             self.assertEqual(run(d)["status"], "COMPLETED")
 
+    @unittest.skipUnless(hasattr(socket.socket, "sendmsg"), "sendmsg is platform specific")
+    def test_zero_denies_unconnected_udp_sendmsg_before_io(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            with self.assertRaisesRegex(RuntimeError, "blocked network attempt"):
+                with deny_python_network():
+                    try:
+                        connection.sendmsg([b"x"], [], 0, ("127.0.0.1", 1))
+                    except RuntimeError:
+                        pass
+
     def test_frozen_protocol_rejects_price_and_time_changes(self):
         with TemporaryDirectory() as d:
             run(d, stop_after_episodes=2)
@@ -192,6 +202,20 @@ class AutonomousSimulationTests(unittest.TestCase):
             book.append(book_external_cash_flow(transaction_id="foreign", cause_event_id="foreign", currency="USD", amount="1"))
             with self.assertRaisesRegex(ValueError, "conflicts with canonical economic"):
                 run(d)
+
+    def test_resume_rejects_changed_quantitative_policy_before_journal_mutation(self):
+        from dataclasses import replace
+        import mvp.autotrade_mvp.simulation_session as session
+        with TemporaryDirectory() as d:
+            run(d, stop_after_episodes=2)
+            store = JournalStore(Path(d) / "journal.sqlite3")
+            cut = store.current_journal_sequence()
+            policy = replace(session._risk_policy(), max_single_notional=Decimal("999"))
+            with patch.object(session, "_risk_policy", return_value=policy):
+                with self.assertRaisesRegex(ValueError, "identity changed"):
+                    run(d)
+            self.assertEqual(store.current_journal_sequence(), cut)
+            self.assertEqual(run(d, stop_after_episodes=2)["status"], "PAUSED")
 
     def test_operator_status_economics_and_accessible_read_are_durable_and_do_not_send(self):
         from mvp.autotrade_mvp.cli import get_status, get_economic_report

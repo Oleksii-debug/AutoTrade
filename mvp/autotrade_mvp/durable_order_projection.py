@@ -43,6 +43,7 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
         "BUST_FILL",
         "CONFIRM_CANCEL",
         "REJECT_CANCEL",
+        "REJECT_REPLACE",
         "CONFIRM_EXPIRED",
     }
 )
@@ -423,6 +424,11 @@ class DurableOrderBookProjection:
             )
         elif operation == "REQUEST_REPLACE":
             order.request_replace(command_id=request.get("command_id"))
+        elif operation == "REJECT_REPLACE":
+            order.reject_replace(
+                command_id=request.get("command_id"),
+                reason_code=request.get("reason_code"),
+            )
         elif operation == "CONFIRM_EXPIRED":
             order.confirm_expired()
         else:
@@ -1093,6 +1099,28 @@ class DurableOrderBookProjection:
                 "command_id": _text(command_id, name="command_id"),
             },
             committed_at=committed_at,
+        )
+
+    def reject_replace(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        command_id: str,
+        reason_code: str,
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> DurableOrderMutationResult:
+        return self._commit(
+            event_key=event_key,
+            operation="REJECT_REPLACE",
+            request={
+                "client_order_id": _text(client_order_id, name="client_order_id"),
+                "command_id": _text(command_id, name="command_id"),
+                "reason_code": _text(reason_code, name="reason_code"),
+            },
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
         )
 
     def confirm_expired(self, **kwargs) -> DurableOrderMutationResult:

@@ -15,7 +15,7 @@ class ReplayError(ValueError):
 
 
 def _instant(value: str, *, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
+    if type(value) is not str or not value.endswith("Z"):
         raise ReplayError(f"{field} must be a UTC timestamp ending in Z")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
@@ -46,7 +46,7 @@ def _canonical_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("payload must be a mapping")
     normalized = json.loads(
-        json.dumps(dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        json.dumps(_plain_json(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     )
     if not isinstance(normalized, dict):
         raise TypeError("payload must serialize as an object")
@@ -64,12 +64,12 @@ class ReplayEvent:
     payload: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+        if type(self.sequence) is not int:
             raise TypeError("sequence must be an integer")
         if self.sequence < 0:
             raise ReplayError("sequence must be non-negative")
         _instant(self.available_at, field="available_at")
-        if not isinstance(self.source_version, str) or not self.source_version.strip():
+        if type(self.source_version) is not str or not self.source_version.strip():
             raise ReplayError("source_version must be non-empty")
         object.__setattr__(self, "payload", _canonical_payload(self.payload))
 
@@ -938,11 +938,18 @@ class ReplayCheckpoint:
             int(self.dataset_digest, 16)
         except ValueError as error:
             raise ReplayError("dataset_digest must be hexadecimal") from error
-        if isinstance(self.cursor, bool) or not isinstance(self.cursor, int):
+        if type(self.cursor) is not int:
             raise TypeError("cursor must be an integer")
         if self.cursor < 0:
             raise ReplayError("cursor must be non-negative")
         _instant(self.clock, field="clock")
+
+
+def _detached_replay_event(event: ReplayEvent) -> ReplayEvent:
+    if type(event) is not ReplayEvent:
+        raise TypeError("events must contain exact ReplayEvent values")
+    return ReplayEvent(sequence=event.sequence, available_at=event.available_at,
+                       source_version=event.source_version, payload=event.payload)
 
 
 def _event_record(event: ReplayEvent) -> dict[str, Any]:
@@ -974,10 +981,12 @@ class CausalReplay:
         start_at: str,
         checkpoint: ReplayCheckpoint | None = None,
     ) -> None:
-        records = tuple(events)
-        for event in records:
-            if not isinstance(event, ReplayEvent):
-                raise TypeError("events must contain ReplayEvent values")
+        records = tuple(_detached_replay_event(event) for event in events)
+        if checkpoint is not None:
+            if type(checkpoint) is not ReplayCheckpoint:
+                raise TypeError("checkpoint must be exact ReplayCheckpoint")
+            checkpoint = ReplayCheckpoint(dataset_digest=checkpoint.dataset_digest,
+                                          cursor=checkpoint.cursor, clock=checkpoint.clock)
 
         ordered = tuple(
             sorted(
@@ -1044,7 +1053,7 @@ class CausalReplay:
             event = self._events[self._cursor]
             if _instant(event.available_at, field="available_at") > target:
                 break
-            visible.append(event)
+            visible.append(_detached_replay_event(event))
             self._cursor += 1
 
         self._clock = target
@@ -1056,7 +1065,7 @@ class CausalReplay:
         event = self._events[self._cursor]
         if _instant(event.available_at, field="available_at") > self._clock:
             return None
-        return event
+        return _detached_replay_event(event)
 
     def checkpoint(self) -> ReplayCheckpoint:
         return ReplayCheckpoint(

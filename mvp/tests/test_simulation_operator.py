@@ -167,6 +167,25 @@ class SimulationOperatorTests(unittest.TestCase):
                 event["payload"]["client_order_id"] = "another-order"
         self._invalid_journal(alter)
 
+    def test_provider_fill_financial_binding_must_match_committed_transaction(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["transaction_digest"] = "sha256:" + "0" * 64
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
+    def test_provider_fill_financial_binding_cannot_replace_admission_identity(self):
+        def alter(event):
+            if event["event_type"] == "ProviderFillFinancialPlanBound":
+                request = event["payload"]["request"]
+                request["financial_admission"]["admission_id"] = "another-admission"
+                request["financial_admission_digest"] = payload_digest(
+                    request["financial_admission"]
+                )
+                event["payload"]["request_digest"] = payload_digest(request)
+        self._invalid_journal(alter)
+
     def test_complete_flag_cannot_replace_activity_coverage(self):
         def alter(event):
             if event["event_type"] == "AccountReconciled":

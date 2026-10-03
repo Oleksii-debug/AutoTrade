@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp import qualification_attestation as qualification_trust
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -363,6 +363,29 @@ def evaluate(
 
 
 class ProductCompletionGateTests(unittest.TestCase):
+    def test_terminal_qualification_surfaces_import_without_research_package(self):
+        script = r"""
+import importlib.abc
+import sys
+
+class BlockResearch(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "research" or fullname.startswith("research."):
+            raise ImportError("research package is unavailable in installed runtime")
+        return None
+
+sys.meta_path.insert(0, BlockResearch())
+import tools.check_nvda_qualification
+import tools.check_product_completion
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_current_repository_cannot_be_misreported_as_complete(self):
         result = subprocess.run(
             [

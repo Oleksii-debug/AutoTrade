@@ -12,7 +12,7 @@ successor readiness.  Terminal recovery must compose those independent facts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -230,6 +230,16 @@ def _validate_chain(
             )
         payload = event.get("payload")
         receipt = _receipt_from_payload(payload)
+        receipt_subject = asdict(receipt)
+        receipt_subject.pop("receipt_id")
+        expected_receipt_id = (
+            "credential-transition/sha256:"
+            + sha256(_canonical_bytes(receipt_subject)).hexdigest()
+        )
+        if receipt.receipt_id != expected_receipt_id:
+            raise CredentialTransitionAnchorError(
+                "credential transition anchor receipt content identity mismatch"
+            )
         if _aggregate_id(receipt) != aggregate_id:
             raise CredentialTransitionAnchorError(
                 "credential transition anchor logical scope changed"

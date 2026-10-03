@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.credential_transition_journal as journal_module
 from mvp.autotrade_mvp.credential_transition_journal import (
     CredentialTransitionAnchorError,
     record_current_trade_credential_transition_anchor,
@@ -150,6 +152,32 @@ class CredentialTransitionJournalTests(unittest.TestCase):
         self.assertNotEqual(testnet_witness.aggregate_id, demo_witness.aggregate_id)
         self.assertEqual(testnet_receipt.provider_environment, "TESTNET")
         self.assertEqual(demo_receipt.provider_environment, "DEMO")
+
+    def test_historical_receipt_content_identity_is_revalidated(self) -> None:
+        _second, receipt = self._rotate(self.first, "secret-v2")
+        forged = replace(
+            receipt,
+            completed_time_ns=receipt.completed_time_ns + 1,
+        )
+        self.assertEqual(forged.receipt_id, receipt.receipt_id)
+        aggregate_id = journal_module._aggregate_id(forged)
+        payload = journal_module._event_payload(forged)
+        event = {
+            "event_id": journal_module._event_id(aggregate_id, forged),
+            "event_type": "CredentialTransitionAnchored",
+            "aggregate_type": "credential_transition_anchor",
+            "aggregate_id": aggregate_id,
+            "aggregate_version": 1,
+            "payload": payload,
+            "payload_hash": journal_module.payload_digest(payload),
+            "journal_sequence": 1,
+        }
+
+        with self.assertRaisesRegex(
+            CredentialTransitionAnchorError,
+            "receipt content identity mismatch",
+        ):
+            journal_module._validate_chain(aggregate_id, [event])
 
     def test_vault_only_rollback_cannot_roll_back_newer_journal_anchor(self) -> None:
         second, receipt_one = self._rotate(self.first, "secret-v2")

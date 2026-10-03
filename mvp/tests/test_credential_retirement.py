@@ -194,10 +194,10 @@ class CredentialRetirementTests(unittest.TestCase):
                 poisoned_calls += 1
                 return {"version": self.FORMAT_VERSION, "records": {}}
 
-        poisoned = PoisonedVault(
-            self.path,
-            protector=DeterministicProtector(),
-        )
+        # Construction is intentionally bypassed: the regression is about the
+        # retirement function rejecting the subclass before any virtual method
+        # can become an authority seam.
+        poisoned = object.__new__(PoisonedVault)
 
         with self.assertRaisesRegex(
             TypeError,

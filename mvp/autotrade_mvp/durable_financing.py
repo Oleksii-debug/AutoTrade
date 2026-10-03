@@ -36,6 +36,7 @@ from .exact_decimal import (
     exact_subtract,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
 )
 from .instruments import (
     InstrumentRegistry,
@@ -200,15 +201,18 @@ def _strict_json_object(data: bytes) -> dict[str, Any]:
         value = json.loads(
             text,
             object_pairs_hook=pairs_hook,
-            parse_float=Decimal,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 FinancingError(
                     f"financing evidence contains non-finite JSON constant: {value}"
                 )
             ),
         )
-    except (json.JSONDecodeError, TypeError) as error:
-        raise FinancingError("financing evidence must be valid JSON") from error
+    except (json.JSONDecodeError, ExactDecimalError, TypeError, ValueError) as error:
+        raise FinancingError(
+            "financing evidence must be valid bounded JSON"
+        ) from error
     if not isinstance(value, dict):
         raise FinancingError("financing evidence must be a JSON object")
     return value

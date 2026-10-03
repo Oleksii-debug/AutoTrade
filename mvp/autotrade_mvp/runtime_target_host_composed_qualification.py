@@ -225,6 +225,14 @@ def verify_composed_runtime_target_host_qualification(
             expected_release_artifact_sha256=expected_release_artifact_sha256,
         )
     )
+    if (
+        durable_binding.target_host_measurement_digest != measurement.digest
+        or durable_binding.source_sha != measurement.source_sha
+        or durable_binding.spec_digest != measurement.spec_digest
+    ):
+        raise RuntimeTargetHostCompositionError(
+            "durable financial binding does not bind canonical target-host measurement"
+        )
 
     accepted = verify_runtime_target_host_qualification(
         receipt,

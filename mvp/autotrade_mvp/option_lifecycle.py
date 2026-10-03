@@ -690,9 +690,13 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
-        if not isinstance(source, ProviderResponseObservation):
+        if type(source) is not ProviderResponseObservation:
             raise OptionLifecycleError(
-                "provider lifecycle evidence must be a sealed ProviderResponseObservation"
+                "provider lifecycle evidence must be an exact sealed ProviderResponseObservation"
+            )
+        if self.economic_book.environment in {"PAPER", "LIVE"}:
+            raise OptionLifecycleError(
+                "PAPER/LIVE option lifecycle economics require durable PROVIDER_ORIGIN evidence"
             )
         if source.evidence_ref != reference:
             raise OptionLifecycleError(

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
-
-import pytest
+import unittest
 
 from autotrade_mvp.runtime_target_host_qualification import (
     CAMPAIGN_EVIDENCE_KIND,
@@ -20,7 +19,11 @@ RAW_SHA256 = "sha256:" + sha256(RAW).hexdigest()
 DIGEST = "sha256:" + ("b" * 64)
 
 
-def _provenance(*, payload_artifact_id: str = PAYLOAD_ID, payload_sha256: str = RAW_SHA256):
+def _provenance(
+    *,
+    payload_artifact_id: str = PAYLOAD_ID,
+    payload_sha256: str = RAW_SHA256,
+) -> RuntimeTargetHostProvenance:
     return RuntimeTargetHostProvenance(
         evidence_kind=CAMPAIGN_EVIDENCE_KIND,
         source_sha=SOURCE_SHA,
@@ -39,55 +42,64 @@ def _provenance(*, payload_artifact_id: str = PAYLOAD_ID, payload_sha256: str = 
     )
 
 
-def test_bound_payload_rejects_forbidden_artifact_identity_before_read() -> None:
-    reads: list[str] = []
+class RuntimeTargetHostPayloadIndependenceTests(unittest.TestCase):
+    def test_forbidden_artifact_identity_fails_before_read(self) -> None:
+        reads: list[str] = []
 
-    def reader(artifact_id: str):
-        reads.append(artifact_id)
-        return {}, RAW
+        def reader(artifact_id: str) -> tuple[dict[str, object], bytes]:
+            reads.append(artifact_id)
+            return {}, RAW
 
-    with pytest.raises(RuntimeTargetHostQualificationError, match="artifact is not independent"):
-        _read_bound_payload(
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "artifact is not independent",
+        ):
+            _read_bound_payload(
+                reader,
+                _provenance(),
+                forbidden_artifact_ids={PAYLOAD_ID},
+                forbidden_sha256=set(),
+            )
+
+        self.assertEqual(reads, [])
+
+    def test_forbidden_digest_fails_before_read(self) -> None:
+        reads: list[str] = []
+
+        def reader(artifact_id: str) -> tuple[dict[str, object], bytes]:
+            reads.append(artifact_id)
+            return {}, RAW
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostQualificationError,
+            "bytes are not independent",
+        ):
+            _read_bound_payload(
+                reader,
+                _provenance(),
+                forbidden_artifact_ids=set(),
+                forbidden_sha256={RAW_SHA256},
+            )
+
+        self.assertEqual(reads, [])
+
+    def test_independent_authenticated_bytes_are_accepted(self) -> None:
+        reads: list[str] = []
+
+        def reader(artifact_id: str) -> tuple[dict[str, object], bytes]:
+            reads.append(artifact_id)
+            return {"artifact_id": artifact_id}, RAW
+
+        result = _read_bound_payload(
             reader,
             _provenance(),
-            forbidden_artifact_ids={PAYLOAD_ID},
-            forbidden_sha256=set(),
+            forbidden_artifact_ids={RELEASE_ID},
+            forbidden_sha256={DIGEST},
         )
 
-    assert reads == []
+        self.assertEqual(result, RAW)
+        self.assertEqual(reads, [PAYLOAD_ID])
 
 
-def test_bound_payload_rejects_forbidden_digest_before_read() -> None:
-    reads: list[str] = []
-
-    def reader(artifact_id: str):
-        reads.append(artifact_id)
-        return {}, RAW
-
-    with pytest.raises(RuntimeTargetHostQualificationError, match="bytes are not independent"):
-        _read_bound_payload(
-            reader,
-            _provenance(),
-            forbidden_artifact_ids=set(),
-            forbidden_sha256={RAW_SHA256},
-        )
-
-    assert reads == []
-
-
-def test_bound_payload_accepts_independent_authenticated_bytes() -> None:
-    reads: list[str] = []
-
-    def reader(artifact_id: str):
-        reads.append(artifact_id)
-        return {"artifact_id": artifact_id}, RAW
-
-    result = _read_bound_payload(
-        reader,
-        _provenance(),
-        forbidden_artifact_ids={RELEASE_ID},
-        forbidden_sha256={DIGEST},
-    )
-
-    assert result == RAW
-    assert reads == [PAYLOAD_ID]
+if __name__ == "__main__":
+    unittest.main()

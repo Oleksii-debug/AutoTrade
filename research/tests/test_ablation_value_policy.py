@@ -122,6 +122,61 @@ class AblationValuePolicyTests(unittest.TestCase):
                 eur_registration.protocol_hash,
             )
 
+    def test_policy_subclasses_are_rejected_before_callbacks_or_hashing(self):
+        calls: list[str] = []
+
+        class HostilePolicy(dict):
+            def items(self):
+                calls.append("items")
+                return super().items()
+
+            def get(self, key, default=None):
+                calls.append("get")
+                return super().get(key, default)
+
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                return super().strip(*args, **kwargs)
+
+            def upper(self):
+                calls.append("upper")
+                return super().upper()
+
+            def startswith(self, *args, **kwargs):
+                calls.append("startswith")
+                return super().startswith(*args, **kwargs)
+
+            def __eq__(self, other):
+                calls.append("eq")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_values = [
+            HostilePolicy(dimensional_policy()),
+            {**dimensional_policy(), "value_unit": HostileText("USD")},
+            {**dimensional_policy(), "utility_projection_ref": HostileText(UTILITY_REF)},
+            {**dimensional_policy(), "cost_projection_ref": HostileText(COST_REF)},
+            {**dimensional_policy(), "fx_valuation_ref": HostileText(FX_REF)},
+        ]
+        for index, policy in enumerate(hostile_values):
+            with self.subTest(index=index), TemporaryDirectory() as directory:
+                registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+                payload = protocol_payload()
+                payload["ablation_value_policy"] = policy
+                calls.clear()
+                with self.assertRaises(ProtocolViolation):
+                    registry.register_protocol(
+                        payload,
+                        protocol_id=f"aaaaaaaa-aaaa-4aaa-8{index:03d}-aaaaaaaaaaaa",
+                    )
+                self.assertEqual(calls, [])
+
     def test_malformed_dimension_or_projection_identity_fails_closed(self):
         bad_policies = [
             {**dimensional_policy(), "value_unit": "usd"},

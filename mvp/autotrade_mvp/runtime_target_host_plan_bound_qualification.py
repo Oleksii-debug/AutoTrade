@@ -241,8 +241,14 @@ _bind_terminal_chronology_verifier, _terminal_chronology_dispatch = (
 )
 
 
-def _build_product_verifier(terminal_chronology_dispatch):
-    """Capture the product terminal dispatcher so later module rebinding is inert."""
+def _build_product_verifier(
+    terminal_chronology_dispatch,
+    *,
+    signed_receipt_type=SignedQualificationAttestation,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
+):
+    """Capture every authority-bearing product dependency before module rebinding."""
 
     def verify_declared_plan_runtime_target_host_qualification(
         receipt: SignedQualificationAttestation,
@@ -266,10 +272,14 @@ def _build_product_verifier(terminal_chronology_dispatch):
     ):
         """Verify product-facing WP-65 admission, requiring chronology for real receipts."""
 
-        chronology_values = (recovery, runtime, chronology_cut)
-        chronology_supplied = any(value is not None for value in chronology_values)
-        if chronology_supplied and any(value is None for value in chronology_values):
-            raise RuntimeTargetHostCompositionError(
+        chronology_supplied = (
+            recovery is not None or runtime is not None or chronology_cut is not None
+        )
+        chronology_complete = (
+            recovery is not None and runtime is not None and chronology_cut is not None
+        )
+        if chronology_supplied and not chronology_complete:
+            raise composition_error_type(
                 "terminal WP-65 qualification requires complete RELEASE_RUNTIME chronology authority"
             )
 
@@ -291,12 +301,12 @@ def _build_product_verifier(terminal_chronology_dispatch):
                 measurement=measurement,
             )
 
-        if type(receipt) is SignedQualificationAttestation:
-            raise RuntimeTargetHostCompositionError(
+        if type(receipt) is signed_receipt_type:
+            raise composition_error_type(
                 "terminal WP-65 qualification requires accepted RELEASE_RUNTIME chronology authority"
             )
 
-        return _verify_declared_plan_runtime_target_host_qualification_without_chronology(
+        return chronology_free_verifier(
             receipt,
             evidence_store=evidence_store,
             evidence_root=evidence_root,
@@ -314,7 +324,10 @@ def _build_product_verifier(terminal_chronology_dispatch):
 
 
 verify_declared_plan_runtime_target_host_qualification = _build_product_verifier(
-    _terminal_chronology_dispatch
+    _terminal_chronology_dispatch,
+    signed_receipt_type=SignedQualificationAttestation,
+    composition_error_type=RuntimeTargetHostCompositionError,
+    chronology_free_verifier=_verify_declared_plan_runtime_target_host_qualification_without_chronology,
 )
 
 # Complete canonical terminal-verifier binding during module import. Leaving this

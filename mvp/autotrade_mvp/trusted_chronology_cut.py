@@ -1649,6 +1649,60 @@ def _cut_from_event(event: object) -> TrustedChronologyCut:
     )
 
 
+def _require_cut_challenge_binding(
+    challenge: ChronologyChallenge,
+    cut: TrustedChronologyCut,
+) -> None:
+    if type(challenge) is not ChronologyChallenge:
+        raise TypeError("challenge must be exact ChronologyChallenge")
+    if type(cut) is not TrustedChronologyCut:
+        raise TypeError("cut must be exact TrustedChronologyCut")
+    bindings = (
+        (challenge.challenge_digest, cut.challenge_digest),
+        (challenge.scope, cut.scope),
+        (challenge.source_sha, cut.source_sha),
+        (challenge.store_identity_digest, cut.store_identity_digest),
+        (challenge.owner_scope, cut.owner_scope),
+        (challenge.owner_id, cut.owner_id),
+        (challenge.owner_epoch, cut.owner_epoch),
+        (challenge.clock_incident_generation, cut.clock_incident_generation),
+        (challenge.runtime_environment, cut.runtime_environment),
+        (challenge.release_artifact_id, cut.release_artifact_id),
+        (challenge.release_artifact_sha256, cut.release_artifact_sha256),
+        (challenge.runtime_host_id, cut.runtime_host_id),
+        (challenge.runtime_occurrence_id, cut.runtime_occurrence_id),
+        (challenge.runtime_occurrence_version, cut.runtime_occurrence_version),
+        (
+            challenge.runtime_occurrence_journal_sequence,
+            cut.runtime_occurrence_journal_sequence,
+        ),
+    )
+    if any(expected != observed for expected, observed in bindings):
+        raise TrustedChronologyError(
+            "trusted chronology accepted cut differs from prepared challenge"
+        )
+
+
+def _validated_aggregate(
+    events: tuple[dict[str, object], ...],
+) -> tuple[ChronologyChallenge, TrustedChronologyCut, dict[str, object]]:
+    if type(events) is not tuple or len(events) != 2:
+        raise TrustedChronologyError(
+            "trusted chronology aggregate must contain exactly prepare and accept"
+        )
+    challenge, _start_mono, _start_wall, prepared_sequence = (
+        _validate_prepared_event(events[0])
+    )
+    accepted_payload, accepted_sequence = _validate_accepted_event(events[1])
+    if accepted_sequence != prepared_sequence + 1:
+        raise TrustedChronologyError(
+            "trusted chronology accepted event is not the immediate prepared successor"
+        )
+    cut = _cut_from_event(events[1])
+    _require_cut_challenge_binding(challenge, cut)
+    return challenge, cut, accepted_payload
+
+
 def _parse_persisted_receipt(payload: dict[str, object]) -> SignedQualificationAttestation:
     parsed = _strict_json_value(
         payload.get("signed_receipt_json"),
@@ -1769,14 +1823,14 @@ def accept_trusted_chronology_cut(
             expected_journal_sequence=journal_cut,
         )
         events = _load_events(store, attempt.challenge.challenge_digest)
-        if len(events) != 2:
-            raise TrustedChronologyError("trusted chronology cut did not round-trip")
-        durable_challenge, *_ = _validate_prepared_event(events[0])
+        durable_challenge, cut, _accepted_payload_value = _validated_aggregate(
+            events
+        )
         if durable_challenge != attempt.challenge:
             raise TrustedChronologyError(
                 "trusted chronology prepared challenge changed before acceptance"
             )
-        return _cut_from_event(events[1])
+        return cut
 
 
 def _reverify_durable_acceptance(
@@ -1867,12 +1921,14 @@ def require_current_trusted_chronology_cut(
     events = _load_events(store, challenge_digest)
     if len(events) != 2:
         raise PermissionError("trusted chronology cut durable aggregate is unavailable")
-    challenge, *_prepared = _validate_prepared_event(events[0])
-    durable = _cut_from_event(events[1])
+    try:
+        challenge, durable, payload = _validated_aggregate(events)
+    except TrustedChronologyError as error:
+        raise PermissionError(
+            "trusted chronology durable aggregate binding is invalid"
+        ) from error
     if durable != cut:
         raise PermissionError("trusted chronology cut differs from durable authority")
-    if challenge.challenge_digest != durable.challenge_digest:
-        raise PermissionError("trusted chronology prepared/cut challenge binding changed")
     if journal_store_identity_digest(identity) != challenge.store_identity_digest:
         raise PermissionError("trusted chronology cut JournalStore identity changed")
     if recovery.durable_owner_store_identity != identity:
@@ -1906,7 +1962,6 @@ def require_current_trusted_chronology_cut(
     ):
         raise PermissionError("trusted chronology release identity mismatch")
 
-    payload, _sequence = _validate_accepted_event(events[1])
     _reverify_durable_acceptance(
         payload=payload,
         challenge=challenge,

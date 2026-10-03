@@ -34,6 +34,7 @@ from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, ve
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_QUALIFIER_SOURCE_PATH = "qualification/zero_model/qualify.py"
 
 
 class UnavailableModelInventory:
@@ -124,6 +125,22 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
         raise RuntimeError("cannot inspect qualification Git checkout") from error
 
 
+def _git_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
+    executable = _trusted_git_executable()
+    try:
+        return subprocess.run(
+            [executable, *args],
+            cwd=_SOURCE_ROOT,
+            check=True,
+            capture_output=True,
+            text=False,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot read exact qualification Git object") from error
+
+
 def _observed_source_sha() -> str:
     """Read source identity from the exact checkout that owns this qualifier."""
 
@@ -166,8 +183,14 @@ def _require_exact_checkout(expected_source_sha: str) -> str:
     return observed
 
 
-def _qualifier_sha256() -> str:
-    return "sha256:" + sha256(Path(__file__).read_bytes()).hexdigest()
+def _qualifier_sha256(source_sha: str) -> str:
+    source_sha = _require_source_sha(source_sha)
+    raw = _git_bytes(
+        "cat-file",
+        "blob",
+        f"{source_sha}:{_QUALIFIER_SOURCE_PATH}",
+    ).stdout
+    return "sha256:" + sha256(raw).hexdigest()
 
 
 def _outage_routes() -> dict[str, object]:
@@ -235,7 +258,7 @@ def _outage_routes() -> dict[str, object]:
 
 def qualify(source_sha: str) -> dict[str, object]:
     source_sha = _require_exact_checkout(source_sha)
-    qualifier_sha256 = _qualifier_sha256()
+    qualifier_sha256 = _qualifier_sha256(source_sha)
 
     request = ModelRequest(
         request_id="zero-model-qualification",

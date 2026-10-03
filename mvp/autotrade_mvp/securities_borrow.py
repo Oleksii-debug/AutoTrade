@@ -230,7 +230,7 @@ def verify_provider_borrow_evidence(
     expected_receipt = provider_borrow_evidence_receipt(evidence)
     expected_metadata = provider_borrow_evidence_metadata(evidence)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = artifact_store.read_authenticated_snapshot(artifact_id)
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -257,7 +257,6 @@ def verify_provider_borrow_evidence(
             raise ArtifactIntegrityError(
                 "borrow evidence lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,

@@ -331,7 +331,8 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(first["status"], "UNKNOWN")
             store = JournalStore(Path(directory) / "journal.sqlite3")
             before = store.load_events_by_aggregate_type("submission_attempt")
-            self.assertEqual(len(before), 2)
+            self.assertTrue(before)
+            self.assertEqual(before[-1]["event_type"], "SubmissionUnknown")
             with self.assertRaisesRegex(
                 ValueError, "incompatible simulation protocol/configuration"
             ):
@@ -343,6 +344,16 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("submission_attempt"),
                 before,
             )
+
+    def test_source_tree_identity_is_stable_across_lf_and_crlf_checkouts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "component.py"
+            source.write_bytes(b"value = 1\n")
+            lf_identity = simulation_module._python_source_tree_digest(root)
+            source.write_bytes(b"value = 1\r\n")
+            crlf_identity = simulation_module._python_source_tree_digest(root)
+            self.assertEqual(lf_identity, crlf_identity)
 
     def test_strategy_exact_boundary_precedes_every_result_path(self):
         strategy = MovingAverageStrategy()

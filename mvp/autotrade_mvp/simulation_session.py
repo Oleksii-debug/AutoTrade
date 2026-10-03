@@ -89,8 +89,11 @@ def _python_source_tree_digest(root: Path) -> str:
     for path in files:
         try:
             relative = path.relative_to(root).as_posix().encode("utf-8")
-            content = path.read_bytes()
-        except (OSError, ValueError) as error:
+            source = path.read_text(encoding="utf-8")
+            content = (
+                source.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+            )
+        except (OSError, UnicodeError, ValueError) as error:
             raise RuntimeError(
                 "canonical simulation source identity cannot be established"
             ) from error

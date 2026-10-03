@@ -33,13 +33,13 @@ class ZeroModelQualificationTests(unittest.TestCase):
         )
         self.assertIn("mvp.tests.test_zero_model_economics", workflow)
         for path in (
-            "mvp/autotrade_mvp/allocation.py",
-            "mvp/autotrade_mvp/simulated_provider.py",
-            "research/autotrade_research/economics/after_cost.py",
+            "mvp/autotrade_mvp/**",
+            "research/autotrade_research/economics/**",
+            "mvp/tests/test_zero_model_qualification.py",
             "mvp/tests/test_zero_model_economics.py",
         ):
             with self.subTest(path=path):
-                self.assertIn(path, workflow)
+                self.assertEqual(workflow.count(path), 2)
 
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()

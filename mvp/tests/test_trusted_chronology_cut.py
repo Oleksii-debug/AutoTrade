@@ -41,7 +41,8 @@ class TrustedChronologyCutTests(_cases.TrustedChronologyCutTests):
                 return_value=accepted,
             ),
         ):
-            return chronology.require_current_trusted_chronology_cut(
+            verifier = chronology._build_test_current_cut_verifier()
+            return verifier(
                 store=store,
                 recovery=recovery,
                 cut=cut,
@@ -213,7 +214,8 @@ class TrustedChronologyCutTests(_cases.TrustedChronologyCutTests):
                     "clock incident generation changed",
                 ),
             ):
-                chronology.require_current_trusted_chronology_cut(
+                verifier = chronology._build_test_current_cut_verifier()
+                verifier(
                     store=store,
                     recovery=recovery,
                     cut=cut,

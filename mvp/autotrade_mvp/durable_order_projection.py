@@ -310,15 +310,20 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest = self.evidence_artifact_store.load_manifest(
-                    ref["artifact_id"]
+                manifest, artifact_bytes = (
+                    self.evidence_artifact_store.read_authenticated_snapshot(
+                        ref["artifact_id"]
+                    )
                 )
-                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
             except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
                 ) from error
-            if manifest.get("sha256") != ref["sha256"]:
+            artifact_digest = "sha256:" + sha256(artifact_bytes).hexdigest()
+            if (
+                manifest.get("sha256") != ref["sha256"]
+                or artifact_digest != ref["sha256"]
+            ):
                 raise OrderProjectionConflict(
                     "provider evidence digest differs from immutable artifact"
                 )

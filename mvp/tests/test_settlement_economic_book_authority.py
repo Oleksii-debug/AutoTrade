@@ -1,12 +1,20 @@
+from datetime import date
 from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
     EconomicBook,
     ScopedEconomicBook,
+    book_equity_fill,
     book_external_cash_flow,
 )
-from mvp.autotrade_mvp.settlement import SettlementBook
+from mvp.autotrade_mvp.settlement import (
+    SettlementAccountScope,
+    SettlementBook,
+    SettlementConflict,
+    SettlementRuleBinding,
+    equity_cash_obligation_from_transaction,
+)
 
 
 def opening_cash(amount="1000"):
@@ -15,6 +23,49 @@ def opening_cash(amount="1000"):
         cause_event_id="deposit-1",
         currency="USD",
         amount=Decimal(amount),
+    )
+
+
+def equity_fill():
+    return book_equity_fill(
+        transaction_id="fill-1",
+        cause_event_id="event:fill-1",
+        instrument="ABC",
+        settlement_currency="USD",
+        side="BUY",
+        quantity="1",
+        price="100",
+        economic_effective_at="2026-09-24T14:00:00Z",
+        economic_order_key="fill-1",
+        observed_at="2026-09-24T14:00:00Z",
+    )
+
+
+def settlement_rule(*, account_id):
+    return SettlementRuleBinding(
+        rule_id="cash-equity-settlement",
+        rule_version="1",
+        scope=SettlementAccountScope(
+            provider_id="TEST_PROVIDER",
+            account_id=account_id,
+            environment="PAPER",
+        ),
+        instrument_version="ABC",
+        settlement_currency="USD",
+        effective_from=date(2026, 9, 1),
+        effective_to=None,
+        evidence_refs=("instrument:ABC", "rule:1"),
+    )
+
+
+def bound_obligation(transaction, *, account_id):
+    return equity_cash_obligation_from_transaction(
+        transaction,
+        obligation_id="settle-fill-1",
+        instrument="ABC",
+        settlement_currency="USD",
+        settlement_date=date(2026, 9, 25),
+        rule_binding=settlement_rule(account_id=account_id),
     )
 
 
@@ -142,6 +193,48 @@ class SettlementEconomicBookAuthorityTests(unittest.TestCase):
             )
 
         self.assertEqual(calls, [])
+
+    def test_scoped_book_cannot_splice_foreign_account_settlement_obligation(self):
+        fill = equity_fill()
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-a",
+            transactions=(opening_cash(), fill),
+        )
+        foreign = bound_obligation(fill, account_id="acct-b")
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "scoped economic book.*settlement scope|immutable scoped-book owner",
+        ):
+            SettlementBook.from_economic_book(
+                economic_book=scoped,
+                obligations=(foreign,),
+            )
+
+    def test_mutable_scoped_book_labels_cannot_forge_original_settlement_scope(self):
+        fill = equity_fill()
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-a",
+            transactions=(opening_cash(), fill),
+        )
+        foreign = bound_obligation(fill, account_id="acct-b")
+
+        # Visible scope labels are mutable today.  Matching them to the foreign
+        # binding must not manufacture proof that the book was originally
+        # selected for that account/runtime.
+        scoped.account_id = "acct-b"
+        scoped.environment = "PAPER"
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "immutable scoped-book owner",
+        ):
+            SettlementBook.from_economic_book(
+                economic_book=scoped,
+                obligations=(foreign,),
+            )
 
 
 if __name__ == "__main__":

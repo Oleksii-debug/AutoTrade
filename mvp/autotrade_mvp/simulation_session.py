@@ -366,8 +366,6 @@ def _zero_wire_blocked_projection(
         store,
         environment=ENVIRONMENT,
         account_id=ACCOUNT,
-        resolution_artifact_store=ArtifactStore(root / "artifacts"),
-        resolution_artifact_root=root / "artifacts",
     )
     reservation = reservations.get(_uuid("reservation", episode_id))
     if reservation.state != required_reservation_state:

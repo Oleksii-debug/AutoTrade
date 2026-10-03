@@ -1181,6 +1181,20 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             _windows_path_key("nested/report ")
         with self.assertRaisesRegex(BundleError, "alternate-data-stream"):
             _windows_path_key("nested/report.txt:payload")
+        with self.assertRaisesRegex(BundleError, "Windows separator"):
+            _windows_path_key(r"nested\\payload.dll")
+        for unsafe in (
+            "nested/bad?.dll",
+            "nested/bad*.dll",
+            'nested/bad".dll',
+            "nested/bad<.dll",
+            "nested/bad>.dll",
+            "nested/bad|.dll",
+            "nested/bad\x1f.dll",
+        ):
+            with self.subTest(path=unsafe):
+                with self.assertRaisesRegex(BundleError, "Windows-forbidden"):
+                    _windows_path_key(unsafe)
 
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):

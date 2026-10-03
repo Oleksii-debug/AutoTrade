@@ -476,34 +476,66 @@ class PreparedSettlementMutation:
 
 
 def _install_durable_settlement_store_binding():
-    """Keep original settlement-store composition outside mutable module state."""
+    """Keep original settlement composition outside mutable instance/module state."""
 
-    bindings: WeakKeyDictionary[object, tuple[JournalStore, object]] = (
-        WeakKeyDictionary()
-    )
+    bindings: WeakKeyDictionary[
+        object,
+        tuple[JournalStore, object, str, str, str, str],
+    ] = WeakKeyDictionary()
     lock = RLock()
 
     def bind(
         book: object,
         store: JournalStore,
         identity: object,
+        scope: SettlementAccountScope,
+        scope_id: str,
     ) -> None:
         with lock:
             if book in bindings:
                 raise RuntimeError(
-                    "durable settlement JournalStore is already bound"
+                    "durable settlement authority is already bound"
                 )
-            bindings[book] = (store, identity)
+            bindings[book] = (
+                store,
+                identity,
+                scope.provider_id,
+                scope.account_id,
+                scope.environment,
+                scope_id,
+            )
 
-    def bound(book: object) -> tuple[JournalStore, object]:
+    def bound(
+        book: object,
+    ) -> tuple[JournalStore, object, SettlementAccountScope, str]:
         with lock:
             binding = bindings.get(book)
         if binding is None:
             raise SettlementConflict(
-                "durable settlement JournalStore binding is unavailable"
+                "durable settlement authority binding is unavailable"
             )
-        store, identity = binding
-        return store, identity
+        (
+            store,
+            retained_identity,
+            provider_id,
+            account_id,
+            environment,
+            scope_id,
+        ) = binding
+        current_identity = require_exact_journal_store_authority(
+            store,
+            subject="durable settlement JournalStore",
+        )
+        if current_identity != retained_identity:
+            raise SettlementConflict(
+                "durable settlement JournalStore generation changed"
+            )
+        scope = SettlementAccountScope(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+        )
+        return store, current_identity, scope, scope_id
 
     return bind, bound
 
@@ -531,52 +563,66 @@ class DurableSettlementBook:
             store,
             subject="durable settlement JournalStore",
         )
-        self.store = store
-        _bind_durable_settlement_store(self, store, store_identity)
         if not isinstance(evidence_artifact_store, ArtifactStore):
             raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
-        self.evidence_artifact_store = evidence_artifact_store
-        self.scope = SettlementAccountScope(
+        scope = SettlementAccountScope(
             provider_id=provider_id,
             account_id=account_id,
             environment=environment,
         )
-        self.scope_id = _scope_id(self.scope)
+        scope_id = _scope_id(scope)
+
+        _bind_durable_settlement_store(
+            self,
+            store,
+            store_identity,
+            scope,
+            scope_id,
+        )
+        self.store = store
+        self.evidence_artifact_store = evidence_artifact_store
+        self.scope = scope
+        self.scope_id = scope_id
         self._book = SettlementBook()
         self._reload()
 
-    def _selected_store(self):
-        store, bound_identity = _bound_durable_settlement_store(self)
+    def _selected_authority(
+        self,
+    ) -> tuple[JournalStore, object, SettlementAccountScope, str]:
+        store, identity, scope, scope_id = _bound_durable_settlement_store(self)
         try:
             visible_store = object.__getattribute__(self, "store")
+            visible_scope = object.__getattribute__(self, "scope")
+            visible_scope_id = object.__getattribute__(self, "scope_id")
         except AttributeError as error:
             raise SettlementConflict(
-                "durable settlement JournalStore generation changed"
+                "durable settlement composition changed"
             ) from error
         if visible_store is not store:
             raise SettlementConflict(
                 "durable settlement JournalStore generation changed"
             )
-        identity = require_exact_journal_store_authority(
-            store,
-            subject="durable settlement JournalStore",
-        )
-        if identity != bound_identity:
+        if visible_scope != scope or visible_scope_id != scope_id:
             raise SettlementConflict(
-                "durable settlement JournalStore generation changed"
+                "durable settlement scope changed after construction"
             )
+        return store, identity, scope, scope_id
+
+    def _selected_store(self):
+        store, identity, _scope, _scope_id_value = self._selected_authority()
         return store, identity
 
     def _events(self) -> list[dict[str, object]]:
-        store, identity = self._selected_store()
+        store, identity, _scope, scope_id = self._selected_authority()
         with journal_store_authority_scope(store, identity):
             return JournalStore.load_events(
                 store,
                 _AGGREGATE_TYPE,
-                self.scope_id,
+                scope_id,
             )
 
     def _replay(self, events: list[dict[str, object]]) -> SettlementBook:
+        _store, _identity, scope, _scope_id_value = self._selected_authority()
         book = SettlementBook()
         expected_version = 1
         for event in events:
@@ -589,7 +635,7 @@ class DurableSettlementBook:
             if not isinstance(payload, Mapping):
                 raise SettlementConflict("settlement event payload must be an object")
             raw_scope = payload.get("scope")
-            if raw_scope != _scope_payload(self.scope):
+            if raw_scope != _scope_payload(scope):
                 raise SettlementConflict(
                     "settlement journal event scope does not match durable book"
                 )
@@ -636,7 +682,7 @@ class DurableSettlementBook:
                         "settlement evidence references unknown obligation"
                     )
                 verify_settlement_completion_evidence(
-                    scope=self.scope,
+                    scope=scope,
                     obligation=obligation,
                     evidence=evidence,
                     artifact_store=self.evidence_artifact_store,
@@ -660,10 +706,12 @@ class DurableSettlementBook:
 
     @property
     def obligations(self) -> tuple[SettlementObligation, ...]:
+        self._selected_authority()
         return self._book.obligations
 
     @property
     def settled_obligation_evidence(self) -> dict[str, SettlementEvidence]:
+        self._selected_authority()
         return self._book.settled_obligation_evidence
 
     def prepare_register_mutation(
@@ -672,6 +720,7 @@ class DurableSettlementBook:
         *,
         committed_at: str,
     ) -> PreparedSettlementMutation:
+        _store, _identity, scope, scope_id = self._selected_authority()
         batch = tuple(obligations)
         if not batch:
             raise ValueError("settlement obligation batch must not be empty")
@@ -681,7 +730,7 @@ class DurableSettlementBook:
         )
         for obligation in canonical:
             assert obligation.rule_binding is not None
-            if obligation.rule_binding.scope != self.scope:
+            if obligation.rule_binding.scope != scope:
                 raise SettlementConflict(
                     "settlement obligation scope does not match durable book"
                 )
@@ -698,7 +747,7 @@ class DurableSettlementBook:
         raw_items = [_obligation_payload(item) for item in canonical]
         request = {
             "schema_version": "1.0.0",
-            "scope": _scope_payload(self.scope),
+            "scope": _scope_payload(scope),
             "obligations": raw_items,
         }
         result = {
@@ -735,15 +784,15 @@ class DurableSettlementBook:
         digest = payload_digest(raw_items)
         payload = {
             "schema_version": "1.0.0",
-            "scope": _scope_payload(self.scope),
+            "scope": _scope_payload(scope),
             "obligations": raw_items,
             "batch_digest": digest,
         }
         envelope = {
-            "event_id": _event_id(self.scope, "obligation-batch", digest),
+            "event_id": _event_id(scope, "obligation-batch", digest),
             "event_type": _REGISTER_EVENT,
             "aggregate_type": _AGGREGATE_TYPE,
-            "aggregate_id": self.scope_id,
+            "aggregate_id": scope_id,
             "aggregate_version": str(next_version),
             "committed_at": when,
             "payload": payload,
@@ -773,13 +822,13 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            store, identity = self._selected_store()
+            store, identity, scope, _scope_id_value = self._selected_authority()
             with journal_store_authority_scope(store, identity):
                 _, inserted, _ = JournalStore.commit_command(
                     store,
                     command_id=_text(command_id, name="command_id"),
                     actor=_ACTOR,
-                    environment=self.scope.environment,
+                    environment=scope.environment,
                     idempotency_key=_text(
                         idempotency_key, name="idempotency_key"
                     ),
@@ -801,6 +850,7 @@ class DurableSettlementBook:
         as_of: date,
         committed_at: str,
     ) -> PreparedSettlementMutation:
+        _store, _identity, scope, scope_id = self._selected_authority()
         if not isinstance(evidence, SettlementEvidence):
             raise TypeError("evidence must be SettlementEvidence")
         if type(as_of) is not date:
@@ -818,7 +868,7 @@ class DurableSettlementBook:
         if obligation is None:
             raise SettlementConflict("unknown settlement obligation")
         verify_settlement_completion_evidence(
-            scope=self.scope,
+            scope=scope,
             obligation=obligation,
             evidence=evidence,
             artifact_store=self.evidence_artifact_store,
@@ -830,7 +880,7 @@ class DurableSettlementBook:
         )
         request = {
             "schema_version": "1.0.0",
-            "scope": _scope_payload(self.scope),
+            "scope": _scope_payload(scope),
             "evidence": _evidence_payload(evidence),
             "as_of": as_of.isoformat(),
         }
@@ -863,19 +913,19 @@ class DurableSettlementBook:
         evidence_value = _evidence_payload(evidence)
         payload = {
             "schema_version": "1.0.0",
-            "scope": _scope_payload(self.scope),
+            "scope": _scope_payload(scope),
             "evidence": evidence_value,
             "as_of": as_of.isoformat(),
         }
         envelope = {
             "event_id": _event_id(
-                self.scope,
+                scope,
                 "settlement-evidence",
                 evidence_value,
             ),
             "event_type": _SETTLE_EVENT,
             "aggregate_type": _AGGREGATE_TYPE,
-            "aggregate_id": self.scope_id,
+            "aggregate_id": scope_id,
             "aggregate_version": str(next_version),
             "committed_at": when,
             "payload": payload,
@@ -907,13 +957,13 @@ class DurableSettlementBook:
             return False
         assert plan.envelope is not None
         try:
-            store, identity = self._selected_store()
+            store, identity, scope, _scope_id_value = self._selected_authority()
             with journal_store_authority_scope(store, identity):
                 _, inserted, _ = JournalStore.commit_command(
                     store,
                     command_id=_text(command_id, name="command_id"),
                     actor=_ACTOR,
-                    environment=self.scope.environment,
+                    environment=scope.environment,
                     idempotency_key=_text(
                         idempotency_key, name="idempotency_key"
                     ),

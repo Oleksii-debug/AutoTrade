@@ -537,7 +537,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "changed after registry issuance",
+                "resolved policy content digest mismatch",
             ):
                 evaluate_valuation_freshness(
                     mark(),
@@ -777,7 +777,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "same JournalStore generation",
+                "resolved RiskPolicy JournalStore generation mismatch",
             ):
                 book.resolve_fresh_at(
                     journal_sequence_cut=policy_cut,

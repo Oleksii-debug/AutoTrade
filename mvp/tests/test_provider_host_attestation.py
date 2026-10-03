@@ -447,7 +447,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
         changed["receipt"]["provider_environment"] = "DEMO"
         with self.assertRaisesRegex(
             HostProviderAttestationError,
-            "independently resolved transition",
+            "lease identity is inconsistent",
         ):
             verify_host_sender_fence_attestation(changed, **expected)
 

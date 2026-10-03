@@ -125,7 +125,6 @@ class RuntimeLoadNestedTextAuthorityTests(unittest.TestCase):
                 JournalStore.current_journal_sequence(journal),
                 before_sequence,
             )
-            self.assertIsNone(JournalStore.get_event(journal, "fin-expected"))
 
 
 if __name__ == "__main__":

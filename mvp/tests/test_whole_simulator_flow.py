@@ -136,14 +136,29 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 account_id="sim-account",
                 environment="SIMULATION",
             )
-            economic.append(
-                book_external_cash_flow(
-                    transaction_id="seed",
-                    cause_event_id="deposit",
-                    currency="USD",
-                    amount="1000",
-                )
+            seed = economic.prepare_batch_mutation(
+                (
+                    book_external_cash_flow(
+                        transaction_id="seed",
+                        cause_event_id="deposit",
+                        currency="USD",
+                        amount="1000",
+                    ),
+                ),
+                committed_at="2026-09-24T17:59:59Z",
             )
+            assert seed.envelope is not None
+            journal.commit_command(
+                command_id=f"test-economic:{seed.batch_digest}",
+                actor="provider-economic-accounting",
+                environment="SIMULATION",
+                idempotency_key=f"test-economic:{economic.book_id}:{seed.batch_digest}",
+                request=seed.request,
+                result=seed.result,
+                state_version=seed.aggregate_version,
+                events=[(seed.envelope, "autotrade.economic.events")],
+            )
+            economic.refresh()
             bootstrap_outbox = journal.pending_outbox()
             self.assertEqual(
                 len(bootstrap_outbox),

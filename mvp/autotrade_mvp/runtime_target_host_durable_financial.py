@@ -37,6 +37,7 @@ from .runtime_target_host_measurement import (
 
 SCHEMA_VERSION = "1.0.0"
 CLOCK_CONTRACT_ID = "python-perf-counter-equals-monotonic>=3.13"
+TARGET_HOST_SHARED_CLOCK_ID = "python-time.monotonic-perf-shared>=3.13"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -286,6 +287,10 @@ def bind_durable_financial_latency_to_target_host_measurement(
     if type(measurement) is not TargetHostMeasurementArtifact:
         raise TypeError("measurement must be exact TargetHostMeasurementArtifact")
     measurement = TargetHostMeasurementArtifact.parse(measurement.canonical_bytes())
+    if measurement.monotonic_clock_id != TARGET_HOST_SHARED_CLOCK_ID:
+        raise RuntimeTargetHostDurableFinancialError(
+            "target-host measurement does not declare the shared monotonic/perf clock"
+        )
     if type(spec) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
     if measurement.source_sha != spec.release_sha:

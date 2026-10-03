@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.evaluation.scientific_trial_owner import (
     gate_profile_subject_digest,
@@ -30,26 +31,30 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
                 payload={"candidate": "candidate-1"},
             )
 
-            canonical_trial_snapshot = registry.trial_completeness_evidence
+            canonical_trial_snapshot = ScientificRegistry.trial_completeness_evidence
             writer_was_blocked = False
 
-            def guarded_trial_snapshot(protocol_id: str):
+            def guarded_trial_snapshot(authority, protocol_id: str):
                 nonlocal writer_was_blocked
-                competing = sqlite3.connect(registry.path, timeout=0)
+                competing = sqlite3.connect(authority.path, timeout=0)
                 try:
                     with self.assertRaises(sqlite3.OperationalError):
                         competing.execute("BEGIN IMMEDIATE")
                     writer_was_blocked = True
                 finally:
                     competing.close()
-                return canonical_trial_snapshot(protocol_id)
+                return canonical_trial_snapshot(authority, protocol_id)
 
-            registry.trial_completeness_evidence = guarded_trial_snapshot
-            owner = resolve_scientific_trial_owner(
-                registry=registry,
-                profile=gate_profile,
-                evidence=evidence(trials_attempted=1, trial_log_complete=True),
-            )
+            with patch.object(
+                ScientificRegistry,
+                "trial_completeness_evidence",
+                new=guarded_trial_snapshot,
+            ):
+                owner = resolve_scientific_trial_owner(
+                    registry=registry,
+                    profile=gate_profile,
+                    evidence=evidence(trials_attempted=1, trial_log_complete=True),
+                )
 
             self.assertTrue(writer_was_blocked)
             self.assertEqual(owner.binding.protocol_id, registered.protocol_id)

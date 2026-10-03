@@ -16,9 +16,6 @@ from mvp.autotrade_mvp import runtime_target_host_plan_bound_qualification as pl
 from mvp.autotrade_mvp.runtime_target_host_composed_qualification import (
     RuntimeTargetHostCompositionError,
 )
-from mvp.autotrade_mvp.runtime_target_host_plan_bound_qualification import (
-    verify_declared_plan_runtime_target_host_qualification,
-)
 
 
 SOURCE_SHA = "a" * 40
@@ -26,6 +23,23 @@ CONFIG = "sha256:" + ("b" * 64)
 HOST = "sha256:" + ("c" * 64)
 RELEASE_ID = "60000000-0000-4000-8000-000000000001"
 RELEASE_SHA = "sha256:" + ("d" * 64)
+
+
+def verify_declared_plan_runtime_target_host_qualification(*args, **kwargs):
+    """Focused tests inject current seams without reopening production authority."""
+
+    chronology_free = plan_bound_module._build_chronology_free_verifier(
+        verify_composed=(
+            plan_bound_module.verify_composed_runtime_target_host_qualification
+        ),
+    )
+    verifier = plan_bound_module._build_product_verifier(
+        plan_bound_module._terminal_chronology_dispatch,
+        signed_receipt_type=plan_bound_module.SignedQualificationAttestation,
+        composition_error_type=plan_bound_module.RuntimeTargetHostCompositionError,
+        chronology_free_verifier=chronology_free,
+    )
+    return verifier(*args, **kwargs)
 
 
 def _spec(**overrides: object) -> RuntimeBudgetSpec:

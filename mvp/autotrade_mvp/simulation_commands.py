@@ -81,6 +81,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
     if payload_digest(protocol) != payload['protocol_digest']:
         raise ValueError('frozen simulation identity changed')
     root = Path(journal.path).parent
+    verified_journal_cut = None
     if action == 'BACKUP_SIMULATION':
         destination = root.parent / 'backups' / payload['command_id']
         # A crash after atomic backup publication must re-verify those same bytes.
@@ -125,10 +126,13 @@ def execute_simulation_action(journal, action, payload, accepted_at):
             else payload['stop_after_episodes']
         )
         completed_episodes = status.get('completed_episodes')
+        verified_journal_cut = status.get('journal_sequence')
         if (
             type(completed_episodes) is not int
             or completed_episodes < target_episodes
             or completed_episodes > len(protocol['prices'])
+            or type(verified_journal_cut) is not int
+            or verified_journal_cut < 1
             or status.get('session_status') == 'UNKNOWN'
             or status.get('replay_verified') is not True
             or report.get('reconciled') is not True
@@ -151,5 +155,8 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         'occurred_at': accepted_at, 'observed_at': accepted_at, 'committed_at': accepted_at,
         'correlation_id': payload['command_id'], 'causation_id': None, 'payload': data,
         'payload_hash': payload_digest(data), 'evidence_refs': []}
-    journal.append_event(event)
+    journal.append_event(
+        event,
+        expected_journal_sequence=verified_journal_cut,
+    )
     return resolve_simulation_action(journal, action, payload)

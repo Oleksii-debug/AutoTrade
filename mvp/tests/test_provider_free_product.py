@@ -159,6 +159,36 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
 
+    def test_simulation_receipt_is_cas_bound_to_verified_journal_cut(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            observed_cuts = []
+            original_append = JournalStore.append_event
+
+            def capture_receipt_cut(store, envelope, **kwargs):
+                if envelope.get('aggregate_type') == 'simulation_operator_receipt':
+                    observed_cuts.append(kwargs.get('expected_journal_sequence'))
+                return original_append(store, envelope, **kwargs)
+
+            try:
+                with patch.object(JournalStore, 'append_event', new=capture_receipt_cut):
+                    _command_id, operation = client.command('START_SIMULATION')
+                self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
+                self.assertEqual(len(observed_cuts), 1)
+                self.assertIs(type(observed_cuts[0]), int)
+                self.assertGreater(observed_cuts[0], 0)
+
+                events = client.runtime.journal.load_events_by_aggregate_type(
+                    'simulation_operator_receipt'
+                )
+                self.assertEqual(len(events), 1)
+                self.assertEqual(
+                    events[0]['journal_sequence'],
+                    observed_cuts[0] + 1,
+                )
+            finally:
+                client.close()
+
     def test_worker_stdout_cannot_forge_financial_completion(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

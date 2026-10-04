@@ -485,9 +485,11 @@ class KrakenSpotExecutionReport:
     side: str | None = None
     last_qty: Decimal | None = None
     last_price: Decimal | None = None
+    cost: Decimal | None = None
     fees: tuple[KrakenSpotExecutionFee, ...] = ()
     event_time: str | None = None
     trade_id: int | None = None
+    margin_borrow: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -529,7 +531,7 @@ class KrakenSpotExecutionReport:
                 )
             object.__setattr__(self, "side", side)
 
-        for field_name in ("last_qty", "last_price"):
+        for field_name in ("last_qty", "last_price", "cost"):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(
@@ -565,6 +567,10 @@ class KrakenSpotExecutionReport:
                 raise KrakenSpotStreamError(
                     "trade_id must be a non-negative integer"
                 )
+        if self.margin_borrow is not None and type(self.margin_borrow) is not bool:
+            raise KrakenSpotStreamError(
+                "margin_borrow must be an exact boolean when present"
+            )
 
         if exec_type == "trade":
             missing: list[str] = []
@@ -574,7 +580,9 @@ class KrakenSpotExecutionReport:
                 "side",
                 "last_qty",
                 "last_price",
+                "cost",
                 "event_time",
+                "trade_id",
             ):
                 if getattr(self, field_name) is None:
                     missing.append(field_name)
@@ -589,8 +597,10 @@ class KrakenSpotExecutionReport:
             self.exec_id is not None
             or self.last_qty is not None
             or self.last_price is not None
+            or self.cost is not None
             or self.fees
             or self.trade_id is not None
+            or self.margin_borrow is not None
         ):
             raise KrakenSpotStreamError(
                 "Kraken non-trade report contains trade-only economics"
@@ -766,9 +776,11 @@ def parse_execution_frame(
                 side=raw_report.get("side"),
                 last_qty=raw_report.get("last_qty"),
                 last_price=raw_report.get("last_price"),
+                cost=raw_report.get("cost"),
                 fees=fees,
                 event_time=raw_report.get("timestamp"),
                 trade_id=raw_report.get("trade_id"),
+                margin_borrow=raw_report.get("margin_borrow"),
             )
         )
 

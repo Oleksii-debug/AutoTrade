@@ -36,6 +36,9 @@ def frame_bytes(
             normalized.setdefault("side", "buy")
             normalized.setdefault("last_qty", 1)
             normalized.setdefault("last_price", 25000)
+            normalized.setdefault("cost", 25000)
+            normalized.setdefault("trade_id", 1)
+            normalized.setdefault("margin_borrow", False)
             normalized.setdefault(
                 "fees",
                 [{"asset": "USD", "qty": 1}],
@@ -154,6 +157,9 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(report.side, "buy")
         self.assertEqual(report.last_qty, Decimal("1"))
         self.assertEqual(report.last_price, Decimal("25000"))
+        self.assertEqual(report.cost, Decimal("25000"))
+        self.assertEqual(report.trade_id, 1)
+        self.assertFalse(report.margin_borrow)
         self.assertEqual(len(report.fees), 1)
         self.assertEqual(report.fees[0].asset, "USD")
         self.assertEqual(report.fees[0].quantity, Decimal("1"))
@@ -166,9 +172,10 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             b'"exec_id":"E-EXACT","exec_type":"trade",'
             b'"order_status":"partially_filled","symbol":"BTC/USD",'
             b'"side":"sell","last_qty":0.00000001,'
-            b'"last_price":12345.67890123,'
+            b'"last_price":12345.67890123,"cost":0.0001234567890123,'
             b'"fees":[{"asset":"USD","qty":0.00000123}],'
-            b'"timestamp":"2026-10-04T05:00:00.123456Z","trade_id":42}],'
+            b'"timestamp":"2026-10-04T05:00:00.123456Z","trade_id":42,'
+            b'"margin_borrow":false}],'
             b'"sequence":2}'
         )
         report = parse_execution_frame(
@@ -182,6 +189,9 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(report.side, "sell")
         self.assertEqual(report.last_qty, Decimal("0.00000001"))
         self.assertEqual(report.last_price, Decimal("12345.67890123"))
+        self.assertEqual(report.cost, Decimal("0.0001234567890123"))
+        self.assertEqual(report.trade_id, 42)
+        self.assertFalse(report.margin_borrow)
         self.assertEqual(report.fees[0].asset, "USD")
         self.assertEqual(report.fees[0].quantity, Decimal("0.00000123"))
         self.assertEqual(report.event_time, "2026-10-04T05:00:00.123456Z")
@@ -193,7 +203,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             b'{"order_id":"O-INCOMPLETE","exec_id":"E-INCOMPLETE",'
             b'"exec_type":"trade","order_status":"partially_filled",'
             b'"symbol":"BTC/USD","side":"buy","last_qty":1,'
-            b'"last_price":25000,'
+            b'"last_price":25000,"cost":25000,"trade_id":7,"margin_borrow":false,'
             b'"timestamp":"2026-10-04T05:00:00Z"}],'
             b'"sequence":3}'
         )
@@ -212,8 +222,8 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             b'{"channel":"executions","type":"update","data":['
             b'{"order_id":"O-STRING","exec_id":"E-STRING","exec_type":"trade",'
             b'"order_status":"partially_filled","symbol":"BTC/USD","side":"buy",'
-            b'"last_qty":"1.0","last_price":25000,'
-            b'"fees":[{"asset":"USD","qty":1}],'
+            b'"last_qty":"1.0","last_price":25000,"cost":25000,"trade_id":8,'
+            b'"margin_borrow":false,"fees":[{"asset":"USD","qty":1}],'
             b'"timestamp":"2026-10-04T05:00:00Z"}],"sequence":4}'
         )
         with self.assertRaisesRegex(
@@ -225,6 +235,44 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 account_id="spot-live-1",
                 connection_generation=1,
             )
+
+    def test_trade_frame_requires_provider_cost_trade_id_and_exact_margin_flag(self):
+        cases = (
+            (
+                b'{"channel":"executions","type":"update","data":[{"order_id":"O-COST",'
+                b'"exec_id":"E-COST","exec_type":"trade","order_status":"partially_filled",'
+                b'"symbol":"BTC/USD","side":"buy","last_qty":1,"last_price":25000,'
+                b'"fees":[{"asset":"USD","qty":1}],"timestamp":"2026-10-04T05:00:00Z",'
+                b'"trade_id":9,"margin_borrow":false}],"sequence":5}',
+                "cost",
+            ),
+            (
+                b'{"channel":"executions","type":"update","data":[{"order_id":"O-ID",'
+                b'"exec_id":"E-ID","exec_type":"trade","order_status":"partially_filled",'
+                b'"symbol":"BTC/USD","side":"buy","last_qty":1,"last_price":25000,"cost":25000,'
+                b'"fees":[{"asset":"USD","qty":1}],"timestamp":"2026-10-04T05:00:00Z",'
+                b'"margin_borrow":false}],"sequence":6}',
+                "trade_id",
+            ),
+            (
+                b'{"channel":"executions","type":"update","data":[{"order_id":"O-MARGIN",'
+                b'"exec_id":"E-MARGIN","exec_type":"trade","order_status":"partially_filled",'
+                b'"symbol":"BTC/USD","side":"buy","last_qty":1,"last_price":25000,"cost":25000,'
+                b'"fees":[{"asset":"USD","qty":1}],"timestamp":"2026-10-04T05:00:00Z",'
+                b'"trade_id":10,"margin_borrow":1}],"sequence":7}',
+                "margin_borrow must be an exact boolean",
+            ),
+        )
+        for raw, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                message,
+            ):
+                parse_execution_frame(
+                    raw,
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                )
 
     def test_non_trade_report_cannot_carry_trade_only_economics(self):
         raw = frame_bytes(

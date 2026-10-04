@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import hmac
 import weakref
@@ -70,11 +71,14 @@ def _signature_verifier(secret):
     return verify
 
 
+_TRUSTED_VERIFY_SIGNATURE = _signature_verifier(_TRUSTED_SECRET)
+
+
 def _trusted_verifier():
     return RuntimeStateVerifier.select_product_trust(
         authority_id="runtime:production",
         verifier_id="host-trust:runtime-production-v1",
-        verify_signature=_signature_verifier(_TRUSTED_SECRET),
+        verify_signature=_TRUSTED_VERIFY_SIGNATURE,
     )
 
 
@@ -360,6 +364,29 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 protocol_ref="protocol:walk-forward-v1",
             )
         self.assertEqual(replay.cursor, 1)
+
+    def test_product_trust_binding_cannot_be_replaced_after_verifier_gc(self):
+        verifier = _trusted_verifier()
+        verifier_ref = weakref.ref(verifier)
+        del verifier
+        gc.collect()
+        self.assertIsNone(verifier_ref())
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "product-selected verifier binding is immutable",
+        ):
+            RuntimeStateVerifier.select_product_trust(
+                authority_id="runtime:production",
+                verifier_id="host-trust:runtime-production-v1",
+                verify_signature=_signature_verifier(_ATTACKER_SECRET),
+            )
+
+        rebound = _trusted_verifier()
+        self.assertEqual(
+            rebound.verifier_id,
+            "host-trust:runtime-production-v1",
+        )
 
     def test_competing_product_trust_selection_is_rejected_while_anchor_live(self):
         product_verifier = _trusted_verifier()

@@ -7,6 +7,7 @@ from autotrade_research.forward_paper import (
     ForwardPaperEvidence,
     ForwardPaperProtocol,
     OperationalObservation,
+    PaperDecisionEconomics,
     SealedPrediction,
     assess_forward_paper,
     forward_paper_protocol_hash,
@@ -33,6 +34,14 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             maximum_decision_latency_ms=1000,
             required_provider_capabilities=("KRAKEN:SPOT:LIMIT", "IBKR:EQUITY:LIMIT"),
             required_operational_cases=("RECONNECT", "MANUAL_ACTIVITY"),
+            required_regimes=("TREND", "RANGE"),
+            minimum_independent_decisions_per_regime=1,
+            required_simulation_limitations=(
+                "OFFICIAL_TEST_FILL_MODEL",
+                "QUEUE_PRIORITY_UNOBSERVED",
+            ),
+            reporting_currency="USD",
+            maximum_drawdown="50",
         )
         values.update(overrides)
         values["protocol_hash"] = (
@@ -54,6 +63,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 decision_deadline_at="2026-09-24T20:05:02Z",
                 outcome_horizon_end_at="2026-09-24T20:30:00Z",
                 decision_latency_ms=400,
+                regime="TREND",
+                independence_key="wave-1",
             ),
             SealedPrediction.create(
                 prediction_id="pred-2",
@@ -65,6 +76,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 decision_deadline_at="2026-09-24T20:10:02Z",
                 outcome_horizon_end_at="2026-09-24T20:40:00Z",
                 decision_latency_ms=500,
+                regime="RANGE",
+                independence_key="wave-2",
             ),
         )
 
@@ -105,6 +118,34 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             )
         return tuple(rows)
 
+    def economics(self):
+        return (
+            PaperDecisionEconomics.create(
+                prediction_id="pred-1",
+                currency="USD",
+                gross_pnl="5.00",
+                fees="0.25",
+                spread_cost="0.25",
+                slippage_cost="0.50",
+                net_pnl="4.00",
+                equity_before="100.00",
+                equity_after="104.00",
+                peak_equity_before="100.00",
+            ),
+            PaperDecisionEconomics.create(
+                prediction_id="pred-2",
+                currency="USD",
+                gross_pnl="-1.00",
+                fees="0.25",
+                spread_cost="0.25",
+                slippage_cost="0.50",
+                net_pnl="-2.00",
+                equity_before="104.00",
+                equity_after="102.00",
+                peak_equity_before="104.00",
+            ),
+        )
+
     def evidence(self, **overrides):
         values = dict(
             exact_build_sha=BUILD,
@@ -116,6 +157,11 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             costs_by_currency={"USD": "12.34", "EUR": Decimal("1.25")},
             costs_complete=True,
             account_reconciliation_complete=True,
+            paper_economics=self.economics(),
+            simulation_limitations=(
+                "OFFICIAL_TEST_FILL_MODEL",
+                "QUEUE_PRIORITY_UNOBSERVED",
+            ),
         )
         values.update(overrides)
         return ForwardPaperEvidence.create(**values)
@@ -378,6 +424,195 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 required_provider_capabilities=("KRAKEN:SPOT:LIMIT",),
                 required_operational_cases=("RECONNECT",),
             )
+
+
+    def test_item22_fields_are_locked_into_protocol_hash(self):
+        frozen = self.protocol()
+        changed = dict(
+            campaign_id=frozen.campaign_id,
+            exact_build_sha=frozen.exact_build_sha,
+            registered_at=frozen.registered_at,
+            starts_at=frozen.starts_at,
+            ends_at=frozen.ends_at,
+            minimum_predictions=frozen.minimum_predictions,
+            maximum_decision_latency_ms=frozen.maximum_decision_latency_ms,
+            required_provider_capabilities=frozen.required_provider_capabilities,
+            required_operational_cases=frozen.required_operational_cases,
+            required_regimes=frozen.required_regimes,
+            minimum_independent_decisions_per_regime=2,
+            required_simulation_limitations=frozen.required_simulation_limitations,
+            reporting_currency=frozen.reporting_currency,
+            maximum_drawdown=frozen.maximum_drawdown,
+        )
+        self.assertNotEqual(forward_paper_protocol_hash(**changed), frozen.protocol_hash)
+
+    def test_legacy_protocol_without_item22_registration_is_inconclusive(self):
+        values = dict(
+            campaign_id="legacy-paper",
+            exact_build_sha=BUILD,
+            registered_at="2026-09-24T19:59:00Z",
+            starts_at="2026-09-24T20:00:00Z",
+            ends_at="2026-09-24T21:00:00Z",
+            minimum_predictions=2,
+            maximum_decision_latency_ms=1000,
+            required_provider_capabilities=("KRAKEN:SPOT:LIMIT", "IBKR:EQUITY:LIMIT"),
+            required_operational_cases=("RECONNECT", "MANUAL_ACTIVITY"),
+        )
+        protocol = ForwardPaperProtocol.create(
+            **values,
+            protocol_hash=forward_paper_protocol_hash(**values),
+        )
+        evidence = self.evidence(protocol_hash=protocol.protocol_hash)
+        result = assess_forward_paper(protocol, evidence)
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn("regime_coverage_not_registered", result.reasons)
+        self.assertIn("simulation_limitations_not_registered", result.reasons)
+        self.assertIn("maximum_drawdown_not_registered", result.reasons)
+
+    def test_independent_decisions_are_required_per_registered_regime(self):
+        protocol = self.protocol(minimum_independent_decisions_per_regime=2)
+        evidence = self.evidence(protocol_hash=protocol.protocol_hash)
+        result = assess_forward_paper(protocol, evidence)
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn("minimum_independent_decisions_not_reached:TREND", result.reasons)
+        self.assertIn("minimum_independent_decisions_not_reached:RANGE", result.reasons)
+
+    def test_undeclared_regime_invalidates_forward_evidence(self):
+        predictions = list(self.predictions())
+        predictions[0] = SealedPrediction.create(
+            prediction_id="pred-1",
+            provider_capability="KRAKEN:SPOT:LIMIT",
+            input_hash=HASH_B,
+            proposal_hash=HASH_C,
+            information_cutoff_at="2026-09-24T20:04:59Z",
+            sealed_at="2026-09-24T20:05:00Z",
+            decision_deadline_at="2026-09-24T20:05:02Z",
+            outcome_horizon_end_at="2026-09-24T20:30:00Z",
+            decision_latency_ms=400,
+            regime="CRISIS",
+            independence_key="wave-1",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(predictions=predictions),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("undeclared_regime", result.reasons)
+
+    def test_one_independence_unit_cannot_count_in_two_regimes(self):
+        predictions = list(self.predictions())
+        second = predictions[1]
+        predictions[1] = SealedPrediction.create(
+            prediction_id=second.prediction_id,
+            provider_capability=second.provider_capability,
+            input_hash=second.input_hash,
+            proposal_hash=second.proposal_hash,
+            information_cutoff_at=second.information_cutoff_at,
+            sealed_at=second.sealed_at,
+            decision_deadline_at=second.decision_deadline_at,
+            outcome_horizon_end_at=second.outcome_horizon_end_at,
+            decision_latency_ms=second.decision_latency_ms,
+            regime=second.regime,
+            independence_key="wave-1",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(predictions=predictions),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("independence_key_regime_conflict", result.reasons)
+
+    def test_every_prediction_requires_exact_execution_economics(self):
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=(self.economics()[0],)),
+        )
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn("missing_paper_economics", result.reasons)
+
+    def test_paper_economics_reject_float_cost_and_false_net_identity(self):
+        with self.assertRaisesRegex(ForwardPaperError, "exact decimal"):
+            PaperDecisionEconomics.create(
+                prediction_id="pred-1",
+                currency="USD",
+                gross_pnl="5",
+                fees=0.25,
+                spread_cost="0.25",
+                slippage_cost="0.50",
+                net_pnl="4",
+                equity_before="100",
+                equity_after="104",
+                peak_equity_before="100",
+            )
+        with self.assertRaisesRegex(ForwardPaperError, "net_pnl must equal"):
+            PaperDecisionEconomics.create(
+                prediction_id="pred-1",
+                currency="USD",
+                gross_pnl="5",
+                fees="0.25",
+                spread_cost="0.25",
+                slippage_cost="0.50",
+                net_pnl="4.01",
+                equity_before="100",
+                equity_after="104.01",
+                peak_equity_before="100",
+            )
+
+    def test_paper_economics_currency_is_protocol_bound(self):
+        rows = list(self.economics())
+        first = rows[0]
+        rows[0] = PaperDecisionEconomics.create(
+            prediction_id=first.prediction_id,
+            currency="EUR",
+            gross_pnl=first.gross_pnl,
+            fees=first.fees,
+            spread_cost=first.spread_cost,
+            slippage_cost=first.slippage_cost,
+            net_pnl=first.net_pnl,
+            equity_before=first.equity_before,
+            equity_after=first.equity_after,
+            peak_equity_before=first.peak_equity_before,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_economics_currency_mismatch", result.reasons)
+
+    def test_missing_registered_simulation_limitation_is_inconclusive(self):
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(simulation_limitations=("OFFICIAL_TEST_FILL_MODEL",)),
+        )
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn(
+            "missing_simulation_limitation:QUEUE_PRIORITY_UNOBSERVED",
+            result.reasons,
+        )
+
+    def test_drawdown_over_registered_bound_is_valid_negative_evidence(self):
+        rows = list(self.economics())
+        rows[1] = PaperDecisionEconomics.create(
+            prediction_id="pred-2",
+            currency="USD",
+            gross_pnl="-59",
+            fees="0.25",
+            spread_cost="0.25",
+            slippage_cost="0.50",
+            net_pnl="-60",
+            equity_before="104",
+            equity_after="44",
+            peak_equity_before="104",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "VALID")
+        self.assertEqual(result.operational_status, "FAIL")
+        self.assertIn("maximum_drawdown_exceeded", result.reasons)
+        self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
 
 
 if __name__ == "__main__":

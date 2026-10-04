@@ -101,6 +101,15 @@ class DurableOrderProjectionTests(unittest.TestCase):
             oms_ref = weakref.ref(oms)
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(oms))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(store))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(artifacts))
+            )
 
             del oms
             gc.collect()

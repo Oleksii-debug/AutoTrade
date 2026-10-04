@@ -40,6 +40,10 @@ class NeutralRuntimeInstalledCandidateTests(unittest.TestCase):
             root = Path(directory)
             staging = root / "staging"
             staging.mkdir()
+            # The shared POSIX publisher deliberately requires nested parents
+            # to exist before it acquires root authority. Build the private
+            # layout before staging; never weaken that publication fence.
+            (staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
             composition = root / "composition.json"
             composition.write_text(
                 json.dumps(
@@ -141,6 +145,122 @@ print("NEUTRAL_ARTIFACT_RUNTIME_OK")
                 completed.stdout.strip(),
                 "NEUTRAL_ARTIFACT_RUNTIME_OK",
             )
+
+
+    def test_missing_mandatory_runtime_component_fails_closed_in_isolated_process(self):
+        missing_cases = (
+            (
+                "foundation-locality",
+                "autotrade_foundation/local_filesystem.py",
+                "autotrade_foundation.local_filesystem",
+            ),
+            (
+                "runtime-resource-lock",
+                "autotrade_runtime/resource_lock.py",
+                "autotrade_runtime.resource_lock",
+            ),
+            (
+                "runtime-strict-json",
+                "autotrade_runtime/strict_json.py",
+                "autotrade_runtime.strict_json",
+            ),
+            (
+                "artifact-store-module",
+                "autotrade_runtime/artifacts/store.py",
+                "autotrade_runtime.artifacts.store",
+            ),
+        )
+        source_sha = subprocess.check_output(
+            ("git", "rev-parse", "--verify", "HEAD"),
+            cwd=ROOT,
+            text=True,
+        ).strip()
+        self.assertRegex(source_sha, r"^[0-9a-f]{40}$")
+
+        script = r"""
+import os
+from pathlib import Path
+import sys
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
+staging = Path(os.environ["AUTOTRADE_STAGING"]).resolve(strict=True)
+artifact_root = Path(os.environ["AUTOTRADE_ARTIFACT_ROOT"])
+expected_missing = os.environ["AUTOTRADE_EXPECTED_MISSING"]
+sys.path.insert(0, str(staging))
+
+try:
+    import autotrade_runtime.artifacts  # noqa: F401
+except ModuleNotFoundError as error:
+    assert error.name == expected_missing, (error.name, expected_missing)
+else:
+    raise AssertionError("missing mandatory runtime component was accepted")
+
+assert not artifact_root.exists(), artifact_root
+assert not any(name == "research" or name.startswith("research.") for name in sys.modules)
+assert not any(
+    name == "autotrade_research" or name.startswith("autotrade_research.")
+    for name in sys.modules
+)
+print("MISSING_RUNTIME_COMPONENT_REJECTED")
+"""
+
+        for label, missing_relative, expected_missing in missing_cases:
+            with self.subTest(component=label), TemporaryDirectory() as directory:
+                root = Path(directory)
+                staging = root / "staging"
+                staging.mkdir()
+                (staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
+                composition = root / "composition.json"
+                composition.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0.0",
+                            "product": "AutoTrade",
+                            "source_sha": source_sha,
+                            "components": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                stage_windows_foundation(
+                    staging=staging,
+                    composition_path=composition,
+                    source_root=ROOT,
+                )
+                stage_windows_runtime(
+                    staging=staging,
+                    composition_path=composition,
+                    source_root=ROOT,
+                )
+                missing_path = staging / missing_relative
+                self.assertTrue(missing_path.is_file(), missing_path)
+                missing_path.unlink()
+
+                artifact_root = root / "must-not-be-created"
+                env = os.environ.copy()
+                env.pop("PYTHONPATH", None)
+                env["AUTOTRADE_STAGING"] = str(staging)
+                env["AUTOTRADE_ARTIFACT_ROOT"] = str(artifact_root)
+                env["AUTOTRADE_EXPECTED_MISSING"] = expected_missing
+                completed = subprocess.run(
+                    (sys.executable, "-I", "-S", "-c", script),
+                    cwd=staging,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stdout + completed.stderr,
+                )
+                self.assertEqual(
+                    completed.stdout.strip(),
+                    "MISSING_RUNTIME_COMPONENT_REJECTED",
+                )
+                self.assertFalse(artifact_root.exists())
+
 
 
 if __name__ == "__main__":

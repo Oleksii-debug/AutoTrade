@@ -78,7 +78,10 @@ class ProductClient:
     def state(self):
         for _ in range(100):
             status, data, _ = self.request('GET', '/api/v1/state')
-            if status == 200: return data
+            if status == 200:
+                return data
+            if status != 503 or data != {'error': 'SNAPSHOT_BUSY', 'retryable': True}:
+                raise AssertionError((status, data))
             time.sleep(.02)
         raise AssertionError((status, data))
 

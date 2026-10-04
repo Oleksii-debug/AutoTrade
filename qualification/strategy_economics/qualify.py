@@ -44,6 +44,7 @@ _BASE_REQUIRED_OWNERS = (
     "capacity_evidence_authority",
     "after_cost_projection_authority",
     "provider_economic_cut",
+    "provider_scope_binding",
 )
 
 _ASSET_REQUIRED_OWNERS = {

@@ -115,7 +115,7 @@ def forward_paper_protocol_hash(
         raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
     if "UNSPECIFIED" in regimes:
         raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
-    independent_minimum = _positive_int(
+    unit_minimum = _positive_int(
         minimum_decision_units_per_regime,
         name="minimum_decision_units_per_regime",
     )
@@ -147,7 +147,7 @@ def forward_paper_protocol_hash(
         regimes
         or limitations
         or drawdown is not None
-        or independent_minimum != 1
+        or unit_minimum != 1
         or currency != "USD"
         or evaluation_profile is not None
     )
@@ -167,7 +167,7 @@ def forward_paper_protocol_hash(
         payload.update(
             {
                 "required_regimes": list(regimes),
-                "minimum_decision_units_per_regime": independent_minimum,
+                "minimum_decision_units_per_regime": unit_minimum,
                 "required_simulation_limitations": list(limitations),
                 "reporting_currency": currency,
                 "maximum_drawdown": (
@@ -295,7 +295,7 @@ class ForwardPaperProtocol:
             raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
         if "UNSPECIFIED" in regimes:
             raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
-        independent_minimum = _positive_int(
+        unit_minimum = _positive_int(
             self.minimum_decision_units_per_regime,
             name="minimum_decision_units_per_regime",
         )
@@ -348,7 +348,7 @@ class ForwardPaperProtocol:
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
             required_regimes=regimes,
-            minimum_decision_units_per_regime=independent_minimum,
+            minimum_decision_units_per_regime=unit_minimum,
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,
@@ -386,7 +386,7 @@ class ForwardPaperProtocol:
         object.__setattr__(
             self,
             "minimum_decision_units_per_regime",
-            independent_minimum,
+            unit_minimum,
         )
         object.__setattr__(
             self,
@@ -453,7 +453,7 @@ class ForwardPaperProtocol:
             raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
         if "UNSPECIFIED" in regimes:
             raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
-        independent_minimum = _positive_int(
+        unit_minimum = _positive_int(
             minimum_decision_units_per_regime,
             name="minimum_decision_units_per_regime",
         )
@@ -500,7 +500,7 @@ class ForwardPaperProtocol:
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
             required_regimes=regimes,
-            minimum_decision_units_per_regime=independent_minimum,
+            minimum_decision_units_per_regime=unit_minimum,
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,

@@ -1,4 +1,5 @@
 """Authenticated state restoration through the canonical research job store."""
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -75,8 +76,9 @@ class JobCheckpointReadTests(unittest.TestCase):
                 ref=f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
                 # Integrity-valid artifact plus corrupted job pointer must still
                 # fail the semantic binding before a payload reaches execution.
-                with sqlite3.connect(path) as connection:
+                with closing(sqlite3.connect(path)) as connection:
                     connection.execute("UPDATE jobs SET checkpoint_ref=? WHERE job_id=?",(ref,job["job_id"]))
+                    connection.commit()
                 before=jobs.get(job["job_id"])
                 with self.assertRaisesRegex(JobConflictError,"enrolled job and inputs"):
                     jobs.read_checkpoint_bytes(job["job_id"],worker_id="worker-a",generation=generation,now=NOW)

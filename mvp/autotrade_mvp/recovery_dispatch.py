@@ -36,8 +36,9 @@ class RecoveryBoundDispatcher:
     Product shutdown can call :meth:`stop_and_drain` to make recovery revocation
     linear with this retained dispatch surface. Existing dispatches finish before
     the controller is stopped; new dispatch entry is held until that stop commits,
-    after which the canonical sender check fails closed. Calling shutdown from
-    inside an active dispatch is rejected rather than self-deadlocking.
+    after which the retained dispatcher is permanently revoked without touching
+    the journal or provider transport. Calling shutdown from inside an active
+    dispatch is rejected rather than self-deadlocking.
 
     A durable takeover intentionally invalidates an existing instance. Product
     composition must construct a new dispatcher from the successor controller;
@@ -150,13 +151,13 @@ class RecoveryBoundDispatcher:
         RecoveryController.validate_sender(controller, owner_id, owner_epoch)
 
     def stop_and_drain(self) -> None:
-        """Drain this retained send surface, then revoke its recovery owner.
+        """Drain this retained send surface, then permanently revoke it.
 
         Entry to new dispatches is paused while draining. The final controller
         stop happens while that entry gate is still held, so there is no gap in
         which a new caller can validate the old owner after the drain completed.
-        Post-stop dispatch attempts are allowed to reach the existing durable
-        fail-closed path and therefore remain auditable as blocked submissions.
+        Once stopped, this dispatcher rejects all future entry before any durable
+        submission or provider-side effect can be attempted.
         """
 
         thread = current_thread()
@@ -205,6 +206,10 @@ class RecoveryBoundDispatcher:
         with condition:
             while self._revoking:
                 condition.wait()
+            if self._revoked:
+                raise RecoveryDispatchBindingError(
+                    "recovery-bound dispatcher is permanently revoked"
+                )
             self._active_dispatches += 1
             self._active_threads[thread] = self._active_threads.get(thread, 0) + 1
 

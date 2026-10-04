@@ -43,6 +43,7 @@ from .provider_transport import (
     direct_authenticated_read_network_policy_identity,
     direct_authenticated_read_transport_identity,
     provider_observation_direct_execution_material,
+    qualified_authenticated_read_expected_wire_semantics_digest,
 )
 from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -108,6 +109,7 @@ _RETAINED_PAYLOAD_KEYS = frozenset(
         "observed_at",
         "execution_class",
         "wire_request_sha256",
+        "wire_request_semantics_sha256",
         "terminal_authority_journal_sequence_cut",
         "terminal_authority_verified_at",
     }
@@ -324,6 +326,7 @@ def _origin_ref(
     journal_sequence: int,
     execution_class: str,
     wire_request_sha256: str,
+    wire_request_semantics_sha256: str,
     terminal_authority_journal_sequence_cut: int,
     terminal_authority_verified_at: str,
 ) -> str:
@@ -338,6 +341,7 @@ def _origin_ref(
         "journal_sequence": journal_sequence,
         "execution_class": execution_class,
         "wire_request_sha256": wire_request_sha256,
+        "wire_request_semantics_sha256": wire_request_semantics_sha256,
         "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
         "terminal_authority_verified_at": terminal_authority_verified_at,
     }
@@ -380,6 +384,7 @@ class AuthenticatedReadResponseBinding:
     journal_sequence: int
     execution_class: str
     wire_request_sha256: str
+    wire_request_semantics_sha256: str
     terminal_authority_journal_sequence_cut: int
     terminal_authority_verified_at: str
     _binding_token: InitVar[object | None] = None
@@ -411,6 +416,7 @@ class AuthenticatedReadResponseBinding:
             "origin_ref",
             "execution_class",
             "wire_request_sha256",
+            "wire_request_semantics_sha256",
             "terminal_authority_verified_at",
         ):
             _exact_text(getattr(self, name), name=name)
@@ -423,6 +429,7 @@ class AuthenticatedReadResponseBinding:
             self.network_policy_identity,
             self.response_sha256,
             self.wire_request_sha256,
+            self.wire_request_semantics_sha256,
         ):
             if _SHA256_RE.fullmatch(digest) is None:
                 raise ProviderOriginError("provider-origin digest is non-canonical")
@@ -629,6 +636,12 @@ class ProviderOriginJournal:
                     + snapshot["qualified_query_digest"]
                 ).encode("utf-8")
             ).hexdigest()
+            wire_request_semantics_sha256 = "sha256:" + sha256(
+                (
+                    "TEST_INJECTED_SEMANTICS|"
+                    + snapshot["qualified_query_digest"]
+                ).encode("utf-8")
+            ).hexdigest()
             terminal_cut = snapshot["authority_journal_sequence_cut"]
             terminal_verified_at = _utc_text(
                 observed_at,
@@ -682,8 +695,24 @@ class ProviderOriginJournal:
                 observed_value,
                 name="direct provider observed_at",
             )
+            expected_wire_semantics_sha256 = (
+                qualified_authenticated_read_expected_wire_semantics_digest(
+                    query_binding.query_binding,
+                    provider_environment=query_binding.provider_environment,
+                )
+            )
+            if (
+                receipt_snapshot["request_semantics_sha256"]
+                != expected_wire_semantics_sha256
+            ):
+                raise ProviderOriginError(
+                    "direct wire request semantics differ from exact qualified read"
+                )
             execution_class = _DIRECT_EXECUTION_CLASS
             wire_request_sha256 = receipt_snapshot["request_sha256"]
+            wire_request_semantics_sha256 = receipt_snapshot[
+                "request_semantics_sha256"
+            ]
             terminal_cut = terminal_snapshot["journal_sequence_cut"]
             terminal_verified_at = terminal_snapshot["verified_at"]
 
@@ -699,6 +728,8 @@ class ProviderOriginJournal:
         observed_text = _utc_text(observed_at, name="observed_at")
         if _SHA256_RE.fullmatch(wire_request_sha256) is None:
             raise ProviderOriginError("wire request digest is non-canonical")
+        if _SHA256_RE.fullmatch(wire_request_semantics_sha256) is None:
+            raise ProviderOriginError("wire request semantics digest is non-canonical")
         if type(terminal_cut) is not int or terminal_cut < 0:
             raise ProviderOriginError("terminal provider-read authority cut is invalid")
         _parse_utc_text(
@@ -766,6 +797,7 @@ class ProviderOriginJournal:
             "provider_environment": snapshot["provider_environment"],
             "execution_class": execution_class,
             "wire_request_sha256": wire_request_sha256,
+            "wire_request_semantics_sha256": wire_request_semantics_sha256,
             "terminal_authority_journal_sequence_cut": terminal_cut,
             "terminal_authority_verified_at": terminal_verified_at,
         }
@@ -811,6 +843,7 @@ class ProviderOriginJournal:
             "observed_at": observed_text,
             "execution_class": execution_class,
             "wire_request_sha256": wire_request_sha256,
+            "wire_request_semantics_sha256": wire_request_semantics_sha256,
             "terminal_authority_journal_sequence_cut": terminal_cut,
             "terminal_authority_verified_at": terminal_verified_at,
         }
@@ -1005,6 +1038,7 @@ class ProviderOriginJournal:
             "provider_environment": snapshot["provider_environment"],
             "execution_class": execution_class,
             "wire_request_sha256": wire_request_sha256,
+            "wire_request_semantics_sha256": wire_request_semantics_sha256,
             "terminal_authority_journal_sequence_cut": terminal_cut,
             "terminal_authority_verified_at": terminal_verified_at,
         }

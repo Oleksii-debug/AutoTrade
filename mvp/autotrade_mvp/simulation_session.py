@@ -1597,6 +1597,17 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
                 "reason": "unfinished_episode_requires_reconciliation", "resumed": True}
+    if completed:
+        # Validate the last terminal common cut before recreating provider,
+        # economic, OMS, risk or valuation projections.  The checkpoint is
+        # evidence over existing owners; it is not a new financial authority.
+        from .simulation_runtime_checkpoint import verify_autonomous_runtime_checkpoint
+        verify_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            completed=completed,
+        )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
     provider = SimulatedProvider.from_state(state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -1861,6 +1872,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         for item in store.pending_outbox(limit=1000):
             store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         completed.append(result)
+        # Persist only after the durable episode and every publication in this
+        # terminal cut are complete.  A crash before this point leaves the
+        # prior checkpoint and therefore fails closed on restart.
+        from .simulation_runtime_checkpoint import persist_autonomous_runtime_checkpoint
+        persist_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            completed=completed,
+        )
         previous_equities.append(equity)
     return {"status": "COMPLETED" if len(completed) == len(values) else "PAUSED", "environment": ENVIRONMENT,
         "mode": "ZERO", "run_id": run_id, "protocol_digest": protocol_digest,

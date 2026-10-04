@@ -1058,6 +1058,35 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
+        for field in ("state_version", "event_cursor"):
+            with self.subTest(field=field):
+                def malformed_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = int(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-{field}.sqlite3"
+                    ),
+                    snapshot_provider=malformed_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+
     def test_command_expected_state_version_rejects_noncanonical_sequence(self):
         for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
             with self.subTest(version=version):

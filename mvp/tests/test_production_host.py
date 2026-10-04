@@ -416,6 +416,51 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     )
             fence.acquire.assert_not_called()
 
+    def test_runtime_binding_failure_closes_listener_and_releases_fence(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            application = Mock()
+            server = Mock()
+            fence = Mock()
+            failure = RuntimeError("runtime binding failed")
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(
+                    production_host,
+                    "_InstanceFence",
+                ) as fence_type,
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostApplication",
+                    return_value=application,
+                ),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    return_value=server,
+                ),
+                patch.object(
+                    production_host,
+                    "ProductionHostRuntime",
+                    side_effect=failure,
+                ),
+            ):
+                fence_type.acquire.return_value = fence
+                with self.assertRaises(RuntimeError) as raised:
+                    build_production_host(
+                        config,
+                        security_boundary=self.DummySecurityBoundary(),
+                        principal_resolver=Mock(),
+                        snapshot_provider=Mock(),
+                    )
+            self.assertIs(raised.exception, failure)
+            server.server_close.assert_called_once_with()
+            fence.release.assert_called_once_with()
+
     def test_https_requires_tls_context(self):
         with TemporaryDirectory() as directory:
             config = ProductionHostConfig(

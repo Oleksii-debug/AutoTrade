@@ -12,7 +12,10 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
-from mvp.autotrade_mvp.provider_transport import BYBIT_V5_ENDPOINT_POLICIES
+from mvp.autotrade_mvp.provider_transport import (
+    BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5HttpTransport,
+)
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
@@ -20,6 +23,7 @@ from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
 _POLICY_FORGED_CALLS: list[object] = []
 _CREDENTIAL_FORGED_CALLS: list[object] = []
+_TRANSPORT_FORGED_CALLS: list[object] = []
 
 
 def _forged_policy_identity(policy, *, provider_environment):
@@ -44,6 +48,11 @@ def _forged_credential_identity(handle):
         "TRADE",
         1,
     )
+
+
+def _forged_transport_call(self, client_order_id, request, final_guard):
+    _TRANSPORT_FORGED_CALLS.append((self, client_order_id, request, final_guard))
+    raise AssertionError("forged Bybit transport executable ran")
 
 
 class _FenceStub:
@@ -346,6 +355,95 @@ class ProductionBybitAuthorityBindingTests(unittest.TestCase):
                     resolver._require_runtime_authority()
             finally:
                 production_bybit._credential_identity = original_reader
+
+            self.assertEqual(forged_calls, [])
+
+    def test_transport_class_rebinding_fails_before_financial_callbacks_or_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            original_call = BybitV5HttpTransport.__call__
+            forged_calls = []
+
+            def forged_call(*args, **kwargs):
+                forged_calls.append((args, kwargs))
+                raise AssertionError("forged transport executable ran")
+
+            BybitV5HttpTransport.__call__ = forged_call
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "transport executable authority changed",
+                ):
+                    sender.dispatch(
+                        attempt_id="attempt-transport-rebind",
+                        intent_id="intent-transport-rebind",
+                        intent_hash="sha256:" + "3" * 64,
+                        request={"symbol": "BTCUSDT"},
+                        now="2026-10-04T02:00:02Z",
+                        authority_check=lambda *_args: self.fail(
+                            "authority callback ran after transport executable retarget"
+                        ),
+                    )
+            finally:
+                BybitV5HttpTransport.__call__ = original_call
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_transport_same_object_code_mutation_fails_before_execution(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            canonical = BybitV5HttpTransport.__call__
+            original_code = canonical.__code__
+            _TRANSPORT_FORGED_CALLS.clear()
+            try:
+                canonical.__code__ = _forged_transport_call.__code__
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "transport executable authority code changed",
+                ):
+                    sender.dispatch(
+                        attempt_id="attempt-transport-code",
+                        intent_id="intent-transport-code",
+                        intent_hash="sha256:" + "4" * 64,
+                        request={"symbol": "BTCUSDT"},
+                        now="2026-10-04T02:00:03Z",
+                        authority_check=lambda *_args: self.fail(
+                            "authority callback ran after transport code mutation"
+                        ),
+                    )
+            finally:
+                canonical.__code__ = original_code
+
+            self.assertEqual(_TRANSPORT_FORGED_CALLS, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_security_boundary_lease_rebinding_is_rejected_before_secret_access(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            sender = self._sender(runtime)
+            transport = sender._ProductionBybitOrderSender__transport
+            resolver = transport.secret_resolver
+            original_lease = SecurityBoundary.lease_for_execution
+            forged_calls = []
+
+            def forged_lease(*args, **kwargs):
+                forged_calls.append((args, kwargs))
+                raise AssertionError("forged credential lease ran")
+
+            SecurityBoundary.lease_for_execution = forged_lease
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "credential lease authority changed",
+                ):
+                    resolver._require_runtime_authority()
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
 
             self.assertEqual(forged_calls, [])
 

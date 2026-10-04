@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from .exact_decimal import (
@@ -310,7 +311,7 @@ class CorporateEvent:
             or self.source_sequence < 0
         ):
             raise ValueError("source_sequence must be a non-negative integer when provided")
-        object.__setattr__(self, "payload", normalized_payload)
+        object.__setattr__(self, "payload", MappingProxyType(normalized_payload))
 
     @classmethod
     def create(
@@ -372,6 +373,23 @@ class Transition:
     after: EquityState
     economic_pnl: Decimal
     reason: str
+
+    def __post_init__(self) -> None:
+        if type(self.before) is not EquityState:
+            raise TypeError("transition before must be exact EquityState")
+        if type(self.after) is not EquityState:
+            raise TypeError("transition after must be exact EquityState")
+        if type(self.economic_pnl) is not Decimal:
+            raise TypeError("economic_pnl must be exact Decimal")
+        try:
+            economic_pnl = parse_bounded_exact_decimal(self.economic_pnl)
+        except ExactDecimalError as error:
+            raise ValueError(
+                "economic_pnl must be a finite decimal within the exact resource envelope"
+            ) from error
+        object.__setattr__(self, "event_id", _text(self.event_id, name="transition event_id"))
+        object.__setattr__(self, "economic_pnl", economic_pnl)
+        object.__setattr__(self, "reason", _text(self.reason, name="transition reason"))
 
 
 @dataclass(frozen=True)

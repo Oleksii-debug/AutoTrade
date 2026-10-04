@@ -45,12 +45,25 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
         raise ValueError('not a canonical dotnet restore run line')
     try:
-        tokens = tuple(shlex.split(command.removeprefix('run: ')))
+        tokens = tuple(shlex.split(command.removeprefix('run: '), comments=True))
     except ValueError as error:
         raise ValueError('malformed dotnet restore command') from error
     if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):
         raise ValueError('not a canonical dotnet restore command')
     return tokens
+
+
+def dotnet_restore_targets_project(
+    tokens: tuple[str, ...] | list[str],
+    project: str,
+) -> bool:
+    """Require the release project as the canonical restore positional target."""
+    if not isinstance(project, str) or not project or project.startswith('-'):
+        return False
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+    return bool(arguments) and arguments[0] == project
 
 
 def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:

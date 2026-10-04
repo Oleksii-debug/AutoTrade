@@ -2,9 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
+import subprocess
+import sys
 import unittest
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
 
 import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
@@ -95,6 +97,47 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "exact canonical ArtifactStore"):
                 durable(store, artifacts)
 
+    def test_order_projection_import_is_hermetic_without_research_package(self):
+        root = Path(__file__).resolve().parents[2]
+        script = r"""
+import importlib.abc
+import sys
+
+
+class BlockResearch(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "research" or fullname.startswith("research."):
+            raise ImportError("research package is unavailable in installed runtime")
+        return None
+
+
+sys.meta_path.insert(0, BlockResearch())
+import autotrade_runtime.artifacts as runtime_artifacts
+import mvp.autotrade_mvp.durable_order_projection as projection
+
+assert projection.ArtifactStore is runtime_artifacts.ArtifactStore
+leaked = sorted(
+    name for name in sys.modules
+    if name == "research" or name.startswith("research.")
+)
+if leaked:
+    raise AssertionError(f"durable order projection imported research package: {leaked}")
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                f"sys.path.insert(0, {str(root)!r})\n" + script,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_provider_evidence_uses_one_authenticated_snapshot(self):
         with TemporaryDirectory() as directory:
             book, artifacts, _request, ref = prepared_book(directory)
@@ -158,52 +201,40 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                     evidence_refs=[ref],
                 )
 
-    def test_retained_authenticated_reader_code_retarget_fails_closed(self):
+    def test_trusted_reader_factory_rebinding_after_construction_does_not_redirect(self):
         with TemporaryDirectory() as directory:
             book, _artifacts, _request, ref = prepared_book(directory)
-            reader = ArtifactStore.read_authenticated_snapshot
-            original_code = reader.__code__
-
-            def forged_reader(self, artifact_id):
-                del self, artifact_id
-                raise AssertionError("forged provider reader executed")
-
-            try:
-                reader.__code__ = forged_reader.__code__
-                with self.assertRaisesRegex(
-                    OrderProjectionConflict,
-                    "snapshot reader authority changed",
-                ):
-                    book.acknowledge(
-                        event_key="ack-reader-code",
-                        client_order_id="c1",
-                        provider_order_id="provider-order-1",
-                        status="ACCEPTED",
-                        committed_at=T1,
-                        evidence_refs=[ref],
-                    )
-            finally:
-                reader.__code__ = original_code
-
-    def test_instance_reader_shadow_fails_closed_before_redirect(self):
-        with TemporaryDirectory() as directory:
-            book, artifacts, _request, ref = prepared_book(directory)
-            artifacts.read_authenticated_snapshot = lambda _artifact_id: (
-                {"sha256": ref["sha256"], "metadata": {}},
-                b"forged provider bytes",
-            )
-            with self.assertRaisesRegex(
-                OrderProjectionConflict,
-                "not resolvable and intact",
+            with patch.object(
+                durable_order_projection_module,
+                "trusted_authenticated_reader",
+                side_effect=AssertionError("rebound reader factory must not run"),
             ):
-                book.acknowledge(
-                    event_key="ack-instance-shadow",
+                result = book.acknowledge(
+                    event_key="ack-reader-factory-rebind",
                     client_order_id="c1",
                     provider_order_id="provider-order-1",
                     status="ACCEPTED",
                     committed_at=T1,
                     evidence_refs=[ref],
                 )
+            self.assertEqual(result.snapshot.state, "WORKING")
+
+    def test_instance_reader_shadow_cannot_redirect_pinned_private_reader(self):
+        with TemporaryDirectory() as directory:
+            book, artifacts, _request, ref = prepared_book(directory)
+            artifacts.read_authenticated_snapshot = lambda _artifact_id: (
+                {"sha256": ref["sha256"], "metadata": {}},
+                b"forged provider bytes",
+            )
+            result = book.acknowledge(
+                event_key="ack-instance-shadow",
+                client_order_id="c1",
+                provider_order_id="provider-order-1",
+                status="ACCEPTED",
+                committed_at=T1,
+                evidence_refs=[ref],
+            )
+            self.assertEqual(result.snapshot.state, "WORKING")
 
     def test_module_reader_rebinding_does_not_redirect_captured_authority(self):
         with TemporaryDirectory() as directory:

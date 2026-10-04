@@ -4695,6 +4695,10 @@ def _install_authenticated_read_execution_receipt_authority():
     direct_proxy_handler = ProxyHandler
     direct_redirect_handler = _NoRedirectHandler
     direct_response_limiter = require_provider_response_bytes
+    direct_parse_qsl = parse_qsl
+    direct_urlsplit = urlsplit
+    direct_payload_digest = payload_digest
+    direct_sha256 = sha256
     canonical_binance_policies = dict(BINANCE_SPOT_ENDPOINT_POLICIES)
     canonical_bybit_policies = dict(BYBIT_V5_ENDPOINT_POLICIES)
     canonical_kraken_policies = dict(KRAKEN_SPOT_ENDPOINT_POLICIES)
@@ -4731,6 +4735,10 @@ def _install_authenticated_read_execution_receipt_authority():
             or ProxyHandler is not direct_proxy_handler
             or _NoRedirectHandler is not direct_redirect_handler
             or require_provider_response_bytes is not direct_response_limiter
+            or parse_qsl is not direct_parse_qsl
+            or urlsplit is not direct_urlsplit
+            or payload_digest is not direct_payload_digest
+            or sha256 is not direct_sha256
             or direct_client_init.__code__ is not direct_client_init_code
             or direct_client_send.__code__ is not direct_client_send_code
             or canonical_observe.__code__ is not canonical_observe_code
@@ -4775,7 +4783,7 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct authenticated-read response bytes are not exact bytes"
             )
-        if observation.response_sha256 != "sha256:" + sha256(response_bytes).hexdigest():
+        if observation.response_sha256 != "sha256:" + direct_sha256(response_bytes).hexdigest():
             raise ProviderTransportError(
                 "direct authenticated-read response digest mismatch"
             )
@@ -4805,8 +4813,13 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct authenticated-read receipt identity collision"
             )
+        def clear_receipt(value_ref, *, receipt_id=object_id) -> None:
+            current_state = states.get(receipt_id)
+            if current_state is not None and current_state[0] is value_ref:
+                states.pop(receipt_id, None)
+
         states[object_id] = (
-            weakref.ref(observation),
+            weakref.ref(observation, clear_receipt),
             (
                 query_binding,
                 terminal_authority,
@@ -4853,7 +4866,7 @@ def _install_authenticated_read_execution_receipt_authority():
             or observation.http_status != http_status
             or type(response_bytes) is not bytes
             or observation.response_sha256 != response_sha256
-            or response_sha256 != "sha256:" + sha256(response_bytes).hexdigest()
+            or response_sha256 != "sha256:" + direct_sha256(response_bytes).hexdigest()
             or observation.observed_at
             != observed_at.isoformat().replace("+00:00", "Z")
         ):
@@ -4887,7 +4900,7 @@ def _install_authenticated_read_execution_receipt_authority():
         }
         if provider_environment is not None:
             material["provider_environment"] = provider_environment
-        return payload_digest(material)
+        return direct_payload_digest(material)
 
     def require_direct_request_scope(
         request: AuthenticatedReadHttpRequest,
@@ -4895,8 +4908,8 @@ def _install_authenticated_read_execution_receipt_authority():
         policy: ProviderEndpointPolicy,
         query_binding: AuthenticatedReadQueryBinding,
     ) -> None:
-        parsed = urlsplit(request.url)
-        expected = urlsplit(policy.base_url + query_binding.endpoint)
+        parsed = direct_urlsplit(request.url)
+        expected = direct_urlsplit(policy.base_url + query_binding.endpoint)
         if (
             parsed.scheme != "https"
             or parsed.hostname != expected.hostname
@@ -4916,7 +4929,7 @@ def _install_authenticated_read_execution_receipt_authority():
         query_binding: AuthenticatedReadQueryBinding,
     ) -> None:
         if request.method == "GET":
-            encoded = urlsplit(request.url).query
+            encoded = direct_urlsplit(request.url).query
         else:
             if type(request.body) is not bytes:
                 raise ProviderTransportError(
@@ -4929,7 +4942,7 @@ def _install_authenticated_read_execution_receipt_authority():
                     "direct authenticated-read form body is not ASCII"
                 ) from error
         try:
-            pairs = parse_qsl(
+            pairs = direct_parse_qsl(
                 encoded,
                 keep_blank_values=True,
                 strict_parsing=False,

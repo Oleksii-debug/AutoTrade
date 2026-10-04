@@ -879,6 +879,54 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     )
             forged_reader.assert_not_called()
 
+    def test_provider_evidence_rehashes_bytes_returned_by_canonical_reader(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-evidence-rehash-canonical",
+                client_order_id="evidence-rehash-canonical",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "evidence-rehash-canonical",
+                "provider_order_id": "provider-evidence-rehash-canonical",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            with patch.object(
+                ArtifactStore,
+                "_read_verified_object_bytes",
+                return_value=b"different provider evidence bytes",
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "digest differs from immutable artifact",
+                ):
+                    book.acknowledge(
+                        event_key="ack-evidence-rehash-canonical",
+                        client_order_id="evidence-rehash-canonical",
+                        provider_order_id="provider-evidence-rehash-canonical",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+
     def test_provider_evidence_retained_reader_code_retarget_is_not_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -962,8 +1010,8 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 observed_at=T1,
             )
             with patch.object(
-                durable_order_projection_module,
-                "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
+                ArtifactStore,
+                "_open_manifest_descriptor",
                 side_effect=OSError("simulated evidence I/O failure"),
             ):
                 with self.assertRaisesRegex(

@@ -471,6 +471,16 @@ class AuthorityTests(unittest.TestCase):
             authority_event_count = len(
                 store.load_events("authority_state", "canonical")
             )
+            risk_event_count = len(
+                store.load_events("risk_decision", result.risk_decision_id)
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
+            )
             retry = authority.admit(
                 reservation_book=reservations,
                 **kwargs,
@@ -479,6 +489,22 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 len(store.load_events("authority_state", "canonical")),
                 authority_event_count,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                ),
+                risk_event_count,
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
             )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),

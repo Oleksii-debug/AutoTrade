@@ -153,6 +153,22 @@ class LearningWavePolicy:
         ):
             raise ValueError("at least one learning-wave pause trigger is required")
 
+    @property
+    def policy_hash(self) -> str:
+        return _hash_payload(
+            {
+                "policy_id": self.policy_id,
+                "max_market_seconds": self.max_market_seconds,
+                "max_trades": self.max_trades,
+                "min_evidence_events": self.min_evidence_events,
+                "max_drawdown": (
+                    None if self.max_drawdown is None else str(self.max_drawdown)
+                ),
+                "pause_on_regime_change": self.pause_on_regime_change,
+                "promotion_mode": self.promotion_mode,
+            }
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MarketWaveSnapshot:
@@ -219,6 +235,7 @@ class MarketWaveSnapshot:
 @dataclass(frozen=True, slots=True)
 class PauseDecision:
     wave_id: str
+    policy_hash: str
     source_cut_hash: str
     should_pause: bool
     reasons: tuple[str, ...]
@@ -226,6 +243,11 @@ class PauseDecision:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _text(self.wave_id, name="wave_id"))
+        object.__setattr__(
+            self,
+            "policy_hash",
+            _digest(self.policy_hash, name="policy_hash"),
+        )
         object.__setattr__(
             self,
             "source_cut_hash",
@@ -277,6 +299,7 @@ def evaluate_pause(
 
     payload = {
         "policy_id": policy.policy_id,
+        "policy_hash": policy.policy_hash,
         "wave_id": snapshot.wave_id,
         "segment_id": snapshot.segment_id,
         "champion_artifact_hash": snapshot.champion_artifact_hash,
@@ -292,6 +315,7 @@ def evaluate_pause(
     }
     return PauseDecision(
         wave_id=snapshot.wave_id,
+        policy_hash=policy.policy_hash,
         source_cut_hash=snapshot.source_cut_hash,
         should_pause=bool(reasons),
         reasons=tuple(reasons),
@@ -339,6 +363,7 @@ class EvidencePopulation:
 @dataclass(frozen=True, slots=True)
 class CandidateWave:
     wave_id: str
+    policy_hash: str
     champion_artifact_hash: str
     candidate_id: str
     candidate_artifact_hash: str
@@ -352,6 +377,11 @@ class CandidateWave:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _text(self.wave_id, name="wave_id"))
+        object.__setattr__(
+            self,
+            "policy_hash",
+            _digest(self.policy_hash, name="policy_hash"),
+        )
         champion = _digest(
             self.champion_artifact_hash,
             name="champion_artifact_hash",
@@ -427,8 +457,11 @@ class CandidateWave:
             raise ValueError("candidate wave requires a real pause decision")
         if not isinstance(policy, LearningWavePolicy):
             raise TypeError("policy must be LearningWavePolicy")
+        if policy.policy_hash != pause.policy_hash:
+            raise ValueError("policy does not match the exact pause decision")
         return cls(
             wave_id=pause.wave_id,
+            policy_hash=pause.policy_hash,
             champion_artifact_hash=champion_artifact_hash,
             candidate_id=candidate_id,
             candidate_artifact_hash=candidate_artifact_hash,
@@ -547,6 +580,7 @@ def resolve_candidate(
 
     payload = {
         "wave_id": wave.wave_id,
+        "policy_hash": wave.policy_hash,
         "candidate_id": wave.candidate_id,
         "candidate_artifact_hash": wave.candidate_artifact_hash,
         "pause_decision_hash": wave.pause_decision_hash,

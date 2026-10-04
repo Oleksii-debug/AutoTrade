@@ -8,7 +8,7 @@ strategy or establishes economic/trading authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -141,6 +141,7 @@ class StrategyFamilyStudy:
     economic_unit: str
     cases: tuple[RegisteredStrategyCase, ...]
     minimum_cases_per_strategy_context: int = 1
+    study_hash: str = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "study_id", _text(self.study_id, "study_id"))
@@ -171,6 +172,25 @@ class StrategyFamilyStudy:
         object.__setattr__(self, "registered_at", registered)
         object.__setattr__(self, "evaluation_cutoff", cutoff)
         object.__setattr__(self, "economic_unit", unit)
+        object.__setattr__(
+            self,
+            "study_hash",
+            _digest({
+                "study_id": self.study_id,
+                "registered_at": registered.isoformat(),
+                "evaluation_cutoff": cutoff.isoformat(),
+                "economic_unit": unit,
+                "minimum": self.minimum_cases_per_strategy_context,
+                "cases": [{
+                    "case_id": case.case_id,
+                    "strategy_family": case.strategy_family,
+                    "context": case.context.key,
+                    "decision_time": case.decision_time.isoformat(),
+                    "assignment_time": case.assignment_time.isoformat(),
+                    "input_population_hash": case.input_population_hash,
+                } for case in self.cases],
+            }),
+        )
 
     @classmethod
     def create(cls, *, study_id, registered_at, evaluation_cutoff, economic_unit,
@@ -198,21 +218,7 @@ class StrategyFamilyStudy:
 
     @property
     def digest(self):
-        return _digest({
-            "study_id": self.study_id,
-            "registered_at": self.registered_at.isoformat(),
-            "evaluation_cutoff": self.evaluation_cutoff.isoformat(),
-            "economic_unit": self.economic_unit,
-            "minimum": self.minimum_cases_per_strategy_context,
-            "cases": [{
-                "case_id": case.case_id,
-                "strategy_family": case.strategy_family,
-                "context": case.context.key,
-                "decision_time": case.decision_time.isoformat(),
-                "assignment_time": case.assignment_time.isoformat(),
-                "input_population_hash": case.input_population_hash,
-            } for case in self.cases],
-        })
+        return self.study_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +235,7 @@ class StrategyCaseOutcome:
     execution_cost: Decimal
     net_value: Decimal
     economic_unit: str
+    evidence_hash: str = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "case_id", _text(self.case_id, "case_id"))
@@ -264,27 +271,33 @@ class StrategyCaseOutcome:
             "execution_evidence_hash",
             _sha(self.execution_evidence_hash, "execution_evidence_hash"),
         )
+        unit = _text(self.economic_unit, "economic_unit")
         object.__setattr__(self, "gross_value", gross)
         object.__setattr__(self, "execution_cost", cost)
         object.__setattr__(self, "net_value", net)
-        object.__setattr__(self, "economic_unit", _text(self.economic_unit, "economic_unit"))
+        object.__setattr__(self, "economic_unit", unit)
+        object.__setattr__(
+            self,
+            "evidence_hash",
+            _digest({
+                "case_id": self.case_id,
+                "strategy_family": self.strategy_family,
+                "context": self.context.key,
+                "decision_time": decision.isoformat(),
+                "outcome_available_at": available.isoformat(),
+                "execution_reconciled_at": reconciled.isoformat(),
+                "input_population_hash": self.input_population_hash,
+                "execution_evidence_hash": self.execution_evidence_hash,
+                "gross_value": gross,
+                "execution_cost": cost,
+                "net_value": net,
+                "economic_unit": unit,
+            }),
+        )
 
     @property
     def digest(self):
-        return _digest({
-            "case_id": self.case_id,
-            "strategy_family": self.strategy_family,
-            "context": self.context.key,
-            "decision_time": self.decision_time.isoformat(),
-            "outcome_available_at": self.outcome_available_at.isoformat(),
-            "execution_reconciled_at": self.execution_reconciled_at.isoformat(),
-            "input_population_hash": self.input_population_hash,
-            "execution_evidence_hash": self.execution_evidence_hash,
-            "gross_value": self.gross_value,
-            "execution_cost": self.execution_cost,
-            "net_value": self.net_value,
-            "economic_unit": self.economic_unit,
-        })
+        return self.evidence_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +358,7 @@ def assess_strategy_families(study, outcomes):
         raise TypeError("outcomes must be an exact tuple")
     if any(type(item) is not StrategyCaseOutcome for item in outcomes):
         raise TypeError("outcomes must contain exact StrategyCaseOutcome values")
+    original_study_hash = _sha(study.study_hash, "study_hash")
     study = StrategyFamilyStudy(
         study_id=study.study_id,
         registered_at=study.registered_at,
@@ -353,20 +367,30 @@ def assess_strategy_families(study, outcomes):
         cases=study.cases,
         minimum_cases_per_strategy_context=study.minimum_cases_per_strategy_context,
     )
-    outcomes = tuple(StrategyCaseOutcome(
-        case_id=item.case_id,
-        strategy_family=item.strategy_family,
-        context=item.context,
-        decision_time=item.decision_time,
-        outcome_available_at=item.outcome_available_at,
-        execution_reconciled_at=item.execution_reconciled_at,
-        input_population_hash=item.input_population_hash,
-        execution_evidence_hash=item.execution_evidence_hash,
-        gross_value=item.gross_value,
-        execution_cost=item.execution_cost,
-        net_value=item.net_value,
-        economic_unit=item.economic_unit,
-    ) for item in outcomes)
+    if study.study_hash != original_study_hash:
+        raise ValueError("study_hash changed after study construction")
+
+    clean_outcomes = []
+    for item in outcomes:
+        original_evidence_hash = _sha(item.evidence_hash, "outcome evidence_hash")
+        clean = StrategyCaseOutcome(
+            case_id=item.case_id,
+            strategy_family=item.strategy_family,
+            context=item.context,
+            decision_time=item.decision_time,
+            outcome_available_at=item.outcome_available_at,
+            execution_reconciled_at=item.execution_reconciled_at,
+            input_population_hash=item.input_population_hash,
+            execution_evidence_hash=item.execution_evidence_hash,
+            gross_value=item.gross_value,
+            execution_cost=item.execution_cost,
+            net_value=item.net_value,
+            economic_unit=item.economic_unit,
+        )
+        if clean.evidence_hash != original_evidence_hash:
+            raise ValueError("outcome evidence_hash changed after construction")
+        clean_outcomes.append(clean)
+    outcomes = tuple(clean_outcomes)
 
     registered = {case.case_id: case for case in study.cases}
     if len(outcomes) != len(study.cases):

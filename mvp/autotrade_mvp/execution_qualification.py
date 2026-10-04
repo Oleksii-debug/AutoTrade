@@ -16,8 +16,10 @@ from uuid import UUID
 from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
+from .instruments import InstrumentVersion, _detached_instrument_version
 from .execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedExecution,
@@ -132,8 +134,10 @@ def validate_execution_qualification(
     *,
     model: ExecutionModel,
     qualification: ExecutionModelQualification,
+    instrument: InstrumentVersion,
     asset_class: str,
     instrument_version: str,
+    instrument: InstrumentVersion,
     protocol_sha256: str,
     artifact_store: ArtifactStore,
     evidence_artifact_id: str,
@@ -154,6 +158,15 @@ def validate_execution_qualification(
     normalized_instrument = _text(
         instrument_version,
         name="instrument_version",
+    )
+    if type(instrument) is not InstrumentVersion:
+        raise TypeError("instrument must be exact InstrumentVersion")
+    detached_instrument = _detached_instrument_version(instrument)
+    authoritative_instrument = (
+        f"{detached_instrument.instrument_id}@{detached_instrument.version}"
+    )
+    authoritative_projection = ExecutionPriceProjectionPolicy.from_instrument(
+        detached_instrument
     )
     normalized_purpose = _text(purpose, name="purpose").upper()
     if normalized_purpose not in _PURPOSES:
@@ -186,6 +199,10 @@ def validate_execution_qualification(
     )
 
     failures: list[str] = []
+    if normalized_instrument != authoritative_instrument:
+        failures.append("instrument_authority")
+    if model.price_projection != authoritative_projection:
+        failures.append("price_projection_authority")
     if qualification.asset_class != normalized_asset:
         failures.append("asset_class")
     if qualification.data_fidelity != model.data_fidelity:
@@ -248,6 +265,7 @@ def simulate_qualified_execution(
         qualification=qualification,
         asset_class=asset_class,
         instrument_version=order.instrument_version,
+        instrument=instrument,
         protocol_sha256=protocol_sha256,
         artifact_store=artifact_store,
         evidence_artifact_id=evidence_artifact_id,

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import mvp.autotrade_mvp.simulation_session as simulation_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import MovingAverageStrategy, _money
@@ -197,6 +198,38 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(str(book.cash("USD")), first["cash"])
             self.assertEqual(str(book.position(INSTRUMENT)), first["position"])
             self.assertIsNotNone(reopened.get_event(first["reconciliation_event_id"]))
+
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlements = DurableSettlementBook(
+                reopened,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                evidence_artifact_root=Path(directory) / "artifacts",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(len(settlements.obligations), 1)
+            obligation = settlements.obligations[0]
+            self.assertLess(obligation.amount, Decimal("0"))
+            self.assertEqual(obligation.cause_event_id, first["fill_id"])
+            self.assertIsNotNone(obligation.source_transaction_id)
+            self.assertIsNotNone(obligation.rule_binding)
+            self.assertTrue(
+                any(
+                    ref.startswith("artifact:")
+                    for ref in obligation.rule_binding.evidence_refs
+                )
+            )
+            self.assertEqual(settlements.settled_obligation_evidence, {})
+            projected = settlements.project(book)
+            self.assertEqual(projected.available_to_spend("USD"), Decimal(first["cash"]))
+            settlement_events = reopened.load_events_by_aggregate_type("settlement_book")
+            self.assertEqual(
+                [event["event_type"] for event in settlement_events],
+                ["SettlementObligationsRegistered"],
+            )
+
             sessions = reopened.load_events("canonical_simulation_session", "single-episode")
             self.assertEqual(
                 [event["event_type"] for event in sessions],
@@ -211,6 +244,10 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(
                 reopened.load_events("canonical_simulation_session", "single-episode"),
                 sessions,
+            )
+            self.assertEqual(
+                reopened.load_events_by_aggregate_type("settlement_book"),
+                settlement_events,
             )
             with self.assertRaisesRegex(ValueError, "another simulation input"):
                 run_canonical_simulation(HOLD, directory, episode_id="buy")
@@ -284,8 +321,25 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 self.assertEqual(result[key], completed["payload"][key])
             self.assertEqual(
                 started["payload"]["protocol_version"],
-                "canonical-simulation@3",
+                "canonical-simulation@4",
             )
+
+    def test_changed_settlement_configuration_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="settlement-config", now=NOW
+            )
+            with patch.object(
+                simulation_module,
+                "_SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS",
+                4,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="settlement-config"
+                    )
 
     def test_changed_fee_configuration_cannot_reinterpret_completed_state(self):
         with TemporaryDirectory() as directory:

@@ -268,17 +268,29 @@ def collect_journal_conservation_evidence(
         store,
         subject="runtime qualification JournalStore",
     )
-    try:
-        events = JournalStore.load_events_after_journal_sequence(
+    # Freeze the exact durable terminal cut before readback.  A later writer may
+    # extend the journal, but it cannot move the evidence horizon after outcomes
+    # are visible.  Bound the read to precisely this cut using the canonical
+    # JournalStore API rather than relying on a non-existent partial-tail mode.
+    cut_end = JournalStore.current_journal_sequence(store)
+    if type(cut_end) is not int or cut_end < start:
+        raise RuntimeLoadEvidenceError(
+            "journal terminal cut is invalid for the declared campaign start"
+        )
+    tail_length = cut_end - start
+    if tail_length > limit:
+        raise RuntimeLoadEvidenceError("journal tail is incomplete")
+    events = (
+        []
+        if tail_length == 0
+        else JournalStore.load_events_after_journal_sequence(
             store,
             start,
-            limit=limit,
-            allow_partial=False,
+            limit=tail_length,
         )
-    except ValueError as error:
-        if "journal tail exceeds limit" not in str(error):
-            raise
-        raise RuntimeLoadEvidenceError("journal tail is incomplete") from error
+    )
+    if len(events) != tail_length:
+        raise RuntimeLoadEvidenceError("journal tail is incomplete")
 
     end = start
     recovered_records: list[dict[str, object]] = []
@@ -328,6 +340,11 @@ def collect_journal_conservation_evidence(
                 "journal_sequence": sequence,
                 "payload_hash": event.get("payload_hash"),
             }
+        )
+
+    if end != cut_end:
+        raise RuntimeLoadEvidenceError(
+            "journal qualification did not reach the frozen terminal cut"
         )
 
     if len(recovered_ids) != len(set(recovered_ids)):

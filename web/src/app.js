@@ -116,24 +116,13 @@
   }
 
   function exactCounter(value, name) {
-    if (typeof value === "bigint") {
-      if (value < 0n) throw new Error(name + " must be non-negative");
-      return value;
+    if (
+      typeof value !== "string" ||
+      !/^(0|[1-9][0-9]*)$/.test(value)
+    ) {
+      throw new Error(name + " must be a canonical Sequence string");
     }
-    if (typeof value === "number") {
-      if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(name + " must be an exact non-negative integer");
-      }
-      return BigInt(value);
-    }
-    if (value === null || value === undefined) {
-      throw new Error(name + " is required");
-    }
-    const token = String(value);
-    if (!/^(0|[1-9][0-9]*)$/.test(token)) {
-      throw new Error(name + " must be a canonical non-negative integer");
-    }
-    return BigInt(token);
+    return BigInt(value);
   }
 
   function requiredText(value, name) {

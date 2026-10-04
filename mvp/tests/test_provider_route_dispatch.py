@@ -24,13 +24,15 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationAttestation,
     SignedQualificationAttestation,
 )
+from mvp.tests.provider_qualification_test_support import (
+    ExactQualificationProjectionHarness,
+)
 from mvp.tests.test_durable_capabilities import verified
 from mvp.tests.test_provider_qualification_authority import (
     CAMPAIGN_KIND,
     POLICY_ID,
     ROOT_ID,
     SOURCE_SHA,
-    _ProjectionOnlyRegistry,
     _artifact_id,
     _campaign_payload,
     _protocol,
@@ -131,12 +133,19 @@ class ProviderRouteDispatchTests(unittest.TestCase):
             )
         )
         evidence_root = Path(directory) / "evidence"
-        qualifications = _ProjectionOnlyRegistry(
+        harness = ExactQualificationProjectionHarness().start()
+        self.addCleanup(harness.stop)
+        qualifications = harness.registry(
             journal,
             evidence_store=ArtifactStore(evidence_root),
             evidence_root=evidence_root,
         )
         q1, receipt1, protocol1 = accepted_spot_q(ordinal=40)
+        harness.register(
+            protocol_key=protocol1.key,
+            record=q1,
+            receipt=receipt1,
+        )
         qualifications._append_accepted(
             protocol_key=protocol1.key,
             record=q1,
@@ -157,7 +166,15 @@ class ProviderRouteDispatchTests(unittest.TestCase):
             account_id="paper-account",
             owner_token="route-owner",
         )
-        return journal, capabilities, qualifications, selection.selected, dispatcher, q1
+        return (
+            journal,
+            capabilities,
+            qualifications,
+            selection.selected,
+            dispatcher,
+            q1,
+            harness,
+        )
 
     def dispatch(
         self,
@@ -189,7 +206,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_success_binds_q_and_c_into_durable_submission_scope(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, q1 = self.setup_route(directory)
+            journal, capabilities, qualifications, route, dispatcher, q1, _harness = self.setup_route(directory)
             wire = []
 
             def transport(_client_id, _request, final_guard):
@@ -223,12 +240,17 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_q1_superseded_by_q2_between_checks_produces_zero_wire(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, q1 = self.setup_route(directory)
+            journal, capabilities, qualifications, route, dispatcher, q1, harness = self.setup_route(directory)
             wire = []
 
             def transport(_client_id, _request, final_guard):
                 q2, receipt2, protocol2 = successor_spot_q(
                     old_qualification_id=q1.qualification_id,
+                )
+                harness.register(
+                    protocol_key=protocol2.key,
+                    record=q2,
+                    receipt=receipt2,
                 )
                 qualifications._append_accepted(
                     protocol_key=protocol2.key,
@@ -261,7 +283,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_c1_superseded_by_c2_between_checks_produces_zero_wire(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
+            journal, capabilities, qualifications, route, dispatcher, _q1, _harness = self.setup_route(directory)
             wire = []
 
             def transport(_client_id, _request, final_guard):
@@ -300,7 +322,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_q_expiry_at_final_barrier_produces_zero_wire(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
+            journal, capabilities, qualifications, route, dispatcher, _q1, _harness = self.setup_route(directory)
             wire = []
 
             def transport(_client_id, _request, final_guard):
@@ -327,7 +349,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_caller_cannot_override_route_authority_in_submission_scope(self):
         with TemporaryDirectory() as directory:
-            _journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
+            _journal, capabilities, qualifications, route, dispatcher, _q1, _harness = self.setup_route(directory)
             with self.assertRaisesRegex(ProviderRouteDispatchError, "override"):
                 self.dispatch(
                     dispatcher,
@@ -342,8 +364,8 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_dispatch_and_registries_must_share_exact_store_instance(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
-            other_q = _ProjectionOnlyRegistry(
+            journal, capabilities, qualifications, route, dispatcher, _q1, harness = self.setup_route(directory)
+            other_q = harness.registry(
                 JournalStore(Path(directory) / "journal.sqlite3"),
                 evidence_store=qualifications.evidence_store,
                 evidence_root=qualifications.evidence_root,

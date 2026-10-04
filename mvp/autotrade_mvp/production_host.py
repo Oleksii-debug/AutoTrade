@@ -112,9 +112,10 @@ def _readmit_production_host_config(
 
     if type(config) is not ProductionHostConfig:
         raise TypeError("config must be exact ProductionHostConfig")
-    state = vars(config)
-    if type(state) is not dict:
+    source_state = vars(config)
+    if type(source_state) is not dict:
         raise TypeError("production host config state must be an exact dict")
+    state = dict.copy(source_state)
     if any(type(key) is not str for key in state):
         raise TypeError("production host config field names must be exact strings")
     if set(state) != _CONFIG_FIELDS:

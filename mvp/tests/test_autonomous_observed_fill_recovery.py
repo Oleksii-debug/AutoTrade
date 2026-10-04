@@ -186,6 +186,15 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 Path(directory) / "journal.sqlite3"
             )
             cut = store.current_journal_sequence()
+
+            from mvp.autotrade_mvp.cli import get_status
+
+            self.assertEqual(
+                get_status(directory)["status"], "corrupt"
+            )
+            self.assertEqual(
+                store.current_journal_sequence(), cut
+            )
             with self.assertRaisesRegex(
                 ValueError, "simulator history differs"
             ):

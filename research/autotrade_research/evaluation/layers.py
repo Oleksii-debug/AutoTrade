@@ -362,6 +362,20 @@ class EvaluationLayerReceipt:
                 "historical GateDecision can only populate layer A or B"
             )
         payload = _gate_payload(decision)
+        check_statuses = tuple(payload["checks"].values())
+        derived_status = (
+            "FAIL"
+            if "FAIL" in check_statuses
+            else (
+                "INCONCLUSIVE"
+                if "INCONCLUSIVE" in check_statuses
+                else "PASS"
+            )
+        )
+        if decision.status != derived_status:
+            raise EvaluationLayersError(
+                "GateDecision status contradicts its own check statuses"
+            )
         return cls(
             layer=layer,
             candidate_id=candidate_id,

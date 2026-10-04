@@ -1576,6 +1576,48 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(missing_value.required_lower_bound, Decimal("0"))
             self.assertEqual(missing_value.uncertainty_multiplier, Decimal("2"))
 
+            population_payload = dict(base)
+            population_payload["ablation_decision_policy"] = dict(
+                decision_only_payload["ablation_decision_policy"]
+            )
+            population_payload["ablation_value_policy"] = {
+                "schema_version": "1.0.0",
+                "value_unit": "USD",
+                "utility_projection_ref": (
+                    "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                    + "1" * 64
+                ),
+                "cost_projection_ref": (
+                    "artifact:22222222-2222-4222-8222-222222222222@sha256:"
+                    + "2" * 64
+                ),
+                "fx_valuation_ref": None,
+            }
+            population_registration = science.register_protocol(
+                population_payload,
+                protocol_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            )
+            shadowed_authority = authority_for(population_registration)
+            shadow_calls: list[str] = []
+
+            def hostile_population_resolver(*_args, **_kwargs):
+                shadow_calls.append("resolve_population")
+                raise AssertionError("instance population resolver executed")
+
+            shadowed_authority.resolve_population = hostile_population_resolver
+            shadow_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=shadowed_authority,
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+            )
+            self.assertEqual(
+                shadow_result.reason,
+                "canonical_population_evidence_unavailable",
+            )
+            self.assertEqual(shadow_calls, [])
+
             fx_required_payload = dict(base)
             fx_required_payload["ablation_decision_policy"] = dict(
                 decision_only_payload["ablation_decision_policy"]

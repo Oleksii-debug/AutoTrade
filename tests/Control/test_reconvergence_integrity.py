@@ -167,11 +167,15 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             if path.is_file()
         )
         self.assertGreaterEqual(len(workflows), 10)
-        self.assertEqual(
-            sorted(set(workflows) - PROTECTED_SENTINELS),
-            [],
-            "every checked-in workflow authority must be a protected sentinel",
-        )
+        for workflow in workflows:
+            with self.subTest(workflow=workflow):
+                result = assess_reconvergence(
+                    base_paths=[workflow, "README.md"],
+                    changes=[Change(status="D", path=workflow)],
+                )
+                self.assertFalse(result.allowed)
+                self.assertEqual(result.protected_deletions, (workflow,))
+                self.assertIn(workflow, result.protected_violations)
 
     def test_protected_sentinel_rename_away_fails_closed(self):
         sentinel = "control/INDEX.json"

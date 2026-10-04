@@ -299,16 +299,59 @@ def _direct_wire_execution_claim_payload(
     terminal_authority_journal_sequence_cut: int,
     terminal_authority_verified_at: str,
 ) -> dict[str, object]:
+    attempt = _exact_text(attempt_id, name="wire execution attempt_id")
+    qualified_digest = _exact_text(
+        qualified_query_digest,
+        name="wire execution qualified_query_digest",
+    )
+    qualification = _exact_text(
+        qualification_id,
+        name="wire execution qualification_id",
+    )
+    response_digest = _exact_text(
+        response_sha256,
+        name="wire execution response_sha256",
+    )
+    request_digest = _exact_text(
+        wire_request_sha256,
+        name="wire execution request_sha256",
+    )
+    semantics_digest = _exact_text(
+        wire_request_semantics_sha256,
+        name="wire execution request semantics sha256",
+    )
+    for name, value in (
+        ("qualified_query_digest", qualified_digest),
+        ("response_sha256", response_digest),
+        ("wire_request_sha256", request_digest),
+        ("wire_request_semantics_sha256", semantics_digest),
+    ):
+        if _SHA256_RE.fullmatch(value) is None:
+            raise ProviderOriginError(f"wire execution {name} is non-canonical")
+    if _QID_RE.fullmatch(qualification) is None:
+        raise ProviderOriginError("wire execution qualification_id is non-canonical")
+    observed = _exact_text(observed_at, name="wire execution observed_at")
+    verified = _exact_text(
+        terminal_authority_verified_at,
+        name="wire execution terminal authority verified_at",
+    )
+    _parse_utc_text(observed, name="wire execution observed_at")
+    _parse_utc_text(verified, name="wire execution terminal authority verified_at")
+    cut = terminal_authority_journal_sequence_cut
+    if type(cut) is not int or cut < 0:
+        raise ProviderOriginError(
+            "wire execution terminal authority cut is invalid"
+        )
     return {
-        "attempt_id": attempt_id,
-        "qualified_query_digest": qualified_query_digest,
-        "qualification_id": qualification_id,
-        "response_sha256": response_sha256,
-        "observed_at": observed_at,
-        "wire_request_sha256": wire_request_sha256,
-        "wire_request_semantics_sha256": wire_request_semantics_sha256,
-        "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
-        "terminal_authority_verified_at": terminal_authority_verified_at,
+        "attempt_id": attempt,
+        "qualified_query_digest": qualified_digest,
+        "qualification_id": qualification,
+        "response_sha256": response_digest,
+        "observed_at": observed,
+        "wire_request_sha256": request_digest,
+        "wire_request_semantics_sha256": semantics_digest,
+        "terminal_authority_journal_sequence_cut": cut,
+        "terminal_authority_verified_at": verified,
     }
 
 

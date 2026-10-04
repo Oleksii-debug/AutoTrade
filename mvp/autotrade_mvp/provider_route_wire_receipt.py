@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import weakref
+from urllib.parse import urlencode
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .durable_capabilities import DurableCapabilityRegistry
@@ -22,6 +23,10 @@ from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .persistence import canonical_json
 from .provider_qualification_authority import ProviderQualificationError
 from .provider_qualification_current_scope import ProviderQualificationCurrentScope
+from .provider_core import ProviderResponseObservation
+from .provider_route_financial_binding import (
+    build_selected_provider_route_transport_capability_registry,
+)
 from .provider_route_reads import (
     QualifiedProviderReadQueryBinding,
     _require_qualified_provider_read_binding_authority,
@@ -30,7 +35,10 @@ from .provider_selection import SelectedProviderRoute
 from .provider_transport import (
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
-    ProviderWireClient,
+    BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5AuthenticatedReadTransport,
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    UrllibJsonWireClient,
 )
 
 
@@ -84,6 +92,67 @@ def _request_digest(request: AuthenticatedReadHttpRequest) -> str:
         "timeout_seconds": request.timeout_seconds,
     }
     return "sha256:" + sha256(canonical_json(material).encode("utf-8")).hexdigest()
+
+
+def _require_request_matches_binding(
+    request: AuthenticatedReadHttpRequest,
+    *,
+    query_binding: QualifiedProviderReadQueryBinding,
+) -> None:
+    _require_qualified_provider_read_binding_authority(query_binding)
+    base = query_binding.query_binding
+    policy = BYBIT_V5_ENDPOINT_POLICIES.get(query_binding.provider_environment)
+    if policy is None:
+        raise QualifiedProviderReadWireError(
+            "qualified Bybit read has unsupported provider environment"
+        )
+    expected_url = (
+        policy.absolute_url(base.endpoint)
+        + "?"
+        + urlencode(sorted(base.query.items()))
+    )
+    if (
+        request.method != "GET"
+        or request.body != b""
+        or request.url != expected_url
+        or request.timeout_seconds != policy.timeout_seconds
+    ):
+        raise QualifiedProviderReadWireError(
+            "terminal signed request differs from exact qualified Bybit query"
+        )
+    expected_headers = {
+        "Accept",
+        "X-BAPI-API-KEY",
+        "X-BAPI-TIMESTAMP",
+        "X-BAPI-RECV-WINDOW",
+        "X-BAPI-SIGN",
+    }
+    headers = request.headers
+    if set(headers) != expected_headers or headers.get("Accept") != "application/json":
+        raise QualifiedProviderReadWireError(
+            "terminal signed request headers are not canonical Bybit V5 auth"
+        )
+    api_key = headers.get("X-BAPI-API-KEY")
+    timestamp = headers.get("X-BAPI-TIMESTAMP")
+    recv_window = headers.get("X-BAPI-RECV-WINDOW")
+    signature = headers.get("X-BAPI-SIGN")
+    if (
+        type(api_key) is not str
+        or not api_key
+        or type(timestamp) is not str
+        or not timestamp.isascii()
+        or not timestamp.isdigit()
+        or type(recv_window) is not str
+        or not recv_window.isascii()
+        or not recv_window.isdigit()
+        or not 1 <= int(recv_window) <= 60000
+        or type(signature) is not str
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise QualifiedProviderReadWireError(
+            "terminal signed request auth material is malformed"
+        )
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -236,7 +305,7 @@ class QualifiedBybitReadWireClient:
         query_binding: QualifiedProviderReadQueryBinding,
         capability_registry: DurableCapabilityRegistry,
         qualification_registry: DurableProviderQualificationRegistry,
-        delegate: ProviderWireClient,
+        delegate: UrllibJsonWireClient,
         clock_utc,
     ) -> None:
         if type(route) is not SelectedProviderRoute:
@@ -258,8 +327,10 @@ class QualifiedBybitReadWireClient:
             raise QualifiedProviderReadWireError(
                 "terminal C/Q authorities must share one exact JournalStore"
             )
-        if not hasattr(delegate, "send"):
-            raise TypeError("delegate must implement ProviderWireClient.send")
+        if type(delegate) is not UrllibJsonWireClient:
+            raise TypeError(
+                "delegate must be exact canonical UrllibJsonWireClient"
+            )
         if not callable(clock_utc):
             raise TypeError("clock_utc must be callable")
 
@@ -380,9 +451,15 @@ class QualifiedBybitReadWireClient:
             raise QualifiedProviderReadWireError(
                 "qualified provider-read wire client is one-shot"
             )
+        _require_request_matches_binding(
+            request,
+            query_binding=self.query_binding,
+        )
         cut, authorized_at = self._terminal_authority()
         self._used = True
-        response = self.delegate.send(request)
+        # Call the canonical class implementation directly. Instance-level
+        # replacement of ``send`` cannot become provider-origin authority.
+        response = UrllibJsonWireClient.send(self.delegate, request)
         if type(response) is not AuthenticatedReadWireResponse:
             raise QualifiedProviderReadWireError(
                 "qualified provider-read wire delegate must preserve exact HTTP status"
@@ -412,3 +489,105 @@ class QualifiedBybitReadWireClient:
         _register_wire_receipt_authority(receipt)
         self._receipt = receipt
         return response
+
+
+@dataclass(frozen=True, slots=True)
+class QualifiedBybitReadExecution:
+    observation: ProviderResponseObservation
+    receipt: QualifiedProviderReadWireReceipt
+
+    def __post_init__(self) -> None:
+        if type(self.observation) is not ProviderResponseObservation:
+            raise TypeError("observation must be exact ProviderResponseObservation")
+        _require_wire_receipt_authority(self.receipt)
+        if self.observation.query_binding is not self.receipt.query_binding.query_binding:
+            raise QualifiedProviderReadWireError(
+                "transport observation differs from wire receipt query"
+            )
+        if (
+            self.observation.http_status != self.receipt.http_status
+            or self.observation.response_sha256 != self.receipt.response_sha256
+        ):
+            raise QualifiedProviderReadWireError(
+                "transport observation differs from exact wire receipt response"
+            )
+
+
+def execute_qualified_bybit_read(
+    *,
+    route: SelectedProviderRoute,
+    query_binding: QualifiedProviderReadQueryBinding,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
+    secret_resolver,
+    credential_handle,
+    session_token: str,
+    origin: str,
+    execution_identity: str,
+    clock_millis,
+    clock_utc,
+    quota_gate=None,
+    recv_window_ms: int = 5000,
+    max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+) -> QualifiedBybitReadExecution:
+    """Execute one product Bybit read and return its non-self-mintable receipt.
+
+    No caller-selected network client is accepted. The shared Bybit transport
+    owns signing/credential handling; this module owns exact durable C/Q at the
+    final wire boundary and the canonical urllib client owns the network call.
+    """
+
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
+    if type(query_binding) is not QualifiedProviderReadQueryBinding:
+        raise TypeError(
+            "query_binding must be exact QualifiedProviderReadQueryBinding"
+        )
+    candidate = route.candidate
+    if candidate.provider_id != "BYBIT":
+        raise QualifiedProviderReadWireError(
+            "execute_qualified_bybit_read requires selected BYBIT route"
+        )
+    policy = BYBIT_V5_ENDPOINT_POLICIES.get(candidate.provider_environment)
+    if policy is None:
+        raise QualifiedProviderReadWireError(
+            "selected BYBIT route has unsupported provider environment"
+        )
+    delegate = UrllibJsonWireClient(max_response_bytes=max_response_bytes)
+    terminal = QualifiedBybitReadWireClient(
+        route=route,
+        query_binding=query_binding,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
+        delegate=delegate,
+        clock_utc=clock_utc,
+    )
+    transport = BybitV5AuthenticatedReadTransport(
+        policy=policy,
+        provider_environment=candidate.provider_environment,
+        account_id=candidate.account_id,
+        capability_snapshot_id=route.capability_snapshot_id,
+        capability_registry=build_selected_provider_route_transport_capability_registry(
+            route
+        ),
+        secret_resolver=secret_resolver,
+        credential_handle=credential_handle,
+        session_token=session_token,
+        origin=origin,
+        execution_identity=execution_identity,
+        clock_millis=clock_millis,
+        clock_utc=clock_utc,
+        quota_gate=quota_gate,
+        wire_client=terminal,
+        recv_window_ms=recv_window_ms,
+    )
+    observation = transport(query_binding.query_binding)
+    receipt = terminal.receipt
+    if receipt is None:
+        raise QualifiedProviderReadWireError(
+            "canonical Bybit transport returned without terminal wire receipt"
+        )
+    return QualifiedBybitReadExecution(
+        observation=observation,
+        receipt=receipt,
+    )

@@ -44,6 +44,25 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/ui.schema.json#/$defs/UiSnapshot
+        "503":
+          description: A coherent snapshot could not be projected within the bounded retry window because durable state kept advancing. No mixed-cut snapshot is returned; clients may retry.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              description: Minimum retry delay in seconds.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [error, retryable]
+                properties:
+                  error:
+                    const: SNAPSHOT_BUSY
+                  retryable:
+                    const: true
   /api/v1/commands:
     post:
       operationId: submitCommand

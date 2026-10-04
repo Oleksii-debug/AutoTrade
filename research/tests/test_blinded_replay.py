@@ -172,6 +172,37 @@ class Section17BlindedReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(BlindingError, "undeclared absolute date"):
             self.blind(source)
 
+    def test_rejects_multiple_absolute_calendar_spellings(self):
+        leaking_dates = (
+            "2024-03-12",
+            "2024/03/12",
+            "2024.03.12",
+            "12/03/2024",
+            "12.03.2024",
+            "March 12, 2024",
+            "12 March 2024",
+        )
+        for leaked in leaking_dates:
+            with self.subTest(leaked=leaked):
+                source = dataset(
+                    event("one", payload_extra={"note": f"known on {leaked}"})
+                )
+                with self.assertRaisesRegex(BlindingError, "absolute date"):
+                    self.blind(source)
+
+    def test_rejects_unregistered_identity_namespace(self):
+        with self.assertRaisesRegex(BlindingError, "registered neutral"):
+            IdentityField(("instrument_id",), "SECRET_CUSTOM_ROLE")
+
+    def test_rejects_parent_child_path_overlap(self):
+        with self.assertRaisesRegex(BlindingError, "non-overlapping"):
+            BlindingProfile(
+                identity_fields=(
+                    IdentityField(("entity",), "ENTITY"),
+                    IdentityField(("entity", "provider"), "PROVIDER"),
+                )
+            )
+
     def test_masks_declared_payload_calendar_as_relative_offset(self):
         source = dataset(
             event(
@@ -591,7 +622,7 @@ class Section17BlindedReplayTests(unittest.TestCase):
 
         wrong_profile = BlindingProfile(
             identity_fields=(
-                IdentityField(("instrument_id",), "ASSET", required=True),
+                IdentityField(("instrument_id",), "COMPANY", required=True),
                 IdentityField(("provider_id",), "PROVIDER", required=True),
             )
         )

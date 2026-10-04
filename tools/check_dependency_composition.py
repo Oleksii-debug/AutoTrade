@@ -11,6 +11,7 @@ import json
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import tomllib
 import xml.etree.ElementTree as ET
 
@@ -229,14 +230,31 @@ def _dotnet_dependency_lock_blockers(
         blockers.append("DOTNET_LOCKED_RESTORE_COMMAND_MISSING")
         return blockers
 
+    restore_tokens: list[list[str]] = []
     for index, command in enumerate(restore_commands, start=1):
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            blockers.append(
+                "DOTNET_RESTORE_COMMAND_INVALID:"
+                f".github/workflows/dotnet-foundation.yml:{index}"
+            )
+            continue
+        restore_tokens.append(tokens)
         if (
-            "--locked-mode" not in command
+            "--locked-mode" not in tokens
             and "RestoreLockedMode=true" not in command
         ):
             blockers.append(
                 "DOTNET_RESTORE_NOT_LOCKED:"
                 f".github/workflows/dotnet-foundation.yml:{index}"
+            )
+
+    for project in projects:
+        relative = project.relative_to(root).as_posix()
+        if not any(relative in tokens for tokens in restore_tokens):
+            blockers.append(
+                f"DOTNET_LOCKED_RESTORE_PROJECT_MISSING:{relative}"
             )
     return blockers
 

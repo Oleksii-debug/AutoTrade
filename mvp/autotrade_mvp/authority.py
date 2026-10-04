@@ -1378,7 +1378,9 @@ def _validate_confirmation_financial_binding(
     """Recompute a persisted confirmation binding from durable evidence."""
 
     if confirmation.financial_binding_hash is None:
-        return
+        raise AuthorityConflict(
+            "durable confirmed admission lacks financial binding"
+        )
     risk_intent_payload = _durable_risk_intent_payload(
         durable_risk_intent
     )

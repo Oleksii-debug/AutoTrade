@@ -51,11 +51,11 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {})", js)
         self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged})", js)
+        self.assertIn("renderPermissionSummary(\n      parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
-        self.assertIn("renderJobs(parsed.jobs, {preserveSelection: !scopeChanged})", js)
+        self.assertIn("renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged})", js)
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 
@@ -100,23 +100,38 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("row.children[1].textContent = stateVersion.toString()", js)
         self.assertIn("row.children[2].textContent = kind", js)
         self.assertIn("row.children[3].textContent = projectionText(payload)", js)
-        self.assertIn("while (body.children.length > 100)", js)
+        event = js[js.index("function renderHostEvent"):js.index("function resetOperationsForScope")]
+        self.assertIn('const rowHeader = document.createElement("th")', event)
+        self.assertIn('rowHeader.scope = "row"', event)
+        self.assertIn("for (const expired of retained.slice(100)) expired.remove();", event)
         self.assertNotIn("innerHTML", js)
 
-    def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
+    def test_account_or_environment_scope_change_clears_derived_evidence_and_counter_baseline(self):
         js = APP.read_text(encoding="utf-8")
-        self.assertIn("function resetEventHistoryForScope()", js)
-        self.assertIn("const scopeChanged = state.accountId !== null", js)
-        self.assertIn("parsed.accountId !== state.accountId", js)
-        self.assertIn("parsed.environment !== state.environment", js)
-        scope = js.index("if (scopeChanged)")
+        self.assertIn("renderedHostId: null", js)
+        self.assertIn("renderedAccountId: null", js)
+        self.assertIn("renderedEnvironment: null", js)
+        self.assertIn("const scopeChanged = state.renderedAccountId !== null", js)
+        self.assertIn("parsed.accountId !== state.renderedAccountId", js)
+        self.assertIn("parsed.environment !== state.renderedEnvironment", js)
+        scope = js.index("if (displayContextChanged)")
         cursor_reset = js.index("state.cursor = 0n", scope)
         version_reset = js.index("state.version = 0n", scope)
-        history_reset = js.index("resetEventHistoryForScope()", scope)
+        notifications_reset = js.index("resetNotificationsForScope();", scope)
+        filters_reset = js.index("resetTableFiltersForScopeChange();", scope)
+        operations_reset = js.index("resetOperationsForScope();", scope)
+        history_reset = js.index("resetEventHistoryForScope();", scope)
         regression_check = js.index("host snapshot counters regressed", scope)
         self.assertLess(cursor_reset, regression_check)
         self.assertLess(version_reset, regression_check)
+        self.assertLess(notifications_reset, filters_reset)
+        self.assertLess(filters_reset, operations_reset)
+        self.assertLess(operations_reset, history_reset)
         self.assertLess(history_reset, regression_check)
+        self.assertIn(
+            "No host operations loaded for this account/environment session.",
+            js,
+        )
         self.assertIn(
             "No canonical host events received in this account/environment session.",
             js,
@@ -930,13 +945,13 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'body, "Capability " + String(index + 1), capability',
             js,
         )
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged})", js)
+        self.assertIn("renderPermissionSummary(\n      parsed.permissionSummary, {preserveSelection: !displayContextChanged})", js)
 
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
             self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
@@ -954,6 +969,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('row.dataset.filterableRow = "true"', js)
         self.assertIn("tableSearchText(row).includes(query)", js)
         self.assertIn("row.hidden = !matches", js)
+        self.assertIn('reapplyTableFilter("permissions-body")', js)
+        self.assertIn('reapplyTableFilter("operations-body")', js)
         self.assertIn('reapplyTableFilter("jobs-body")', js)
         self.assertIn('reapplyTableFilter("event-history-body")', js)
         self.assertIn("reapplyTableFilter(bodyId)", js)
@@ -985,7 +1002,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("tableViewFor(tool).page = 0", reset)
         self.assertEqual(reset.count("queuePoliteAnnouncement("), 1)
         snapshot = js[js.index("function renderSnapshot(snapshot"):js.index("async function refreshSnapshot")]
-        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index("resetEventHistoryForScope();"))
+        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index("resetOperationsForScope();"))
+        self.assertLess(snapshot.index("resetOperationsForScope();"), snapshot.index("resetEventHistoryForScope();"))
         self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index('renderProjection(\n      "portfolio-body"'))
 
     def test_copy_visible_rows_uses_only_rendered_text_and_accessible_fallback(self):
@@ -1002,7 +1020,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         parser = _ElementParser()
         parser.feed(html)
         by_id = {attrs["id"]: (tag, attrs) for tag, attrs in parser.elements if "id" in attrs}
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             status_id = f"{prefix}-filter-status"
             tag, attrs = by_id[status_id]
             self.assertEqual(tag, "p", status_id)
@@ -1055,6 +1073,60 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("announce(message", copy)
 
 
+    def test_permission_and_operation_tables_share_modern_keyboard_tools(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in ("permissions", "operations"):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-previous" type="button"', html)
+            self.assertIn(f'id="{prefix}-next" type="button"', html)
+            self.assertIn(f'"{prefix}-filter"', js)
+            self.assertIn(f'"{prefix}-sort"', js)
+        self.assertIn('reapplyTableFilter("permissions-body")', js)
+        operation = js[js.index("function renderOperation"):js.index("async function refreshOperation")]
+        self.assertIn('row.dataset.filterableRow = "true"', operation)
+        self.assertIn('row.dataset.selectionKey = "operation:" + operation.operationId', operation)
+        self.assertIn('const rowHeader = document.createElement("th")', operation)
+        self.assertIn('rowHeader.scope = "row"', operation)
+        self.assertIn('reapplyTableFilter("operations-body")', operation)
+
+    def test_rendered_display_scope_survives_command_authority_invalidation(self):
+        js = APP.read_text(encoding="utf-8")
+        invalidate = js[js.index("function invalidateSnapshotAuthority"):js.index("function isSnapshotBusy")]
+        self.assertIn("state.accountId = null", invalidate)
+        self.assertIn("state.environment = null", invalidate)
+        self.assertNotIn("state.renderedHostId = null", invalidate)
+        self.assertNotIn("state.renderedAccountId = null", invalidate)
+        self.assertNotIn("state.renderedEnvironment = null", invalidate)
+        pagehide = js[js.index('window.addEventListener("pagehide"'):js.index('window.addEventListener("pageshow"')]
+        self.assertNotIn("state.renderedAccountId = null", pagehide)
+        self.assertNotIn("state.renderedEnvironment = null", pagehide)
+
+    def test_same_scope_snapshot_cursor_gap_clears_event_derived_views(self):
+        js = APP.read_text(encoding="utf-8")
+        snapshot = js[js.index("function renderSnapshot"):js.index("async function refreshSnapshot")]
+        self.assertIn("const priorCursor = state.cursor;", snapshot)
+        self.assertIn("const skippedSameScopeEvents =", snapshot)
+        self.assertIn("parsed.cursor > priorCursor", snapshot)
+        gap = snapshot[snapshot.index("if (skippedSameScopeEvents)"):]
+        self.assertIn("resetNotificationsForScope(", gap)
+        self.assertIn("resetOperationsForScope(", gap)
+        self.assertIn("resetEventHistoryForScope(", gap)
+        self.assertIn("were cleared rather than shown as current", gap)
+        self.assertNotIn("missing events", gap.lower())
+
+    def test_dynamic_operation_and_event_tables_use_semantic_row_headers(self):
+        js = APP.read_text(encoding="utf-8")
+        operation = js[js.index("function renderOperation"):js.index("async function refreshOperation")]
+        event = js[js.index("function renderHostEvent"):js.index("function resetOperationsForScope")]
+        for scope in (operation, event):
+            self.assertIn('const rowHeader = document.createElement("th")', scope)
+            self.assertIn('rowHeader.scope = "row"', scope)
+            self.assertIn("row.appendChild(rowHeader)", scope)
+            self.assertIn("for (let index = 1; index < 4; index += 1)", scope)
+
     def test_table_sort_and_paging_are_bounded_local_and_stably_described(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
@@ -1069,7 +1141,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         table_scope = js[js.index("function tableViewFor"):js.index("function announceLiveText")]
         self.assertNotIn("fetch(", table_scope)
         self.assertNotIn("submitCanonicalCommand", table_scope)
-        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+        for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn('<option value="host">Host order</option>', html)
             self.assertIn(f'id="{prefix}-previous" type="button"', html)
             self.assertIn(f'id="{prefix}-next" type="button"', html)

@@ -116,6 +116,41 @@ class ReleaseQualificationTests(unittest.TestCase):
             "FAIL",
         )
 
+    def test_mutated_invalid_release_check_status_fails_closed(self):
+        checks = list(all_checks())
+        index = REQUIRED_RELEASE_CHECKS.index(
+            "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"
+        )
+        object.__setattr__(checks[index], "status", "GREEN")
+
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "status must be PASS, FAIL or INCONCLUSIVE",
+        ):
+            evaluate_release(candidate(), checks)
+
+    def test_mutated_candidate_signature_type_is_revalidated(self):
+        release_candidate = candidate()
+        object.__setattr__(release_candidate, "signatures_verified", "true")
+
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "signatures_verified must be boolean",
+        ):
+            evaluate_release(release_candidate, all_checks())
+
+    def test_release_check_subclass_is_rejected_before_attribute_dispatch(self):
+        class HostileReleaseCheck(ReleaseCheck):
+            def __getattribute__(self, name):
+                raise AssertionError("release-check subclass callback must not run")
+
+        forged = object.__new__(HostileReleaseCheck)
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "release check must be exact ReleaseCheck",
+        ):
+            evaluate_release(candidate(), (forged,))
+
     def test_unsigned_artifacts_cannot_pass_even_with_green_checks(self):
         decision = evaluate_release(candidate(signatures=False), all_checks())
         self.assertEqual(decision.status, "FAIL")

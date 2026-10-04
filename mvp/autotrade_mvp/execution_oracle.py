@@ -247,6 +247,16 @@ def assert_conservative_execution(
     result = _detached_execution_result(result)
     if observation.instrument_version != order.instrument_version:
         raise ExecutionOracleError("instrument identity mismatch")
+    if order.order_type == "MARKET":
+        projection = model.price_projection
+        if projection is None:
+            raise ExecutionOracleError(
+                "MARKET execution requires authoritative price projection policy"
+            )
+        if projection.instrument_version != order.instrument_version:
+            raise ExecutionOracleError(
+                "price projection instrument_version must match order instrument_version"
+            )
     if result.model_fingerprint != model.fingerprint:
         raise ExecutionOracleError("result model fingerprint mismatch")
     if result.data_fidelity != model.data_fidelity or result.scenario != model.scenario:

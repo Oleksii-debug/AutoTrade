@@ -22,7 +22,9 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
+from .durable_settlement import DurableSettlementBook
 from .exact_decimal import exact_add, exact_subtract, exact_abs
+from .provider_activity_accounting import DurableProviderEconomicBook
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -565,6 +567,342 @@ def _authority_store_call(
         )
     with journal_store_authority_scope(store, expected_identity):
         return method(store, *args, **kwargs)
+
+
+def _authority_service_capital_operations():
+    """Retain the selected local-capital composition outside caller-writable state."""
+
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            DurableSettlementBook | None,
+            DurableProviderEconomicBook | None,
+        ],
+    ] = {}
+    lock = threading.RLock()
+
+    def register(
+        service: object,
+        settlement_book: DurableSettlementBook | None,
+        economic_book: DurableProviderEconomicBook | None,
+    ) -> None:
+        if (settlement_book is None) != (economic_book is None):
+            raise TypeError(
+                "settlement_book and economic_book must be supplied together"
+            )
+        if settlement_book is not None:
+            if type(settlement_book) is not DurableSettlementBook:
+                raise TypeError(
+                    "settlement_book must be exact DurableSettlementBook"
+                )
+            if type(economic_book) is not DurableProviderEconomicBook:
+                raise TypeError(
+                    "economic_book must be exact DurableProviderEconomicBook"
+                )
+            store = _authority_service_store(service, required=True)
+            selected_store, _identity, scope, _scope_id = (
+                DurableSettlementBook._selected_authority(settlement_book)
+            )
+            DurableProviderEconomicBook.read_cut(economic_book)
+            if selected_store is not store or economic_book.store is not store:
+                raise AuthorityConflict(
+                    "capital authorities must share the AuthorityService JournalStore"
+                )
+            if (
+                scope.provider_id != economic_book.provider_id
+                or scope.account_id != economic_book.account_id
+                or scope.environment != economic_book.environment
+            ):
+                raise AuthorityConflict(
+                    "settlement and economic capital scopes do not match"
+                )
+            # DurableProviderEconomicBook does not yet retain provider_environment.
+            # Never collapse BYBIT TESTNET/DEMO into generic PAPER authority.
+            if (
+                scope.provider_id == "BYBIT"
+                and scope.provider_environment != scope.environment
+            ):
+                raise AuthorityConflict(
+                    "BYBIT capital authority requires provider_environment "
+                    "in the durable economic book"
+                )
+
+        object_id = id(service)
+        with lock:
+            current = states.get(object_id)
+            if current is not None and current[0]() is service:
+                raise AuthorityConflict(
+                    "AuthorityService capital composition is already initialized"
+                )
+            if current is not None and current[0]() is not None:
+                raise AuthorityConflict(
+                    "AuthorityService capital binding identity collision"
+                )
+            states[object_id] = (
+                weakref.ref(service),
+                settlement_book,
+                economic_book,
+            )
+
+    def binding(
+        service: object,
+        *,
+        required: bool = False,
+    ) -> tuple[
+        DurableSettlementBook | None,
+        DurableProviderEconomicBook | None,
+    ]:
+        with lock:
+            state = states.get(id(service))
+        if state is None or state[0]() is not service:
+            raise AuthorityConflict(
+                "AuthorityService capital process state is unavailable"
+            )
+        settlement_book, economic_book = state[1], state[2]
+        if settlement_book is None:
+            if required:
+                raise AuthorityConflict(
+                    "financial admission requires configured local capital authority"
+                )
+            return None, None
+
+        store = _authority_service_store(service, required=True)
+        selected_store, _identity, scope, _scope_id = (
+            DurableSettlementBook._selected_authority(settlement_book)
+        )
+        DurableProviderEconomicBook.read_cut(economic_book)
+        if selected_store is not store or economic_book.store is not store:
+            raise AuthorityConflict(
+                "capital authority JournalStore binding changed"
+            )
+        if (
+            scope.provider_id != economic_book.provider_id
+            or scope.account_id != economic_book.account_id
+            or scope.environment != economic_book.environment
+        ):
+            raise AuthorityConflict("capital authority scope changed")
+        return settlement_book, economic_book
+
+    def resolve(
+        service: object,
+        provider_available: Mapping[str, object],
+        resources: tuple[str, ...],
+        *,
+        required: bool = False,
+    ) -> dict[str, object] | None:
+        settlement_book, economic_book = binding(service, required=required)
+        if settlement_book is None:
+            return None
+        cash_resources = tuple(
+            sorted(resource for resource in resources if resource.startswith("CASH:"))
+        )
+        if not cash_resources:
+            return None
+
+        store = _authority_service_store(service, required=True)
+        before = _authority_store_call(service, "current_journal_sequence")
+        DurableProviderEconomicBook.refresh(economic_book)
+        projection = DurableSettlementBook.project(
+            settlement_book,
+            economic_book,
+        )
+        after = _authority_store_call(service, "current_journal_sequence")
+        if before != after:
+            raise AuthorityConflict(
+                "capital authority changed while spendable cash was projected"
+            )
+
+        _selected_store, _identity, scope, scope_id = (
+            DurableSettlementBook._selected_authority(settlement_book)
+        )
+        adjustments: dict[str, dict[str, str]] = {}
+        for resource in cash_resources:
+            raw_provider = provider_available.get(resource)
+            if raw_provider is None:
+                raise AuthorityConflict(
+                    f"provider availability lacks required cash resource {resource}"
+                )
+            provider_amount = _decimal(
+                raw_provider,
+                name=f"provider availability[{resource}]",
+            )
+            if provider_amount < 0:
+                raise AuthorityConflict(
+                    "provider cash availability must be non-negative"
+                )
+            currency = resource.removeprefix("CASH:")
+            local_amount = projection.available_to_spend(currency)
+            if local_amount < 0:
+                raise AuthorityConflict(
+                    "local spendable cash must be non-negative"
+                )
+            effective = min(provider_amount, local_amount)
+            adjustments[resource] = {
+                "provider_available": _canonical_decimal_text(provider_amount),
+                "local_available": _canonical_decimal_text(local_amount),
+                "effective_available": _canonical_decimal_text(effective),
+            }
+        return {
+            "schema_version": "settlement-capital-cut.v1",
+            "journal_sequence": after,
+            "provider_id": scope.provider_id,
+            "account_id": scope.account_id,
+            "environment": scope.environment,
+            "provider_environment": scope.provider_environment,
+            "settlement_scope_id": scope_id,
+            "economic_book_id": economic_book.book_id,
+            "resources": adjustments,
+        }
+
+    return register, binding, resolve
+
+
+(
+    _register_authority_service_capital,
+    _authority_service_capital_binding,
+    _resolve_authority_service_capital,
+) = _authority_service_capital_operations()
+del _authority_service_capital_operations
+
+
+def _canonical_settlement_capital_adjustment(
+    value: object,
+    *,
+    provider_available: Mapping[str, object],
+    required_resources: tuple[str, ...],
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    risk_journal_sequence: int | None = None,
+) -> tuple[dict[str, object], dict[str, Decimal]]:
+    if not isinstance(value, Mapping):
+        raise AuthorityConflict("settlement capital adjustment is malformed")
+    expected_fields = {
+        "schema_version",
+        "journal_sequence",
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_environment",
+        "settlement_scope_id",
+        "economic_book_id",
+        "resources",
+    }
+    if set(value) != expected_fields:
+        raise AuthorityConflict("settlement capital adjustment is malformed")
+    if value.get("schema_version") != "settlement-capital-cut.v1":
+        raise AuthorityConflict("settlement capital schema is unsupported")
+    journal_sequence = value.get("journal_sequence")
+    if type(journal_sequence) is not int or journal_sequence < 0:
+        raise AuthorityConflict("settlement capital journal cut is invalid")
+    if (
+        risk_journal_sequence is not None
+        and journal_sequence >= risk_journal_sequence
+    ):
+        raise AuthorityConflict(
+            "settlement capital cut must precede the durable risk decision"
+        )
+    canonical_provider = _text(provider_id, name="provider_id").upper()
+    canonical_account = _text(account_id, name="account_id")
+    canonical_environment = _text(environment, name="environment").upper()
+    if (
+        value.get("provider_id") != canonical_provider
+        or value.get("account_id") != canonical_account
+        or value.get("environment") != canonical_environment
+    ):
+        raise AuthorityConflict("settlement capital scope is inconsistent")
+    provider_environment = _text(
+        value.get("provider_environment"),
+        name="provider_environment",
+    ).upper()
+    # Until DurableProviderEconomicBook carries provider_environment, only an
+    # unambiguous runtime==provider domain can be consumed here.
+    if provider_environment != canonical_environment:
+        raise AuthorityConflict(
+            "settlement capital provider domain is not represented by economic authority"
+        )
+    settlement_scope_id = _text(
+        value.get("settlement_scope_id"),
+        name="settlement_scope_id",
+    )
+    economic_book_id = _text(
+        value.get("economic_book_id"),
+        name="economic_book_id",
+    )
+    raw_resources = value.get("resources")
+    if not isinstance(raw_resources, Mapping):
+        raise AuthorityConflict("settlement capital resources are malformed")
+    cash_resources = tuple(
+        sorted(
+            resource
+            for resource in required_resources
+            if resource.startswith("CASH:")
+        )
+    )
+    if set(raw_resources) != set(cash_resources):
+        raise AuthorityConflict(
+            "settlement capital resources do not match reservation requirements"
+        )
+
+    effective: dict[str, Decimal] = {}
+    canonical_resources: dict[str, dict[str, str]] = {}
+    for resource in cash_resources:
+        raw = raw_resources.get(resource)
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "provider_available",
+            "local_available",
+            "effective_available",
+        }:
+            raise AuthorityConflict(
+                "settlement capital resource adjustment is malformed"
+            )
+        provider_amount = _decimal(
+            raw.get("provider_available"),
+            name=f"capital.provider_available[{resource}]",
+        )
+        local_amount = _decimal(
+            raw.get("local_available"),
+            name=f"capital.local_available[{resource}]",
+        )
+        effective_amount = _decimal(
+            raw.get("effective_available"),
+            name=f"capital.effective_available[{resource}]",
+        )
+        current_provider = _decimal(
+            provider_available.get(resource),
+            name=f"authoritative availability[{resource}]",
+        )
+        if (
+            provider_amount < 0
+            or local_amount < 0
+            or effective_amount < 0
+            or provider_amount != current_provider
+            or effective_amount != min(provider_amount, local_amount)
+        ):
+            raise AuthorityConflict(
+                "settlement capital adjustment is inconsistent"
+            )
+        effective[resource] = effective_amount
+        canonical_resources[resource] = {
+            "provider_available": _canonical_decimal_text(provider_amount),
+            "local_available": _canonical_decimal_text(local_amount),
+            "effective_available": _canonical_decimal_text(effective_amount),
+        }
+    return (
+        {
+            "schema_version": "settlement-capital-cut.v1",
+            "journal_sequence": journal_sequence,
+            "provider_id": canonical_provider,
+            "account_id": canonical_account,
+            "environment": canonical_environment,
+            "provider_environment": provider_environment,
+            "settlement_scope_id": settlement_scope_id,
+            "economic_book_id": economic_book_id,
+            "resources": canonical_resources,
+        },
+        effective,
+    )
 
 
 @dataclass(frozen=True)
@@ -1369,6 +1707,8 @@ class AuthorityService:
             AuthoritativeRiskSnapshot,
         ]
         | None = None,
+        settlement_book: DurableSettlementBook | None = None,
+        economic_book: DurableProviderEconomicBook | None = None,
     ):
         # Validate all composition inputs before publishing any process binding.
         # Explicit __init__ re-entry must fail before it can reset established
@@ -1389,6 +1729,11 @@ class AuthorityService:
             raise TypeError("risk_authority_resolver must be callable")
 
         _register_authority_service_store(self, store, risk_policy_scope)
+        _register_authority_service_capital(
+            self,
+            settlement_book,
+            economic_book,
+        )
         # Compatibility/diagnostic view only. Internal authority always resolves
         # the closure-owned binding and rejects caller retargeting.
         self.store = store
@@ -2681,6 +3026,42 @@ class AuthorityService:
             raise AuthorityConflict(
                 "non-borrow admission carries borrow capacity adjustments"
             )
+
+        raw_capital_adjustment = availability_evidence.get(
+            "settlement_capital_adjustment"
+        )
+        if raw_capital_adjustment is not None:
+            risk_journal_sequence = risk_event.get("journal_sequence")
+            if type(risk_journal_sequence) is not int:
+                raise AuthorityConflict(
+                    "durable risk decision journal sequence is invalid"
+                )
+            regenerated_provider_available = regenerated_availability.get(
+                "availability"
+            )
+            if not isinstance(regenerated_provider_available, Mapping):
+                raise AuthorityConflict(
+                    "regenerated provider availability is malformed"
+                )
+            canonical_capital_adjustment, effective_cash = (
+                _canonical_settlement_capital_adjustment(
+                    raw_capital_adjustment,
+                    provider_available=regenerated_provider_available,
+                    required_resources=tuple(sorted(risk_requirements)),
+                    provider_id=_text(
+                        availability_evidence.get("provider_id"),
+                        name="provider_id",
+                    ),
+                    account_id=record.account_id,
+                    environment=record.environment,
+                    risk_journal_sequence=risk_journal_sequence,
+                )
+            )
+            reservation_expected_available = dict(reservation_expected_available)
+            reservation_expected_available.update(effective_cash)
+            expected_availability_evidence[
+                "settlement_capital_adjustment"
+            ] = canonical_capital_adjustment
 
         durable_availability_evidence = dict(availability_evidence)
         if durable_availability_evidence != expected_availability_evidence:
@@ -4105,6 +4486,54 @@ class AuthorityService:
                         },
                     }
 
+        if decision.admitted and availability_evidence is not None:
+            required_resource_names = tuple(
+                resource for resource, _amount in normalized_requirements
+            )
+            raw_capital_adjustment = availability_evidence.get(
+                "settlement_capital_adjustment"
+            )
+            if existing is not None:
+                if raw_capital_adjustment is not None:
+                    canonical_capital_adjustment, effective_cash = (
+                        _canonical_settlement_capital_adjustment(
+                            raw_capital_adjustment,
+                            provider_available=canonical_available,
+                            required_resources=required_resource_names,
+                            provider_id=provider_id,
+                            account_id=account_id,
+                            environment=environment,
+                        )
+                    )
+                    authoritative_available.update(effective_cash)
+                    availability_evidence = {
+                        **availability_evidence,
+                        "settlement_capital_adjustment": canonical_capital_adjustment,
+                    }
+            else:
+                capital_cut = _resolve_authority_service_capital(
+                    self,
+                    canonical_available,
+                    required_resource_names,
+                    required=False,
+                )
+                if capital_cut is not None:
+                    canonical_capital_adjustment, effective_cash = (
+                        _canonical_settlement_capital_adjustment(
+                            capital_cut,
+                            provider_available=canonical_available,
+                            required_resources=required_resource_names,
+                            provider_id=provider_id,
+                            account_id=account_id,
+                            environment=environment,
+                        )
+                    )
+                    authoritative_available.update(effective_cash)
+                    availability_evidence = {
+                        **availability_evidence,
+                        "settlement_capital_adjustment": canonical_capital_adjustment,
+                    }
+
         allocation_binding = None
         if allocation_result is not None:
             allocation_binding = self._allocation_binding_for_admission(
@@ -4759,28 +5188,106 @@ class AuthorityService:
                     )
                 # Historical evidence above is intentionally regenerated at the
                 # admission instant so restart/replay remains deterministic.
-                # Sending is a distinct authority boundary: the exact persisted
-                # checkpoint/resources must still be current *now*.
-                load_account_resource_availability_evidence(
-                    _authority_service_store(self, required=True),
-                    checkpoint_event_id=_text(
-                        availability_evidence.get("checkpoint_event_id"),
-                        name="checkpoint_event_id",
-                    ),
-                    provider_id=_text(
-                        availability_evidence.get("provider_id"),
-                        name="provider_id",
-                    ),
-                    account_id=record.account_id,
-                    environment=record.environment,
-                    resources=tuple(sorted(risk_requirements)),
-                    now=now,
-                    max_age_seconds=availability_evidence.get(
-                        "max_age_seconds"
-                    ),
-                    evidence_artifact_store=self.evidence_artifact_store,
-                    require_latest_scope=True,
+                # Sending is a distinct authority boundary: freeze one global
+                # journal cut across every final provider/local financial read.
+                # A newer reconciliation, settlement or borrow fact appearing
+                # between component reads must invalidate the whole decision
+                # rather than letting mixed-generation authority reach send.
+                financial_validation_sequence = _authority_store_call(
+                    self, "current_journal_sequence"
                 )
+                raw_capital_adjustment = availability_evidence.get(
+                    "settlement_capital_adjustment"
+                )
+                current_provider_evidence = (
+                    load_account_resource_availability_evidence(
+                        _authority_service_store(self, required=True),
+                        checkpoint_event_id=_text(
+                            availability_evidence.get("checkpoint_event_id"),
+                            name="checkpoint_event_id",
+                        ),
+                        provider_id=_text(
+                            availability_evidence.get("provider_id"),
+                            name="provider_id",
+                        ),
+                        account_id=record.account_id,
+                        environment=record.environment,
+                        resources=tuple(sorted(risk_requirements)),
+                        now=now,
+                        max_age_seconds=availability_evidence.get(
+                            "max_age_seconds"
+                        ),
+                        evidence_artifact_store=self.evidence_artifact_store,
+                        require_latest_scope=True,
+                    )
+                )
+                if raw_capital_adjustment is not None:
+                    current_provider_available = current_provider_evidence.get(
+                        "availability"
+                    )
+                    if not isinstance(current_provider_available, Mapping):
+                        raise AuthorityConflict(
+                            "current provider availability is malformed"
+                        )
+                    persisted_capital, _historical_effective = (
+                        _canonical_settlement_capital_adjustment(
+                            raw_capital_adjustment,
+                            provider_available=current_provider_available,
+                            required_resources=tuple(sorted(risk_requirements)),
+                            provider_id=_text(
+                                availability_evidence.get("provider_id"),
+                                name="provider_id",
+                            ),
+                            account_id=record.account_id,
+                            environment=record.environment,
+                        )
+                    )
+                    current_capital = _resolve_authority_service_capital(
+                        self,
+                        current_provider_available,
+                        tuple(sorted(risk_requirements)),
+                        required=True,
+                    )
+                    assert current_capital is not None
+                    canonical_current_capital, current_effective = (
+                        _canonical_settlement_capital_adjustment(
+                            current_capital,
+                            provider_available=current_provider_available,
+                            required_resources=tuple(sorted(risk_requirements)),
+                            provider_id=_text(
+                                availability_evidence.get("provider_id"),
+                                name="provider_id",
+                            ),
+                            account_id=record.account_id,
+                            environment=record.environment,
+                        )
+                    )
+                    for identity_field in (
+                        "provider_id",
+                        "account_id",
+                        "environment",
+                        "provider_environment",
+                        "settlement_scope_id",
+                        "economic_book_id",
+                    ):
+                        if (
+                            canonical_current_capital.get(identity_field)
+                            != persisted_capital.get(identity_field)
+                        ):
+                            raise AuthorityConflict(
+                                "current settlement capital authority changed"
+                            )
+                    for resource, raw_requirement in risk_requirements.items():
+                        if not resource.startswith("CASH:"):
+                            continue
+                        requirement = _decimal(
+                            raw_requirement,
+                            name=f"reservation requirement[{resource}]",
+                        )
+                        if current_effective.get(resource, Decimal("0")) < requirement:
+                            raise AuthorityConflict(
+                                "current settlement capital no longer covers reservation"
+                            )
                 borrow_resources = tuple(
                     resource
                     for resource in risk_requirements
@@ -4837,6 +5344,13 @@ class AuthorityService:
                         )
                         if projection.active_quantity > 0:
                             return False, "borrow_recall_active"
+                if (
+                    _authority_store_call(self, "current_journal_sequence")
+                    != financial_validation_sequence
+                ):
+                    raise AuthorityConflict(
+                        "financial authority changed during dispatch validation"
+                    )
             except Exception:
                 return False, "financial_evidence_invalid"
             if reservation.intent_id != record.intent_id:

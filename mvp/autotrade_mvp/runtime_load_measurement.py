@@ -405,6 +405,7 @@ def measure_declared_financial_operation(
     str_for = str
     object_getattribute = object.__getattribute__
     missing = object()
+    authority_error_type = ValueError
     error_type = RuntimeLoadMeasurementError
     journal_store_type = JournalStore
     get_event = JournalStore.get_event
@@ -558,8 +559,78 @@ def measure_declared_financial_operation(
         protected_dependency_values
         + tuple(value for _name, value in journal_dependencies)
     )
+    protected_domain_classes = tuple(
+        (
+            label,
+            class_type,
+            tuple(class_type.__dict__),
+            tuple(class_type.__dict__.items()),
+            tuple(
+                (
+                    name,
+                    value,
+                    value.__code__,
+                    value.__defaults__,
+                    value.__kwdefaults__,
+                    None
+                    if value.__kwdefaults__ is None
+                    else tuple(sorted(value.__kwdefaults__.items())),
+                )
+                for name, value in class_type.__dict__.items()
+                if type_for(value) is FunctionType
+            ),
+        )
+        for label, class_type in (
+            ("RuntimeLoadMeasurementError", error_type),
+            ("DeclaredRuntimeEventPlan", plan_type),
+            ("ExpectedJournalEvent", expected_type),
+            ("DurableFinancialLatencySample", sample_type),
+        )
+    )
 
     def require_operation_authority() -> None:
+        # Verify exact class surfaces first, using mappingproxy access that cannot
+        # dispatch callback-installed instance descriptors.  Only after these
+        # checks pass is it safe to use the plan/expected/sample classes below.
+        for (
+            label,
+            class_type,
+            member_names,
+            members,
+            class_executables,
+        ) in protected_domain_classes:
+            current_class_namespace = class_type.__dict__
+            if tuple_for(current_class_namespace) != member_names:
+                raise authority_error_type(
+                    f"measurement {label} class shape changed during financial operation"
+                )
+            for name, expected_value in members:
+                if current_class_namespace.get(name, missing) is not expected_value:
+                    raise authority_error_type(
+                        f"measurement {label} class authority changed during financial "
+                        f"operation: {name}"
+                    )
+            for (
+                name,
+                function,
+                code,
+                defaults,
+                kwdefaults,
+                kwdefault_items,
+            ) in class_executables:
+                if (
+                    function.__code__ is not code
+                    or function.__defaults__ is not defaults
+                    or function.__kwdefaults__ is not kwdefaults
+                    or (
+                        kwdefaults is not None
+                        and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
+                    )
+                ):
+                    raise authority_error_type(
+                        f"measurement {label} executable authority changed during financial "
+                        f"operation: {name}"
+                    )
         if type_for(store) is not journal_store_type:
             raise error_type(
                 "measurement JournalStore exact class changed during financial operation"

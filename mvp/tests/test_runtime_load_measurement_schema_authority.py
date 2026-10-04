@@ -257,6 +257,129 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
                 store.get_event(self._measurement_id(plan_id, expected.event_id))
             )
 
+    def test_operation_rejects_expected_event_descriptor_before_dispatch(self) -> None:
+        touched: list[str] = []
+
+        class HostileDescriptor:
+            def __get__(self, _instance, _owner=None):
+                touched.append("payload")
+                raise AssertionError("hostile ExpectedJournalEvent descriptor executed")
+
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            original = ExpectedJournalEvent.__dict__["payload"]
+
+            def attack() -> None:
+                _append(store, expected)
+                ExpectedJournalEvent.payload = HostileDescriptor()
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"ExpectedJournalEvent class authority changed.*payload",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                ExpectedJournalEvent.payload = original
+
+            self.assertEqual(touched, [])
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_rejects_plan_digest_descriptor_before_dispatch(self) -> None:
+        touched: list[str] = []
+        plan_type = measurement_module.DeclaredRuntimeEventPlan
+
+        class HostileDescriptor:
+            def __get__(self, _instance, _owner=None):
+                touched.append("digest")
+                raise AssertionError("hostile DeclaredRuntimeEventPlan descriptor executed")
+
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            original = plan_type.__dict__["digest"]
+
+            def attack() -> None:
+                _append(store, expected)
+                plan_type.digest = HostileDescriptor()
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"DeclaredRuntimeEventPlan class authority changed.*digest",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                plan_type.digest = original
+
+            self.assertEqual(touched, [])
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_rejects_latency_sample_class_shape_before_constructor(self) -> None:
+        touched: list[str] = []
+        sample_type = measurement_module.DurableFinancialLatencySample
+        had_own_new = "__new__" in sample_type.__dict__
+        original_new = sample_type.__dict__.get("__new__")
+
+        def hostile_new(cls, *_args, **_kwargs):
+            touched.append("__new__")
+            return object.__new__(cls)
+
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+
+            def attack() -> None:
+                _append(store, expected)
+                sample_type.__new__ = staticmethod(hostile_new)
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"DurableFinancialLatencySample class shape changed",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                if had_own_new:
+                    sample_type.__new__ = original_new
+                else:
+                    del sample_type.__new__
+
+            self.assertEqual(touched, [])
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_rejects_measurement_error_class_shape_with_builtin_fallback(self) -> None:
+        error_type = RuntimeLoadMeasurementError
+        had_marker = "_hostile_marker" in error_type.__dict__
+        original_marker = error_type.__dict__.get("_hostile_marker")
+
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+
+            def attack() -> None:
+                _append(store, expected)
+                error_type._hostile_marker = object()
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"RuntimeLoadMeasurementError class shape changed",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                if had_marker:
+                    error_type._hostile_marker = original_marker
+                else:
+                    del error_type._hostile_marker
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

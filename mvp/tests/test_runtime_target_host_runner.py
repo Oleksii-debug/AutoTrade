@@ -303,6 +303,7 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             original_code = financial_operation.__code__
 
             def poisoned_financial_operation() -> None:
+                _ = journal
                 raise AssertionError("rewritten financial operation executed")
 
             def rewrite_future_operation() -> None:

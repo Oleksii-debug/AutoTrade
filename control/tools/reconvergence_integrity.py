@@ -49,6 +49,20 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
+# These two files execute the reconvergence trust decision itself.  Unlike
+# descriptive sentinels, an ordinary content modification can change what the
+# guard permits while leaving the path and Git object type intact.  Such a
+# modification therefore requires independently supplied *exact-path* mutation
+# authority.  A directory scope is intentionally insufficient.
+PROTECTED_MUTATION_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
+_SIMPLE_CHANGE_STATUSES = frozenset({"A", "M", "D", "T"})
+
 
 @dataclass(frozen=True)
 class Change:
@@ -70,9 +84,57 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
+def _canonical_change_path(value: object, *, field: str) -> str:
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError(f"{field} must be a non-empty NUL-free Git path")
+    if value.startswith("/") or value.endswith("/"):
+        raise ValueError(f"{field} must be repository-relative")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"{field} is not a canonical repository-relative path")
+    return value
+
+
+def _validated_change(change: object) -> Change:
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    status = change.status
+    if type(status) is not str or not status:
+        raise ValueError("Git name-status token is invalid")
+
+    path = _canonical_change_path(change.path, field="changed path")
+    kind = status[:1]
+    previous_path = change.previous_path
+
+    if status in _SIMPLE_CHANGE_STATUSES:
+        if previous_path is not None:
+            raise ValueError("non-rename Git change cannot carry previous_path")
+        return Change(status=status, path=path)
+
+    if kind in {"R", "C"}:
+        score = status[1:]
+        if (
+            not score
+            or any(character < "0" or character > "9" for character in score)
+            or int(score) > 100
+        ):
+            raise ValueError(f"unsupported Git similarity status: {status!r}")
+        previous = _canonical_change_path(
+            previous_path,
+            field="previous changed path",
+        )
+        return Change(status=status, previous_path=previous, path=path)
+
+    # U/X/B and every unknown status are fail-closed.  In particular, an
+    # unmerged index is not a candidate tree that this guard may authorize.
+    raise ValueError(f"unsupported Git name-status token: {status!r}")
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
+        if type(raw) is not str:
+            raise TypeError("Git name-status records must be exact strings")
         line = raw.rstrip("\n")
         if not line:
             continue
@@ -82,13 +144,16 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(
-                Change(status=status, previous_path=parts[1], path=parts[2])
+            candidate = Change(
+                status=status,
+                previous_path=parts[1],
+                path=parts[2],
             )
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
+            candidate = Change(status=status, path=parts[1])
+        changes.append(_validated_change(candidate))
     return tuple(changes)
 
 
@@ -112,12 +177,26 @@ def assess_reconvergence(
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
 
-    deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
+    validated_changes = tuple(_validated_change(change) for change in changes)
+
+    normalized_scopes: tuple[str, ...] | None = None
+    if allowed_scopes is not None:
+        normalized_scopes = _normalized_scopes(allowed_scopes)
+
+    deleted = tuple(
+        sorted(
+            {
+                change.path
+                for change in validated_changes
+                if change.status == "D"
+            }
+        )
+    )
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
 
     protected_damage: set[str] = set(protected)
-    for change in changes:
+    for change in validated_changes:
         kind = change.status[:1]
         if (
             kind == "R"
@@ -129,15 +208,39 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
-    protected_violations = tuple(sorted(protected_damage))
 
-    normalized_scopes: tuple[str, ...] | None = None
-    if allowed_scopes is not None:
-        normalized_scopes = _normalized_scopes(allowed_scopes)
+        # Ordinary content replacement of the executable trust roots is itself
+        # authority-bearing.  Only an independently supplied exact-path scope
+        # may admit it; path_covers(directory, file) is deliberately not enough.
+        if (
+            change.status == "M"
+            and change.path in PROTECTED_MUTATION_ROOTS
+            and (
+                normalized_scopes is None
+                or change.path not in normalized_scopes
+            )
+        ):
+            protected_damage.add(
+                f"{change.path} (unauthorized modification)"
+            )
+
+        # A rename/copy *into* an executable trust-root path can replace the
+        # authority just as surely as M.  Preserve the older unconditional
+        # protection for destructive rename/type/delete and fail this form
+        # closed as well.
+        if (
+            kind in {"R", "C"}
+            and change.path in PROTECTED_MUTATION_ROOTS
+        ):
+            protected_damage.add(
+                f"{change.path} ({'rename' if kind == 'R' else 'copy'} target)"
+            )
+
+    protected_violations = tuple(sorted(protected_damage))
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in changes:
+        for change in validated_changes:
             kind = change.status[:1]
             if kind == "R":
                 touched = (change.previous_path, change.path)

@@ -14,7 +14,7 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
-from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery import OwnerFence, RecoveryController
 from mvp.autotrade_mvp.recovery_takeover import (
     DurableTakeoverError,
     execute_durable_takeover,
@@ -125,31 +125,26 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
             provider_id="SIMULATED",
         )
 
-    def test_rebound_append_event_cannot_strip_owner_commit_journal_cut(self) -> None:
+    def _anchor_injector(self, *, event_id: str, aggregate_id: str):
         original_append = JournalStore.append_event
         original_require_anchor = (
             takeover_module.require_current_trade_credential_transition_anchor
         )
         injected = False
 
-        def append_event_without_owner_cut(store, envelope, *args, **kwargs):
-            if envelope.get("event_type") == "RecoveryOwnerChanged":
-                kwargs.pop("expected_journal_sequence", None)
-            return original_append(store, envelope, *args, **kwargs)
-
         def require_anchor_and_inject(store, vault, receipt):
             nonlocal injected
             anchor = original_require_anchor(store, vault, receipt)
             if not injected:
                 injected = True
-                payload = {"reason": "owner-append-rebinding-race"}
+                payload = {"reason": aggregate_id}
                 original_append(
                     store,
                     {
-                        "event_id": "owner-append-rebinding-race-1",
+                        "event_id": event_id,
                         "event_type": "OwnerCutRaceProbe",
                         "aggregate_type": "test_probe",
-                        "aggregate_id": "owner-append-rebinding-race",
+                        "aggregate_id": aggregate_id,
                         "aggregate_version": "1",
                         "payload": payload,
                         "payload_hash": payload_digest(payload),
@@ -158,13 +153,64 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
                 )
             return anchor
 
+        return require_anchor_and_inject
+
+    def test_rebound_owner_chain_read_cannot_hide_durable_owner(self) -> None:
+        with patch.object(JournalStore, "load_events", return_value=[]):
+            self.assertEqual(
+                self.controller.durable_owner_chain(),
+                (OwnerFence("host-a", 1),),
+            )
+
+    def test_rebound_append_event_cannot_strip_owner_commit_journal_cut(self) -> None:
+        original_append = JournalStore.append_event
+
+        def append_event_without_owner_cut(store, envelope, *args, **kwargs):
+            if envelope.get("event_type") == "RecoveryOwnerChanged":
+                kwargs.pop("expected_journal_sequence", None)
+            return original_append(store, envelope, *args, **kwargs)
+
         with patch.object(
             JournalStore,
             "append_event",
             new=append_event_without_owner_cut,
         ), patch(
             "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
-            new=require_anchor_and_inject,
+            new=self._anchor_injector(
+                event_id="owner-append-rebinding-race-1",
+                aggregate_id="owner-append-rebinding-race",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                DurableTakeoverError,
+                "journal changed during takeover owner validation",
+            ):
+                self._takeover()
+
+        self.assertEqual(
+            [
+                (owner.owner_id, owner.epoch)
+                for owner in self.controller.durable_owner_chain()
+            ],
+            [("host-a", 1)],
+        )
+
+    def test_rebound_current_sequence_cannot_preapprove_one_intervening_event(self) -> None:
+        original_current = JournalStore.current_journal_sequence
+
+        def forged_next_sequence(store):
+            return original_current(store) + 1
+
+        with patch.object(
+            JournalStore,
+            "current_journal_sequence",
+            new=forged_next_sequence,
+        ), patch(
+            "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
+            new=self._anchor_injector(
+                event_id="owner-cursor-rebinding-race-1",
+                aggregate_id="owner-cursor-rebinding-race",
+            ),
         ):
             with self.assertRaisesRegex(
                 DurableTakeoverError,

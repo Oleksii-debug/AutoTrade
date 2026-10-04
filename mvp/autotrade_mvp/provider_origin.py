@@ -2510,6 +2510,58 @@ del _bind_execute_direct_provider_origin_read
 del _execute_direct_provider_origin_read_impl
 del _record_direct_provider_origin_from_execute
 
+def require_current_provider_origin_account_acquisition(
+    *,
+    response_binding: AuthenticatedReadResponseBinding,
+    account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+    account_acquisition: SerializedProviderAccountAcquisition,
+) -> SerializedProviderAccountAcquisition:
+    """Require one provider-origin response to belong to exact current acquisition."""
+
+    require_provider_origin_response_binding_authority(response_binding)
+    if type(account_acquisition_authority) is not DurableProviderAccountAcquisitionAuthority:
+        raise TypeError(
+            "account_acquisition_authority must be exact DurableProviderAccountAcquisitionAuthority"
+        )
+    if type(account_acquisition) is not SerializedProviderAccountAcquisition:
+        raise TypeError(
+            "account_acquisition must be exact SerializedProviderAccountAcquisition"
+        )
+    try:
+        current = account_acquisition_authority.require_current(account_acquisition)
+    except ProviderAccountAcquisitionError as error:
+        raise ProviderOriginError(
+            "provider-origin account acquisition is no longer current"
+        ) from error
+    if (
+        response_binding.account_acquisition_id is None
+        or response_binding.account_acquisition_generation is None
+        or response_binding.account_acquisition_journal_sequence_cut is None
+        or response_binding.account_acquisition_scope_digest is None
+    ):
+        raise ProviderOriginError(
+            "provider-origin response is not bound to account acquisition authority"
+        )
+    if (
+        response_binding.account_id != current.account_id
+        or response_binding.provider_id != current.provider_scope.provider_id
+        or response_binding.environment != current.provider_scope.runtime_environment
+        or response_binding.provider_environment
+        != current.provider_scope.provider_environment
+        or response_binding.account_acquisition_id != current.acquisition_id
+        or response_binding.account_acquisition_generation
+        != current.acquisition_generation
+        or response_binding.account_acquisition_journal_sequence_cut
+        != current.acquisition_journal_sequence_cut
+        or response_binding.account_acquisition_scope_digest
+        != current.provider_scope.content_digest
+    ):
+        raise ProviderOriginError(
+            "provider-origin response belongs to another account acquisition"
+        )
+    return current
+
+
 def execute_direct_provider_origin_account_read(
     *,
     origin: ProviderOriginJournal,

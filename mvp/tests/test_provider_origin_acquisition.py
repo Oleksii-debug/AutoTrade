@@ -182,6 +182,77 @@ class ProviderOriginAcquisitionBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderOriginError, "changed after durable journal load"):
                 require_provider_origin_response_binding_authority(response)
 
+    def test_current_acquisition_consumer_fence_accepts_exact_bound_response(self):
+        with TemporaryDirectory() as directory:
+            _journal, origin, authority, acquisition, _q1, binding = self._fixture(directory)
+            attempt_id = origin.prepare_direct(
+                binding, recorded_at=NOW,
+                account_acquisition_authority=authority, account_acquisition=acquisition,
+            )
+            response = origin._record_provider_origin(
+                attempt_id, binding, http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=NOW, _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            from mvp.autotrade_mvp.provider_origin import (
+                require_current_provider_origin_account_acquisition,
+            )
+            self.assertEqual(
+                require_current_provider_origin_account_acquisition(
+                    response_binding=response,
+                    account_acquisition_authority=authority,
+                    account_acquisition=acquisition,
+                ),
+                acquisition,
+            )
+
+    def test_supersession_invalidates_bound_response_at_consumer_fence(self):
+        with TemporaryDirectory() as directory:
+            _journal, origin, authority, acquisition, _q1, binding = self._fixture(directory)
+            attempt_id = origin.prepare_direct(
+                binding, recorded_at=NOW,
+                account_acquisition_authority=authority, account_acquisition=acquisition,
+            )
+            response = origin._record_provider_origin(
+                attempt_id, binding, http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=NOW, _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="provider-origin-account-read-superseding",
+                committed_at=NOW,
+            )
+            from mvp.autotrade_mvp.provider_origin import (
+                require_current_provider_origin_account_acquisition,
+            )
+            with self.assertRaisesRegex(ProviderOriginError, "no longer current"):
+                require_current_provider_origin_account_acquisition(
+                    response_binding=response,
+                    account_acquisition_authority=authority,
+                    account_acquisition=acquisition,
+                )
+
+    def test_unbound_response_cannot_cross_account_consumer_fence(self):
+        with TemporaryDirectory() as directory:
+            _journal, origin, authority, acquisition, _q1, binding = self._fixture(directory)
+            attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+            response = origin._record_provider_origin(
+                attempt_id, binding, http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=NOW, _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            from mvp.autotrade_mvp.provider_origin import (
+                require_current_provider_origin_account_acquisition,
+            )
+            with self.assertRaisesRegex(ProviderOriginError, "not bound"):
+                require_current_provider_origin_account_acquisition(
+                    response_binding=response,
+                    account_acquisition_authority=authority,
+                    account_acquisition=acquisition,
+                )
+
     def test_generic_origin_remains_explicitly_unbound(self):
         with TemporaryDirectory() as directory:
             _journal, origin, _authority, _acquisition, _q1, binding = self._fixture(directory)

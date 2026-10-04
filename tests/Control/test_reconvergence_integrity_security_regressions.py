@@ -223,6 +223,72 @@ class ReconvergenceSecurityRegressionTests(unittest.TestCase):
             any("changed paths outside declared mutation scope" in reason for reason in result.reasons)
         )
 
+    def test_future_checked_in_workflow_modification_requires_exact_approval(self):
+        path = ".github/workflows/future-provider-qualification.yml"
+        unapproved = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[Change(status="M", path=path)],
+        )
+        self.assertFalse(unapproved.allowed)
+        self.assertEqual(
+            unapproved.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
+        )
+
+        approved = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[Change(status="M", path=path)],
+            trusted_root_approvals=(path,),
+        )
+        self.assertTrue(approved.allowed)
+        self.assertEqual(approved.protected_violations, ())
+
+    def test_future_checked_in_workflow_deletion_is_protected_without_static_registration(self):
+        path = ".github/workflows/future-release.yaml"
+        result = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[Change(status="D", path=path)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.protected_deletions, (path,))
+        self.assertTrue(
+            any(path in reason for reason in result.reasons)
+        )
+
+    def test_future_checked_in_workflow_rename_away_is_protected_without_static_registration(self):
+        path = ".github/workflows/future-science.yml"
+        moved = ".github/disabled/future-science.yml"
+        result = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path=path,
+                    path=moved,
+                )
+            ],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            f"{path} -> {moved} (rename)",
+            result.protected_violations,
+        )
+
+    def test_future_checked_in_workflow_type_change_is_protected_without_static_registration(self):
+        path = ".github/workflows/future-control.yaml"
+        result = assess_reconvergence(
+            base_paths=[path, "README.md"],
+            changes=[Change(status="T", path=path)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (type change)",),
+        )
+
     def test_live_base_event_values_enter_shell_only_through_env(self):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "reconvergence-integrity.yml"

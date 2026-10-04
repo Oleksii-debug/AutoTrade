@@ -91,6 +91,18 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ['DOTNET_PROJECT_LOCK_VERSION_UNSUPPORTED:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:2'],
             )
 
+    def test_boolean_lock_schema_version_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project, version=True)
+            self.assertEqual(
+                dotnet_lock_content_blockers(root, project),
+                ['DOTNET_PROJECT_LOCK_VERSION_UNSUPPORTED:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:True'],
+            )
+            with self.assertRaisesRegex(ValueError, 'does not match project'):
+                dotnet_locked_dependency_graph(root, [project])
+
     def test_declared_direct_package_must_be_present(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -149,6 +161,20 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 write_lock(project, content_hash=value)
                 blockers = dotnet_lock_content_blockers(root, project)
                 self.assertTrue(any('DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:' in item for item in blockers))
+
+    def test_content_hash_must_use_canonical_base64_encoding(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            noncanonical = GOOD_HASH + '='
+            write_lock(project, content_hash=noncanonical)
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith('DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:')
+                    for item in blockers
+                )
+            )
 
     def test_package_name_case_drift_is_visible(self):
         with TemporaryDirectory() as directory:

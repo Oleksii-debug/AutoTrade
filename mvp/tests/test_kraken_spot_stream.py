@@ -2,6 +2,8 @@ import hashlib
 import unittest
 from decimal import Decimal
 
+from mvp.autotrade_mvp.reconciliation import reconcile_account
+
 from mvp.autotrade_mvp.kraken_spot_stream import (
     KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION,
     KrakenSpotExecutionsSubscriptionBinding,
@@ -631,6 +633,105 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             provider_fills_from_execution_frame(
                 frame,
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
+
+    def test_provider_fill_bridge_defers_execution_identity_to_canonical_reconciliation(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=49,
+                reports=[
+                    {
+                        "order_id": "O-CANONICAL-ID",
+                        "cl_ord_id": "client-canonical-id",
+                        "exec_id": "E-CANONICAL-ID",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        fill = provider_fills_from_execution_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+
+        result = reconcile_account(
+            provider_id="KRAKEN",
+            account_id="spot-live-1",
+            environment="LIVE",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(fill, fill),
+            coverage_start="2026-10-04T04:59:00Z",
+            coverage_end="2026-10-04T05:01:00Z",
+            pagination_complete=False,
+        )
+
+        self.assertEqual(
+            result.unexpected_execution_ids,
+            ("E-CANONICAL-ID",),
+        )
+
+    def test_canonical_reconciliation_rejects_changed_economics_for_same_stream_exec_id(self):
+        common = {
+            "order_id": "O-CANONICAL-CONFLICT",
+            "cl_ord_id": "client-canonical-conflict",
+            "exec_id": "E-CANONICAL-CONFLICT",
+            "exec_type": "trade",
+            "order_status": "partially_filled",
+        }
+        first = provider_fills_from_execution_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=50,
+                    reports=[common],
+                ),
+                account_id="spot-live-1",
+                connection_generation=1,
+            ),
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+        changed = dict(common)
+        changed["last_price"] = 25001
+        changed["cost"] = 25001
+        second = provider_fills_from_execution_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=51,
+                    reports=[changed],
+                ),
+                account_id="spot-live-1",
+                connection_generation=1,
+            ),
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider execution id has conflicting observations",
+        ):
+            reconcile_account(
+                provider_id="KRAKEN",
+                account_id="spot-live-1",
+                environment="LIVE",
+                local_cash={},
+                provider_cash={},
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(first, second),
+                coverage_start="2026-10-04T04:59:00Z",
+                coverage_end="2026-10-04T05:01:00Z",
+                pagination_complete=False,
             )
 
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):

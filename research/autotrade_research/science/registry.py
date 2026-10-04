@@ -610,15 +610,19 @@ class ScientificRegistry:
                 )
                 return identity_hash
 
-            prior_trials = int(
-                con.execute(
-                    "SELECT COUNT(*) FROM trials WHERE protocol_id=?",
-                    (protocol,),
-                ).fetchone()[0]
+            prior_activity = sum(
+                int(
+                    con.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE protocol_id=?",
+                        (protocol,),
+                    ).fetchone()[0]
+                )
+                for table in ("trials", "evaluations", "holdout_access")
             )
-            if prior_trials != 0:
+            if prior_activity != 0:
                 raise ProtocolViolation(
-                    "protocol locked holdout must be preregistered before the first trial"
+                    "protocol locked holdout must be preregistered before the first "
+                    "trial or holdout access"
                 )
 
             holdout = con.execute(
@@ -743,11 +747,27 @@ class ScientificRegistry:
         protocol = _id(protocol_id)
         holdout = _text(holdout_id, "holdout_id")
         why = _text(purpose, "purpose")
+        supplied_identity_hash, _ = _holdout_identity(holdout_identity)
         access_id = _id()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM protocols WHERE protocol_id=?", (protocol,)).fetchone() is None:
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if owner is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
+            if supplied_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "holdout access identity does not match the preregistered "
+                    "protocol holdout"
+                )
             identity_hash = self._bind_holdout_identity(
                 con,
                 holdout_id=holdout,

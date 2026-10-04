@@ -700,6 +700,106 @@ class AuthorityTests(unittest.TestCase):
                     ],
                 )
 
+    def test_requested_confirmation_identity_survives_snapshot_round_trip(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="snapshot-requested-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-requested-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        rejected = service._admit_unverified(
+            admission_id="snapshot-requested-admission",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-requested-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+            confirmation_id="snapshot-requested-confirmation",
+            financial_confirmation_binding_hash="sha256:" + "0" * 64,
+        )
+        self.assertEqual(rejected.outcome, "REJECTED")
+        self.assertIsNone(rejected.confirmation_id)
+        self.assertEqual(
+            rejected.requested_confirmation_id,
+            "snapshot-requested-confirmation",
+        )
+
+        snapshot = service.export_state()
+        admission_payload = snapshot["admissions"][0]
+        self.assertEqual(
+            admission_payload["requested_confirmation_id"],
+            "snapshot-requested-confirmation",
+        )
+        restored = AuthorityService.restore(snapshot)
+        self.assertEqual(
+            restored._admissions[rejected.admission_id],
+            rejected,
+        )
+
+    def test_admitted_snapshot_keeps_legacy_confirmation_shape(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="snapshot-consumed-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-consumed-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        admitted = service._admit_unverified(
+            admission_id="snapshot-consumed-admission",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-consumed-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+            confirmation_id="snapshot-consumed-confirmation",
+        )
+        self.assertEqual(admitted.outcome, "ADMITTED")
+        self.assertEqual(
+            admitted.requested_confirmation_id,
+            admitted.confirmation_id,
+        )
+        snapshot = service.export_state()
+        self.assertNotIn(
+            "requested_confirmation_id",
+            snapshot["admissions"][0],
+        )
+        restored = AuthorityService.restore(snapshot)
+        restored_admitted = restored._admissions[admitted.admission_id]
+        self.assertEqual(restored_admitted, admitted)
+        self.assertEqual(
+            restored_admitted.requested_confirmation_id,
+            restored_admitted.confirmation_id,
+        )
+
     def test_financial_confirmation_invalidates_material_envelope_changes(self):
         variants = (
             (

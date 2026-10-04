@@ -425,7 +425,7 @@ def _stable_runtime_components(
 
 
 def _runtime_leaf(root: str | Path, name: str) -> Path:
-    candidate = Path(root) / name
+    candidate = Path(root).expanduser() / name
     if os.name == "nt":
         from autotrade_foundation.local_filesystem import (
             freeze_local_filesystem_path,
@@ -434,7 +434,10 @@ def _runtime_leaf(root: str | Path, name: str) -> Path:
 
         candidate = Path(freeze_local_filesystem_path(candidate))
         require_qualified_local_filesystem_path(candidate)
-    return candidate
+        return candidate
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    return candidate.resolve(strict=False)
 
 
 def _authority_key_path(root: str | Path) -> Path:

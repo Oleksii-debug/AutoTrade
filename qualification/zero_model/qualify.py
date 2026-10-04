@@ -351,6 +351,54 @@ def qualify(source_sha: str) -> dict[str, object]:
             if partial_fill["economic_edge_status"] != "INCONCLUSIVE":
                 raise RuntimeError("partial-fill qualification manufactured economic edge")
 
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-unknown-") as unknown_directory:
+            unknown_first = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                unknown_directory,
+                run_id="section16-unknown-qualification",
+                now=AUTONOMOUS_NOW,
+                fault_at_episode=3,
+            )
+            unknown_reentry = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                unknown_directory,
+                run_id="section16-unknown-qualification",
+                now=AUTONOMOUS_NOW,
+                fault_at_episode=3,
+            )
+            if unknown_first["status"] != "UNKNOWN":
+                raise RuntimeError("lost-response fault did not enter sticky UNKNOWN")
+            if unknown_first["new_outbound_requests"] != 1:
+                raise RuntimeError("lost-response qualification did not exercise exactly one send")
+            if unknown_reentry["status"] != "UNKNOWN":
+                raise RuntimeError("UNKNOWN state was not preserved across re-entry")
+            if unknown_reentry["new_outbound_requests"] != 0:
+                raise RuntimeError("UNKNOWN re-entry spontaneously resent financial intent")
+
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-emergency-") as emergency_directory:
+            emergency = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                emergency_directory,
+                run_id="section16-emergency-qualification",
+                now=AUTONOMOUS_NOW,
+                emergency_at_episode=4,
+            )
+            emergency_replay = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                emergency_directory,
+                run_id="section16-emergency-qualification",
+                now=AUTONOMOUS_NOW,
+                emergency_at_episode=4,
+            )
+            if emergency["status"] != "COMPLETED" or emergency["completed_episodes"] != 8:
+                raise RuntimeError("emergency mode did not preserve deterministic loop completion")
+            if emergency["new_outbound_requests"] != 1:
+                raise RuntimeError("emergency mode did not stop subsequent new orders")
+            if emergency_replay["new_outbound_requests"] != 0:
+                raise RuntimeError("emergency replay emitted a duplicate outbound request")
+            if emergency["economic_edge_status"] != "INCONCLUSIVE":
+                raise RuntimeError("emergency qualification manufactured economic edge")
+
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "execution_platform": {
@@ -400,6 +448,19 @@ def qualify(source_sha: str) -> dict[str, object]:
                     and resumed["position"] == continuous["position"]
                 ),
                 "economic_edge_status": continuous["economic_edge_status"],
+            },
+            "canonical_unknown_no_resend": {
+                "initial_status": unknown_first["status"],
+                "reentry_status": unknown_reentry["status"],
+                "initial_outbound_requests": unknown_first["new_outbound_requests"],
+                "reentry_outbound_requests": unknown_reentry["new_outbound_requests"],
+            },
+            "canonical_emergency_zero_loop": {
+                "status": emergency["status"],
+                "episodes": emergency["completed_episodes"],
+                "outbound_requests": emergency["new_outbound_requests"],
+                "replay_outbound_requests": emergency_replay["new_outbound_requests"],
+                "economic_edge_status": emergency["economic_edge_status"],
             },
             "canonical_partial_fill_zero_loop": {
                 "status": partial_fill["status"],

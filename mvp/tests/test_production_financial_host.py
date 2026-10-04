@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import unittest
 from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import (
+    HostLifetimeProviderSecretResolver,
     build_production_financial_host,
 )
 from mvp.autotrade_mvp.production_host import (
@@ -14,6 +17,12 @@ from mvp.autotrade_mvp.production_host import (
     ProductionHostRuntime,
 )
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+
+
+class _LeaseBoundary:
+    @contextmanager
+    def lease_for_execution(self, *_args, **_kwargs):
+        yield "secret"
 
 
 class ProductionFinancialHostTests(unittest.TestCase):
@@ -64,6 +73,8 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(runtime.owner.owner_id, "host-a")
             self.assertEqual(runtime.owner.epoch, 1)
             self.assertEqual(runtime.recovery_controller.state, HostState.RECOVERING)
+            self.assertTrue(runtime.provider_secret_resolver.accepting)
+            self.assertEqual(runtime.provider_secret_resolver.active_leases, 0)
             events = host.journal.load_events("recovery_owner", "PAPER:account-1")
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["owner_id"], "host-a")
@@ -99,7 +110,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["owner_id"], "host-a")
 
-    def test_close_stops_recovery_before_host_fence_teardown(self) -> None:
+    def test_close_drains_provider_leases_then_stops_recovery_then_host(self) -> None:
         with TemporaryDirectory() as root:
             config = self._config(root)
             host = self._host(config)
@@ -115,21 +126,114 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 )
 
             order: list[str] = []
+            original_drain = runtime.provider_secret_resolver.stop_and_drain
             original_stop = runtime.recovery_controller.stop
+
+            def drain_provider() -> None:
+                order.append("provider")
+                original_drain()
 
             def stop_recovery() -> None:
                 order.append("recovery")
                 original_stop()
 
+            runtime.provider_secret_resolver.stop_and_drain = drain_provider  # type: ignore[method-assign]
             runtime.recovery_controller.stop = stop_recovery  # type: ignore[method-assign]
             host.close = Mock(side_effect=lambda: order.append("host"))  # type: ignore[method-assign]
 
             runtime.close()
 
-            self.assertEqual(order, ["recovery", "host"])
+            self.assertEqual(order, ["provider", "recovery", "host"])
+            self.assertFalse(runtime.provider_secret_resolver.accepting)
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
             self.assertIsNone(runtime.recovery_controller.owner)
             host.close.assert_called_once_with()
+
+    def test_active_provider_lease_blocks_fence_teardown_until_lease_exits(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=_LeaseBoundary(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+
+            lease_entered = Event()
+            allow_lease_exit = Event()
+            drain_started = Event()
+            close_finished = Event()
+            original_drain = runtime.provider_secret_resolver.stop_and_drain
+
+            def drain_provider() -> None:
+                drain_started.set()
+                original_drain()
+
+            runtime.provider_secret_resolver.stop_and_drain = drain_provider  # type: ignore[method-assign]
+
+            def hold_lease() -> None:
+                with runtime.provider_secret_resolver.lease_for_execution(
+                    "token",
+                    origin="http://127.0.0.1:18765",
+                    handle=object(),
+                    execution_identity="host-a",
+                    account_id="account-1",
+                    provider="BYBIT",
+                    environment="PAPER",
+                    purpose="TRADE",
+                    provider_environment="TESTNET",
+                ):
+                    lease_entered.set()
+                    allow_lease_exit.wait()
+
+            lease_thread = Thread(target=hold_lease, daemon=False)
+            lease_thread.start()
+            self.assertTrue(lease_entered.wait(timeout=2))
+            self.assertEqual(runtime.provider_secret_resolver.active_leases, 1)
+
+            def close_runtime() -> None:
+                runtime.close()
+                close_finished.set()
+
+            close_thread = Thread(target=close_runtime, daemon=False)
+            close_thread.start()
+            self.assertTrue(drain_started.wait(timeout=2))
+            self.assertFalse(runtime.provider_secret_resolver.accepting)
+            self.assertFalse(close_finished.is_set())
+            host.close.assert_not_called()
+            self.assertEqual(runtime.recovery_controller.state, HostState.RECOVERING)
+
+            allow_lease_exit.set()
+            lease_thread.join(timeout=2)
+            close_thread.join(timeout=2)
+
+            self.assertFalse(lease_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertTrue(close_finished.is_set())
+            host.close.assert_called_once_with()
+            self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
+
+    def test_closed_resolver_rejects_new_provider_lease(self) -> None:
+        resolver = HostLifetimeProviderSecretResolver(_LeaseBoundary())
+        resolver.stop_and_drain()
+        with self.assertRaisesRegex(PermissionError, "credential leases are closed"):
+            with resolver.lease_for_execution(
+                "token",
+                origin="http://127.0.0.1:18765",
+                handle=object(),
+                execution_identity="host-a",
+                account_id="account-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="TESTNET",
+            ):
+                self.fail("closed resolver yielded a secret")
 
 
 if __name__ == "__main__":

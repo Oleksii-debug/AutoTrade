@@ -150,6 +150,15 @@ def _detach_descriptor(value: StrategyDescriptor) -> StrategyDescriptor:
         raise TypeError(
             "registered_strategies must contain exact StrategyDescriptor"
         )
+    for name in (
+        "market_requirements",
+        "parameter_bounds",
+        "supported_regimes",
+    ):
+        if type(getattr(value, name)) is not tuple:
+            raise TypeError(
+                f"StrategyDescriptor {name} must remain an exact tuple"
+            )
     return StrategyDescriptor(
         strategy_id=value.strategy_id,
         version=value.version,
@@ -202,12 +211,25 @@ def _detach_coverage_assessment(
         protocol_sha256=value.protocol_sha256,
         evidence_sha256=value.evidence_sha256,
         economic_edge_status=value.economic_edge_status,
+        regime_routing_status=value.regime_routing_status,
+        strategy_comparison_status=value.strategy_comparison_status,
+        grants_trading_authority=value.grants_trading_authority,
     )
 
 
 def _detach_gate(value: GateDecision) -> GateDecision:
     if type(value) is not GateDecision:
         raise TypeError("scientific_gate must be exact GateDecision")
+    if type(value.reasons) is not tuple:
+        raise TypeError("scientific_gate reasons must remain an exact tuple")
+    if type(value.checks) not in {dict, MappingProxyType}:
+        raise TypeError(
+            "scientific_gate checks must remain an exact dict or mapping proxy"
+        )
+    if type(value.provenance) not in {dict, MappingProxyType}:
+        raise TypeError(
+            "scientific_gate provenance must remain an exact dict or mapping proxy"
+        )
     return GateDecision(
         status=value.status,
         reasons=value.reasons,
@@ -401,10 +423,14 @@ class StrategyToolPolicy:
         registered_strategies: Sequence[StrategyDescriptor],
         required_cells: Sequence[StrategyToolCell],
     ) -> "StrategyToolPolicy":
-        if isinstance(registered_strategies, (str, bytes)):
-            raise TypeError("registered_strategies must be a sequence")
-        if isinstance(required_cells, (str, bytes)):
-            raise TypeError("required_cells must be a sequence")
+        if type(registered_strategies) not in {tuple, list}:
+            raise TypeError(
+                "registered_strategies must be an exact tuple or list"
+            )
+        if type(required_cells) not in {tuple, list}:
+            raise TypeError(
+                "required_cells must be an exact tuple or list"
+            )
         strategies = tuple(_detach_descriptor(item) for item in registered_strategies)
         strategies = tuple(sorted(strategies, key=lambda item: item.fingerprint))
         cells_raw = tuple(required_cells)
@@ -617,8 +643,10 @@ class StrategyToolAssessment:
             _text(item, name="reason")
             for item in self.reasons
         )
-        if not isinstance(self.cell_statuses, Mapping):
-            raise TypeError("cell_statuses must be a mapping")
+        if type(self.cell_statuses) not in {dict, MappingProxyType}:
+            raise TypeError(
+                "cell_statuses must be an exact dict or mapping proxy"
+            )
         statuses: dict[str, str] = {}
         for raw_key, raw_value in self.cell_statuses.items():
             key = _text(raw_key, name="cell status key")
@@ -633,13 +661,17 @@ class StrategyToolAssessment:
                 "cell_statuses must not be empty"
             )
 
-        if not isinstance(self.dispositions, Mapping):
-            raise TypeError("dispositions must be a mapping")
+        if type(self.dispositions) not in {dict, MappingProxyType}:
+            raise TypeError(
+                "dispositions must be an exact dict or mapping proxy"
+            )
         frozen_dispositions: dict[str, Mapping[str, str]] = {}
         for raw_cell, raw_rows in self.dispositions.items():
             cell = _text(raw_cell, name="disposition cell")
-            if not isinstance(raw_rows, Mapping):
-                raise TypeError("cell dispositions must be mappings")
+            if type(raw_rows) not in {dict, MappingProxyType}:
+                raise TypeError(
+                    "cell dispositions must be exact dicts or mapping proxies"
+                )
             rows: dict[str, str] = {}
             for raw_strategy, raw_disposition in raw_rows.items():
                 strategy = _sha(
@@ -659,13 +691,17 @@ class StrategyToolAssessment:
                 {key: rows[key] for key in sorted(rows)}
             )
 
-        if not isinstance(self.weights, Mapping):
-            raise TypeError("weights must be a mapping")
+        if type(self.weights) not in {dict, MappingProxyType}:
+            raise TypeError(
+                "weights must be an exact dict or mapping proxy"
+            )
         frozen_weights: dict[str, Mapping[str, ExactWeight]] = {}
         for raw_cell, raw_rows in self.weights.items():
             cell = _text(raw_cell, name="weight cell")
-            if not isinstance(raw_rows, Mapping):
-                raise TypeError("cell weights must be mappings")
+            if type(raw_rows) not in {dict, MappingProxyType}:
+                raise TypeError(
+                    "cell weights must be exact dicts or mapping proxies"
+                )
             rows: dict[str, ExactWeight] = {}
             for raw_strategy, raw_weight in raw_rows.items():
                 strategy = _sha(
@@ -798,8 +834,8 @@ def assess_strategy_tools(
         registered_strategies=policy.registered_strategies,
         required_cells=policy.required_cells,
     )
-    if isinstance(evidence, (str, bytes)):
-        raise TypeError("evidence must be a sequence")
+    if type(evidence) not in {tuple, list}:
+        raise TypeError("evidence must be an exact tuple or list")
     records = tuple(_detach_evidence(item) for item in evidence)
 
     strategies = {

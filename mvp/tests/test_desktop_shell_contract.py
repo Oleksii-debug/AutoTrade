@@ -51,6 +51,21 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("Authorization", text)
         self.assertNotIn("AutoTrade-Session", text)
 
+    def test_openapi_distinguishes_ephemeral_owned_desktop_pairing(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        session = text.split("  /api/v1/session:", 1)[1].split(
+            "  /api/v1/state:",
+            1,
+        )[0]
+        self.assertIn("Standalone ZERO launch", session)
+        self.assertIn("owned WPF desktop child", session)
+        self.assertIn("does not persist it", session)
+        self.assertIn("Configured persistent Windows current-user session handoff failed", session)
+        self.assertNotIn(
+            "Windows ZERO launcher stores the same short-lived session in current-user Credential Manager",
+            session,
+        )
+
     def test_event_credential_query_grammar_is_pinned_to_openapi_after_parameter(self):
         policy = WEB_POLICY.read_text(encoding="utf-8")
         openapi = OPENAPI.read_text(encoding="utf-8")

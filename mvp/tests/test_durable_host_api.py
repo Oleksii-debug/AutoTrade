@@ -2210,6 +2210,17 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(store.state_version, 1)
 
 
+    def test_expected_state_version_requires_canonical_sequence(self):
+        store = self.store()
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                ValueError,
+                "canonical Sequence",
+            ):
+                store.submit(self.command(version=version))
+            self.assertEqual(store.state_version, 0)
+            self.assertEqual(store.events_after(0), ())
+
     def test_event_cursor_rejects_noncanonical_sequence_text(self):
         store = self.store()
         store.submit(self.command())

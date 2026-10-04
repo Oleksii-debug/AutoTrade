@@ -134,6 +134,7 @@ class RuntimeLoadEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)
             expected = (_expected("financial-1", 1), _expected("financial-2", 2))
+            expected_ids = tuple(event.event_id for event in expected)
             start = store.current_journal_sequence()
             for event in expected:
                 _append(store, event)
@@ -147,6 +148,8 @@ class RuntimeLoadEvidenceTests(unittest.TestCase):
                 financial_staleness_us=(100, 200),
                 research_interference_us=(50,),
                 reconnect_backlog_remaining=0,
+                financial_latency_event_ids=expected_ids,
+                financial_staleness_event_ids=expected_ids,
                 declared_duration_us=1_000_000,
                 observed_duration_us=1_000_000,
             )
@@ -162,6 +165,34 @@ class RuntimeLoadEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence.end_journal_sequence, start + 2)
             self.assertTrue(evidence.expected_event_digest.startswith("sha256:"))
             self.assertTrue(evidence.digest.startswith("sha256:"))
+
+    def test_equal_length_anonymous_metric_series_cannot_gain_event_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = (_expected("financial-1", 1), _expected("financial-2", 2))
+            start = store.current_journal_sequence()
+            for event in expected:
+                _append(store, event)
+
+            decision, _evidence = evaluate_journal_backed_runtime_budget(
+                _spec(),
+                store,
+                start_journal_sequence=start,
+                expected_events=expected,
+                financial_latency_us=(100, 200),
+                financial_staleness_us=(100, 200),
+                research_interference_us=(50,),
+                reconnect_backlog_remaining=0,
+                declared_duration_us=1_000_000,
+                observed_duration_us=1_000_000,
+            )
+
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertIn("unbound_financial_latency_samples", decision.reasons)
+            self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+            self.assertIn("unbound_financial_staleness_samples", decision.reasons)
+            self.assertNotIn("p95_financial_latency_us", decision.metrics)
+            self.assertNotIn("max_financial_staleness_us", decision.metrics)
 
     def test_missing_durable_event_forces_financial_event_loss(self):
         with tempfile.TemporaryDirectory() as root:

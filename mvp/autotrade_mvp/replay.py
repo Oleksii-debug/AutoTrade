@@ -95,7 +95,7 @@ REQUIRED_RUNTIME_COMPONENTS = frozenset(
 
 def _sha256_hex(value: str, *, field: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) != 64
         or any(character not in _SHA256_HEX for character in value)
     ):
@@ -105,7 +105,7 @@ def _sha256_hex(value: str, *, field: str) -> str:
 
 def _signature_hex(value: str, *, field: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) < 64
         or len(value) > 8192
         or len(value) % 2
@@ -119,7 +119,7 @@ def _signature_hex(value: str, *, field: str) -> str:
 
 def _build_sha(value: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) not in {40, 64}
         or any(character not in _SHA256_HEX for character in value)
     ):
@@ -130,11 +130,12 @@ def _build_sha(value: str) -> str:
 def _component_bindings(
     values: Mapping[str, str],
 ) -> Mapping[str, str]:
-    if not isinstance(values, Mapping):
-        raise TypeError("runtime component bindings must be a mapping")
+    if type(values) is not dict:
+        raise TypeError("runtime component bindings must be an exact dictionary")
+    held = values.copy()
     normalized: dict[str, str] = {}
-    for raw_name, raw_digest in values.items():
-        if not isinstance(raw_name, str) or not raw_name.strip():
+    for raw_name, raw_digest in held.items():
+        if type(raw_name) is not str or not raw_name.strip():
             raise ReplayError("runtime component names must be non-empty")
         name = raw_name.strip()
         if name != raw_name:
@@ -172,17 +173,17 @@ class RuntimeStateSnapshot:
     authority_seal: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.cut_id, str) or not self.cut_id.strip():
+        if type(self.cut_id) is not str or not self.cut_id.strip():
             raise ReplayError("runtime cut_id must be non-empty")
         if self.cut_id != self.cut_id.strip():
             raise ReplayError("runtime cut_id must be canonical text")
-        if not isinstance(self.replay, ReplayCheckpoint):
-            raise TypeError("runtime snapshot replay must be ReplayCheckpoint")
-        if not isinstance(self.authority_id, str) or not self.authority_id.strip():
+        if type(self.replay) is not ReplayCheckpoint:
+            raise TypeError("runtime snapshot replay must be exact ReplayCheckpoint")
+        if type(self.authority_id) is not str or not self.authority_id.strip():
             raise ReplayError("runtime authority_id must be non-empty")
         if self.authority_id != self.authority_id.strip():
             raise ReplayError("runtime authority_id must be canonical text")
-        if not isinstance(self.verifier_id, str) or not self.verifier_id.strip():
+        if type(self.verifier_id) is not str or not self.verifier_id.strip():
             raise ReplayError("runtime verifier_id must be non-empty")
         if self.verifier_id != self.verifier_id.strip():
             raise ReplayError("runtime verifier_id must be canonical text")
@@ -428,7 +429,7 @@ class RuntimeStateVerifier:
             (authority_id, "runtime authority_id"),
             (verifier_id, "runtime verifier_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ReplayError(f"{field} must be non-empty")
             if value != value.strip():
                 raise ReplayError(f"{field} must be canonical text")
@@ -540,7 +541,7 @@ class RuntimeStateAuthority:
         signer: RuntimeStateSigner,
         cut_resolver: RuntimeStateCutResolver,
     ) -> None:
-        if not isinstance(authority_id, str) or not authority_id.strip():
+        if type(authority_id) is not str or not authority_id.strip():
             raise ReplayError("runtime authority_id must be non-empty")
         if authority_id != authority_id.strip():
             raise ReplayError("runtime authority_id must be canonical text")
@@ -600,7 +601,7 @@ class RuntimeStateAuthority:
         protocol_ref: str,
     ) -> bytes:
         build = _build_sha(build_sha)
-        if not isinstance(protocol_ref, str) or not protocol_ref.strip():
+        if type(protocol_ref) is not str or not protocol_ref.strip():
             raise ReplayError("protocol_ref must be non-empty")
         protocol = protocol_ref.strip()
         if protocol != protocol_ref:
@@ -633,7 +634,7 @@ class RuntimeStateAuthority:
         verifier_id: str,
     ) -> RuntimeStateSnapshot:
         authority_id = _runtime_state_authority_id(self)
-        if not isinstance(verifier_id, str) or not verifier_id.strip():
+        if type(verifier_id) is not str or not verifier_id.strip():
             raise ReplayError("runtime verifier_id must be non-empty")
         if verifier_id != verifier_id.strip():
             raise ReplayError("runtime verifier_id must be canonical text")
@@ -641,13 +642,13 @@ class RuntimeStateAuthority:
             cut_id, replay, raw_components = _resolve_runtime_authority_cut(self)
         except Exception as error:
             raise ReplayError("runtime state authority failed") from error
-        if not isinstance(cut_id, str) or not cut_id.strip():
+        if type(cut_id) is not str or not cut_id.strip():
             raise ReplayError("runtime cut_id must be non-empty")
         if cut_id != cut_id.strip():
             raise ReplayError("runtime cut_id must be canonical text")
-        if not isinstance(replay, ReplayCheckpoint):
+        if type(replay) is not ReplayCheckpoint:
             raise ReplayError(
-                "runtime state authority must resolve a ReplayCheckpoint"
+                "runtime state authority must resolve an exact ReplayCheckpoint"
             )
         components = _component_bindings(raw_components)
         material = self._binding_material(
@@ -660,7 +661,7 @@ class RuntimeStateAuthority:
         return RuntimeStateSnapshot(
             cut_id=cut_id,
             replay=replay,
-            runtime_components=components,
+            runtime_components=dict(components),
             authority_id=authority_id,
             verifier_id=verifier_id,
             authority_seal=_sign_runtime_authority_material(self, material),
@@ -737,20 +738,20 @@ class CompositeReplayCheckpoint:
     schema_version: str = "4.0.0"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.replay, ReplayCheckpoint):
-            raise TypeError("replay must be ReplayCheckpoint")
+        if type(self.replay) is not ReplayCheckpoint:
+            raise TypeError("replay must be exact ReplayCheckpoint")
         components = _component_bindings(self.runtime_components)
-        if not isinstance(self.runtime_cut_id, str) or not self.runtime_cut_id.strip():
+        if type(self.runtime_cut_id) is not str or not self.runtime_cut_id.strip():
             raise ReplayError("runtime_cut_id must be non-empty")
         cut_id = self.runtime_cut_id.strip()
         if cut_id != self.runtime_cut_id:
             raise ReplayError("runtime_cut_id must be canonical text")
-        if not isinstance(self.runtime_authority_id, str) or not self.runtime_authority_id.strip():
+        if type(self.runtime_authority_id) is not str or not self.runtime_authority_id.strip():
             raise ReplayError("runtime_authority_id must be non-empty")
         authority_id = self.runtime_authority_id.strip()
         if authority_id != self.runtime_authority_id:
             raise ReplayError("runtime_authority_id must be canonical text")
-        if not isinstance(self.runtime_verifier_id, str) or not self.runtime_verifier_id.strip():
+        if type(self.runtime_verifier_id) is not str or not self.runtime_verifier_id.strip():
             raise ReplayError("runtime_verifier_id must be non-empty")
         verifier_id = self.runtime_verifier_id.strip()
         if verifier_id != self.runtime_verifier_id:
@@ -760,7 +761,7 @@ class CompositeReplayCheckpoint:
             field="runtime authority signature",
         )
         build = _build_sha(self.build_sha)
-        if not isinstance(self.protocol_ref, str) or not self.protocol_ref.strip():
+        if type(self.protocol_ref) is not str or not self.protocol_ref.strip():
             raise ReplayError("protocol_ref must be non-empty")
         protocol = self.protocol_ref.strip()
         if protocol != self.protocol_ref:
@@ -843,8 +844,8 @@ class CompositeReplayCheckpoint:
 
     @classmethod
     def from_canonical_json(cls, document: str) -> "CompositeReplayCheckpoint":
-        if not isinstance(document, str):
-            raise TypeError("composite replay checkpoint document must be text")
+        if type(document) is not str:
+            raise TypeError("composite replay checkpoint document must be exact text")
         try:
             decoded = json.loads(document)
         except json.JSONDecodeError as error:
@@ -934,7 +935,7 @@ class ReplayCheckpoint:
     clock: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.dataset_digest, str) or len(self.dataset_digest) != 64:
+        if type(self.dataset_digest) is not str or len(self.dataset_digest) != 64:
             raise ReplayError("dataset_digest must be a SHA-256 hex digest")
         try:
             int(self.dataset_digest, 16)
@@ -1111,7 +1112,7 @@ class CausalReplay:
         )
         checkpoint = CompositeReplayCheckpoint(
             replay=replay_before,
-            runtime_components=snapshot.runtime_components,
+            runtime_components=dict(snapshot.runtime_components),
             runtime_cut_id=snapshot.cut_id,
             runtime_authority_id=snapshot.authority_id,
             runtime_verifier_id=snapshot.verifier_id,
@@ -1173,7 +1174,7 @@ def resume_from_composite_checkpoint(
     )
     current = CompositeReplayCheckpoint(
         replay=snapshot.replay,
-        runtime_components=snapshot.runtime_components,
+        runtime_components=dict(snapshot.runtime_components),
         runtime_cut_id=snapshot.cut_id,
         runtime_authority_id=snapshot.authority_id,
         runtime_verifier_id=snapshot.verifier_id,

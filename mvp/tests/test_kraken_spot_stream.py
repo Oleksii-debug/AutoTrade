@@ -386,16 +386,6 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 },
                 "cost",
             ),
-            (
-                {
-                    "order_id": "O-ID",
-                    "exec_id": "E-ID",
-                    "exec_type": "trade",
-                    "order_status": "partially_filled",
-                    "trade_id": None,
-                },
-                "trade_id",
-            ),
         )
         for report_input, missing_field in cases:
             with self.subTest(missing_field=missing_field):
@@ -406,6 +396,39 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 ).reports[0]
                 self.assertIsNone(getattr(report, missing_field))
                 self.assertFalse(report.trade_economics_complete)
+
+    def test_trade_id_is_optional_for_canonical_provider_fill_bridge(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=6,
+                reports=[
+                    {
+                        "order_id": "O-OPTIONAL-TRADE-ID",
+                        "cl_ord_id": "client-optional-trade-id",
+                        "exec_id": "E-OPTIONAL-TRADE-ID",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "trade_id": None,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        report = frame.reports[0]
+        self.assertIsNone(report.trade_id)
+        self.assertTrue(report.trade_economics_complete)
+
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+        self.assertEqual(fill.provider_execution_id, "E-OPTIONAL-TRADE-ID")
+        self.assertEqual(fill.client_order_id, "client-optional-trade-id")
+        self.assertEqual(fill.quantity, Decimal("1"))
+        self.assertEqual(fill.price, Decimal("25000"))
 
     def test_trade_frame_rejects_non_boolean_margin_flag_when_present(self):
         raw = (

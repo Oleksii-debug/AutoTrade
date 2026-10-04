@@ -660,7 +660,6 @@ class KrakenSpotExecutionReport:
             and self.last_qty is not None
             and self.last_price is not None
             and self.cost is not None
-            and self.trade_id is not None
             and self.fees_reported
         )
 

@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.kraken_spot_stream import (
     KrakenSpotStreamError,
     parse_execution_frame,
     parse_executions_subscription_ack,
+    provider_fills_from_execution_frame,
 )
 
 
@@ -478,6 +479,128 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             report.event_time,
             "2026-10-04T07:00:00+02:00",
         )
+
+
+    def test_trade_frame_maps_to_existing_canonical_provider_fill_evidence(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=44,
+                reports=[
+                    {
+                        "order_id": "O-BRIDGE",
+                        "cl_ord_id": "client-bridge",
+                        "exec_id": "E-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "symbol": "BTC/USD",
+                        "side": "sell",
+                        "last_qty": 1,
+                        "last_price": 40000,
+                        "cost": 40000,
+                        "fees": [
+                            {"asset": "USD", "qty": 1},
+                            {"asset": "USD", "qty": 2},
+                        ],
+                        "timestamp": "2026-10-04T05:00:00.123456Z",
+                        "trade_id": 404,
+                        "margin_borrow": False,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        fills = provider_fills_from_execution_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )
+
+        self.assertEqual(len(fills), 1)
+        fill = fills[0]
+        self.assertEqual(fill.provider_id, "KRAKEN")
+        self.assertEqual(fill.account_id, "spot-live-1")
+        self.assertEqual(fill.environment, "LIVE")
+        self.assertEqual(fill.provider_execution_id, "E-BRIDGE")
+        self.assertEqual(fill.client_order_id, "client-bridge")
+        self.assertEqual(fill.instrument, "CRYPTO:BTC-USD:v1")
+        self.assertEqual(fill.side, "SELL")
+        self.assertEqual(fill.quantity, Decimal("1"))
+        self.assertEqual(fill.price, Decimal("40000"))
+        self.assertEqual(fill.fee_amount, Decimal("3"))
+        self.assertEqual(fill.fee_currency, "USD")
+        self.assertEqual(fill.trade_time, "2026-10-04T05:00:00.123456Z")
+        self.assertEqual(fill.evidence_refs, (frame.evidence_ref,))
+
+    def test_provider_fill_bridge_ignores_status_only_reports(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=45,
+                reports=[
+                    {
+                        "order_id": "O-STATUS-ONLY",
+                        "exec_type": "status",
+                        "order_status": "new",
+                        "symbol": "BTC/USD",
+                        "side": "buy",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        self.assertEqual(
+            provider_fills_from_execution_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            ),
+            (),
+        )
+
+    def test_provider_fill_bridge_rejects_unmapped_symbol_and_mixed_fee_assets(self):
+        base = {
+            "order_id": "O-BRIDGE-FAIL",
+            "cl_ord_id": "client-bridge-fail",
+            "exec_id": "E-BRIDGE-FAIL",
+            "exec_type": "trade",
+            "order_status": "partially_filled",
+            "symbol": "BTC/USD",
+            "side": "buy",
+        }
+        frame = parse_execution_frame(
+            frame_bytes(frame_type="update", sequence=46, reports=[base]),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "unmapped Kraken executions symbol",
+        ):
+            provider_fills_from_execution_frame(
+                frame,
+                instrument_versions={},
+            )
+
+        mixed = dict(base)
+        mixed["fees"] = [
+            {"asset": "USD", "qty": 1},
+            {"asset": "EUR", "qty": 1},
+        ]
+        mixed_frame = parse_execution_frame(
+            frame_bytes(frame_type="update", sequence=47, reports=[mixed]),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "fees span multiple currencies",
+        ):
+            provider_fills_from_execution_frame(
+                mixed_frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
 
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
         huge_integer = b"9" * 1000

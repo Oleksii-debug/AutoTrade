@@ -18,10 +18,12 @@ from typing import Mapping, Sequence
 
 from .exact_decimal import (
     ExactDecimalError,
+    exact_sum,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
     parse_bounded_json_number_token,
 )
+from .reconciliation import ProviderFillEvidence
 
 
 class KrakenSpotStreamError(ValueError):
@@ -871,6 +873,104 @@ def parse_execution_frame(
         ),
         response_bytes=exact,
     )
+
+
+def provider_fills_from_execution_frame(
+    frame: object,
+    *,
+    instrument_versions: Mapping[str, str],
+) -> tuple[ProviderFillEvidence, ...]:
+    """Translate exact Kraken trade reports into canonical reconciliation fills.
+
+    This pure bridge owns no durable state and grants no readiness. Canonical
+    reconciliation/provider-fill accounting remains the execution-identity and
+    financial authority.
+    """
+
+    if type(frame) is not KrakenSpotExecutionFrame:
+        raise TypeError("frame must be exact KrakenSpotExecutionFrame")
+    if not isinstance(instrument_versions, Mapping):
+        raise TypeError("instrument_versions must be a mapping")
+
+    instruments: dict[str, str] = {}
+    for raw_symbol, raw_instrument in instrument_versions.items():
+        symbol = _canonical_text(
+            raw_symbol,
+            name="instrument_versions symbol",
+        )
+        instrument = _canonical_text(
+            raw_instrument,
+            name=f"instrument_versions[{symbol}]",
+        )
+        if symbol in instruments and instruments[symbol] != instrument:
+            raise KrakenSpotStreamError(
+                "instrument_versions contains conflicting symbol mappings"
+            )
+        instruments[symbol] = instrument
+
+    fills: list[ProviderFillEvidence] = []
+    for report in frame.reports:
+        if report.exec_type != "trade":
+            continue
+        if (
+            report.exec_id is None
+            or report.symbol is None
+            or report.side is None
+            or report.last_qty is None
+            or report.last_price is None
+            or report.event_time is None
+            or not report.fees
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken trade report is incomplete at provider-fill bridge"
+            )
+
+        instrument = instruments.get(report.symbol)
+        if instrument is None:
+            raise KrakenSpotStreamError(
+                f"unmapped Kraken executions symbol: {report.symbol}"
+            )
+
+        fee_assets = {
+            _canonical_text(fee.asset, name="fee.asset").upper()
+            for fee in report.fees
+        }
+        if len(fee_assets) != 1:
+            raise KrakenSpotStreamError(
+                "Kraken execution fees span multiple currencies; "
+                "canonical fill requires one fee currency"
+            )
+        try:
+            fee_amount = exact_sum(fee.quantity for fee in report.fees)
+        except ExactDecimalError as error:
+            raise KrakenSpotStreamError(
+                "Kraken execution fee aggregation exceeds exact resource authority"
+            ) from error
+
+        try:
+            fills.append(
+                ProviderFillEvidence.create(
+                    provider_id="KRAKEN",
+                    account_id=frame.account_id,
+                    environment=frame.environment,
+                    provider_execution_id=report.exec_id,
+                    client_order_id=report.client_order_id,
+                    instrument=instrument,
+                    quantity=report.last_qty,
+                    price=report.last_price,
+                    fee_amount=fee_amount,
+                    fee_currency=next(iter(fee_assets)),
+                    trade_time=report.event_time,
+                    side=report.side.upper(),
+                    evidence_refs=(frame.evidence_ref,),
+                )
+            )
+        except (TypeError, ValueError) as error:
+            raise KrakenSpotStreamError(
+                "Kraken trade report cannot form canonical provider fill evidence"
+            ) from error
+
+    return tuple(fills)
 
 
 @dataclass(frozen=True)

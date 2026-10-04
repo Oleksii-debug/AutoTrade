@@ -56,6 +56,7 @@ from mvp.autotrade_mvp.provider_transport import (
     UrllibJsonWireClient,
     direct_authenticated_read_execution_receipt,
     direct_authenticated_read_execution_receipt_snapshot,
+    provider_observation_direct_execution_material,
     _exact_trading_response,
     _binance_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
@@ -4607,6 +4608,63 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             "not bound to exact response",
         ):
             direct_authenticated_read_execution_receipt(forged_response)
+
+    def test_genuine_receipt_cannot_promote_caller_assembled_observation(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener.open = lambda *_args, **_kwargs: Stream(b'{"ok":true}')
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_qualified_read_authority",
+            object(),
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            binding,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
+        )
+        wire_response = client.send(request)
+        receipt = direct_authenticated_read_execution_receipt(wire_response)
+
+        caller_observation = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=READ_NOW,
+        )
+        object.__setattr__(
+            caller_observation,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+        object.__setattr__(
+            caller_observation,
+            "_direct_authenticated_read_response_bytes",
+            wire_response.body,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "direct provider observation execution authority is unavailable",
+        ):
+            provider_observation_direct_execution_material(caller_observation)
 
     def test_direct_receipt_rejects_terminal_proof_relabelled_to_other_wire_endpoint(self):
         class Stream(BytesIO):

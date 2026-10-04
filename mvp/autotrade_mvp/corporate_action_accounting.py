@@ -29,6 +29,7 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    require_authoritative_corporate_action,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
 from .exact_decimal import (
@@ -530,6 +531,7 @@ def commit_authoritative_corporate_action(
         raise TypeError(
             "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"
         )
+    accepted = require_authoritative_corporate_action(accepted)
     (
         evidence_journal,
         _,

@@ -369,6 +369,28 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("50"))
         self.assertEqual(restarted.version, 3)
 
+    def test_mark_unknown_accepts_frozen_time_without_wall_clock(self):
+        first = self.book()
+        self.reserve(first)
+        frozen = "2026-10-03T00:00:03.000001Z"
+        with patch(
+            "mvp.autotrade_mvp.durable_reservations._now",
+            side_effect=AssertionError("explicit durable time must not read wall clock"),
+        ):
+            first.mark_unknown(
+                command_id="cmd-unknown-frozen",
+                idempotency_key="idem-unknown-frozen",
+                reservation_id="r1",
+                committed_at=frozen,
+            )
+
+        events = self.store.load_events("reservation_book", first.scope_id)
+        self.assertEqual(events[-1]["payload"]["operation"], "MARK_UNKNOWN")
+        self.assertEqual(events[-1]["committed_at"], frozen)
+        restarted = self.book()
+        self.assertEqual(restarted.get("r1").state, "UNKNOWN")
+        self.assertEqual(restarted.version, 2)
+
     def test_evidenced_terminal_resolution_survives_restart(self):
         first = self.book()
         self.reserve(first)

@@ -30,6 +30,7 @@ from .dispatch import (
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_latest_reconciliation_checkpoint_for_scope
 from .recovery import HostState, OwnerFence, RecoveryController
+from .recovery_takeover import _latest_effectful_submission_sequence
 
 
 _ISSUANCE_TOKEN = object()
@@ -48,6 +49,10 @@ _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE = (
 _CANONICAL_LOAD_LATEST_RECONCILIATION = load_latest_reconciliation_checkpoint_for_scope
 _CANONICAL_LOAD_LATEST_RECONCILIATION_CODE = (
     load_latest_reconciliation_checkpoint_for_scope.__code__
+)
+_CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE = _latest_effectful_submission_sequence
+_CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE = (
+    _latest_effectful_submission_sequence.__code__
 )
 _CANONICAL_PAYLOAD_DIGEST = payload_digest
 _CANONICAL_PAYLOAD_DIGEST_CODE = payload_digest.__code__
@@ -87,6 +92,16 @@ def _require_executable_authority() -> None:
         is not _CANONICAL_LOAD_LATEST_RECONCILIATION_CODE
     ):
         raise PermissionError("reconciliation reader authority code changed")
+    if (
+        _latest_effectful_submission_sequence
+        is not _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE
+    ):
+        raise PermissionError("effectful submission reader authority changed")
+    if (
+        _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE.__code__
+        is not _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE
+    ):
+        raise PermissionError("effectful submission reader authority code changed")
     if payload_digest is not _CANONICAL_PAYLOAD_DIGEST:
         raise PermissionError("payload digest authority changed")
     if _CANONICAL_PAYLOAD_DIGEST.__code__ is not _CANONICAL_PAYLOAD_DIGEST_CODE:
@@ -232,6 +247,8 @@ class RecoveryIssuedDispatcher:
         "__journal_snapshot_reader_code",
         "__reconciliation_reader",
         "__reconciliation_reader_code",
+        "__latest_effectful_submission_sequence",
+        "__latest_effectful_submission_sequence_code",
         "__payload_digest",
         "__payload_digest_code",
         "__owner",
@@ -288,6 +305,7 @@ class RecoveryIssuedDispatcher:
         recover_function = _CANONICAL_RECOVER_DURABLE_UNCERTAINTY
         snapshot_reader = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
         reconciliation_reader = _CANONICAL_LOAD_LATEST_RECONCILIATION
+        effectful_reader = _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE
         digest_function = _CANONICAL_PAYLOAD_DIGEST
 
         self.__recovery = recovery
@@ -303,6 +321,10 @@ class RecoveryIssuedDispatcher:
         self.__journal_snapshot_reader_code = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE
         self.__reconciliation_reader = reconciliation_reader
         self.__reconciliation_reader_code = _CANONICAL_LOAD_LATEST_RECONCILIATION_CODE
+        self.__latest_effectful_submission_sequence = effectful_reader
+        self.__latest_effectful_submission_sequence_code = (
+            _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE
+        )
         self.__payload_digest = digest_function
         self.__payload_digest_code = _CANONICAL_PAYLOAD_DIGEST_CODE
         self.__owner = owner
@@ -402,6 +424,15 @@ class RecoveryIssuedDispatcher:
         if reconciliation_reader.__code__ is not self.__reconciliation_reader_code:
             raise PermissionError("reconciliation reader authority code changed")
 
+        effectful_reader = self.__latest_effectful_submission_sequence
+        if _latest_effectful_submission_sequence is not effectful_reader:
+            raise PermissionError("effectful submission reader authority changed")
+        if (
+            effectful_reader.__code__
+            is not self.__latest_effectful_submission_sequence_code
+        ):
+            raise PermissionError("effectful submission reader authority code changed")
+
         digest_function = self.__payload_digest
         if payload_digest is not digest_function:
             raise PermissionError("payload digest authority changed")
@@ -452,6 +483,18 @@ class RecoveryIssuedDispatcher:
             or self.__payload_digest(payload) != checkpoint.get("payload_hash")
         ):
             raise PermissionError("durable reconciliation payload is invalid")
+        checkpoint_sequence = checkpoint.get("journal_sequence")
+        if type(checkpoint_sequence) is not int or checkpoint_sequence < 1:
+            raise PermissionError("durable reconciliation journal sequence is invalid")
+        latest_effectful_sequence = self.__latest_effectful_submission_sequence(
+            self.__store,
+            environment=self.__environment,
+            account_id=self.__account_id,
+        )
+        if checkpoint_sequence <= latest_effectful_sequence:
+            raise PermissionError(
+                "durable reconciliation predates latest durable send state"
+            )
         checkpoint_owner = payload.get("checkpoint_owner")
         if (
             type(checkpoint_owner) is not dict

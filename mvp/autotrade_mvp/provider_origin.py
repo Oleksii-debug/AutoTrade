@@ -6,13 +6,13 @@ persisted before I/O; exact response bytes can then be retained in the neutral
 ArtifactStore before a terminal Observed event is published.  Restart can
 finish Retained -> Observed without a provider re-query.
 
-Important authority boundary: ``_record_provider_origin`` is deliberately a
-private integration seam.  The module-local token exists only so deterministic
-unit tests can falsify the durable chronology.  An importable Python token is
-*not* PAPER/LIVE provider-origin authority.  Product code must not call this
-seam until a canonical provider transport supplies a non-self-mintable wire
-execution receipt.  Consequently this module by itself makes no PAPER/LIVE
-provenance or release-readiness claim.
+Authority boundary: deterministic durability tests may still record explicit
+TEST_INJECTED responses, but that evidence class can never produce a financial
+ProviderOriginObservation.  Production PROVIDER_ORIGIN requires the canonical
+direct transport's closure-authorized execution receipt and a terminal exact
+C/Q proof captured immediately before the wire send.  The durable journal keeps
+those identities across restart without treating storage integrity as provider
+origin or provider qualification.
 """
 
 from __future__ import annotations
@@ -35,6 +35,14 @@ from .provider_route_reads import (
     QualifiedProviderResponseObservation,
     _require_qualified_provider_read_binding_authority,
     observe_qualified_provider_json_response,
+    terminal_qualified_provider_read_authority_snapshot,
+)
+from .provider_transport import (
+    ProviderTransportError,
+    direct_authenticated_read_execution_receipt_snapshot,
+    direct_authenticated_read_network_policy_identity,
+    direct_authenticated_read_transport_identity,
+    provider_observation_direct_execution_material,
 )
 from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -54,6 +62,8 @@ _PREPARED_EVENT = "AuthenticatedReadPrepared"
 _RETAINED_EVENT = "AuthenticatedReadRetained"
 _OBSERVED_EVENT = "AuthenticatedReadObserved"
 _ORIGIN_KIND = "PROVIDER_ORIGIN"
+_DIRECT_EXECUTION_CLASS = "DIRECT_PROVIDER_WIRE"
+_TEST_EXECUTION_CLASS = "TEST_INJECTED"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
@@ -96,6 +106,10 @@ _RETAINED_PAYLOAD_KEYS = frozenset(
         "response_sha256",
         "response_artifact_id",
         "observed_at",
+        "execution_class",
+        "wire_request_sha256",
+        "terminal_authority_journal_sequence_cut",
+        "terminal_authority_verified_at",
     }
 )
 _OBSERVED_PAYLOAD_KEYS = frozenset(set(_RETAINED_PAYLOAD_KEYS) | {"retained_event_id"})
@@ -308,6 +322,10 @@ def _origin_ref(
     response_artifact_id: str,
     observed_at: str,
     journal_sequence: int,
+    execution_class: str,
+    wire_request_sha256: str,
+    terminal_authority_journal_sequence_cut: int,
+    terminal_authority_verified_at: str,
 ) -> str:
     material = {
         "attempt_id": attempt_id,
@@ -318,6 +336,10 @@ def _origin_ref(
         "response_artifact_id": response_artifact_id,
         "observed_at": observed_at,
         "journal_sequence": journal_sequence,
+        "execution_class": execution_class,
+        "wire_request_sha256": wire_request_sha256,
+        "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
+        "terminal_authority_verified_at": terminal_authority_verified_at,
     }
     return "provider-origin:sha256:" + sha256(
         json.dumps(
@@ -356,6 +378,10 @@ class AuthenticatedReadResponseBinding:
     response_bytes: bytes
     origin_ref: str
     journal_sequence: int
+    execution_class: str
+    wire_request_sha256: str
+    terminal_authority_journal_sequence_cut: int
+    terminal_authority_verified_at: str
     _binding_token: InitVar[object | None] = None
 
     def __post_init__(self, _binding_token: object | None) -> None:
@@ -383,6 +409,9 @@ class AuthenticatedReadResponseBinding:
             "response_sha256",
             "response_artifact_id",
             "origin_ref",
+            "execution_class",
+            "wire_request_sha256",
+            "terminal_authority_verified_at",
         ):
             _exact_text(getattr(self, name), name=name)
         if _QID_RE.fullmatch(self.qualification_id) is None:
@@ -393,6 +422,7 @@ class AuthenticatedReadResponseBinding:
             self.qualified_route_rule_digest,
             self.network_policy_identity,
             self.response_sha256,
+            self.wire_request_sha256,
         ):
             if _SHA256_RE.fullmatch(digest) is None:
                 raise ProviderOriginError("provider-origin digest is non-canonical")
@@ -400,6 +430,22 @@ class AuthenticatedReadResponseBinding:
             raise ProviderOriginError("origin_ref is non-canonical")
         if type(self.http_status) is not int or not 200 <= self.http_status <= 299:
             raise ProviderOriginError("provider-origin HTTP status must be exact 2xx")
+        if self.execution_class not in {
+            _DIRECT_EXECUTION_CLASS,
+            _TEST_EXECUTION_CLASS,
+        }:
+            raise ProviderOriginError("provider-origin execution class is invalid")
+        if (
+            type(self.terminal_authority_journal_sequence_cut) is not int
+            or self.terminal_authority_journal_sequence_cut < 0
+        ):
+            raise ProviderOriginError(
+                "terminal provider-read authority cut is invalid"
+            )
+        _parse_utc_text(
+            self.terminal_authority_verified_at,
+            name="terminal_authority_verified_at",
+        )
         if type(self.response_bytes) is not bytes or not self.response_bytes:
             raise ProviderOriginError("provider-origin response bytes are missing")
         if "sha256:" + sha256(self.response_bytes).hexdigest() != self.response_sha256:

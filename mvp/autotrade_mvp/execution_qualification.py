@@ -14,7 +14,6 @@ from typing import Literal
 from uuid import UUID
 
 from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
-
 from .execution_oracle import assert_conservative_execution
 from .execution_realism import (
     ExecutionModel,
@@ -80,6 +79,10 @@ class ExecutionModelQualification:
     protocol_sha256: str
     evidence_artifact_id: str
     evidence_sha256: str
+    provider_id: str
+    provider_environment: str
+    data_quality_artifact_id: str
+    data_quality_sha256: str
     instrument_version: str | None = None
 
     def __post_init__(self) -> None:
@@ -109,6 +112,19 @@ class ExecutionModelQualification:
             name="evidence_artifact_id",
         )
         evidence = _sha256(self.evidence_sha256, name="evidence_sha256")
+        provider_id = _text(self.provider_id, name="provider_id")
+        provider_environment = _text(
+            self.provider_environment,
+            name="provider_environment",
+        ).upper()
+        data_quality_artifact_id = _uuid(
+            self.data_quality_artifact_id,
+            name="data_quality_artifact_id",
+        )
+        data_quality = _sha256(
+            self.data_quality_sha256,
+            name="data_quality_sha256",
+        )
         instrument = (
             None
             if self.instrument_version is None
@@ -125,7 +141,51 @@ class ExecutionModelQualification:
         object.__setattr__(self, "protocol_sha256", protocol)
         object.__setattr__(self, "evidence_artifact_id", evidence_artifact_id)
         object.__setattr__(self, "evidence_sha256", evidence)
+        object.__setattr__(self, "provider_id", provider_id)
+        object.__setattr__(self, "provider_environment", provider_environment)
+        object.__setattr__(
+            self,
+            "data_quality_artifact_id",
+            data_quality_artifact_id,
+        )
+        object.__setattr__(self, "data_quality_sha256", data_quality)
         object.__setattr__(self, "instrument_version", instrument)
+
+
+def _resolve_artifact_sha256(
+    *,
+    artifact_store: ArtifactStore,
+    artifact_id: str,
+    label: str,
+) -> str:
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        if manifest.get("manifest_hash") is None:
+            raise ExecutionQualificationError(
+                f"{label} manifest lacks integrity binding"
+            )
+        artifact_store.read_bytes(artifact_id)
+    except ExecutionQualificationError:
+        raise
+    except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
+        raise ExecutionQualificationError(
+            f"{label} artifact cannot be verified"
+        ) from error
+    return _sha256(
+        manifest.get("sha256"),
+        name=f"resolved {label} sha256",
+    )
+
+
+def _artifact_metadata_matches(
+    *,
+    artifact_store: ArtifactStore,
+    artifact_id: str,
+    expected: dict[str, object],
+) -> bool:
+    manifest = artifact_store.load_manifest(artifact_id)
+    metadata = manifest.get("metadata")
+    return type(metadata) is dict and metadata == expected
 
 
 def validate_execution_qualification(
@@ -137,6 +197,10 @@ def validate_execution_qualification(
     protocol_sha256: str,
     artifact_store: ArtifactStore,
     evidence_artifact_id: str,
+    provider_id: str,
+    provider_environment: str,
+    data_quality_artifact_id: str,
+    data_quality_sha256: str,
     purpose: str,
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
@@ -163,29 +227,56 @@ def validate_execution_qualification(
         evidence_artifact_id,
         name="evidence_artifact_id",
     )
+    normalized_provider_id = _text(provider_id, name="provider_id")
+    normalized_provider_environment = _text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    normalized_data_quality_artifact_id = _uuid(
+        data_quality_artifact_id,
+        name="data_quality_artifact_id",
+    )
+    normalized_data_quality = _sha256(
+        data_quality_sha256,
+        name="data_quality_sha256",
+    )
 
-    try:
-        evidence_manifest = artifact_store.load_manifest(
-            normalized_evidence_artifact_id
-        )
-        if evidence_manifest.get("manifest_hash") is None:
-            raise ExecutionQualificationError(
-                "execution evidence manifest lacks integrity binding"
-            )
-        artifact_store.read_bytes(normalized_evidence_artifact_id)
-    except ExecutionQualificationError:
-        raise
-    except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
-        raise ExecutionQualificationError(
-            "execution evidence artifact cannot be verified"
-        ) from error
-
-    resolved_evidence = _sha256(
-        evidence_manifest.get("sha256"),
-        name="resolved evidence sha256",
+    resolved_evidence = _resolve_artifact_sha256(
+        artifact_store=artifact_store,
+        artifact_id=normalized_evidence_artifact_id,
+        label="execution evidence",
+    )
+    resolved_data_quality = _resolve_artifact_sha256(
+        artifact_store=artifact_store,
+        artifact_id=normalized_data_quality_artifact_id,
+        label="data quality profile",
+    )
+    execution_evidence_scope_matches = _artifact_metadata_matches(
+        artifact_store=artifact_store,
+        artifact_id=normalized_evidence_artifact_id,
+        expected={
+            "kind": "execution-qualification-evidence",
+            "provider_id": qualification.provider_id,
+            "provider_environment": qualification.provider_environment,
+            "data_quality_artifact_id": qualification.data_quality_artifact_id,
+            "data_quality_sha256": qualification.data_quality_sha256,
+        },
+    )
+    data_quality_scope_matches = _artifact_metadata_matches(
+        artifact_store=artifact_store,
+        artifact_id=normalized_data_quality_artifact_id,
+        expected={
+            "kind": "execution-data-quality-profile",
+            "provider_id": qualification.provider_id,
+            "provider_environment": qualification.provider_environment,
+        },
     )
 
     failures: list[str] = []
+    if not execution_evidence_scope_matches:
+        failures.append("execution_evidence_provider_scope")
+    if not data_quality_scope_matches:
+        failures.append("data_quality_provider_scope")
     if qualification.asset_class != normalized_asset:
         failures.append("asset_class")
     if qualification.data_fidelity != model.data_fidelity:
@@ -204,6 +295,20 @@ def validate_execution_qualification(
         failures.append("evidence_artifact_id")
     if qualification.evidence_sha256 != resolved_evidence:
         failures.append("evidence_sha256")
+    if qualification.provider_id != normalized_provider_id:
+        failures.append("provider_id")
+    if qualification.provider_environment != normalized_provider_environment:
+        failures.append("provider_environment")
+    if (
+        qualification.data_quality_artifact_id
+        != normalized_data_quality_artifact_id
+    ):
+        failures.append("data_quality_artifact_id")
+    if (
+        qualification.data_quality_sha256 != normalized_data_quality
+        or normalized_data_quality != resolved_data_quality
+    ):
+        failures.append("data_quality_sha256")
     if (
         qualification.instrument_version is not None
         and qualification.instrument_version != normalized_instrument
@@ -230,6 +335,10 @@ def simulate_qualified_execution(
     protocol_sha256: str,
     artifact_store: ArtifactStore,
     evidence_artifact_id: str,
+    provider_id: str,
+    provider_environment: str,
+    data_quality_artifact_id: str,
+    data_quality_sha256: str,
     purpose: str = "REPLAY",
 ) -> SimulatedExecution:
     """Run the existing simulator only after exact qualification succeeds.
@@ -251,6 +360,10 @@ def simulate_qualified_execution(
         protocol_sha256=protocol_sha256,
         artifact_store=artifact_store,
         evidence_artifact_id=evidence_artifact_id,
+        provider_id=provider_id,
+        provider_environment=provider_environment,
+        data_quality_artifact_id=data_quality_artifact_id,
+        data_quality_sha256=data_quality_sha256,
         purpose=purpose,
     )
     result = simulate_execution(order, observation, model)

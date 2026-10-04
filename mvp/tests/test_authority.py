@@ -338,6 +338,41 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "AuthorityPolicy"):
             service.register_policy(MutablePolicy())
 
+    def test_registered_policy_is_detached_from_later_caller_mutation(self):
+        original = policy(autonomous=False)
+        nested_identity = next(iter(original.instruments))
+        service = AuthorityService()
+        self.assertTrue(service.register_policy(original))
+        object.__setattr__(original, "autonomous", True)
+        object.__setattr__(original, "max_notional", Decimal("999999"))
+        object.__setattr__(original, "actions", frozenset({"ORDER.SUBMIT", "ORDER.CANCEL", "ORDER.REPLACE"}))
+        object.__setattr__(nested_identity, "version", 2)
+
+        rejected = service._admit_unverified(
+            admission_id="mutated-policy", policy_id="p1", intent_hash="intent",
+            account_id="paper-1", environment="PAPER", instrument_id=INSTRUMENT_ID,
+            instrument_version=1, action="ORDER.SUBMIT", notional="100",
+            state_version=1, risk_admitted=True, now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual((rejected.outcome, rejected.reason), ("REJECTED", "confirmation_required"))
+        self.assertEqual(service._policies["p1"].max_notional, Decimal("1000"))
+        self.assertEqual(next(iter(service._policies["p1"].instruments)).version, 1)
+        self.assertFalse(service._policies["p1"].autonomous)
+
+    def test_registration_revalidates_mutated_scopes_before_publication(self):
+        service = AuthorityService()
+        changed = policy()
+        object.__setattr__(changed, "actions", ["ORDER.SUBMIT"])
+        with self.assertRaisesRegex(TypeError, "exact frozensets"):
+            service.register_policy(changed)
+        self.assertEqual(service.epoch, 0)
+
+        changed = policy()
+        object.__setattr__(changed, "instruments", frozenset({instrument_ref()}))
+        with self.assertRaisesRegex(TypeError, "exact identities"):
+            service.register_policy(changed)
+        self.assertEqual(service.epoch, 0)
+
     def test_confirmation_is_bound_to_exact_intent_and_single_use(self):
         service = AuthorityService()
         service.register_policy(policy())

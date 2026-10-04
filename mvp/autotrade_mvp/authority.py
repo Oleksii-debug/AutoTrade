@@ -3274,8 +3274,34 @@ class AuthorityService:
         return self._epoch
 
     def register_policy(self, policy: AuthorityPolicy, *, simulation_time: str | None = None) -> bool:
-        if not isinstance(policy, AuthorityPolicy):
-            raise TypeError("policy must be AuthorityPolicy")
+        if type(policy) is not AuthorityPolicy:
+            raise TypeError("policy must be exact AuthorityPolicy")
+        # A frozen dataclass is still writable via object.__setattr__.  Retain
+        # our own fully revalidated copy, including nested instrument versions,
+        # before any durable publication or later financial admission.
+        if any(
+            type(values) is not frozenset
+            for values in (policy.environments, policy.instruments, policy.actions)
+        ):
+            raise TypeError("policy scopes must be exact frozensets")
+        if any(type(item) is not InstrumentVersionIdentity for item in policy.instruments):
+            raise TypeError("policy instruments must be exact identities")
+        policy = AuthorityPolicy(
+            policy_id=policy.policy_id,
+            account_id=policy.account_id,
+            environments=policy.environments,
+            instruments=frozenset(
+                InstrumentVersionIdentity(item.instrument_id, item.version)
+                for item in policy.instruments
+            ),
+            actions=policy.actions,
+            max_notional=policy.max_notional,
+            expires_at=policy.expires_at,
+            autonomous=policy.autonomous,
+            valid_from=policy.valid_from,
+            protection_only=policy.protection_only,
+            version=policy.version,
+        )
         if simulation_time is not None:
             if policy.environments != frozenset({"SIMULATION"}):
                 raise ValueError("simulation_time requires a SIMULATION-only policy")

@@ -11,7 +11,10 @@ from mvp.autotrade_mvp.dispatch import DispatchOutcome
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import ProductionHostConfig
 from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
-from mvp.autotrade_mvp.recovery_dispatch import RecoveryBoundDispatcher
+from mvp.autotrade_mvp.recovery_dispatch import (
+    RecoveryBoundDispatcher,
+    RecoveryDispatchBindingError,
+)
 
 
 class _Fence:
@@ -176,26 +179,23 @@ class ProductionTradingHostTests(unittest.TestCase):
             self.assertIsNone(controller.owner)
             self.assertEqual(controller.state, HostState.STOPPED)
 
-            wire_calls = []
-
-            def transport(client_order_id, request, final_guard):
-                del request
-                final_guard()
-                wire_calls.append(client_order_id)
-                return {"status": "accepted"}
-
-            outcome = retained_dispatcher.dispatch(
-                attempt_id="after-close",
-                intent_id="intent-2",
-                intent_hash="hash-2",
-                provider="SIMULATED",
-                request={},
-                now="2026-10-04T03:01:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
-                transport_send=transport,
-            )
-            self.assertEqual(outcome.status, "BLOCKED")
-            self.assertEqual(wire_calls, [])
+            inner_dispatcher = object.__getattribute__(retained_dispatcher, "_dispatcher")
+            with patch.object(inner_dispatcher, "dispatch") as inner_dispatch:
+                with self.assertRaisesRegex(
+                    RecoveryDispatchBindingError,
+                    "permanently revoked",
+                ):
+                    retained_dispatcher.dispatch(
+                        attempt_id="after-close",
+                        intent_id="intent-2",
+                        intent_hash="hash-2",
+                        provider="SIMULATED",
+                        request={},
+                        now="2026-10-04T03:01:00Z",
+                        authority_check=lambda _hash, _now: (True, "allowed"),
+                        transport_send=Mock(),
+                    )
+            inner_dispatch.assert_not_called()
 
     def test_close_drains_active_retained_dispatch_before_process_fence_release(self):
         with TemporaryDirectory() as directory:
@@ -279,6 +279,20 @@ class ProductionTradingHostTests(unittest.TestCase):
             self.assertTrue(host._instance_fence.released)
             self.assertIsNone(controller.owner)
             self.assertEqual(controller.state, HostState.STOPPED)
+            with self.assertRaisesRegex(
+                RecoveryDispatchBindingError,
+                "permanently revoked",
+            ):
+                dispatcher.dispatch(
+                    attempt_id="active-close-after",
+                    intent_id="intent-active-close-after",
+                    intent_hash="hash-active-close-after",
+                    provider="SIMULATED",
+                    request={},
+                    now="2026-10-04T03:01:31Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=Mock(),
+                )
 
     def test_close_revokes_dispatcher_before_later_host_cleanup_failure(self):
         with TemporaryDirectory() as directory:
@@ -299,19 +313,23 @@ class ProductionTradingHostTests(unittest.TestCase):
 
             self.assertIsNone(controller.owner)
             self.assertEqual(controller.state, HostState.STOPPED)
-            outcome = retained_dispatcher.dispatch(
-                attempt_id="after-failed-close",
-                intent_id="intent-failed-close",
-                intent_hash="sha256:" + "5" * 64,
-                provider="SIMULATED",
-                request={},
-                now="2026-10-04T03:02:00Z",
-                authority_check=lambda _hash, _at: (True, "allowed"),
-                transport_send=lambda *_args, **_kwargs: self.fail(
-                    "revoked dispatcher reached transport"
-                ),
-            )
-            self.assertEqual(outcome.status, "BLOCKED")
+            inner_dispatcher = object.__getattribute__(retained_dispatcher, "_dispatcher")
+            with patch.object(inner_dispatcher, "dispatch") as inner_dispatch:
+                with self.assertRaisesRegex(
+                    RecoveryDispatchBindingError,
+                    "permanently revoked",
+                ):
+                    retained_dispatcher.dispatch(
+                        attempt_id="after-failed-close",
+                        intent_id="intent-failed-close",
+                        intent_hash="sha256:" + "5" * 64,
+                        provider="SIMULATED",
+                        request={},
+                        now="2026-10-04T03:02:00Z",
+                        authority_check=lambda _hash, _at: (True, "allowed"),
+                        transport_send=Mock(),
+                    )
+            inner_dispatch.assert_not_called()
 
     def test_existing_durable_owner_without_takeover_fails_and_releases_host_fence(self):
         with TemporaryDirectory() as directory:

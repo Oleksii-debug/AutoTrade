@@ -1604,6 +1604,11 @@ def _simulation_settlement_rule(
 ) -> SettlementRuleBinding:
     """Publish and bind the simulator's explicit contractual cash-settlement rule."""
 
+    if settlement_date != trade_date:
+        raise ValueError(
+            "canonical simulation same-day settlement policy conflicts with provider fill"
+        )
+
     source_ref = (
         f"simulation:settlement-rule:{_SIMULATION_SETTLEMENT_RULE_ID}:"
         f"{_SIMULATION_SETTLEMENT_RULE_VERSION}"

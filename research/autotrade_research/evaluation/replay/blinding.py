@@ -117,6 +117,8 @@ def _freeze(value: object, *, path: str = "payload") -> object:
 def _plain(value: object) -> object:
     if type(value) in {dict, _MAPPING_PROXY_TYPE}:
         return {key: _plain(value[key]) for key in sorted(value)}
+    if type(value) is list:
+        return [_plain(item) for item in value]
     if type(value) is tuple:
         return [_plain(item) for item in value]
     if value is None or type(value) in {str, bool, int}:

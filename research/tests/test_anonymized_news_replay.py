@@ -205,7 +205,8 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         self.assertEqual(item.available_at_us - item.event_time_us, 5_000_000)
         self.assertEqual(item.ingested_at_us - item.available_at_us, 2_000_000)
         self.assertRegex(item.payload["published_at"], r"^T\+\d+us$")
-        self.assertRegex(item.payload["source_event_at"], r"^T\+\d+us$")
+        # The source event preceded the first visible publication by 15 minutes.
+        self.assertEqual(item.payload["source_event_at"], "T-900000000us")
 
     def test_preserves_structured_magnitude_direction_and_relevance(self):
         bundle = self.bundle(revision())

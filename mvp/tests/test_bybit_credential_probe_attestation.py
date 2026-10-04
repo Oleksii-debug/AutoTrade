@@ -194,6 +194,48 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         finally:
             probe_module.BybitCredentialProbeUrllibClient = original_type
 
+        original_build_opener = probe_module.build_opener
+        original_raw_response_type = probe_module.BybitCredentialProbeRawHttpResponse
+        forged_opener_called = False
+
+        def forged_build_opener(*args, **kwargs):
+            nonlocal forged_opener_called
+            del args, kwargs
+            forged_opener_called = True
+            raise AssertionError("forged opener executed")
+
+        try:
+            probe_module.build_opener = forged_build_opener
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+            self.assertFalse(forged_opener_called)
+        finally:
+            probe_module.build_opener = original_build_opener
+
+        class ForgedRawResponse:
+            pass
+
+        try:
+            probe_module.BybitCredentialProbeRawHttpResponse = ForgedRawResponse
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            probe_module.BybitCredentialProbeRawHttpResponse = original_raw_response_type
+
         def forged_init(self, *, max_response_bytes=1024 * 1024):
             del max_response_bytes
             self.send = lambda request: BybitCredentialProbeRawHttpResponse(

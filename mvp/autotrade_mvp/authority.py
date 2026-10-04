@@ -3060,6 +3060,15 @@ class AuthorityService:
         raw_capital_adjustment = availability_evidence.get(
             "settlement_capital_adjustment"
         )
+        settlement_book, _economic_book = _authority_service_capital_binding(self)
+        if (
+            settlement_book is not None
+            and raw_capital_adjustment is None
+            and any(resource.startswith("CASH:") for resource in risk_requirements)
+        ):
+            raise AuthorityConflict(
+                "durable admission lacks required settlement capital evidence"
+            )
         if raw_capital_adjustment is not None:
             risk_journal_sequence = risk_event.get("journal_sequence")
             if type(risk_journal_sequence) is not int:

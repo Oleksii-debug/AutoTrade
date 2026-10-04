@@ -178,6 +178,7 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 )
 
         original_type = probe_module.BybitCredentialProbeUrllibClient
+        original_init = original_type.__init__
         original_send = original_type.send
         try:
             probe_module.BybitCredentialProbeUrllibClient = ForgedDirectClient
@@ -192,6 +193,27 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 )
         finally:
             probe_module.BybitCredentialProbeUrllibClient = original_type
+
+        def forged_init(self, *, max_response_bytes=1024 * 1024):
+            del max_response_bytes
+            self.send = lambda request: BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=body,
+            )
+
+        try:
+            original_type.__init__ = forged_init
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "constructor authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            original_type.__init__ = original_init
 
         def forged_send(self, request):
             del self, request

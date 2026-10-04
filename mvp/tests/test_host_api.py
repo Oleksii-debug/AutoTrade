@@ -298,5 +298,16 @@ class HostCommandStateTests(unittest.TestCase):
             [1],
         )
 
+
+    def test_canonical_long_sequence_avoids_python_int_digit_limit(self):
+        long_sequence = "9" * 5000
+        result = self.store.submit(self.command(version=long_sequence))
+        self.assertEqual(result.status, "CONFLICT")
+        self.assertEqual(result.reason_codes, ("stale_state_version",))
+        self.assertEqual(self.store.state_version, 0)
+        with self.assertRaisesRegex(ValueError, "ahead of host state"):
+            self.store.events_after(long_sequence)
+
+
 if __name__ == "__main__":
     unittest.main()

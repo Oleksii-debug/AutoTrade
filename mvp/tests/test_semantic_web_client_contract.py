@@ -207,15 +207,17 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for forbidden in ("api_key", "client_secret", "access_token", "Bearer "):
             self.assertNotIn(forbidden, js)
 
-    def test_state_versions_and_event_cursors_never_use_lossy_javascript_numbers(self):
+    def test_state_versions_and_event_cursors_require_canonical_sequence_strings(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function exactCounter(value, name)", js)
-        self.assertIn("Number.isSafeInteger(value)", js)
-        self.assertIn("return BigInt(token)", js)
+        self.assertIn('typeof value !== "string"', js)
+        self.assertIn("/^(0|[1-9][0-9]*)$/.test(value)", js)
+        self.assertIn("return BigInt(value)", js)
         self.assertIn('version: exactCounter(snapshot.state_version, "state_version")', js)
         self.assertIn('cursor: exactCounter(snapshot.event_cursor, "event_cursor")', js)
         self.assertIn("expected_state_version: state.version.toString()", js)
-        self.assertIn("return BigInt(token)", js)
+        self.assertNotIn("Number.isSafeInteger(value)", js)
+        self.assertNotIn("const token = String(value)", js)
         self.assertNotIn("Number.parseInt(snapshot.state_version", js)
         self.assertNotIn("Number.parseInt(snapshot.event_cursor", js)
         self.assertNotIn("Number(snapshot.state_version", js)

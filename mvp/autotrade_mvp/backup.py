@@ -1179,8 +1179,17 @@ def create_backup(
             )
         )
 
+        frozen_source_digests = dict(source_rechecks)
         for source, relative, kind in mutable_sources:
             digest, size = _copy_stable_file(source, stage / relative)
+            # The copied bytes must be the exact pre-SQLite generation, not merely
+            # a later stable generation. Otherwise an ABA writer could present A
+            # before the journal snapshot, B while this copy runs, then restore A
+            # before the final recheck and publish a mixed recovery cut.
+            if digest != frozen_source_digests[source]:
+                raise BackupError(
+                    "Source changed across journal snapshot"
+                )
             entries.append(_entry(relative.as_posix(), digest, size, kind))
 
         _assert_mutable_sources_unchanged(

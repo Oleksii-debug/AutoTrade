@@ -443,6 +443,8 @@ class CandidateWave:
             raise ValueError("training population must bind the paused causal cut")
         if self.training_population.available_at > created:
             raise ValueError("training population cannot become available after candidate creation")
+        if self.validation_population.available_at > opened:
+            raise ValueError("validation population cannot be opened before it is available")
         if self.training_population.root_hash == self.validation_population.root_hash:
             raise ValueError("training and validation populations must differ")
         if self.training_population.causal_cut_hash == self.validation_population.causal_cut_hash:

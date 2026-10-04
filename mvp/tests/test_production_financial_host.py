@@ -20,8 +20,12 @@ from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
 class _LeaseBoundary:
+    def __init__(self) -> None:
+        self.calls = []
+
     @contextmanager
-    def lease_for_execution(self, *_args, **_kwargs):
+    def lease_for_execution(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         yield "secret"
 
 
@@ -142,7 +146,13 @@ class ProductionFinancialHostTests(unittest.TestCase):
 
             runtime.provider_secret_resolver.stop_and_drain = drain_provider  # type: ignore[method-assign]
             runtime.recovery_controller.stop = stop_recovery  # type: ignore[method-assign]
-            host.close = Mock(side_effect=lambda: order.append("host"))  # type: ignore[method-assign]
+            host.close = Mock(
+                side_effect=lambda: (
+                    host._admission_gate.stop_and_drain(),
+                    host._terminal_finalizer(),
+                    order.append("host"),
+                )
+            )  # type: ignore[method-assign]
 
             runtime.close()
 
@@ -175,6 +185,12 @@ class ProductionFinancialHostTests(unittest.TestCase):
             host._admission_gate.stop_and_drain = Mock(  # type: ignore[method-assign]
                 side_effect=drain_commands
             )
+            host.close = Mock(
+                side_effect=lambda: (
+                    host._admission_gate.stop_and_drain(),
+                    host._terminal_finalizer(),
+                )
+            )  # type: ignore[method-assign]
             runtime.close()
 
             self.assertEqual(observed, [True])
@@ -195,6 +211,12 @@ class ProductionFinancialHostTests(unittest.TestCase):
                     principal_resolver=Mock(),
                     snapshot_provider=Mock(),
                 )
+            host.close = Mock(
+                side_effect=lambda: (
+                    host._admission_gate.stop_and_drain(),
+                    host._terminal_finalizer(),
+                )
+            )  # type: ignore[method-assign]
 
             lease_entered = Event()
             allow_lease_exit = Event()
@@ -214,10 +236,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
                     origin="http://127.0.0.1:18765",
                     handle=object(),
                     execution_identity="host-a",
-                    account_id="account-1",
                     provider="BYBIT",
-                    environment="PAPER",
-                    purpose="TRADE",
                     provider_environment="TESTNET",
                 ):
                     lease_entered.set()
@@ -250,8 +269,51 @@ class ProductionFinancialHostTests(unittest.TestCase):
             host.close.assert_called_once_with()
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
 
+    def test_resolver_binds_host_scope_and_trade_purpose(self) -> None:
+        boundary = _LeaseBoundary()
+        resolver = HostLifetimeProviderSecretResolver(
+            boundary,
+            account_id="account-1",
+            environment="PAPER",
+        )
+        with resolver.lease_for_execution(
+            "token",
+            origin="http://127.0.0.1:18765",
+            handle=object(),
+            execution_identity="windows-user",
+            provider="BYBIT",
+            provider_environment="TESTNET",
+        ) as plaintext:
+            self.assertEqual(plaintext, "secret")
+
+        self.assertEqual(len(boundary.calls), 1)
+        _, kwargs = boundary.calls[0]
+        self.assertEqual(kwargs["account_id"], "account-1")
+        self.assertEqual(kwargs["environment"], "PAPER")
+        self.assertEqual(kwargs["purpose"], "TRADE")
+        self.assertEqual(kwargs["execution_identity"], "windows-user")
+        self.assertEqual(kwargs["provider"], "BYBIT")
+        self.assertEqual(kwargs["provider_environment"], "TESTNET")
+
+        with self.assertRaises(TypeError):
+            with resolver.lease_for_execution(
+                "token",
+                origin="http://127.0.0.1:18765",
+                handle=object(),
+                execution_identity="windows-user",
+                account_id="other-account",
+                provider="BYBIT",
+                environment="LIVE",
+                purpose="READ",
+            ):
+                self.fail("caller-selected financial scope was accepted")
+
     def test_closed_resolver_rejects_new_provider_lease(self) -> None:
-        resolver = HostLifetimeProviderSecretResolver(_LeaseBoundary())
+        resolver = HostLifetimeProviderSecretResolver(
+            _LeaseBoundary(),
+            account_id="account-1",
+            environment="PAPER",
+        )
         resolver.stop_and_drain()
         with self.assertRaisesRegex(PermissionError, "credential leases are closed"):
             with resolver.lease_for_execution(

@@ -374,6 +374,96 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             )
             self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
 
+    def test_admission_rejects_local_economic_truth_after_provider_query_started(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-during-provider-query",
+                    cause_event_id="capital-during-provider-query-event",
+                    currency="USD",
+                    amount="950",
+                ),
+                committed_at="2026-09-24T18:00:10Z",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider availability predates local economic financial truth",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "900"},
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+    def test_admission_rejects_local_economic_truth_after_provider_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-after-provider-checkpoint",
+                    cause_event_id="capital-after-provider-checkpoint-event",
+                    currency="USD",
+                    amount="950",
+                ),
+                committed_at="2026-09-24T18:00:40Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider availability predates local economic financial truth",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "900"},
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
     def test_admission_rejects_capital_change_after_projection_before_commit(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

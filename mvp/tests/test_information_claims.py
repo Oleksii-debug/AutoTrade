@@ -417,6 +417,53 @@ class InformationClaimTests(unittest.TestCase):
         ):
             store.effective_at(BASE)
 
+    def test_one_source_revision_conflict_cannot_hide_behind_different_locators(self):
+        store = ClaimStore()
+        first_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="r1",
+            source_kind="CORPORATE",
+            title="one revision",
+            passage="guidance is 10",
+            published_at=BASE,
+            available_at=BASE,
+            ingested_at=BASE,
+            rights_basis="issuer-release",
+            locator="table-a",
+        )
+        second_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="r1",
+            source_kind="CORPORATE",
+            title="same revision",
+            passage="guidance is 11",
+            published_at=BASE,
+            available_at=BASE,
+            ingested_at=BASE,
+            rights_basis="issuer-release",
+            locator="table-b",
+        )
+        first = store.build_claim(
+            first_document,
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        second = store.build_claim(
+            second_document,
+            subject="X",
+            predicate="guidance",
+            value="11",
+        )
+        store.add(first)
+        store.add(second)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source revision contains contradictory",
+        ):
+            store.effective_at(BASE)
+
     def test_batch_ingest_keys_extraction_by_source_and_revision(self):
         alpha = doc("alpha", "r1", "alpha passage")
         beta = doc("beta", "r1", "beta passage")

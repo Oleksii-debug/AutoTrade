@@ -400,14 +400,18 @@ class BoundedRealAuthorityUnforgeabilityTests(unittest.TestCase):
                 calls.append("verify")
                 raise AssertionError("hostile verifier callback must not run")
 
-        with self.assertRaises(TypeError):
-            assess_bounded_real_qualification(
-                envelope=envelope,
-                prerequisite_evidence=(),
-                observations=observations,
-                evidence_verifier=HostileVerifier(),
-            )
+        result = assess_bounded_real_qualification(
+            envelope=envelope,
+            prerequisite_evidence=(),
+            observations=observations,
+            evidence_verifier=HostileVerifier(),
+        )
 
+        self.assertIn(
+            "untrusted_immutable_evidence_verifier",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.evidence_verifier_identity)
         self.assertEqual(calls, [])
 
 

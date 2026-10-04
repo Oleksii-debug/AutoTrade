@@ -702,22 +702,29 @@ def _verifier(authority_id: str, key: bytes) -> RuntimeStateVerifier:
         return verifier
 
 
+def _authority_id(
+    protocol: Mapping[str, object],
+    authority_key_identity: object,
+) -> str:
+    run_id, _build_sha, protocol_digest = _protocol_identity(protocol)
+    key_identity = _canonical_key_identity(authority_key_identity)
+    return (
+        f"{_AUTHORITY_PREFIX}:{run_id}:{protocol_digest}:key-sha256:{key_identity}"
+    )
+
+
 def _authority(
     *,
     root: str | Path,
     store: JournalStore,
     protocol: Mapping[str, object],
+    authority_key_identity: object,
     completed: Sequence[Mapping[str, object]],
     replay: CausalReplay,
 ) -> tuple[RuntimeStateAuthority, RuntimeStateVerifier]:
-    run_id, _build_sha, protocol_digest = _protocol_identity(protocol)
-    key_identity = _canonical_key_identity(
-        protocol.get("runtime_authority_key_sha256")
-    )
+    key_identity = _canonical_key_identity(authority_key_identity)
     key = _require_autonomous_runtime_authority_key(root, key_identity)
-    authority_id = (
-        f"{_AUTHORITY_PREFIX}:{run_id}:{protocol_digest}:key-sha256:{key_identity}"
-    )
+    authority_id = _authority_id(protocol, key_identity)
 
     def sign_material(material: bytes) -> str:
         if type(material) is not bytes:
@@ -764,6 +771,7 @@ def build_autonomous_runtime_checkpoint(
     store: JournalStore,
     *,
     protocol: Mapping[str, object],
+    authority_key_identity: object,
     completed: Sequence[Mapping[str, object]],
 ) -> CompositeReplayCheckpoint:
     replay = _replay(protocol, completed_episodes=len(completed))
@@ -771,6 +779,7 @@ def build_autonomous_runtime_checkpoint(
         root=root,
         store=store,
         protocol=protocol,
+        authority_key_identity=authority_key_identity,
         completed=completed,
         replay=replay,
     )
@@ -788,6 +797,7 @@ def persist_autonomous_runtime_checkpoint(
     store: JournalStore,
     *,
     protocol: Mapping[str, object],
+    authority_key_identity: object,
     completed: Sequence[Mapping[str, object]],
 ) -> CompositeReplayCheckpoint:
     if not completed:
@@ -798,6 +808,7 @@ def persist_autonomous_runtime_checkpoint(
         root,
         store,
         protocol=protocol,
+        authority_key_identity=authority_key_identity,
         completed=completed,
     )
     destination = checkpoint_path(root)
@@ -877,6 +888,7 @@ def preflight_autonomous_runtime_checkpoint(
     root: str | Path,
     *,
     protocol: Mapping[str, object],
+    authority_key_identity: object,
     completed_episodes: int,
 ) -> CompositeReplayCheckpoint:
     """Reject missing, malformed or causally stale checkpoint bytes before restore.
@@ -914,10 +926,12 @@ def preflight_autonomous_runtime_checkpoint(
 
     replay = _replay(protocol, completed_episodes=completed_episodes)
     build_sha, protocol_ref = _expected_identity(protocol)
+    expected_authority_id = _authority_id(protocol, authority_key_identity)
     if (
         checkpoint.replay != replay.checkpoint()
         or checkpoint.build_sha != build_sha
         or checkpoint.protocol_ref != protocol_ref
+        or checkpoint.runtime_authority_id != expected_authority_id
     ):
         raise AutonomousRuntimeCheckpointError(
             "persisted autonomous runtime checkpoint identity differs from durable state"
@@ -930,6 +944,7 @@ def verify_autonomous_runtime_checkpoint(
     store: JournalStore,
     *,
     protocol: Mapping[str, object],
+    authority_key_identity: object,
     completed: Sequence[Mapping[str, object]],
 ) -> CompositeReplayCheckpoint:
     if not completed:
@@ -939,6 +954,7 @@ def verify_autonomous_runtime_checkpoint(
     checkpoint = preflight_autonomous_runtime_checkpoint(
         root,
         protocol=protocol,
+        authority_key_identity=authority_key_identity,
         completed_episodes=len(completed),
     )
     replay = _replay(protocol, completed_episodes=len(completed))
@@ -946,6 +962,7 @@ def verify_autonomous_runtime_checkpoint(
         root=root,
         store=store,
         protocol=protocol,
+        authority_key_identity=authority_key_identity,
         completed=completed,
         replay=replay,
     )

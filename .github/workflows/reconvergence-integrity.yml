@@ -30,6 +30,8 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
           git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
+          git fetch --no-tags origin "refs/heads/${{ github.event.pull_request.base.ref }}:refs/remotes/origin/__autotrade_live_base"
+          test "$(git rev-parse refs/remotes/origin/__autotrade_live_base)" = "${{ github.event.pull_request.base.sha }}"
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
         shell: bash

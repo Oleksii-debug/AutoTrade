@@ -22,7 +22,9 @@ from .production_host import (
 from .recovery import HostState, RecoveryController
 from .recovery_dispatch import (
     RecoveryIssuedDispatcher,
+    activate_recovery_takeover_target,
     build_recovery_issued_dispatcher,
+    mark_recovery_takeover_source,
 )
 from .recovery_takeover import DurableTakeoverResult, execute_durable_takeover
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
@@ -271,6 +273,7 @@ class FinancialProductionHostRuntime:
 
     @property
     def recovery_controller(self) -> RecoveryController:
+        _require_host_financial_authority(self.__host, self.__host_authority)
         return self.__recovery_controller
 
     @property
@@ -349,6 +352,15 @@ class FinancialProductionHostRuntime:
                 raise RuntimeError(
                     "durable takeover target does not match production host identity"
                 )
+            activated = activate_recovery_takeover_target(
+                self.__recovery_controller,
+                source=result.source_owner,
+                target=result.target_owner,
+            )
+            if activated != result.target_owner:
+                raise RuntimeError(
+                    "activated recovery owner does not match durable takeover target"
+                )
             issued = build_recovery_issued_dispatcher(
                 self.__recovery_controller,
                 authority.journal,
@@ -418,11 +430,13 @@ def compose_financial_authority(
             )
             dispatcher = HostBoundFinancialDispatcher(host, issued, authority)
         else:
-            recovery.owner = chain[-1]
+            source = chain[-1]
+            recovery.owner = source
             recovery.state = HostState.RECOVERING
             recovery.provider_reconciled = False
             recovery.reason_codes = {"startup_reconciliation_required"}
             recovery._recover_scoped_submission_uncertainty_from_owner_scope()
+            mark_recovery_takeover_source(recovery, source)
         return FinancialProductionHostRuntime(
             host,
             authority,

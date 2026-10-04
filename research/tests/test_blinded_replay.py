@@ -99,6 +99,8 @@ class Section17BlindedReplayTests(unittest.TestCase):
         self.assertNotIn("BTC", text)
         self.assertNotIn("Kraken", text)
         self.assertNotIn("2024-03-12", text)
+        self.assertFalse(hasattr(item, "source_priority"))
+        self.assertFalse(hasattr(item, "source_sequence"))
 
     def test_preserves_financial_economics_exactly_in_identity_mode(self):
         result = self.blind(dataset(event("one")))

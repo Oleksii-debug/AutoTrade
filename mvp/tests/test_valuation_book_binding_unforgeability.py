@@ -16,6 +16,30 @@ from mvp.autotrade_mvp.valuation_authority import (
 
 
 class ValuationBookBindingUnforgeabilityTests(unittest.TestCase):
+    def test_binding_weakrefs_expose_no_callable_removal_callback(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            replacement = JournalStore(root / "replacement.sqlite3")
+            book = DurableValuationBook(selected)
+
+            callbacks = [
+                reference.__callback__
+                for reference in weakref.getweakrefs(book)
+                if reference.__callback__ is not None
+            ]
+            self.assertEqual(callbacks, [])
+
+            with self.assertRaisesRegex(
+                ValuationConflict,
+                "already initialized|already established",
+            ):
+                book.__init__(replacement)
+
+            bound_store, _bound_identity = book._journal_store_authority()
+            self.assertIs(bound_store, selected)
+            self.assertIs(book.store, selected)
+
     def test_reinitialization_cannot_retarget_original_financial_store(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

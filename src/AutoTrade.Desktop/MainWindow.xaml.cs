@@ -44,6 +44,20 @@ public partial class MainWindow : Window
         peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }
 
+    private void SetLiveRegionText(TextBox element, string text)
+    {
+        element.Text = text;
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        AutomationPeer? peer =
+            UIElementAutomationPeer.FromElement(element)
+            ?? UIElementAutomationPeer.CreatePeerForElement(element);
+        peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+    }
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await ConnectWebExperienceAsync();

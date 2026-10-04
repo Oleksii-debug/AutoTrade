@@ -23,11 +23,13 @@ from hashlib import sha256
 import json
 import re
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 
+from .durable_capabilities import DurableCapabilityRegistry
+from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .persistence import JournalStore, payload_digest
 from .provider_route_reads import (
     ProviderRouteReadError,
@@ -35,10 +37,19 @@ from .provider_route_reads import (
     QualifiedProviderResponseObservation,
     _require_qualified_provider_read_binding_authority,
     observe_qualified_provider_json_response,
+    prepare_qualified_provider_read,
 )
 from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
     require_provider_response_bytes,
+)
+from .provider_selection import SelectedProviderRoute
+from .provider_transport import (
+    BinanceSpotAuthenticatedReadTransport,
+    BybitV5AuthenticatedReadTransport,
+    KrakenSpotAuthenticatedReadTransport,
+    ProviderTransportError,
+    require_authenticated_read_execution_receipt,
 )
 
 
@@ -932,6 +943,219 @@ def _observe_loaded_provider_origin_json_response(
         response_binding=response_binding,
         qualified_observation=qualified,
         _observation_token=_OBSERVATION_TOKEN,
+    )
+
+
+def _require_same_terminal_qualified_authority(
+    initial: QualifiedProviderReadQueryBinding,
+    terminal: QualifiedProviderReadQueryBinding,
+) -> None:
+    """Require a fresh terminal Q/C resolution without permitting retargeting."""
+
+    if type(initial) is not QualifiedProviderReadQueryBinding:
+        raise ProviderOriginError("initial qualified provider-read authority is invalid")
+    if type(terminal) is not QualifiedProviderReadQueryBinding:
+        raise ProviderOriginError("terminal qualified provider-read authority is invalid")
+    try:
+        _require_qualified_provider_read_binding_authority(initial)
+        _require_qualified_provider_read_binding_authority(terminal)
+    except ProviderRouteReadError as error:
+        raise ProviderOriginError(
+            "qualified provider-read authority is unavailable at terminal barrier"
+        ) from error
+
+    left = initial.query_binding
+    right = terminal.query_binding
+    base_fields = (
+        "provider_id",
+        "account_id",
+        "entity_id",
+        "environment",
+        "capability_snapshot_id",
+        "instrument_version",
+        "surface",
+        "endpoint",
+        "permission_scope",
+    )
+    if any(getattr(left, field) != getattr(right, field) for field in base_fields):
+        raise ProviderOriginError(
+            "terminal provider-read authority retargeted exact query scope"
+        )
+    if dict(left.query) != dict(right.query):
+        raise ProviderOriginError(
+            "terminal provider-read authority changed exact query parameters"
+        )
+
+    qualified_fields = (
+        "qualification_id",
+        "route_semantics_digest",
+        "endpoint_rule_digest",
+        "qualified_route_rule_digest",
+        "data_entitlement",
+        "accepted_success_statuses",
+        "parser_identity",
+        "provider_environment",
+        "adapter_code_sha",
+        "packaged_artifact_digest",
+    )
+    if any(
+        getattr(initial, field) != getattr(terminal, field)
+        for field in qualified_fields
+    ):
+        raise ProviderOriginError(
+            "terminal provider-read Q/C authority differs from prepared authority"
+        )
+    if terminal.authority_journal_sequence_cut < initial.authority_journal_sequence_cut:
+        raise ProviderOriginError(
+            "terminal provider-read journal cut moved backwards"
+        )
+
+
+def _provider_network_policy_identity(transport: object) -> str:
+    policy = getattr(transport, "policy", None)
+    if policy is None:
+        raise ProviderOriginError("provider transport has no network policy")
+    material = {
+        "provider_id": getattr(policy, "provider_id", None),
+        "environment": getattr(policy, "environment", None),
+        "base_url": getattr(policy, "base_url", None),
+        "allowed_hosts": sorted(getattr(policy, "allowed_hosts", ())),
+        "timeout_seconds": getattr(policy, "timeout_seconds", None),
+    }
+    provider_environment = getattr(transport, "provider_environment", None)
+    if provider_environment is not None:
+        material["provider_environment"] = provider_environment
+    digest = payload_digest(material)
+    if type(digest) is not str or _SHA256_RE.fullmatch(digest) is None:
+        raise ProviderOriginError("provider network policy identity is invalid")
+    return digest
+
+
+def execute_qualified_provider_origin_read(
+    *,
+    origin: "ProviderOriginJournal",
+    route: SelectedProviderRoute,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
+    query_binding: QualifiedProviderReadQueryBinding,
+    transport: object,
+    clock_utc: Callable[[], datetime],
+) -> AuthenticatedReadResponseBinding:
+    """Execute one qualified provider read through the canonical direct-wire path.
+
+    Prepared is durable before credentials/network I/O. Immediately before the
+    real direct send, the guard re-runs canonical route preparation against the
+    shared durable C/Q registries and requires the same exact C/Q/query meaning.
+    The returned observation must carry the closure-backed direct-wire receipt
+    before response bytes can enter durable provider-origin evidence.
+    """
+
+    if type(origin) is not ProviderOriginJournal:
+        raise TypeError("origin must be exact ProviderOriginJournal")
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
+    if type(capability_registry) is not DurableCapabilityRegistry:
+        raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
+    if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    if capability_registry.store is not qualification_registry.store:
+        raise ProviderOriginError(
+            "terminal provider-read C/Q authorities must share one JournalStore"
+        )
+    if capability_registry.store is not origin._require_store():
+        raise ProviderOriginError(
+            "provider-origin and terminal C/Q authorities must share one JournalStore"
+        )
+    if not callable(clock_utc):
+        raise TypeError("clock_utc must be callable")
+    _qualified_query_snapshot(query_binding)
+
+    allowed_transport_types = (
+        BinanceSpotAuthenticatedReadTransport,
+        BybitV5AuthenticatedReadTransport,
+        KrakenSpotAuthenticatedReadTransport,
+    )
+    if type(transport) not in allowed_transport_types:
+        raise ProviderOriginError(
+            "provider-origin execution requires exact canonical authenticated-read transport"
+        )
+    execute_with_receipt = getattr(transport, "execute_with_receipt", None)
+    if not callable(execute_with_receipt):
+        raise ProviderOriginError(
+            "canonical authenticated-read transport lacks receipt execution path"
+        )
+
+    prepared_at = clock_utc()
+    if (
+        type(prepared_at) is not datetime
+        or prepared_at.tzinfo is None
+        or prepared_at.utcoffset() is None
+    ):
+        raise ProviderOriginError("provider-origin clock must return timezone-aware datetime")
+
+    transport_identity = (
+        type(transport).__module__
+        + "."
+        + type(transport).__qualname__
+        + ":direct-receipt-v1"
+    )
+    attempt_id = origin.prepare(
+        query_binding,
+        transport_identity=transport_identity,
+        network_policy_identity=_provider_network_policy_identity(transport),
+        recorded_at=prepared_at,
+    )
+    base = query_binding.query_binding
+
+    def terminal_guard() -> QualifiedProviderReadQueryBinding:
+        point = clock_utc()
+        if (
+            type(point) is not datetime
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderOriginError(
+                "terminal provider-read clock must return timezone-aware datetime"
+            )
+        terminal = prepare_qualified_provider_read(
+            route,
+            capability_registry,
+            qualification_registry,
+            surface=base.surface,
+            endpoint=base.endpoint,
+            query=base.query,
+            at=point,
+            permission_scope=base.permission_scope,
+        )
+        _require_same_terminal_qualified_authority(query_binding, terminal)
+        return terminal
+
+    observation = execute_with_receipt(
+        base,
+        final_guard=terminal_guard,
+    )
+    try:
+        receipt = require_authenticated_read_execution_receipt(observation)
+    except ProviderTransportError as error:
+        raise ProviderOriginError(
+            "provider-origin response lacks canonical direct-wire execution receipt"
+        ) from error
+    if receipt.get("query_binding") is not base:
+        raise ProviderOriginError(
+            "provider-origin execution receipt changed exact query binding"
+        )
+    terminal = receipt.get("terminal_authority")
+    _require_same_terminal_qualified_authority(query_binding, terminal)
+
+    return origin._record_provider_origin(
+        attempt_id,
+        query_binding,
+        http_status=receipt["http_status"],
+        response_bytes=receipt["response_bytes"],
+        observed_at=receipt["observed_at"],
+        _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
     )
 
 

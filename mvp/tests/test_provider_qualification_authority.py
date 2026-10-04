@@ -22,7 +22,6 @@ from mvp.autotrade_mvp.provider_qualification_authority import (
     AcceptedProviderQualification,
     ProviderQualificationError,
     ProviderQualificationProtocol,
-    ProviderQualificationScope,
     ProviderQualificationUnavailable,
     _derive_accepted_provider_qualification,
     parse_provider_qualification_campaign,
@@ -356,6 +355,80 @@ class ProviderQualificationAuthorityTests(unittest.TestCase):
                     scope=_current_scope(q1),
                     at=datetime(2026, 10, 4, 6, tzinfo=timezone.utc),
                 )
+
+    def test_q_is_not_current_before_signature_or_at_expiry(self):
+        record, receipt, protocol = _issued(ordinal=10)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = _ProjectionOnlyRegistry(
+                JournalStore(root / "journal.db"),
+                evidence_store=ArtifactStore(root / "evidence"),
+                evidence_root=root / "evidence",
+            )
+            registry._append_accepted(
+                protocol_key=protocol.key,
+                record=record,
+                receipt=receipt,
+            )
+            with self.assertRaises(ProviderQualificationCurrentUnavailable):
+                registry.current(
+                    scope=_current_scope(record),
+                    at=datetime(2026, 10, 4, 5, 0, 30, tzinfo=timezone.utc),
+                )
+            with self.assertRaises(ProviderQualificationCurrentUnavailable):
+                registry.current(
+                    scope=_current_scope(record),
+                    at=datetime(2026, 10, 5, 5, tzinfo=timezone.utc),
+                )
+
+    def test_global_cut_includes_unrelated_journal_events(self):
+        record, receipt, protocol = _issued(ordinal=11)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.db")
+            registry = _ProjectionOnlyRegistry(
+                store,
+                evidence_store=ArtifactStore(root / "evidence"),
+                evidence_root=root / "evidence",
+            )
+            registry._append_accepted(
+                protocol_key=protocol.key,
+                record=record,
+                receipt=receipt,
+            )
+            unrelated_payload = {"value": "other-authority-change"}
+            store.append_event(
+                {
+                    "event_id": "other-authority-event-1",
+                    "event_type": "OtherAuthorityChanged.v1",
+                    "aggregate_type": "other_authority",
+                    "aggregate_id": "other-authority",
+                    "aggregate_version": "1",
+                    "payload": unrelated_payload,
+                    "payload_hash": payload_digest(unrelated_payload),
+                    "committed_at": "2026-10-04T05:02:00Z",
+                }
+            )
+            current = registry.current(
+                scope=_current_scope(record),
+                at=datetime(2026, 10, 4, 6, tzinfo=timezone.utc),
+            )
+            self.assertEqual(current.qualification_id, record.qualification_id)
+            self.assertEqual(current.journal_sequence_cut, 2)
+
+    def test_future_journal_cut_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = _ProjectionOnlyRegistry(
+                JournalStore(root / "journal.db"),
+                evidence_store=ArtifactStore(root / "evidence"),
+                evidence_root=root / "evidence",
+            )
+            with self.assertRaisesRegex(
+                ProviderQualificationError,
+                "journal cut is in the future",
+            ):
+                registry.history_cut(journal_sequence_cut=1)
 
     def test_signed_supersession_changes_current_q_and_preserves_historical_cut(self):
         q1, r1, p1 = _issued(ordinal=8, campaign_version=1)

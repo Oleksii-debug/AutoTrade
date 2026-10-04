@@ -710,5 +710,83 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertIn("paper_economics_before_outcome_available", result.reasons)
 
 
+    def test_item22_protocol_rejects_unregistered_numeric_shortcuts(self):
+        with self.assertRaisesRegex(ForwardPaperError, "exact decimal"):
+            self.protocol(maximum_drawdown=1.5)
+        with self.assertRaisesRegex(ForwardPaperError, "cannot be negative"):
+            self.protocol(maximum_drawdown="-0.01")
+        with self.assertRaisesRegex(
+            ForwardPaperError,
+            "minimum_independent_decisions_per_regime must be >= 1",
+        ):
+            self.protocol(minimum_independent_decisions_per_regime=0)
+
+    def test_item22_protocol_codes_are_case_insensitively_unique(self):
+        with self.assertRaisesRegex(ForwardPaperError, "case-insensitive duplicates"):
+            self.protocol(required_regimes=("trend", "TREND"))
+        with self.assertRaisesRegex(ForwardPaperError, "case-insensitive duplicates"):
+            self.protocol(
+                required_simulation_limitations=(
+                    "queue_priority_unobserved",
+                    "QUEUE_PRIORITY_UNOBSERVED",
+                )
+            )
+        with self.assertRaisesRegex(ForwardPaperError, "case-insensitive duplicates"):
+            self.evidence(
+                simulation_limitations=(
+                    "official_test_fill_model",
+                    "OFFICIAL_TEST_FILL_MODEL",
+                )
+            )
+
+    def test_drawdown_equal_to_registered_limit_is_not_a_failure(self):
+        rows = list(self.economics())
+        rows[1] = PaperDecisionEconomics.create(
+            prediction_id="pred-2",
+            currency="USD",
+            sequence=2,
+            realized_at="2026-09-24T20:41:00Z",
+            gross_pnl="-49",
+            fees="0.25",
+            spread_cost="0.25",
+            slippage_cost="0.50",
+            net_pnl="-50",
+            equity_before="104",
+            equity_after="54",
+            peak_equity_before="104",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "VALID")
+        self.assertEqual(result.operational_status, "PASS")
+        self.assertNotIn("maximum_drawdown_exceeded", result.reasons)
+
+    def test_opening_peak_cannot_be_reset_above_campaign_start(self):
+        rows = list(self.economics())
+        first = rows[0]
+        rows[0] = PaperDecisionEconomics.create(
+            prediction_id=first.prediction_id,
+            currency=first.currency,
+            sequence=first.sequence,
+            realized_at=first.realized_at,
+            gross_pnl=first.gross_pnl,
+            fees=first.fees,
+            spread_cost=first.spread_cost,
+            slippage_cost=first.slippage_cost,
+            net_pnl=first.net_pnl,
+            equity_before=first.equity_before,
+            equity_after=first.equity_after,
+            peak_equity_before="101",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_equity_opening_peak_mismatch", result.reasons)
+
+
 if __name__ == "__main__":
     unittest.main()

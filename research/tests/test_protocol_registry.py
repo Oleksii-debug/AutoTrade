@@ -497,7 +497,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                 0,
             )
 
-    def test_corrupt_preregistration_chronology_fails_closed(self):
+    def test_corrupt_preregistration_binding_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "science.sqlite3"
             science = ScientificRegistry(path)
@@ -509,21 +509,21 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     "DROP TRIGGER protocol_locked_holdouts_no_update"
                 )
                 cursor = connection.execute(
-                    "UPDATE protocol_locked_holdouts SET created_at=? "
+                    "UPDATE protocol_locked_holdouts SET dataset_version=? "
                     "WHERE protocol_id=?",
-                    ("not-an-authoritative-time", registered.protocol_id),
+                    (2, registered.protocol_id),
                 )
                 self.assertEqual(cursor.rowcount, 1)
                 connection.commit()
 
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "created_at must be exact timezone-aware ISO text",
+                "binding integrity mismatch",
             ):
                 science.locked_holdout_registration(registered.protocol_id)
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "created_at must be exact timezone-aware ISO text",
+                "binding integrity mismatch",
             ):
                 science.record_trial(
                     registered.protocol_id,

@@ -1962,10 +1962,19 @@ def _make_registered_policy_context(resolve_policy_binding):
         label: str,
     ) -> None:
         state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise ProtocolViolation(
+                f"ablation qualification {label} state is not canonical"
+            )
+        names = tuple(state.keys())
+        if any(type(name) is not str for name in names):
+            raise ProtocolViolation(
+                f"ablation qualification {label} state keys are not canonical"
+            )
         shadowed = tuple(
             sorted(
                 name
-                for name in state
+                for name in names
                 if name in owner_type.__dict__
                 and callable(getattr(owner_type, name, None))
             )

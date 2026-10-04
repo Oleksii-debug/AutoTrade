@@ -232,6 +232,12 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                 blockers.append(
                     f'DOTNET_PROJECT_LOCK_RESOLVED_MISMATCH:{relative}:{expected_name}@{expected_version}:{resolved}'
                 )
+            expected_requested = f'[{expected_version}, )'
+            if isinstance(requested, str) and requested != expected_requested:
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_REQUESTED_MISMATCH:'
+                    f'{relative}:{expected_name}@{expected_version}:{requested}'
+                )
 
     for folded, (name, version) in sorted(declared_casefold.items()):
         if not seen_direct[folded]:

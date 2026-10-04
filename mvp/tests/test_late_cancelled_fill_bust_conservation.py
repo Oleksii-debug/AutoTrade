@@ -125,6 +125,8 @@ class LateCancelledFillBustConservationTests(unittest.TestCase):
                 "PARTIALLY_FILLED_CANCELLED",
             )
 
+            # Isolate legacy cancellation state-machine behavior; this synthetic
+            # receipt is never accepted by the production evidence verifier.
             original_verify = DurableReservationBook._verify_resolution_evidence
 
             def accept_cancelled_fixture(selected_book, **kwargs):
@@ -165,43 +167,43 @@ class LateCancelledFillBustConservationTests(unittest.TestCase):
                         committed_at=WHEN,
                     )
                 )
+
+                reopened = JournalStore(Path(directory) / "journal.sqlite3")
+                reopened_orders = DurableOrderBookProjection(
+                    reopened,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    host_id="late-cancelled-bust-host",
+                    owner_epoch="1",
+                )
+                reopened_economics = DurableProviderEconomicBook(
+                    reopened,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                )
+                reopened_reservations = DurableReservationBook(
+                    reopened,
+                    environment=ENVIRONMENT,
+                    account_id=ACCOUNT,
+                )
+
+                snapshot = reopened_orders.order("order-1").snapshot()
+                self.assertEqual(snapshot.state, "CANCELLED")
+                self.assertEqual(snapshot.filled_quantity, Decimal("0"))
+                self.assertEqual(snapshot.fill_count, 0)
+                self.assertEqual(reopened_economics.position("ABC"), Decimal("0"))
+                self.assertEqual(len(reopened_economics.transactions), 2)
+                reservation = reopened_reservations.get("reservation-1")
+                self.assertEqual(reservation.state, "CANCELED")
+                self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
+                self.assertEqual(
+                    reopened_reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
             finally:
                 DurableReservationBook._verify_resolution_evidence = original_verify
-
-            reopened = JournalStore(Path(directory) / "journal.sqlite3")
-            reopened_orders = DurableOrderBookProjection(
-                reopened,
-                provider_id=PROVIDER,
-                account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-                host_id="late-cancelled-bust-host",
-                owner_epoch="1",
-            )
-            reopened_economics = DurableProviderEconomicBook(
-                reopened,
-                provider_id=PROVIDER,
-                account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-            )
-            reopened_reservations = DurableReservationBook(
-                reopened,
-                environment=ENVIRONMENT,
-                account_id=ACCOUNT,
-            )
-
-            snapshot = reopened_orders.order("order-1").snapshot()
-            self.assertEqual(snapshot.state, "CANCELLED")
-            self.assertEqual(snapshot.filled_quantity, Decimal("0"))
-            self.assertEqual(snapshot.fill_count, 0)
-            self.assertEqual(reopened_economics.position("ABC"), Decimal("0"))
-            self.assertEqual(len(reopened_economics.transactions), 2)
-            reservation = reopened_reservations.get("reservation-1")
-            self.assertEqual(reservation.state, "CANCELED")
-            self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
-            self.assertEqual(
-                reopened_reservations.total_reserved("CASH:USD"),
-                Decimal("0"),
-            )
 
 
 if __name__ == "__main__":

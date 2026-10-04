@@ -213,7 +213,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             )
             self.assertEqual(
                 reservation.remaining["CASH:USD"],
-                Decimal("20"),
+                Decimal("0"),
             )
 
     def test_late_bust_after_terminal_filled_reconstitutes_hold_atomically(self):
@@ -223,83 +223,58 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             orders, economics, reservations = books(store)
             projected, provider = seed(orders, economics, reservations)
 
-            # Historical fixture only. Current production terminal release has
-            # stricter evidence verification; this bounded override lets the
-            # regression represent an already-durable legacy FILLED cut without
-            # weakening production DurableReservationBook verification.
-            original_verify = DurableReservationBook._verify_resolution_evidence
-
-            def accept_legacy_filled_fixture(selected_book, **kwargs):
-                if kwargs.get("resolution_evidence") == "fixture-provider-filled":
-                    return "fixture-provider-filled"
-                return original_verify(selected_book, **kwargs)
-
-            DurableReservationBook._verify_resolution_evidence = (
-                accept_legacy_filled_fixture
+            # The atomic final fill already wrote the durable FILLED cut.
+            terminal = reservations.get("reservation-1")
+            self.assertEqual(terminal.state, "FILLED")
+            self.assertEqual(
+                terminal.consumed["CASH:USD"], Decimal("100")
             )
-            try:
-                terminal = reservations._commit(
-                    command_id="fixture-filled-terminal",
-                    idempotency_key="fixture-filled-terminal",
-                    operation="MARK_TERMINAL",
-                    request={
-                        "reservation_id": "reservation-1",
-                        "outcome": "FILLED",
-                        "resolution_evidence": "fixture-provider-filled",
-                    },
-                )
-                self.assertEqual(terminal.state, "FILLED")
-                self.assertEqual(
-                    terminal.consumed["CASH:USD"], Decimal("100")
-                )
-                self.assertEqual(
-                    terminal.remaining["CASH:USD"], Decimal("0")
-                )
+            self.assertEqual(
+                terminal.remaining["CASH:USD"], Decimal("0")
+            )
 
-                self.assertTrue(
-                    atomic_bust(
-                        orders,
-                        economics,
-                        reservations,
-                        projected,
-                        provider,
-                    )
+            self.assertTrue(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    projected,
+                    provider,
                 )
+            )
 
-                reopened = JournalStore(path)
-                ro, re, rr = books(reopened)
-                order = ro.order("order-1").snapshot()
-                self.assertEqual(order.filled_quantity, Decimal("0"))
-                self.assertEqual(order.fill_count, 0)
-                self.assertEqual(order.observation_count, 2)
-                self.assertEqual(re.position("ABC"), Decimal("0"))
-                self.assertEqual(len(re.transactions), 2)
-                reservation = rr.get("reservation-1")
-                self.assertEqual(reservation.state, POST_BUST_HOLD_STATE)
-                self.assertIsNone(reservation.resolution_evidence)
-                self.assertEqual(
-                    reservation.consumed["CASH:USD"], Decimal("0")
-                )
-                # Terminalization had released the unused 20 buffer as well as
-                # the 100 fill usage. The bust must restore the full original
-                # worst-case hold, not merely add the busted usage to zero.
-                self.assertEqual(
-                    reservation.remaining["CASH:USD"], Decimal("120")
-                )
-                self.assertEqual(
-                    rr.total_reserved("CASH:USD"), Decimal("120")
-                )
+            reopened = JournalStore(path)
+            ro, re, rr = books(reopened)
+            order = ro.order("order-1").snapshot()
+            self.assertEqual(order.filled_quantity, Decimal("0"))
+            self.assertEqual(order.fill_count, 0)
+            self.assertEqual(order.observation_count, 2)
+            self.assertEqual(re.position("ABC"), Decimal("0"))
+            self.assertEqual(len(re.transactions), 2)
+            reservation = rr.get("reservation-1")
+            self.assertEqual(reservation.state, POST_BUST_HOLD_STATE)
+            self.assertIsNone(reservation.resolution_evidence)
+            self.assertEqual(
+                reservation.consumed["CASH:USD"], Decimal("0")
+            )
+            # Terminalization had released the unused 20 buffer as well as
+            # the 100 fill usage. The bust must restore the full original
+            # worst-case hold, not merely add the busted usage to zero.
+            self.assertEqual(
+                reservation.remaining["CASH:USD"], Decimal("120")
+            )
+            self.assertEqual(
+                rr.total_reserved("CASH:USD"), Decimal("120")
+            )
 
-                self.assertFalse(
-                    atomic_bust(ro, re, rr, projected, provider)
-                )
-                retry = rr.get("reservation-1")
-                self.assertEqual(retry, reservation)
-                self.assertEqual(
-                    rr.total_reserved("CASH:USD"), Decimal("120")
-                )
-            finally:
-                DurableReservationBook._verify_resolution_evidence = original_verify
+            self.assertFalse(
+                atomic_bust(ro, re, rr, projected, provider)
+            )
+            retry = rr.get("reservation-1")
+            self.assertEqual(retry, reservation)
+            self.assertEqual(
+                rr.total_reserved("CASH:USD"), Decimal("120")
+            )
 
     def test_provider_fill_facade_rejects_polymorphic_evidence_before_field_access(self):
         class HostileProjectedFill(ProjectedFillEvidence):
@@ -651,7 +626,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             )
             self.assertEqual(
                 reservation.remaining["CASH:USD"],
-                Decimal("20"),
+                Decimal("0"),
             )
 
     def test_fresh_bust_is_atomic_restart_safe_and_idempotent(self):
@@ -1026,7 +1001,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             )
             self.assertEqual(
                 reservations.get("reservation-1").remaining["CASH:USD"],
-                Decimal("20"),
+                Decimal("0"),
             )
 
     def test_oms_only_recovery_fences_post_cut_journal_mutation(self):
@@ -1140,7 +1115,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             )
             self.assertEqual(
                 rr.get("reservation-1").remaining["CASH:USD"],
-                Decimal("20"),
+                Decimal("0"),
             )
             self.assertEqual(
                 rr.get("reservation-race").remaining["CASH:EUR"],
@@ -1391,7 +1366,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             )
             self.assertEqual(
                 reservations.get("reservation-1").remaining["CASH:USD"],
-                Decimal("20"),
+                Decimal("0"),
             )
 
     def test_stale_provider_evidence_cannot_bust_newer_oms_revision(self):

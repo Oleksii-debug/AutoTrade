@@ -2496,10 +2496,16 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 raise AccountingConflict(
                     "economic transactions already exist without one canonical durable batch"
                 )
+            matching_event_index = next(
+                index for index, event in enumerate(events) if event is matches[0]
+            )
+            historical = DurableProviderEconomicBook._replay(
+                self, events[: matching_event_index + 1]
+            )
             result = {
                 "batch_digest": batch_digest,
                 "transaction_ids": [item.transaction_id for item in batch],
-                "resulting_book_digest": current.audit_digest(),
+                "resulting_book_digest": historical.audit_digest(),
             }
             return PreparedEconomicBatch(
                 transactions=batch,

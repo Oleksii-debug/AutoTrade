@@ -1076,7 +1076,33 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 )
                 if result != expected:
                     raise ValueError("completed RISK_REJECTED differs from durable zero-wire facts")
-            elif result.get("status") != "FILL_RECONCILED_ORDER_UNCONFIRMED":
+            elif result.get("status") == "FILL_RECONCILED_ORDER_UNCONFIRMED":
+                artifacts = ArtifactStore(root / "artifacts")
+                settlements = DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=ENVIRONMENT,
+                    evidence_artifact_root=root / "artifacts",
+                    evidence_artifact_store=artifacts,
+                )
+                obligations = settlements.obligations
+                if (
+                    len(obligations) != 1
+                    or obligations[0].cause_event_id != result.get("fill_id")
+                    or obligations[0].amount >= 0
+                    or settlements.settled_obligation_evidence
+                ):
+                    raise ValueError(
+                        "completed BUY session does not match durable settlement provenance"
+                    )
+                projected = settlements.project(economic)
+                if str(projected.available_to_spend("USD")) != result["cash"]:
+                    raise ValueError(
+                        "completed BUY session settlement capital differs from economics"
+                    )
+            else:
                 raise ValueError("unsupported completed simulation outcome")
             result["resumed"] = True
             result["new_outbound_requests"] = 0

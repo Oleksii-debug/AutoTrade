@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+from types import MappingProxyType
 
+import mvp.autotrade_mvp.bybit_credential_probe_evidence as probe_module
 from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeEvidence,
     BybitCredentialProbeRawHttpResponse,
@@ -27,6 +29,29 @@ class _FakeWireClient:
             http_status=200,
             body=self.body,
         )
+
+
+class _HostileHeaders(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.touched = False
+
+    def _touch(self):
+        self.touched = True
+        raise AssertionError("hostile header mapping callback executed")
+
+    def __iter__(self):
+        return self._touch()
+
+    def items(self):
+        return self._touch()
+
+    def keys(self):
+        return self._touch()
+
+    def __getitem__(self, key):
+        del key
+        return self._touch()
 
 
 def _headers():
@@ -125,9 +150,137 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                     wire_query=wire_query,
                 )
 
-    def test_wire_boundary_attests_success_after_exact_provider_echo(self):
+    def test_injected_wire_client_cannot_mint_success_attestation(self):
         client = _FakeWireClient(
             b'{"retCode":0,"retMsg":"OK","result":{"apiKey":"probe-key","secret":""}}'
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "direct production transport"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=_headers(),
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertEqual(len(client.requests), 1)
+
+    def test_direct_transport_class_or_send_retarget_cannot_mint_attestation(self):
+        body = (
+            b'{"retCode":0,"retMsg":"OK","result":'
+            b'{"apiKey":"probe-key","secret":""}}'
+        )
+
+        class ForgedDirectClient:
+            def send(self, request):
+                del request
+                return BybitCredentialProbeRawHttpResponse(
+                    http_status=200,
+                    body=body,
+                )
+
+        original_type = probe_module.BybitCredentialProbeUrllibClient
+        original_init = original_type.__init__
+        original_send = original_type.send
+        try:
+            probe_module.BybitCredentialProbeUrllibClient = ForgedDirectClient
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "transport type authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            probe_module.BybitCredentialProbeUrllibClient = original_type
+
+        original_build_opener = probe_module.build_opener
+        original_raw_response_type = probe_module.BybitCredentialProbeRawHttpResponse
+        forged_opener_called = False
+
+        def forged_build_opener(*args, **kwargs):
+            nonlocal forged_opener_called
+            del args, kwargs
+            forged_opener_called = True
+            raise AssertionError("forged opener executed")
+
+        try:
+            probe_module.build_opener = forged_build_opener
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+            self.assertFalse(forged_opener_called)
+        finally:
+            probe_module.build_opener = original_build_opener
+
+        class ForgedRawResponse:
+            pass
+
+        try:
+            probe_module.BybitCredentialProbeRawHttpResponse = ForgedRawResponse
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            probe_module.BybitCredentialProbeRawHttpResponse = original_raw_response_type
+
+        def forged_init(self, *, max_response_bytes=1024 * 1024):
+            del max_response_bytes
+            self.send = lambda request: BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=body,
+            )
+
+        try:
+            original_type.__init__ = forged_init
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "constructor authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            original_type.__init__ = original_init
+
+        def forged_send(self, request):
+            del self, request
+            return BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=body,
+            )
+
+        try:
+            original_type.send = forged_send
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "transport send authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            original_type.send = original_send
+
+    def test_injected_wire_client_can_exercise_nonattested_rejection_path(self):
+        client = _FakeWireClient(
+            b'{"retCode":10003,"retMsg":"API key is invalid"}'
         )
         result = execute_bybit_credential_probe_wire_query(
             source_uri="https://api.bybit.com/v5/user/query-api",
@@ -136,10 +289,140 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
             wire_client=client,
         )
         self.assertEqual(len(client.requests), 1)
-        self.assertEqual(result.ret_code, 0)
-        self.assertTrue(result.api_key_echo_confirmed)
-        self.assertNotIn("probe-key", repr(result))
-        self.assertNotIn("provider_echo_proof", repr(result))
+        self.assertEqual(result.ret_code, 10003)
+        self.assertFalse(result.api_key_echo_confirmed)
+        self.assertFalse(result.provider_transport_confirmed)
+
+    def test_malformed_transport_proof_fails_closed_without_container_dispatch(self):
+        malformed = {}
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeWireResponse(
+                http_status=200,
+                response={"retCode": 10003},
+                _provider_transport_attestation=malformed,
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeEvidence(
+                credential_handle=_handle(),
+                provider_environment="MAINNET",
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                response_surface="V5_UTA_REST",
+                product_family="SPOT",
+                request_timestamp_ms=1791064800123,
+                recv_window_ms=5000,
+                http_status=200,
+                ret_code=10003,
+                response_sha256="sha256:" + "0" * 64,
+                observed_at="2030-01-01T00:00:00Z",
+                _provider_transport_attestation=malformed,
+            )
+
+    def test_transport_proof_controls_negative_classification(self):
+        untrusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+        )
+        trusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+        )
+        self.assertFalse(untrusted.provider_transport_confirmed)
+        self.assertTrue(trusted.provider_transport_confirmed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def untrusted_wire(**kwargs):
+                del kwargs
+                return untrusted
+
+            evidence = _probe(
+                vault=vault,
+                handle=handle,
+                wire_query=untrusted_wire,
+            )
+            self.assertFalse(evidence.provider_transport_confirmed)
+            self.assertEqual(evidence.classification.value, "INCONCLUSIVE")
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def trusted_wire(**kwargs):
+                del kwargs
+                return trusted
+
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=trusted_wire,
+                )
+
+        forged_success = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {"apiKey": "probe-key", "secret": ""},
+            },
+            api_key_echo_confirmed=True,
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+            _provider_echo_attestation=probe_module._PROVIDER_ECHO_ATTESTATION,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def forged_success_wire(**kwargs):
+                del kwargs
+                return forged_success
+
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=forged_success_wire,
+                )
+
+    def test_polymorphic_header_mapping_is_rejected_before_callbacks(self):
+        hostile = _HostileHeaders(_headers())
+        client = _FakeWireClient(b'{"retCode":10003}')
+        with self.assertRaisesRegex(ProviderCoreError, "exact built-in"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=hostile,
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertFalse(hostile.touched)
+        self.assertEqual(client.requests, [])
+
+    def test_mappingproxy_over_hostile_headers_is_rejected_before_callbacks(self):
+        hostile = _HostileHeaders(_headers())
+        proxy = MappingProxyType(hostile)
+        client = _FakeWireClient(b'{"retCode":10003}')
+        with self.assertRaisesRegex(ProviderCoreError, "exact built-in"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=proxy,
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertFalse(hostile.touched)
+        self.assertEqual(client.requests, [])
 
     def test_wire_boundary_rejects_success_for_different_api_key(self):
         client = _FakeWireClient(

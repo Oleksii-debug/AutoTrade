@@ -87,6 +87,7 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PROVIDER_ECHO_ATTESTATION = object()
+_PROVIDER_TRANSPORT_ATTESTATION = object()
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -405,9 +406,16 @@ class BybitCredentialProbeWireResponse:
     http_status: int
     response: InitVar[dict[str, Any]]
     api_key_echo_confirmed: bool = False
+    _provider_transport_attestation: InitVar[object | None] = None
     _provider_echo_attestation: InitVar[object | None] = None
     ret_code: int = field(init=False)
     response_sha256: str = field(init=False)
+    provider_transport_confirmed: bool = field(init=False)
+    _provider_transport_proof: object | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _provider_echo_proof: object | None = field(
         init=False,
         repr=False,
@@ -417,6 +425,7 @@ class BybitCredentialProbeWireResponse:
     def __post_init__(
         self,
         response: dict[str, Any],
+        _provider_transport_attestation: object | None,
         _provider_echo_attestation: object | None,
     ) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
@@ -428,9 +437,23 @@ class BybitCredentialProbeWireResponse:
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
         ret_code, response_sha256 = _response_digest(response)
+        if (
+            _provider_transport_attestation is not None
+            and _provider_transport_attestation is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe provider transport attestation is invalid"
+            )
+        provider_transport_confirmed = (
+            _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
+        )
         if ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential probe requires exact API key echo confirmation"
+            )
+        if ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential probe requires provider-derived direct transport attestation"
             )
         if ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
             raise ProviderCoreError(
@@ -446,6 +469,16 @@ class BybitCredentialProbeWireResponse:
             )
         object.__setattr__(self, "ret_code", ret_code)
         object.__setattr__(self, "response_sha256", response_sha256)
+        object.__setattr__(
+            self,
+            "provider_transport_confirmed",
+            provider_transport_confirmed,
+        )
+        object.__setattr__(
+            self,
+            "_provider_transport_proof",
+            _provider_transport_attestation,
+        )
         object.__setattr__(self, "_provider_echo_proof", _provider_echo_attestation)
 
 
@@ -466,10 +499,16 @@ class BybitCredentialProbeEvidence:
     response_sha256: str
     observed_at: str
     api_key_echo_confirmed: bool = False
+    _provider_transport_attestation: InitVar[object | None] = None
     _provider_echo_attestation: InitVar[object | None] = None
+    provider_transport_confirmed: bool = field(init=False)
     classification: BybitCredentialNonAcceptance = field(init=False)
 
-    def __post_init__(self, _provider_echo_attestation: object | None) -> None:
+    def __post_init__(
+        self,
+        _provider_transport_attestation: object | None,
+        _provider_echo_attestation: object | None,
+    ) -> None:
         credential_handle = _snapshot_credential_handle(self.credential_handle)
         object.__setattr__(self, "credential_handle", credential_handle)
         if credential_handle.provider != "BYBIT":
@@ -528,9 +567,23 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
+        if (
+            _provider_transport_attestation is not None
+            and _provider_transport_attestation is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
+            raise ProviderCoreError(
+                "Bybit credential evidence provider transport attestation is invalid"
+            )
+        provider_transport_confirmed = (
+            _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
+        )
         if self.ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential evidence requires API key echo confirmation"
+            )
+        if self.ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential evidence requires provider-derived direct transport attestation"
             )
         if self.ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
             raise ProviderCoreError(
@@ -555,14 +608,23 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe observed_at cannot precede signed request timestamp"
             )
-        classification = _classify_query_api_credential_nonacceptance(
-            ret_code=self.ret_code,
-            product_family=product_family,
-            response_surface=response_surface,
+        classification = (
+            _classify_query_api_credential_nonacceptance(
+                ret_code=self.ret_code,
+                product_family=product_family,
+                response_surface=response_surface,
+            )
+            if provider_transport_confirmed
+            else BybitCredentialNonAcceptance.INCONCLUSIVE
         )
         object.__setattr__(self, "request_timestamp_ms", request_timestamp_ms)
         object.__setattr__(self, "recv_window_ms", recv_window_ms)
         object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(
+            self,
+            "provider_transport_confirmed",
+            provider_transport_confirmed,
+        )
         object.__setattr__(self, "classification", classification)
 
     @property
@@ -604,6 +666,7 @@ def bybit_credential_probe_receipt_metadata(
         "response_sha256": evidence.response_sha256,
         "observed_at": evidence.observed_at,
         "api_key_echo_confirmed": evidence.api_key_echo_confirmed,
+        "provider_transport_confirmed": evidence.provider_transport_confirmed,
         "classification": evidence.classification.value,
         "send_authority": False,
         "retirement_authority": False,
@@ -647,7 +710,7 @@ def _probe_headers(
     credential_plaintext: str,
     timestamp_ms: object,
     recv_window_ms: object,
-) -> Mapping[str, str]:
+) -> dict[str, str]:
     timestamp_ms = _exact_request_timestamp(timestamp_ms)
     recv_window_ms = _exact_recv_window(recv_window_ms)
     try:
@@ -664,24 +727,27 @@ def _probe_headers(
         signing_material,
         sha256,
     ).hexdigest()
-    return MappingProxyType(
-        {
-            "Accept": "application/json",
-            "X-BAPI-API-KEY": credential.api_key,
-            "X-BAPI-TIMESTAMP": str(timestamp_ms),
-            "X-BAPI-RECV-WINDOW": str(recv_window_ms),
-            "X-BAPI-SIGN": signature,
-        }
-    )
+    return {
+        "Accept": "application/json",
+        "X-BAPI-API-KEY": credential.api_key,
+        "X-BAPI-TIMESTAMP": str(timestamp_ms),
+        "X-BAPI-RECV-WINDOW": str(recv_window_ms),
+        "X-BAPI-SIGN": signature,
+    }
 
 
-def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
-    if not isinstance(headers, Mapping) or set(headers) != _PROBE_HEADER_NAMES:
+def _validate_probe_wire_headers(headers: object) -> dict[str, str]:
+    if type(headers) is not dict:
+        raise ProviderCoreError(
+            "Bybit credential probe wire headers must be an exact built-in object"
+        )
+    held = headers.copy()
+    if set(held) != _PROBE_HEADER_NAMES:
         raise ProviderCoreError(
             "Bybit credential probe wire headers must have exact auth shape"
         )
     normalized: dict[str, str] = {}
-    for raw_key, raw_value in headers.items():
+    for raw_key, raw_value in held.items():
         if type(raw_key) is not str or raw_key not in _PROBE_HEADER_NAMES:
             raise ProviderCoreError(
                 "Bybit credential probe wire header names must be exact canonical text"
@@ -712,7 +778,7 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
     _exact_recv_window(int(recv_window))
     if _HEX_SHA256.fullmatch(normalized["X-BAPI-SIGN"]) is None:
         raise ProviderCoreError("Bybit credential probe signature header is not canonical")
-    return MappingProxyType(normalized)
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,7 +793,7 @@ class BybitCredentialProbeHttpRequest:
             raise ProviderCoreError(
                 "Bybit credential probe request URL is outside exact query-api origins"
             )
-        headers = _validate_probe_wire_headers(self.headers)
+        headers = MappingProxyType(_validate_probe_wire_headers(self.headers))
         if (
             type(self.timeout_seconds) is not int
             or not 1 <= self.timeout_seconds <= 120
@@ -781,14 +847,47 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe response byte budget is invalid"
             )
+        opener_builder = build_opener
+        proxy_handler_type = ProxyHandler
+        redirect_handler_type = _NoProbeRedirectHandler
+        if opener_builder is not _DIRECT_BUILD_OPENER:
+            raise ProviderCoreError(
+                "Bybit credential probe direct opener authority is not canonical"
+            )
+        if proxy_handler_type is not _DIRECT_PROXY_HANDLER_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct proxy-handler authority is not canonical"
+            )
+        if redirect_handler_type is not _DIRECT_REDIRECT_HANDLER_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct redirect-handler authority is not canonical"
+            )
         self.max_response_bytes = max_response_bytes
-        self._opener = build_opener(ProxyHandler({}), _NoProbeRedirectHandler())
+        self._opener = opener_builder(
+            proxy_handler_type({}),
+            redirect_handler_type(),
+        )
 
     def send(
         self,
         request: BybitCredentialProbeHttpRequest,
     ) -> BybitCredentialProbeRawHttpResponse:
-        if type(request) is not BybitCredentialProbeHttpRequest:
+        request_type = _DIRECT_HTTP_REQUEST_TYPE
+        request_factory = Request
+        raw_response_type = _DIRECT_RAW_HTTP_RESPONSE_TYPE
+        if BybitCredentialProbeHttpRequest is not request_type:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP request type authority is not canonical"
+            )
+        if Request is not _DIRECT_REQUEST_FACTORY:
+            raise ProviderCoreError(
+                "Bybit credential probe urllib request authority is not canonical"
+            )
+        if BybitCredentialProbeRawHttpResponse is not raw_response_type:
+            raise ProviderCoreError(
+                "Bybit credential probe raw response type authority is not canonical"
+            )
+        if type(request) is not request_type:
             raise TypeError(
                 "request must be exact BybitCredentialProbeHttpRequest"
             )
@@ -800,7 +899,7 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe response byte budget is invalid"
             )
-        outbound = Request(
+        outbound = request_factory(
             request.url,
             data=None,
             headers=dict(request.headers),
@@ -864,10 +963,22 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP response is invalid or oversized"
             ) from error
-        return BybitCredentialProbeRawHttpResponse(
+        return raw_response_type(
             http_status=final_status,
             body=bounded,
         )
+
+
+_DIRECT_BUILD_OPENER = build_opener
+_DIRECT_PROXY_HANDLER_TYPE = ProxyHandler
+_DIRECT_REDIRECT_HANDLER_TYPE = _NoProbeRedirectHandler
+_DIRECT_REQUEST_FACTORY = Request
+_DIRECT_HTTP_REQUEST_TYPE = BybitCredentialProbeHttpRequest
+_DIRECT_RAW_HTTP_RESPONSE_TYPE = BybitCredentialProbeRawHttpResponse
+_DIRECT_WIRE_RESPONSE_TYPE = BybitCredentialProbeWireResponse
+_DIRECT_PROVIDER_WIRE_CLIENT_TYPE = BybitCredentialProbeUrllibClient
+_DIRECT_PROVIDER_WIRE_CLIENT_INIT = BybitCredentialProbeUrllibClient.__init__
+_DIRECT_PROVIDER_WIRE_CLIENT_SEND = BybitCredentialProbeUrllibClient.send
 
 
 def execute_bybit_credential_probe_wire_query(
@@ -887,16 +998,63 @@ def execute_bybit_credential_probe_wire_query(
         raise ProviderCoreError(
             "Bybit credential probe timeout must be exact integer 1..120"
         )
-    client = wire_client if wire_client is not None else BybitCredentialProbeUrllibClient()
+    direct_provider_transport = wire_client is None
+    if direct_provider_transport:
+        if (
+            build_opener is not _DIRECT_BUILD_OPENER
+            or ProxyHandler is not _DIRECT_PROXY_HANDLER_TYPE
+            or _NoProbeRedirectHandler is not _DIRECT_REDIRECT_HANDLER_TYPE
+            or Request is not _DIRECT_REQUEST_FACTORY
+            or BybitCredentialProbeHttpRequest is not _DIRECT_HTTP_REQUEST_TYPE
+            or BybitCredentialProbeRawHttpResponse is not _DIRECT_RAW_HTTP_RESPONSE_TYPE
+            or BybitCredentialProbeWireResponse is not _DIRECT_WIRE_RESPONSE_TYPE
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport dependency authority is not canonical"
+            )
+        if BybitCredentialProbeUrllibClient is not _DIRECT_PROVIDER_WIRE_CLIENT_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport type authority is not canonical"
+            )
+        if BybitCredentialProbeUrllibClient.__init__ is not _DIRECT_PROVIDER_WIRE_CLIENT_INIT:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport constructor authority is not canonical"
+            )
+        if BybitCredentialProbeUrllibClient.send is not _DIRECT_PROVIDER_WIRE_CLIENT_SEND:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport send authority is not canonical"
+            )
+        client = _DIRECT_PROVIDER_WIRE_CLIENT_TYPE()
+        if type(client) is not _DIRECT_PROVIDER_WIRE_CLIENT_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport construction is not canonical"
+            )
+    else:
+        client = wire_client
     if not hasattr(client, "send"):
         raise TypeError("wire_client must implement send")
-    request = BybitCredentialProbeHttpRequest(
+    request_type = _DIRECT_HTTP_REQUEST_TYPE
+    raw_response_type = _DIRECT_RAW_HTTP_RESPONSE_TYPE
+    wire_response_type = _DIRECT_WIRE_RESPONSE_TYPE
+    if (
+        BybitCredentialProbeHttpRequest is not request_type
+        or BybitCredentialProbeRawHttpResponse is not raw_response_type
+        or BybitCredentialProbeWireResponse is not wire_response_type
+    ):
+        raise ProviderCoreError(
+            "Bybit credential probe wire type authority is not canonical"
+        )
+    request = request_type(
         url=source_uri,
         headers=headers,
         timeout_seconds=timeout_seconds,
     )
-    raw_response = client.send(request)
-    if type(raw_response) is not BybitCredentialProbeRawHttpResponse:
+    raw_response = (
+        _DIRECT_PROVIDER_WIRE_CLIENT_SEND(client, request)
+        if direct_provider_transport
+        else client.send(request)
+    )
+    if type(raw_response) is not raw_response_type:
         raise TypeError(
             "Bybit credential probe wire client must return exact BybitCredentialProbeRawHttpResponse"
         )
@@ -909,14 +1067,27 @@ def execute_bybit_credential_probe_wire_query(
         decoded,
         expected_api_key=headers["X-BAPI-API-KEY"],
     )
-    return BybitCredentialProbeWireResponse(
+    if api_key_echo_confirmed and not direct_provider_transport:
+        raise ProviderCoreError(
+            "successful Bybit credential probe requires direct production transport"
+        )
+    return wire_response_type(
         http_status=raw_response.http_status,
         response=decoded,
         api_key_echo_confirmed=api_key_echo_confirmed,
+        _provider_transport_attestation=(
+            _PROVIDER_TRANSPORT_ATTESTATION if direct_provider_transport else None
+        ),
         _provider_echo_attestation=(
             _PROVIDER_ECHO_ATTESTATION if api_key_echo_confirmed else None
         ),
     )
+
+
+# Retain the canonical direct wire entry point once. A caller-supplied callback may
+# exercise deterministic rejection/inconclusive paths, but it cannot claim provider
+# transport provenance merely by returning a response carrying module-level tokens.
+_DIRECT_PROVIDER_WIRE_QUERY = execute_bybit_credential_probe_wire_query
 
 
 def probe_bybit_credential_with_vault(
@@ -956,6 +1127,7 @@ def probe_bybit_credential_with_vault(
     )
     if not callable(wire_query):
         raise TypeError("wire_query must be callable")
+    direct_wire_query = wire_query is _DIRECT_PROVIDER_WIRE_QUERY
     if not callable(clock_millis) or not callable(clock_utc):
         raise TypeError("probe clocks must be callable")
     recv_window_ms = _exact_recv_window(recv_window_ms)
@@ -1003,9 +1175,27 @@ def probe_bybit_credential_with_vault(
             raise TypeError(
                 "wire_query must return exact BybitCredentialProbeWireResponse"
             )
+        if (
+            not direct_wire_query
+            and (
+                wire_response._provider_transport_proof is not None
+                or wire_response._provider_echo_proof is not None
+            )
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe provider attestation requires canonical direct wire query"
+            )
         if wire_response.http_status != 200:
             raise ProviderCoreError(
                 "Bybit credential probe non-200 HTTP result is not rejection evidence"
+            )
+        if (
+            wire_response.ret_code == 0
+            and wire_response._provider_transport_proof
+            is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
+            raise ProviderCoreError(
+                "successful Bybit credential wire result lost provider-derived attestation for direct transport"
             )
         if (
             wire_response.ret_code == 0
@@ -1035,6 +1225,7 @@ def probe_bybit_credential_with_vault(
             response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
             api_key_echo_confirmed=wire_response.api_key_echo_confirmed,
+            _provider_transport_attestation=wire_response._provider_transport_proof,
             _provider_echo_attestation=wire_response._provider_echo_proof,
         )
 
@@ -1050,18 +1241,21 @@ def probe_bybit_credential_with_shared_wire(
     recv_window_ms: int = 5000,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeEvidence:
-    def wire_query(
-        *,
-        source_uri: str,
-        headers: Mapping[str, str],
-        timeout_seconds: int,
-    ) -> BybitCredentialProbeWireResponse:
-        return execute_bybit_credential_probe_wire_query(
-            source_uri=source_uri,
-            headers=headers,
-            timeout_seconds=timeout_seconds,
-            wire_client=wire_client,
-        )
+    if wire_client is None:
+        wire_query = _DIRECT_PROVIDER_WIRE_QUERY
+    else:
+        def wire_query(
+            *,
+            source_uri: str,
+            headers: Mapping[str, str],
+            timeout_seconds: int,
+        ) -> BybitCredentialProbeWireResponse:
+            return _DIRECT_PROVIDER_WIRE_QUERY(
+                source_uri=source_uri,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+                wire_client=wire_client,
+            )
 
     return probe_bybit_credential_with_vault(
         vault=vault,

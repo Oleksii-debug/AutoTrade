@@ -211,9 +211,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.recv_window_ms, 5000)
         self.assertEqual(evidence.http_status, 200)
         self.assertFalse(evidence.api_key_echo_confirmed)
+        self.assertFalse(evidence.provider_transport_confirmed)
         self.assertIs(
             evidence.classification,
-            BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+            BybitCredentialNonAcceptance.INCONCLUSIVE,
         )
         self.assertFalse(evidence.send_authority)
         self.assertFalse(evidence.retirement_authority)
@@ -452,7 +453,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "response_sha256": evidence.response_sha256,
                 "observed_at": "2026-10-03T22:01:02Z",
                 "api_key_echo_confirmed": False,
-                "classification": "REJECTED_EXACT_DOMAIN",
+                "provider_transport_confirmed": False,
+                "classification": "INCONCLUSIVE",
                 "send_authority": False,
                 "retirement_authority": False,
                 "takeover_authority": False,
@@ -506,9 +508,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             evidence = _probe(vault=vault, handle=handle, wire_query=wire_query)
             self.assertEqual(len(calls), 1)
             self.assertEqual(evidence.credential_handle, handle)
+            self.assertFalse(evidence.provider_transport_confirmed)
             self.assertIs(
                 evidence.classification,
-                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+                BybitCredentialNonAcceptance.INCONCLUSIVE,
             )
             self.assertNotIn("probe-secret", repr(evidence))
 
@@ -692,12 +695,13 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             self.assertEqual(request.headers["X-BAPI-SIGN"], expected_signature)
             self.assertNotIn("probe-key", repr(request))
             self.assertNotIn("probe-secret", repr(request))
+            self.assertFalse(evidence.provider_transport_confirmed)
             self.assertIs(
                 evidence.classification,
-                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+                BybitCredentialNonAcceptance.INCONCLUSIVE,
             )
 
-    def test_shared_wire_success_is_bound_to_exact_echoed_api_key(self):
+    def test_injected_shared_wire_success_cannot_mint_provider_attestation(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
             client = _FakeProbeWireClient(
@@ -706,27 +710,22 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     body=_successful_query_api_body(),
                 )
             )
-            evidence = probe_bybit_credential_with_shared_wire(
-                vault=vault,
-                credential_handle=handle,
-                execution_identity="operator-1",
-                product_family="SPOT",
-                clock_millis=lambda: 1791064800123,
-                clock_utc=lambda: datetime(
-                    2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
-                ),
-                wire_client=client,
-            )
-            metadata = bybit_credential_probe_receipt_metadata(evidence)
-            self.assertIs(
-                evidence.classification,
-                BybitCredentialNonAcceptance.STILL_ACCEPTED,
-            )
-            self.assertTrue(evidence.api_key_echo_confirmed)
-            self.assertTrue(metadata["api_key_echo_confirmed"])
-            serialized = repr(evidence) + repr(metadata)
-            self.assertNotIn("probe-key", serialized)
-            self.assertNotIn("permissions", serialized)
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "direct production transport",
+            ):
+                probe_bybit_credential_with_shared_wire(
+                    vault=vault,
+                    credential_handle=handle,
+                    execution_identity="operator-1",
+                    product_family="SPOT",
+                    clock_millis=lambda: 1791064800123,
+                    clock_utc=lambda: datetime(
+                        2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
+                    ),
+                    wire_client=client,
+                )
+            self.assertEqual(len(client.requests), 1)
 
     def test_shared_wire_success_rejects_mismatched_missing_or_secret_echo(self):
         bodies = (

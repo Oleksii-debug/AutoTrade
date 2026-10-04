@@ -27,6 +27,7 @@ class ThesisImplementationTests(unittest.TestCase):
             as_of=AS_OF,
             horizon_end=HORIZON,
             required_notional="10000",
+            notional_currency="USD",
         )
         values.update(overrides)
         return MarketThesis(**values)
@@ -61,6 +62,7 @@ class ThesisImplementationTests(unittest.TestCase):
             leverage_ratio="2",
             liquidation_risk="0.10",
             liquidity_capacity="50000",
+            liquidity_currency="USD",
             tradable_until=AFTER_HORIZON,
         )
         values.update(overrides)
@@ -288,6 +290,7 @@ class ThesisImplementationTests(unittest.TestCase):
             "leverage_ratio": Decimal("2"),
             "liquidation_risk": Decimal("0.10"),
             "liquidity_capacity": Decimal("50000"),
+            "liquidity_currency": "USD",
             "tradable_until": AFTER_HORIZON,
         })
         with self.assertRaises(TypeError):
@@ -306,6 +309,25 @@ class ThesisImplementationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             decision.rejected_reasons["bad"] = ("FORGED",)
 
+
+
+    def test_liquidity_capacity_never_compares_across_currencies(self):
+        decision = select_implementation(
+            thesis=self.thesis(notional_currency="USD"),
+            policy=self.policy(),
+            candidates=(
+                self.candidate(
+                    "eur-capacity",
+                    liquidity_capacity="999999999",
+                    liquidity_currency="EUR",
+                ),
+            ),
+        )
+        self.assertEqual(decision.status, "NO_TRADE")
+        self.assertEqual(
+            decision.rejected_reasons["eur-capacity"],
+            ("LIQUIDITY_CURRENCY_MISMATCH",),
+        )
 
     def test_instrument_version_identity_must_be_canonical(self):
         invalid = (

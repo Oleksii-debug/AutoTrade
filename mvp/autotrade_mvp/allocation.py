@@ -2388,6 +2388,37 @@ def allocate_evidence_bound_objective_targets(
     cannot be compared against a return rate from a different time interval.
     """
 
+    def snapshot_mapping(value, *, name: str):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        snapshot = dict(value)
+        for key in dict.keys(snapshot):
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be exact built-in strings")
+        return snapshot
+
+    # Materialize every caller-owned container before validating any evidence.
+    # Callback-capable inputs may mutate data while being copied, but cannot run
+    # later between a successful provenance check and financial use.
+    objective_evidence = snapshot_mapping(
+        objective_evidence,
+        name="objective_evidence",
+    )
+    market_evidence = snapshot_mapping(
+        market_evidence,
+        name="market_evidence",
+    )
+    valuation_evidence = snapshot_mapping(
+        valuation_evidence,
+        name="valuation_evidence",
+    )
+    resolved_evidence = snapshot_mapping(
+        resolved_evidence,
+        name="resolved_evidence",
+    )
+    stress_source_evidence = tuple(stress_source_evidence)
+    materialized = tuple(candidates)
+
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment not in _ALLOWED_EVIDENCE_ENVIRONMENTS:
         raise ValueError(f"unsupported allocation environment: {normalized_environment}")
@@ -2400,10 +2431,6 @@ def allocate_evidence_bound_objective_targets(
         decision_time,
         name="allocation decision_time",
     ).isoformat().replace("+00:00", "Z")
-    if not isinstance(resolved_evidence, Mapping):
-        raise TypeError("resolved_evidence must be a mapping")
-
-    materialized = tuple(candidates)
     symbols = tuple(item.candidate.symbol for item in materialized)
     if len(symbols) != len(set(symbols)):
         raise ValueError("objective candidate symbols must be unique")
@@ -2922,8 +2949,31 @@ def revalidate_evidence_bound_allocation(
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
-    if not isinstance(result, EvidenceBoundObjectiveAllocationResult):
-        raise TypeError("result must be EvidenceBoundObjectiveAllocationResult")
+    def snapshot_mapping(value, *, name: str):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        snapshot = dict(value)
+        for key in dict.keys(snapshot):
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be exact built-in strings")
+        return snapshot
+
+    # Freeze every callback-capable authority input before checking the result.
+    resolved_evidence = snapshot_mapping(
+        resolved_evidence,
+        name="resolved_evidence",
+    )
+    current_instrument_versions = snapshot_mapping(
+        current_instrument_versions,
+        name="current_instrument_versions",
+    )
+    current_capability_snapshot_ids = snapshot_mapping(
+        current_capability_snapshot_ids,
+        name="current_capability_snapshot_ids",
+    )
+
+    if type(result) is not EvidenceBoundObjectiveAllocationResult:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment != result.environment:
         raise ValueError("allocation result environment does not match authority environment")

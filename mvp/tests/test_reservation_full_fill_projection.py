@@ -1,7 +1,11 @@
 from decimal import Decimal
 import unittest
 
-from mvp.autotrade_mvp.reservations import ReservationBook, ReservationConflict
+from mvp.autotrade_mvp.reservations import (
+    POST_BUST_HOLD_STATE,
+    ReservationBook,
+    ReservationConflict,
+)
 
 
 class ReservationFullFillProjectionTests(unittest.TestCase):
@@ -91,6 +95,47 @@ class ReservationFullFillProjectionTests(unittest.TestCase):
         self.assertEqual(terminal.state, "FILLED")
         self.assertEqual(terminal.consumed["CASH:USD"], Decimal("100"))
         self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+
+    def test_busted_terminal_can_refill_and_terminalize_again(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="reservation-1",
+            intent_id="intent-1",
+            requirements={"CASH:USD": "120", "FEE:USD": "5"},
+            available={"CASH:USD": "1000", "FEE:USD": "100"},
+        )
+        book.consume_and_mark_filled(
+            "reservation-1",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+            resolution_evidence="journal:order-filled:event-1@sha256:abc",
+        )
+
+        reopened = book.restore_consumption(
+            "reservation-1",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+        )
+        self.assertEqual(reopened.state, POST_BUST_HOLD_STATE)
+        self.assertEqual(reopened.remaining["CASH:USD"], Decimal("120"))
+        self.assertEqual(reopened.remaining["FEE:USD"], Decimal("5"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("120"))
+
+        refilled = book.consume_and_mark_filled(
+            "reservation-1",
+            {"CASH:USD": "101", "FEE:USD": "3"},
+            resolution_evidence="journal:order-filled:event-2@sha256:def",
+        )
+        self.assertEqual(refilled.state, "FILLED")
+        self.assertEqual(
+            refilled.resolution_evidence,
+            "journal:order-filled:event-2@sha256:def",
+        )
+        self.assertEqual(refilled.consumed["CASH:USD"], Decimal("101"))
+        self.assertEqual(refilled.consumed["FEE:USD"], Decimal("3"))
+        self.assertEqual(refilled.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(refilled.remaining["FEE:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+        self.assertEqual(book.total_reserved("FEE:USD"), Decimal("0"))
+        self.assertEqual(book.active(), ())
 
 
 if __name__ == "__main__":

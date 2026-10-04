@@ -138,6 +138,8 @@ class _ProductionBybitSecretResolver:
         "__runtime",
         "__application",
         "__security_boundary",
+        "__security_lease",
+        "__security_lease_code",
         "__recovery",
         "__dispatcher",
         "__owner",
@@ -184,6 +186,8 @@ class _ProductionBybitSecretResolver:
         security_boundary = application.security_boundary
         if type(security_boundary) is not SecurityBoundary:
             raise TypeError("production host SecurityBoundary authority is not exact")
+        security_lease = SecurityBoundary.lease_for_execution
+        security_lease_code = security_lease.__code__
         recovery = runtime.recovery_controller
         if type(recovery) is not RecoveryController:
             raise TypeError("production recovery authority is not exact")
@@ -205,6 +209,8 @@ class _ProductionBybitSecretResolver:
         self.__runtime = runtime
         self.__application = application
         self.__security_boundary = security_boundary
+        self.__security_lease = security_lease
+        self.__security_lease_code = security_lease_code
         self.__recovery = recovery
         self.__dispatcher = dispatcher
         self.__owner = owner
@@ -234,6 +240,11 @@ class _ProductionBybitSecretResolver:
             raise PermissionError("production host SecurityBoundary authority changed")
         if type(self.__security_boundary) is not SecurityBoundary:
             raise PermissionError("production host SecurityBoundary authority changed")
+        security_lease = self.__security_lease
+        if SecurityBoundary.lease_for_execution is not security_lease:
+            raise PermissionError("production credential lease authority changed")
+        if security_lease.__code__ is not self.__security_lease_code:
+            raise PermissionError("production credential lease authority code changed")
         if runtime.recovery_controller is not self.__recovery:
             raise PermissionError("production recovery controller authority changed")
         if runtime.financial_dispatcher is not self.__dispatcher:
@@ -302,7 +313,9 @@ class _ProductionBybitSecretResolver:
                 "Bybit credential request does not match production host authority"
             )
 
-        with self.__security_boundary.lease_for_execution(
+        security_lease = self.__security_lease
+        with security_lease(
+            self.__security_boundary,
             self.__session_token,
             origin=self.__origin,
             handle=self.__credential_handle,
@@ -322,6 +335,8 @@ class ProductionBybitOrderSender:
     __slots__ = (
         "__runtime",
         "__transport",
+        "__transport_call",
+        "__transport_call_code",
         "__dispatcher",
         "__recovery",
         "__owner",
@@ -357,6 +372,8 @@ class ProductionBybitOrderSender:
             raise TypeError("runtime must be exact FinancialProductionHostRuntime")
         if type(transport) is not BybitV5HttpTransport:
             raise TypeError("transport must be exact BybitV5HttpTransport")
+        transport_call = BybitV5HttpTransport.__call__
+        transport_call_code = transport_call.__code__
         dispatcher = runtime.financial_dispatcher
         recovery = runtime.recovery_controller
         owner = dispatcher.owner
@@ -392,6 +409,8 @@ class ProductionBybitOrderSender:
 
         self.__runtime = runtime
         self.__transport = transport
+        self.__transport_call = transport_call
+        self.__transport_call_code = transport_call_code
         self.__dispatcher = dispatcher
         self.__recovery = recovery
         self.__owner = owner
@@ -417,6 +436,13 @@ class ProductionBybitOrderSender:
     def provider_environment(self) -> str:
         return self.__provider_environment
 
+    def _require_transport_executable(self) -> None:
+        transport_call = self.__transport_call
+        if BybitV5HttpTransport.__call__ is not transport_call:
+            raise PermissionError("Bybit transport executable authority changed")
+        if transport_call.__code__ is not self.__transport_call_code:
+            raise PermissionError("Bybit transport executable authority code changed")
+
     def _require_send_authority(self) -> None:
         runtime = self.__runtime
         transport = self.__transport
@@ -432,6 +458,7 @@ class ProductionBybitOrderSender:
             raise PermissionError("production financial sender owner changed")
         if type(transport) is not BybitV5HttpTransport:
             raise PermissionError("Bybit transport authority changed")
+        self._require_transport_executable()
         if BYBIT_V5_ENDPOINT_POLICIES is not self.__policy_registry:
             raise PermissionError("Bybit provider policy registry authority changed")
         canonical_policy = self.__policy_registry.get(self.__provider_environment)
@@ -482,6 +509,19 @@ class ProductionBybitOrderSender:
             raise PermissionError("Bybit session authority changed after composition")
         self.__resolver._require_runtime_authority()
 
+    def _transport_send(
+        self,
+        client_order_id: str,
+        request: Mapping[str, Any],
+        final_guard: Callable[[], None],
+    ):
+        # Guard again at the irreversible transport boundary. The outer dispatch
+        # validation alone would leave a class-level executable retargeting window
+        # while durable preparation/final financial checks are in progress.
+        self._require_send_authority()
+        transport_call = self.__transport_call
+        return transport_call(self.__transport, client_order_id, request, final_guard)
+
     def dispatch(
         self,
         *,
@@ -505,7 +545,7 @@ class ProductionBybitOrderSender:
             request=request,
             now=now,
             authority_check=authority_check,
-            transport_send=self.__transport,
+            transport_send=self._transport_send,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
             final_barrier_clock=final_barrier_clock,

@@ -691,7 +691,7 @@ class Section17BlindedReplayTests(unittest.TestCase):
         after = feeder.input_evidence()
         self.assertNotEqual(before.published_prefix_sha256, after.published_prefix_sha256)
         self.assertNotEqual(before.digest, after.digest)
-        self.assertEqual(after.blinded_dataset_sha256, feeder.blinded_dataset_sha256)
+        self.assertFalse(hasattr(after, "blinded_dataset_sha256"))
 
     def test_blinded_checkpoint_contains_no_absolute_calendar_or_raw_identity(self):
         source = dataset(
@@ -902,6 +902,7 @@ class Section17BlindedReplayTests(unittest.TestCase):
                 "future",
                 instrument="FUTURE-9",
                 provider="FutureProvider",
+                event_time="2024-03-01T10:00:00Z",
                 available_at="2024-03-13T10:00:00Z",
                 sequence=2,
                 payload_extra={"expiry": "2020-01-01"},
@@ -919,6 +920,48 @@ class Section17BlindedReplayTests(unittest.TestCase):
         )
         self.assertEqual(first.events[0].event_time_us, 0)
         self.assertEqual(second.events[0].event_time_us, 0)
+        self.assertLess(second.events[1].event_time_us, 0)
+
+    def test_strategy_prefix_evidence_is_invariant_to_unseen_future(self):
+        base = dataset(
+            event(
+                "visible",
+                instrument="BTC-USD",
+                provider="Kraken",
+                available_at="2024-03-12T10:00:00Z",
+            )
+        )
+        extended = dataset(
+            event(
+                "visible",
+                instrument="BTC-USD",
+                provider="Kraken",
+                available_at="2024-03-12T10:00:00Z",
+            ),
+            event(
+                "future-correction",
+                instrument="FUTURE-9",
+                provider="FutureProvider",
+                event_time="2024-03-01T10:00:00Z",
+                available_at="2024-03-13T10:00:00Z",
+                sequence=2,
+            ),
+        )
+        common = dict(
+            start_time="2024-03-12T10:00:00Z",
+            experiment_id="prefix-evidence",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        first = BlindedCausalFeeder(dataset=base, **common)
+        second = BlindedCausalFeeder(dataset=extended, **common)
+        self.assertEqual(first.view(), second.view())
+        self.assertEqual(first.input_evidence(), second.input_evidence())
+        self.assertNotEqual(
+            first.blinded_dataset_sha256,
+            second.blinded_dataset_sha256,
+        )
 
     def test_string_subclass_cannot_bypass_payload_identity_leak_scan(self):
         callbacks = []

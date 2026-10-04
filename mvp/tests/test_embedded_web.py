@@ -408,6 +408,46 @@ class EmbeddedWebTests(unittest.TestCase):
             self.web_bundle.asset_for_path("/app.js").body,
         )
 
+    def test_host_detaches_static_bytes_and_identity_from_post_admission_mutation(self):
+        admitted_asset = self.web_bundle.asset_for_path("/app.js")
+        self.assertIsNotNone(admitted_asset)
+        expected_body = admitted_asset.body
+        expected_asset_sha = admitted_asset.sha256_hex
+        expected_bundle_sha = self.web_bundle.bundle_sha256
+        expected_source_revision = self.web_bundle.source_revision
+        expected_contract_version = self.web_bundle.host_api_contract_version
+
+        tampered_body = b"export const attacker = true;"
+        object.__setattr__(admitted_asset, "body", tampered_body)
+        object.__setattr__(
+            admitted_asset,
+            "sha256_hex",
+            sha256(tampered_body).hexdigest(),
+        )
+        object.__setattr__(admitted_asset, "content_type", "text/html; charset=utf-8")
+        object.__setattr__(self.web_bundle, "bundle_sha256", "0" * 64)
+        object.__setattr__(self.web_bundle, "source_revision", "b" * 40)
+        object.__setattr__(self.web_bundle, "host_api_contract_version", "999.0.0")
+        object.__setattr__(self.web_bundle, "manifest_bytes", b"{}")
+
+        response = self.app.dispatch(method="GET", target="/app.js", headers={})
+        headers = dict(response.headers)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, expected_body)
+        self.assertNotEqual(response.body, tampered_body)
+        self.assertEqual(response.content_type, "text/javascript; charset=utf-8")
+        self.assertEqual(headers["ETag"], f'"sha256-{expected_asset_sha}"')
+        self.assertEqual(headers["X-AutoTrade-Web-Bundle"], expected_bundle_sha)
+        self.assertEqual(
+            headers["X-AutoTrade-Source-Revision"],
+            expected_source_revision,
+        )
+        self.assertEqual(
+            headers["X-AutoTrade-Host-Api-Contract"],
+            expected_contract_version,
+        )
+
     def test_static_responses_bind_bundle_source_contract_and_harden_browser(self):
         response = self.app.dispatch(method="GET", target="/index.html", headers={})
         headers = dict(response.headers)

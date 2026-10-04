@@ -78,6 +78,57 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
             )
             self.assertNotIn("SubmissionSending", [event["event_type"] for event in events])
 
+    def test_process_local_ready_flags_without_journal_reconciliation_cannot_send(self):
+        with TemporaryDirectory() as directory:
+            journal = self._journal(directory)
+            recovery = self._recovery(journal)
+            dispatcher = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+
+            # Process-local flags are not financial authority. A production-issued
+            # sender must still recover a current owner-bound AccountReconciled
+            # checkpoint from the canonical JournalStore at the final barrier.
+            recovery.provider_reconciled = True
+            recovery.reason_codes.clear()
+            recovery.state = HostState.READY
+            wire_calls = []
+
+            def transport_send(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"ok": True}
+
+            outcome = dispatcher.dispatch(
+                attempt_id="attempt-forged-ready",
+                intent_id="intent-forged-ready",
+                intent_hash="intent-hash-forged-ready",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-10-04T01:00:01Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport_send,
+            )
+
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertIn("sender_fence_rejected:PermissionError", outcome.reason)
+            self.assertEqual(wire_calls, [])
+            events = JournalStore.load_events_by_aggregate_type(
+                journal,
+                "submission_attempt",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertNotIn(
+                "SubmissionSending",
+                [event["event_type"] for event in events],
+            )
+
     def test_final_guard_rereads_durable_owner_and_blocks_stale_issued_dispatcher(self):
         with TemporaryDirectory() as directory:
             journal = self._journal(directory)

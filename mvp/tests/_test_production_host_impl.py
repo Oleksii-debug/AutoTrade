@@ -190,6 +190,7 @@ class ProductionHostRuntimeTests(unittest.TestCase):
             server=server or Mock(),
             instance_fence=fence or Mock(),
             admission_gate=gate or Mock(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
 
     def test_shutdown_cut_rejects_handler_that_reaches_gate_after_closing(self):

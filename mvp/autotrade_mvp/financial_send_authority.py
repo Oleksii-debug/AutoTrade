@@ -854,7 +854,6 @@ class FinanciallyBoundBybitOrderSender:
         now: str,
         client_id_max_length: int = 36,
         client_id_format: str = "TOKEN",
-        final_barrier_clock: Callable[[], str] | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
         self._require_sender_dispatch_authority()
@@ -898,7 +897,6 @@ class FinanciallyBoundBybitOrderSender:
             authority_check=authority_check,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
-            final_barrier_clock=final_barrier_clock,
             submission_scope=submission_scope_snapshot,
         )
 

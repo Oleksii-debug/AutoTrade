@@ -485,6 +485,7 @@ def _event_payload(record: NewsRevision) -> Mapping[str, object]:
         "revision": record.revision,
         "revision_kind": record.revision_kind,
         "supersedes_revision": record.supersedes_revision,
+        "story_ref": record.information_id,
         "source_id": record.source_id,
         "published_at": _timestamp(record.published_at),
         "language": record.language,
@@ -715,7 +716,8 @@ def build_news_replay_bundle(
             )
 
     identity_fields = [
-        IdentityField(("source_id",), "SOURCE", required=True)
+        IdentityField(("story_ref",), "ENTITY", required=True),
+        IdentityField(("source_id",), "SOURCE", required=True),
     ]
     identity_fields.extend(
         IdentityField(("identity_slots", slot), namespace, required=False)

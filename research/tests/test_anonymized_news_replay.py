@@ -126,13 +126,76 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         item = published[0]
         rendered = render_blinded_news(item)
 
-        self.assertEqual(rendered, "Company 001 reported quarterly earnings 17% above expectations")
-        self.assertEqual(item.payload["source_id"], "Source 001")
-        self.assertEqual(item.payload["identity_slots"]["company"], "Company 001")
+        company_ref = item.payload["identity_slots"]["company"]
+        source_ref = item.payload["source_id"]
+        self.assertRegex(company_ref, r"^Company [0-9A-F]{64}$")
+        self.assertRegex(source_ref, r"^Source [0-9A-F]{64}$")
+        self.assertEqual(
+            rendered,
+            f"{company_ref} reported quarterly earnings 17% above expectations",
+        )
         self.assertNotIn("Acme", rendered)
         self.assertNotIn("Reuters", rendered)
         self.assertNotIn("2024", rendered)
         self.assertNotIn("March", rendered)
+
+    def test_story_reference_links_corrections_without_exposing_information_id(self):
+        original_a = revision(information_id="story-a", source_sequence=1)
+        original_b = revision(
+            information_id="story-b",
+            source_sequence=2,
+            syndication_sha256="sha256:" + ("8" * 64),
+            content_sha256="sha256:" + ("8" * 64),
+            published_at="2024-03-12T10:01:00Z",
+            available_at="2024-03-12T10:01:05Z",
+            ingested_at="2024-03-12T10:01:07Z",
+        )
+        correction_a = revision(
+            information_id="story-a",
+            revision_number=2,
+            revision_kind="CORRECTION",
+            supersedes_revision=1,
+            published_at="2024-03-12T10:20:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:01Z",
+            source_sequence=3,
+            summary_template="{company} corrected the reported earnings surprise to 11%",
+            claims=(
+                claim(
+                    claim_id="earnings-corrected",
+                    magnitude="11",
+                    relevance_bps=9000,
+                ),
+            ),
+        )
+        feeder = self.feeder(self.bundle(original_a, original_b, correction_a))
+        feeder.advance_to("2024-03-12T10:30:00Z")
+        events = feeder.view().events
+        story_a_original = next(
+            item for item in events if item.payload["revision"] == 1
+            and item.payload["story_ref"] == events[-1].payload["story_ref"]
+        )
+        story_a_correction = events[-1]
+        other_story = next(
+            item for item in events
+            if item.payload["story_ref"] != story_a_correction.payload["story_ref"]
+        )
+
+        self.assertRegex(
+            story_a_correction.payload["story_ref"],
+            r"^Entity [0-9A-F]{64}$",
+        )
+        self.assertEqual(
+            story_a_original.payload["story_ref"],
+            story_a_correction.payload["story_ref"],
+        )
+        self.assertNotEqual(
+            other_story.payload["story_ref"],
+            story_a_correction.payload["story_ref"],
+        )
+        visible = repr(tuple(item.payload for item in events))
+        self.assertNotIn("story-a", visible)
+        self.assertNotIn("story-b", visible)
 
     def test_preserves_publication_availability_and_ingest_lags(self):
         bundle = self.bundle(revision())

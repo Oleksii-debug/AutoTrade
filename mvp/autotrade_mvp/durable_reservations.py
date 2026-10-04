@@ -817,10 +817,12 @@ class DurableReservationBook:
         idempotency_key: str,
         operation: str,
         request: dict[str, object],
-        committed_at: str | None = None,
+        simulation_time: str | None = None,
     ) -> ReservationSnapshot:
         cid = _text(command_id, name="command_id")
         idem = _text(idempotency_key, name="idempotency_key")
+        if simulation_time is not None and self.environment != "SIMULATION":
+            raise ValueError("simulation_time is SIMULATION-only")
 
         # Read one journal snapshot for idempotency, financial availability
         # and aggregate version. A second read here would allow a concurrent
@@ -891,8 +893,8 @@ class DurableReservationBook:
             "payload_hash": payload_digest(payload),
             "committed_at": (
                 _now()
-                if committed_at is None
-                else _text(committed_at, name="committed_at")
+                if simulation_time is None
+                else _text(simulation_time, name="simulation_time")
             ),
         }
 
@@ -1015,7 +1017,7 @@ class DurableReservationBook:
         command_id: str,
         idempotency_key: str,
         reservation_id: str,
-        committed_at: str | None = None,
+        simulation_time: str | None = None,
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
@@ -1025,7 +1027,7 @@ class DurableReservationBook:
             idempotency_key=idempotency_key,
             operation="MARK_UNKNOWN",
             request=request,
-            committed_at=committed_at,
+            simulation_time=simulation_time,
         )
 
     def _verify_zero_wire_blocked(

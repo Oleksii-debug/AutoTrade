@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from mvp.autotrade_mvp import backup as backup_module
 from mvp.autotrade_mvp.product_runtime import (
     _launch_message,
     _owned_desktop_session_sink,
@@ -460,6 +461,74 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
+
+    def test_backup_source_race_is_unknown_then_retries_on_restart(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            race_path = data / 'state' / 'order-intents' / 'concurrent-backup.json'
+            original_copy = backup_module._copy_stable_file
+            injected = False
+            operation_id = None
+            backup_id = None
+
+            def copy_then_add_source(source, destination):
+                nonlocal injected
+                result = original_copy(source, destination)
+                if not injected:
+                    injected = True
+                    race_path.parent.mkdir(parents=True, exist_ok=True)
+                    race_path.write_text(
+                        '{"intent_id":"concurrent-backup"}\n',
+                        encoding='utf-8',
+                    )
+                return result
+
+            try:
+                with patch.object(
+                    backup_module,
+                    '_copy_stable_file',
+                    side_effect=copy_then_add_source,
+                ):
+                    backup_id, operation = client.command('BACKUP_SIMULATION')
+
+                self.assertTrue(injected)
+                self.assertEqual(operation['phase'], 'UNKNOWN', operation)
+                operation_id = operation['operation_id']
+                self.assertFalse((data / 'backups' / backup_id).exists())
+                self.assertFalse(any((data / 'backups').glob('.autotrade-backup-*')))
+                receipts = JournalStore(
+                    data / 'state' / 'journal.sqlite3'
+                ).load_events_by_aggregate_type('simulation_operator_receipt')
+                self.assertFalse(
+                    any(event['aggregate_id'] == backup_id for event in receipts)
+                )
+                race_path.unlink()
+            finally:
+                client.close()
+
+            self.assertIsNotNone(operation_id)
+            self.assertIsNotNone(backup_id)
+            client = ProductClient(data)
+            try:
+                recovered = None
+                for _ in range(300):
+                    status, candidate, _ = client.request(
+                        'GET',
+                        '/api/v1/operations/' + operation_id,
+                    )
+                    if (
+                        status == 200
+                        and candidate['phase'] in {'SUCCEEDED', 'FAILED'}
+                    ):
+                        recovered = candidate
+                        break
+                    time.sleep(.02)
+                self.assertIsNotNone(recovered)
+                self.assertEqual(recovered['phase'], 'SUCCEEDED', recovered)
+                verify_backup(data / 'backups' / backup_id)
+            finally:
+                client.close()
 
     def test_product_restore_layout_failure_leaves_final_destination_retryable(self):
         with TemporaryDirectory() as directory:

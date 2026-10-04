@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import subprocess
 import sys
@@ -6,8 +7,57 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+PRODUCT_ARTIFACT_CONSUMERS = (
+    "mvp/autotrade_mvp/qualification_attestation.py",
+    "mvp/autotrade_mvp/recovery_qualification.py",
+    "mvp/autotrade_mvp/release_candidate.py",
+    "mvp/autotrade_mvp/science_qualification.py",
+    "mvp/autotrade_mvp/supply_chain_qualification.py",
+    "mvp/autotrade_mvp/windows_update.py",
+    "tools/build_windows_bundle.py",
+    "tools/build_windows_install_manifest.py",
+    "tools/check_nvda_qualification.py",
+)
+
+
+def _research_artifact_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (
+                    alias.name == "research.autotrade_research.artifacts"
+                    or alias.name.startswith("research.autotrade_research.artifacts.")
+                    or alias.name == "autotrade_research.artifacts"
+                    or alias.name.startswith("autotrade_research.artifacts.")
+                ):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if (
+                module == "research.autotrade_research.artifacts"
+                or module.startswith("research.autotrade_research.artifacts.")
+                or module == "autotrade_research.artifacts"
+                or module.startswith("autotrade_research.artifacts.")
+            ):
+                offenders.append(module)
+    return offenders
+
 
 class WindowsReleaseToolingHermeticImportTests(unittest.TestCase):
+    def test_product_release_consumers_have_no_research_artifact_imports(self):
+        offenders = {}
+        for relative in PRODUCT_ARTIFACT_CONSUMERS:
+            imported = _research_artifact_imports(ROOT / relative)
+            if imported:
+                offenders[relative] = imported
+        self.assertEqual(
+            offenders,
+            {},
+            "product release/qualification code must import the neutral artifact authority",
+        )
+
     def test_release_and_qualification_tooling_import_without_research_packages(self):
         script = r'''
 import importlib.abc

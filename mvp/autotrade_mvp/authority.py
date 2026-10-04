@@ -2863,15 +2863,42 @@ class AuthorityService:
             "risk_reducing": record.risk_reducing,
             "journal_sequence_cut": journal_sequence_cut,
         }
-        if record.confirmation_id is not None:
-            confirmation = self._confirmations.get(record.confirmation_id)
-            if (
-                confirmation is not None
-                and confirmation.financial_binding_hash is not None
+        if not policy.autonomous:
+            historical_risk_policy_fingerprint = (
+                authoritative_snapshot.get("risk_policy_fingerprint")
+            )
+            if not isinstance(
+                historical_risk_policy_fingerprint,
+                str,
             ):
-                request["financial_confirmation_binding_hash"] = (
-                    confirmation.financial_binding_hash
+                raise AuthorityConflict(
+                    "historical authoritative risk snapshot lacks "
+                    "risk policy fingerprint"
                 )
+            historical_risk_intent = RiskIntent.create(
+                symbol=durable_risk_intent["symbol"],
+                side=durable_risk_intent["side"],
+                quantity=durable_risk_intent["quantity"],
+                price=durable_risk_intent["price"],
+                expected_state_version=durable_risk_intent[
+                    "expected_state_version"
+                ],
+                reduce_only=durable_risk_intent["reduce_only"],
+                action=durable_risk_intent["action"],
+                instrument_type=durable_risk_intent[
+                    "instrument_type"
+                ],
+            )
+            request["financial_confirmation_binding_hash"] = (
+                _financial_confirmation_binding_hash(
+                    authority_policy_version=policy.version,
+                    risk_intent=historical_risk_intent,
+                    risk_policy_fingerprint=(
+                        historical_risk_policy_fingerprint
+                    ),
+                    reservation_requirements=risk_requirements,
+                )
+            )
         if historical_arithmetic_policy_id is not None:
             request["risk_arithmetic_policy_id"] = (
                 historical_arithmetic_policy_id

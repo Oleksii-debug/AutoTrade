@@ -543,6 +543,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
+            preregister_holdout(store, p.protocol_id)
             store.record_holdout_access(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), purpose="manual inspection")
             exhaust_trials(store, p.protocol_id)
             result = store.register_evaluation(p.protocol_id, holdout_id="holdout-A", holdout_identity=holdout_identity(), result={"score": "0.1"})

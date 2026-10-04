@@ -163,6 +163,7 @@ class RecoveryController:
             str,
             tuple[str, str, str, str, str],
         ] = {}
+        self._takeover_source_owner: OwnerFence | None = None
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
@@ -176,6 +177,57 @@ class RecoveryController:
         """Canonical durable owner scope used by this recovery controller."""
 
         return self._owner_scope
+
+    @property
+    def takeover_source_only(self) -> bool:
+        """Whether this controller is attached only to prove an explicit takeover."""
+
+        return self._takeover_source_owner is not None
+
+    def attach_current_durable_owner_for_takeover(self) -> OwnerFence:
+        """Attach the latest durable owner without granting sender authority.
+
+        This is the restart bridge for the product host.  It gives the canonical
+        takeover issuer the exact source owner it must prove and advance, while
+        validators remain fail-closed even if source-owner reconciliation later
+        makes the controller otherwise READY.
+        """
+
+        if self.owner is not None:
+            raise RuntimeError("Host already has an owner")
+        durable = self._latest_durable_owner()
+        if durable is None:
+            raise RuntimeError("No durable owner exists for takeover attachment")
+        self.owner = durable
+        self._takeover_source_owner = durable
+        self.state = HostState.RECOVERING
+        self.provider_reconciled = False
+        self.reason_codes = {
+            "startup_reconciliation_required",
+            "takeover_source_only",
+        }
+        self._recover_scoped_submission_uncertainty_from_owner_scope()
+        return durable
+
+    def activate_takeover_target_recovery(self) -> OwnerFence:
+        """Release source-only fencing after a proven N->N+1 durable takeover."""
+
+        source = self._takeover_source_owner
+        if source is None:
+            raise RuntimeError("Controller is not attached for takeover")
+        if self.owner is None:
+            raise RuntimeError("Takeover target owner is missing")
+        self._require_current_durable_owner()
+        if self.owner == source:
+            raise PermissionError("Durable takeover has not advanced the source owner")
+        if self.owner.epoch != source.epoch + 1:
+            raise PermissionError("Durable takeover owner epoch is not the next generation")
+        self._takeover_source_owner = None
+        self.provider_reconciled = False
+        self.reason_codes.discard("takeover_source_only")
+        self.reason_codes.add("startup_reconciliation_required")
+        self.state = HostState.RECOVERING
+        return self.owner
 
     @property
     def durable_owner_store_path(self) -> Path | None:
@@ -288,6 +340,7 @@ class RecoveryController:
             )
         candidate = OwnerFence(owner_id=normalized_owner, epoch=1)
         self._append_durable_owner(candidate)
+        self._takeover_source_owner = None
         self.owner = candidate
         self.state = HostState.RECOVERING
         self.provider_reconciled = False
@@ -994,6 +1047,10 @@ class RecoveryController:
         return self.owner
 
     def validate_sender(self, owner_id: str, owner_epoch: int) -> None:
+        if self._takeover_source_owner is not None:
+            raise PermissionError(
+                "Takeover source owner cannot regain sender authority"
+            )
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         if self.owner is None:
@@ -1005,6 +1062,10 @@ class RecoveryController:
             raise PermissionError("Host is not ready for new sends")
 
     def validate_admission(self, owner_epoch: int) -> None:
+        if self._takeover_source_owner is not None:
+            raise PermissionError(
+                "Takeover source owner cannot regain admission authority"
+            )
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         if self.owner is not None:
@@ -1031,6 +1092,7 @@ class RecoveryController:
     def stop(self) -> None:
         self.state = HostState.STOPPED
         self.owner = None
+        self._takeover_source_owner = None
         self.provider_reconciled = False
         self.reason_codes = {"stopped"}
         self.unresolved_attempts.clear()

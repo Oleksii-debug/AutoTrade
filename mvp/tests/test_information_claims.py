@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.information_claims import (
     InformationClaim,
     InformationSnapshot,
     SourceDocument,
+    build_information_event,
     ingest_claims,
 )
 
@@ -899,6 +900,31 @@ class InformationClaimTests(unittest.TestCase):
             manifest["claims"][0]["evidence_digest"],
             claim.evidence_digest(),
         )
+
+    def test_information_event_reseals_claim_before_projection(self):
+        document = doc("corp", "r1", "guidance is 10")
+        claim = ClaimStore.build_claim(
+            document,
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        confidence = {claim.claim_id: 0.8}
+        object.__setattr__(claim, "value", "attacker-rewrite")
+
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            build_information_event(
+                document,
+                (claim,),
+                information_id="11111111-1111-4111-8111-111111111111",
+                revision="1",
+                language="en",
+                extraction_version="v1",
+                artifact_id="22222222-2222-4222-8222-222222222222",
+                artifact_sha256="sha256:" + ("0" * 64),
+                observed_at=BASE,
+                confidence_by_claim=confidence,
+            )
 
     def test_snapshot_detaches_input_claim_from_later_mutation(self):
         store = ClaimStore()

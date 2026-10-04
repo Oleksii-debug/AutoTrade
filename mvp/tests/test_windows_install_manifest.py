@@ -2,6 +2,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -9,7 +10,7 @@ import zipfile
 
 import autotrade_runtime.artifacts.durable_publish as durable_publish_module
 import tools.build_windows_install_manifest as installer_manifest_module
-from tools.build_windows_bundle import build_bundle
+from tools.build_windows_bundle import _RELEASE_RUNTIME_REQUIRED, build_bundle
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
     build_installer_input_manifest,
@@ -17,7 +18,14 @@ from tools.build_windows_install_manifest import (
 )
 
 
-SOURCE_SHA = "a" * 40
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_SHA = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPOSITORY_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 
 
 class WindowsInstallerInputManifestTests(unittest.TestCase):
@@ -27,6 +35,9 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.staging = self.root / "staging"
         self.staging.mkdir()
+        # The exact-source runtime publisher requires the nested artifact
+        # namespace to be prepared by the private product staging layout.
+        (self.staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
         (self.staging / "AutoTrade.Desktop.exe").write_bytes(b"desktop")
         (self.staging / "contracts").mkdir()
         (self.staging / "contracts" / "manifest.json").write_text(
@@ -56,24 +67,36 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
     def composition(self):
         components = []
+        runtime_descriptors = {
+            descriptor.path: descriptor
+            for descriptor in _RELEASE_RUNTIME_REQUIRED
+        }
         for path in sorted(self.staging.rglob("*")):
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(self.staging).as_posix()
-            if relative == "dependency-lock.json":
-                kind = "dependency-lock"
-            elif relative == "sbom.spdx.json":
-                kind = "sbom"
-            elif relative.endswith(".exe"):
-                kind = "runtime"
+            descriptor = runtime_descriptors.get(relative)
+            if descriptor is not None:
+                component_id = descriptor.component_id
+                kind = descriptor.kind
+                version = "source-controlled"
             else:
-                kind = "asset"
+                component_id = relative.replace("/", "-")
+                version = "1.0.0"
+                if relative == "dependency-lock.json":
+                    kind = "dependency-lock"
+                elif relative == "sbom.spdx.json":
+                    kind = "sbom"
+                elif relative.endswith(".exe"):
+                    kind = "runtime"
+                else:
+                    kind = "asset"
             components.append(
                 {
-                    "component_id": relative.replace("/", "-"),
+                    "component_id": component_id,
                     "kind": kind,
                     "path": relative,
-                    "version": "1.0.0",
+                    "version": version,
                     "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
                 }
             )

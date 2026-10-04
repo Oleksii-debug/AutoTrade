@@ -4,6 +4,7 @@ import json
 import os
 from threading import Thread
 from pathlib import Path
+from .authority import AuthorityService
 from .persistence import JournalStore, payload_digest
 from .simulation_commands import (
     _protocol,
@@ -11,6 +12,60 @@ from .simulation_commands import (
     validate_simulation_payload,
 )
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
+
+
+_HOST_TERMINAL_PHASES = frozenset({'SUCCEEDED', 'FAILED', 'CANCELLED'})
+_HOST_OPERATION_PHASES = frozenset({
+    'QUEUED', 'RUNNING', 'WAITING_EXTERNAL', 'UNKNOWN', *_HOST_TERMINAL_PHASES,
+})
+
+
+def _host_emergency_pause_required(store):
+    """Project emergency intent without making old restored BLOCK commands sticky.
+
+    A newly accepted BLOCK must stop the worker even before the serialized Host
+    executor can apply it. Once that operation is terminal, canonical
+    AuthorityService state owns whether the scope is still blocked, so a
+    proven AuthorityNewExposureRestored transition can resume future work.
+    REVOKE_AUTHORITY remains sticky: unlike the scope block it has no inverse
+    transition, and a later self-registered simulation policy must not bypass an
+    Owner emergency revoke.
+    """
+    events = store.load_events_by_aggregate_type('HOST_CONTROL')
+    block_phases = {}
+    for event in events:
+        event_type = event.get('event_type')
+        payload = event.get('payload')
+        if type(payload) is not dict:
+            raise ValueError('Host emergency event payload must be an object')
+        if event_type == 'COMMAND_ACCEPTED':
+            action = payload.get('action')
+            if action == 'REVOKE_AUTHORITY':
+                return True
+            if action != 'BLOCK_NEW_EXPOSURE':
+                continue
+            operation_id = payload.get('operation_id')
+            if type(operation_id) is not str or not operation_id.strip():
+                raise ValueError('accepted Host block requires operation identity')
+            if operation_id in block_phases:
+                raise ValueError('duplicate Host block operation identity')
+            block_phases[operation_id] = 'QUEUED'
+        elif event_type == 'OPERATION_UPDATED':
+            operation_id = payload.get('operation_id')
+            if operation_id not in block_phases:
+                continue
+            phase = payload.get('phase')
+            if phase not in _HOST_OPERATION_PHASES or phase == 'QUEUED':
+                raise ValueError('Host block operation phase is invalid')
+            block_phases[operation_id] = phase
+
+    # Executed block truth is owned by the financial authority service. This is
+    # deliberately checked after unresolved accepted commands so a Host BLOCK
+    # can interrupt the running worker before the serialized executor obtains
+    # its turn, while a later durable restore can clear only that exact block.
+    if AuthorityService(store).is_new_exposure_blocked(ACCOUNT, ENVIRONMENT):
+        return True
+    return any(phase not in _HOST_TERMINAL_PHASES for phase in block_phases.values())
 
 
 def main():
@@ -75,11 +130,9 @@ def main():
     _require_explicit_recovery_for_unknown_start(store, args.action)
 
     def pause_requested():
-        # Accepted emergency stop is already durable. Finish a retained financial
-        # observation, then pause before the next market observation/admission.
-        return any(e['event_type'] == 'COMMAND_ACCEPTED' and e['payload'].get('action') in
-            {'BLOCK_NEW_EXPOSURE', 'REVOKE_AUTHORITY'}
-            for e in store.load_events_by_aggregate_type('HOST_CONTROL'))
+        # Finish any retained financial observation, then pause before the next
+        # market observation/admission when canonical emergency truth requires it.
+        return _host_emergency_pause_required(store)
     result = run_autonomous_simulation(protocol['prices'], root, run_id=protocol['run_id'],
         now=protocol['start_time'], stop_after_episodes=args.stop,
         fault_at_episode=protocol['fault_at_episode'], emergency_at_episode=protocol['emergency_at_episode'],

@@ -1192,18 +1192,7 @@ def assess_forward_paper(
         if prediction_id not in outcomes_by_prediction:
             incomplete.append("missing_forward_outcome")
 
-    required_cases = set(protocol.required_operational_cases)
-    for capability in protocol.required_provider_capabilities:
-        observed_cases = {
-            item.case
-            for item in evidence.operational_observations
-            if type(item) is OperationalObservation
-            and item.provider_capability == capability
-            and item.reconciled
-        }
-        for case in sorted(required_cases - observed_cases):
-            incomplete.append(f"missing_operational_case:{capability}:{case}")
-
+    admitted_operational_observations: list[OperationalObservation] = []
     for item in evidence.operational_observations:
         if type(item) is not OperationalObservation:
             invalid.append("invalid_operational_observation")
@@ -1218,6 +1207,7 @@ def assess_forward_paper(
         except (ForwardPaperError, TypeError):
             invalid.append("invalid_operational_observation")
             continue
+        admitted_operational_observations.append(item)
         if item.provider_capability not in capability_counts:
             invalid.append("operational_case_for_undeclared_capability")
         observed_at = _instant(item.observed_at, name="observed_at")
@@ -1227,6 +1217,16 @@ def assess_forward_paper(
             invalid.append("operational_case_after_observed_until")
         if not item.reconciled:
             operational_failures.append("unreconciled_operational_case")
+
+    required_cases = set(protocol.required_operational_cases)
+    for capability in protocol.required_provider_capabilities:
+        observed_cases = {
+            item.case
+            for item in admitted_operational_observations
+            if item.provider_capability == capability and item.reconciled
+        }
+        for case in sorted(required_cases - observed_cases):
+            incomplete.append(f"missing_operational_case:{capability}:{case}")
 
     economics_by_prediction: dict[str, PaperDecisionEconomics] = {}
     economics_by_sequence: dict[int, PaperDecisionEconomics] = {}

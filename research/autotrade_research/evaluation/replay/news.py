@@ -43,6 +43,7 @@ _ENGLISH_MONTH = re.compile(
 )
 _SCHEMA_VERSION = 1
 _REVISION_KINDS = frozenset({"ORIGINAL", "UPDATE", "CORRECTION", "RETRACTION"})
+_SUPPORTED_TEMPLATE_LANGUAGES = frozenset({"en"})
 
 
 class NewsReplayError(ValueError):
@@ -306,7 +307,13 @@ class NewsRevision:
             if type(value) is not int or value < 0:
                 raise NewsReplayError(f"{name} must be a non-negative exact integer")
 
-        object.__setattr__(self, "language", _text(self.language, name="language"))
+        language = _text(self.language, name="language").lower()
+        if language not in _SUPPORTED_TEMPLATE_LANGUAGES:
+            raise NewsReplayError(
+                "unsupported template language for calendar-cue policy; "
+                f"supported={sorted(_SUPPORTED_TEMPLATE_LANGUAGES)}"
+            )
+        object.__setattr__(self, "language", language)
         object.__setattr__(self, "rights_id", _text(self.rights_id, name="rights_id"))
         object.__setattr__(
             self,
@@ -663,6 +670,7 @@ def build_news_replay_bundle(
     _validate_revision_chains(records_tuple)
 
     syndication_owner: dict[str, str] = {}
+    content_owner: dict[str, str] = {}
     for record in records_tuple:
         if record.revision != 1:
             continue
@@ -673,6 +681,14 @@ def build_news_replay_bundle(
             raise NewsReplayError(
                 "syndicated duplicate must be collapsed before replay; "
                 f"{record.information_id} duplicates {owner}"
+            )
+        content_owner_id = content_owner.setdefault(
+            record.content_sha256, record.information_id
+        )
+        if content_owner_id != record.information_id:
+            raise NewsReplayError(
+                "exact-content duplicate must be collapsed before replay; "
+                f"{record.information_id} duplicates {content_owner_id}"
             )
 
     identity_fields = [

@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.product_worker import _host_emergency_pause_required
 from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_action
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
+from mvp.autotrade_mvp.simulation_status import SimulationStateChanging
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.backup import verify_backup, restore_requires_reconciliation
@@ -140,6 +141,33 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
                 token='ephemeral-owned-session',
             ))
         persist.assert_not_called()
+
+    def test_active_simulation_writer_is_retryable_snapshot_contention_only(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            try:
+                with patch(
+                    'mvp.autotrade_mvp.product_runtime.inspect_canonical_simulation',
+                    side_effect=SimulationStateChanging('simulation writer is active'),
+                ):
+                    status, body, headers = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 503)
+                self.assertEqual(
+                    body,
+                    {'error': 'SNAPSHOT_BUSY', 'retryable': True},
+                )
+                self.assertEqual(headers['Retry-After'], '1')
+
+                with patch(
+                    'mvp.autotrade_mvp.product_runtime.inspect_canonical_simulation',
+                    side_effect=ValueError('corrupt canonical simulation scope'),
+                ):
+                    status, body, _ = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 400)
+                self.assertEqual(body, {'error': 'INVALID_REQUEST'})
+            finally:
+                client.close()
 
     def test_state_http_retries_transient_journal_race_and_bounds_persistent_churn(self):
         with TemporaryDirectory() as directory:

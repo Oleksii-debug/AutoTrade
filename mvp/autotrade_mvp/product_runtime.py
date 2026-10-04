@@ -21,6 +21,7 @@ import webbrowser
 from .embedded_web import EmbeddedWebHostApplication, ImmutableWebAsset, ImmutableWebAssetBundle, HOST_API_CONTRACT_VERSION
 from .host_network import (
     HostPrincipal,
+    SnapshotTemporarilyUnavailable,
     TransportResponse,
     _headers,
     public_session_reference,
@@ -29,7 +30,7 @@ from .host_network import (
 from .production_host import ProductionHostConfig, build_production_host
 from .security import SecurityBoundary
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
-from .simulation_status import inspect_canonical_simulation
+from .simulation_status import SimulationStateChanging, inspect_canonical_simulation
 from .simulation_commands import _protocol
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
 from .windows_host_session import persist_desktop_owner_session
@@ -274,7 +275,12 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
             subject == 'local-owner' and role == 'OWNER' and paired_origin == origin)
 
     def snapshot(durable, principal):
-        inspected = inspect_canonical_simulation(state, history_limit=100)
+        try:
+            inspected = inspect_canonical_simulation(state, history_limit=100)
+        except SimulationStateChanging as error:
+            raise SnapshotTemporarilyUnavailable(
+                'canonical simulation state is changing'
+            ) from error
         status = inspected['status']
         report = inspected.get('economic_report')
         store = runtime.journal

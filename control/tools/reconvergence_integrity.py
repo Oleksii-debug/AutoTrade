@@ -241,10 +241,20 @@ def assess_reconvergence(
         if (
             kind == "R"
             and source_sentinel is not None
-            and change.path.casefold() != change.previous_path.casefold()
+            and change.path != change.previous_path
         ):
             protected_damage.add(
                 f"{source_sentinel} -> {change.path} (rename)"
+            )
+        if (
+            kind == "R"
+            and destination_sentinel is not None
+            and source_sentinel != destination_sentinel
+            and destination_sentinel.casefold() not in exact_scope_authority
+        ):
+            protected_damage.add(
+                f"{change.previous_path} -> {destination_sentinel} "
+                "(rename into trust root without exact-path authorization)"
             )
         if kind == "T" and destination_sentinel is not None:
             protected_damage.add(f"{destination_sentinel} (type change)")

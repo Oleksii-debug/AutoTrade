@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp import production_trading_host as trading_host
+from mvp.autotrade_mvp import recovery_takeover
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import ProductionHostConfig
 from mvp.autotrade_mvp.reconciliation import (
@@ -15,7 +16,7 @@ from mvp.autotrade_mvp.reconciliation import (
     reconcile_account,
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
-from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
 
@@ -218,6 +219,164 @@ class ProductionTradingHostDurableTakeoverTests(unittest.TestCase):
                 [(owner.owner_id, owner.epoch) for owner in verifier.durable_owner_chain()],
                 [("owner-a", 1), ("owner-b", 2)],
             )
+
+
+    def test_restart_resumes_after_target_owner_commit_before_takeover_completion(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = ProductionHostConfig(
+                journal_path=root / "journal.sqlite3",
+                account_id="acct",
+                environment="PAPER",
+                host_id="host-process-c",
+                bind_host="127.0.0.1",
+                bind_port=8765,
+                public_origin="http://127.0.0.1:8765",
+            )
+            store = JournalStore(config.journal_path)
+            prior = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            prior.start("owner-a")
+            record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="restart-ready",
+                result=_reconciliation(),
+                observed_at="2026-10-04T03:11:00Z",
+                host_id="owner-a",
+                owner_epoch="1",
+            )
+            prior.record_reconciliation_checkpoint(
+                reconciliation_id="restart-ready",
+                provider_id="SIMULATED",
+                account_id="acct",
+                environment="PAPER",
+            )
+            self.assertEqual(prior.state, HostState.READY)
+            prior.stop()
+
+            vault = ProtectedCredentialVault(
+                root / "credentials.json",
+                protector=_DeterministicProtector(),
+            )
+            handle = vault.register(
+                handle_id="trade-credential",
+                owner_identity="windows-user",
+                account_id="acct",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value="secret-v1",
+            )
+
+            interrupted = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            trading_host._stage_durable_source_for_immediate_takeover(
+                interrupted,
+                OwnerFence("owner-a", 1),
+            )
+            original_append = recovery_takeover._append_takeover_event
+
+            def crash_before_completion(
+                event_store,
+                *,
+                takeover_id,
+                version,
+                event_type,
+                payload,
+            ):
+                if event_type == "RecoveryTakeoverOwnerCommitted":
+                    raise RuntimeError("simulated crash before takeover completion")
+                return original_append(
+                    event_store,
+                    takeover_id=takeover_id,
+                    version=version,
+                    event_type=event_type,
+                    payload=payload,
+                )
+
+            with patch.object(
+                recovery_takeover,
+                "_append_takeover_event",
+                side_effect=crash_before_completion,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated crash before takeover completion",
+                ):
+                    recovery_takeover.execute_durable_takeover(
+                        interrupted,
+                        new_owner_id="owner-b",
+                        vault=vault,
+                        handle=handle,
+                        execution_identity="windows-user",
+                        reconciliation_id="restart-ready",
+                        provider_id="SIMULATED",
+                    )
+
+            verifier = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:acct",
+            )
+            self.assertEqual(
+                [(owner.owner_id, owner.epoch) for owner in verifier.durable_owner_chain()],
+                [("owner-a", 1), ("owner-b", 2)],
+            )
+            takeover_events = store.load_events_by_aggregate_type("recovery_takeover")
+            self.assertEqual(
+                [event["event_type"] for event in takeover_events],
+                ["RecoveryTakeoverStarted", "RecoveryTakeoverEvidenceIssued"],
+            )
+
+            host = _Host(config, store)
+            original_fence = host._instance_fence
+            with patch.object(
+                trading_host,
+                "build_production_host",
+                return_value=host,
+            ):
+                runtime = trading_host.build_production_trading_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                    recovery_owner_id="owner-b",
+                    takeover=trading_host.DurableTakeoverInputs(
+                        vault=vault,
+                        handle=handle,
+                        execution_identity="windows-user",
+                        reconciliation_id="restart-ready",
+                        provider_id="SIMULATED",
+                    ),
+                )
+            try:
+                self.assertEqual(runtime.recovery.owner, OwnerFence("owner-b", 2))
+                self.assertEqual(runtime.recovery.state, HostState.RECOVERING)
+                self.assertEqual(runtime.dispatcher.owner_id, "owner-b")
+                self.assertEqual(runtime.dispatcher.owner_epoch, 2)
+                self.assertEqual(
+                    [(owner.owner_id, owner.epoch) for owner in runtime.recovery.durable_owner_chain()],
+                    [("owner-a", 1), ("owner-b", 2)],
+                )
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in store.load_events_by_aggregate_type("recovery_takeover")
+                    ],
+                    [
+                        "RecoveryTakeoverStarted",
+                        "RecoveryTakeoverEvidenceIssued",
+                        "RecoveryTakeoverOwnerCommitted",
+                    ],
+                )
+                self.assertFalse(original_fence.released)
+            finally:
+                runtime.close()
+
+            self.assertTrue(original_fence.released)
 
 
 if __name__ == "__main__":

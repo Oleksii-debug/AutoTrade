@@ -222,12 +222,13 @@ def build_production_trading_host(
                 raise PermissionError(
                     "existing durable recovery owner requires explicit takeover inputs"
                 )
-            source = durable_chain[-1]
-            if source.owner_id == normalized_owner:
-                raise ValueError(
-                    "restart recovery_owner_id must differ from the durable source owner"
-                )
-            _stage_durable_source_for_immediate_takeover(controller, source)
+            latest_durable = durable_chain[-1]
+            # The latest durable owner may already be the requested target when
+            # a prior process died after RecoveryOwnerChanged but before the
+            # takeover completion event.  The canonical takeover engine owns the
+            # distinction between a resumable pending transition and an invalid
+            # same-owner request; do not pre-reject that crash-resume state here.
+            _stage_durable_source_for_immediate_takeover(controller, latest_durable)
             execute_durable_takeover(
                 controller,
                 new_owner_id=normalized_owner,
@@ -238,10 +239,12 @@ def build_production_trading_host(
                 provider_id=takeover.provider_id,
             )
             owner = controller.owner
+            durable_after = controller.durable_owner_chain()
             if (
                 owner is None
+                or not durable_after
+                or owner != durable_after[-1]
                 or owner.owner_id != normalized_owner
-                or owner.epoch != source.epoch + 1
                 or controller.state is not HostState.RECOVERING
             ):
                 raise RuntimeError(

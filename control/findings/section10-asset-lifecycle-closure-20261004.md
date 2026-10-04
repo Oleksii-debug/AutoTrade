@@ -48,3 +48,31 @@ The canonical Section 10 candidate now also:
 - includes regressions for both an initially unbound self-authored contract and post-construction removal of the canonical binding.
 
 This is still provider-neutral safety only. It does not prove that a provider-origin InstrumentVersion was issued, does not enable physical delivery, and does not grant PAPER/LIVE authority.
+
+
+## Follow-up source review: registry selection authority
+
+Exact Python type and a construction snapshot are integrity checks, not proof that
+the lifecycle version was selected by the product's canonical instrument
+authority. A caller-authored exact `InstrumentVersion` could previously still
+be passed through `FuturesContract.from_instrument_version()` and authorize
+`OPEN`.
+
+The candidate now reuses the existing `InstrumentRegistry` rather than adding a
+parallel lifecycle authority:
+- lifecycle admission requires an exact canonical `InstrumentRegistry`;
+- the contract's canonical `instrument_id@version` is re-resolved through
+  class-owned `InstrumentRegistry.exact()` on every lifecycle gate;
+- the retained registry-selected lifecycle cut must match the bound version and
+  the contract before any OPEN result can be returned;
+- an absent/wrong registry or registry subclass fails closed;
+- positive coverage proves a registry-selected version still follows the normal
+  OPEN path.
+
+The registry returns detached versions from closure-owned retained state, so
+post-construction mutation of a caller-held `InstrumentVersion` does not mutate
+the selected registry cut. This closes the demonstrated selection/provenance
+gap at the provider-neutral lifecycle boundary. It does not by itself qualify a
+provider's metadata issuance or grant PAPER/LIVE authority.
+
+Exact-head CI remains required. Queued or pending workflow state is not PASS.

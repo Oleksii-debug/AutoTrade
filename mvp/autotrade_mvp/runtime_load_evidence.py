@@ -62,6 +62,14 @@ def _snapshot_metric_series(values: Sequence[int], *, name: str) -> tuple[int, .
     return tuple(_non_negative_int(value, name=name) for value in values)
 
 
+def _snapshot_event_ids(values: Sequence[str], *, name: str) -> tuple[str, ...]:
+    """Freeze explicit measurement-to-event identity without inventing bindings."""
+
+    if type(values) not in (tuple, list):
+        raise RuntimeLoadEvidenceError(f"{name} must be an exact tuple or list")
+    return tuple(_text(value, name=name) for value in values)
+
+
 def _validated_spec(value: RuntimeBudgetSpec) -> RuntimeBudgetSpec:
     if type(value) is not RuntimeBudgetSpec:
         raise TypeError("spec must be exact RuntimeBudgetSpec")
@@ -358,6 +366,8 @@ def evaluate_journal_backed_runtime_budget(
     financial_staleness_us: Sequence[int],
     research_interference_us: Sequence[int],
     reconnect_backlog_remaining: int,
+    financial_latency_event_ids: Sequence[str] = (),
+    financial_staleness_event_ids: Sequence[str] = (),
     declared_duration_us: int | None = None,
     observed_duration_us: int | None = None,
     max_journal_events: int = 100_000,
@@ -366,11 +376,10 @@ def evaluate_journal_backed_runtime_budget(
 
     Caller-owned measurement containers are copied into exact inert tuples before
     reading the journal cut, so iteration cannot mutate durable truth after the
-    conservation boundary has been selected. Latency/staleness/interference are
-    still measurement inputs owned by the later target-host campaign harness.
-    When a complete series has one value per recovered durable event, this
-    diagnostic helper binds that series to the recovered canonical event order;
-    incomplete/extra series remain unbound and therefore cannot qualify.
+    conservation boundary has been selected. Measurement-to-event IDs are also
+    explicit inputs: this layer never invents identity merely because a tuple has
+    the same length as the recovered durable event set. Anonymous legacy series
+    therefore remain non-qualifying.
     """
 
     spec = _validated_spec(spec)
@@ -386,6 +395,14 @@ def evaluate_journal_backed_runtime_budget(
         research_interference_us,
         name="research_interference_us",
     )
+    financial_latency_event_ids = _snapshot_event_ids(
+        financial_latency_event_ids,
+        name="financial_latency_event_ids",
+    )
+    financial_staleness_event_ids = _snapshot_event_ids(
+        financial_staleness_event_ids,
+        name="financial_staleness_event_ids",
+    )
     reconnect_backlog_remaining = _non_negative_int(
         reconnect_backlog_remaining,
         name="reconnect_backlog_remaining",
@@ -398,12 +415,6 @@ def evaluate_journal_backed_runtime_budget(
         max_journal_events=max_journal_events,
     )
     recovered_ids = evidence.recovered_event_ids
-    latency_event_ids = (
-        recovered_ids if len(financial_latency_us) == len(recovered_ids) else ()
-    )
-    staleness_event_ids = (
-        recovered_ids if len(financial_staleness_us) == len(recovered_ids) else ()
-    )
     observation = RuntimeLoadObservation.create(
         scenario_id=spec.scenario_id,
         spec_digest=spec.digest,
@@ -419,7 +430,7 @@ def evaluate_journal_backed_runtime_budget(
         declared_duration_us=declared_duration_us,
         observed_duration_us=observed_duration_us,
         recovered_financial_event_ids=recovered_ids,
-        financial_latency_event_ids=latency_event_ids,
-        financial_staleness_event_ids=staleness_event_ids,
+        financial_latency_event_ids=financial_latency_event_ids,
+        financial_staleness_event_ids=financial_staleness_event_ids,
     )
     return evaluate_runtime_budget(spec, observation), evidence

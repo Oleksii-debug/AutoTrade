@@ -12,6 +12,7 @@ from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
@@ -117,8 +118,81 @@ def _decimal_identity(value: Decimal) -> str:
         ) from error
 
 
+def _install_futures_contract_lifecycle_authority():
+    """Return a construction metaclass plus an integrity verifier.
+
+    Registration occurs only after type.__call__ completes the ordinary
+    __new__ -> generated dataclass __init__ -> __post_init__ path.  Calling
+    object.__new__, __new__, __init__, or __post_init__ directly therefore
+    cannot mint lifecycle authority.
+    """
+
+    authorities: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[str, str, datetime, datetime, datetime],
+        ],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    class LifecycleAuthorityMeta(type):
+        def __call__(cls, *args, **kwargs):
+            value = super().__call__(*args, **kwargs)
+            if type(value) is cls:
+                prune_dead()
+                object_id = id(value)
+                current = authorities.get(object_id)
+                if current is not None and current[0]() is not None:
+                    raise FuturesError(
+                        "futures lifecycle authority identity collision"
+                    )
+                snapshot = (
+                    value.instrument,
+                    value.settlement_method,
+                    value.expiry,
+                    value.last_trade_at,
+                    value.delivery_cutoff,
+                )
+                authorities[object_id] = (weakref.ref(value), snapshot)
+            return value
+
+    def snapshot_for(
+        value: object,
+    ) -> tuple[str, str, datetime, datetime, datetime]:
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise FuturesError("futures lifecycle authority is not established")
+        value_ref, snapshot = entry
+        current = value_ref()
+        if current is value:
+            return snapshot
+        if current is None:
+            authorities.pop(id(value), None)
+            raise FuturesError("futures lifecycle authority is not established")
+        raise FuturesError("futures lifecycle authority identity collision")
+
+    return LifecycleAuthorityMeta, snapshot_for
+
+
+(
+    _FuturesContractLifecycleMeta,
+    _futures_contract_lifecycle_snapshot_for,
+) = _install_futures_contract_lifecycle_authority()
+del _install_futures_contract_lifecycle_authority
+
+
 @dataclass(frozen=True)
-class FuturesContract:
+class FuturesContract(metaclass=_FuturesContractLifecycleMeta):
     instrument: str
     payoff: Literal["LINEAR", "INVERSE"]
     multiplier: Decimal
@@ -130,7 +204,6 @@ class FuturesContract:
     settlement_method: Literal["CASH", "PHYSICAL"]
     price_base_currency: str | None = None
     canonical_instrument: InstrumentVersion | None = None
-
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
         payoff = _text(self.payoff, "payoff")
@@ -250,6 +323,8 @@ class FuturesContract:
             canonical_instrument=version,
         )
 
+
+del _FuturesContractLifecycleMeta
 
 @dataclass(frozen=True)
 class FuturesSettlementScope:
@@ -877,21 +952,81 @@ def book_variation_margin(
 def lifecycle_gate(
     contract: FuturesContract,
     at: datetime,
-    *,
-    physical_delivery_authorized: bool = False,
 ) -> str:
-    """Return a conservative lifecycle state for holding/trading the contract."""
+    """Return the conservative lifecycle state for holding/trading the contract.
+
+    Physical delivery is intentionally not authorizable in this provider-neutral
+    primitive. Until a separately qualified canonical authority/provider path
+    exists, reaching the delivery cutoff is a hard fail-closed boundary.
+    """
+
+    if type(contract) is not FuturesContract:
+        raise FuturesError("lifecycle gate requires exact FuturesContract")
+
+    for field_name in (
+        "instrument",
+        "settlement_method",
+    ):
+        if type(getattr(contract, field_name)) is not str:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact text"
+            )
+    for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
+        if type(getattr(contract, field_name)) is not datetime:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact datetime"
+            )
+
+    version = contract.canonical_instrument
+    if version is not None:
+        if type(version) is not InstrumentVersion:
+            raise FuturesError(
+                "canonical_instrument must be exact InstrumentVersion"
+            )
+        if (
+            type(version.instrument_id) is not str
+            or type(version.version) is not int
+            or type(version.asset_class) is not str
+            or type(version.settlement_method) is not str
+            or type(version.expiry) is not datetime
+            or type(version.last_trade_at) is not datetime
+            or type(version.delivery_cutoff) is not datetime
+        ):
+            raise FuturesError(
+                "canonical lifecycle instrument fields must retain exact types"
+            )
+        if (
+            version.asset_class != "FUTURE"
+            or contract.instrument != f"{version.instrument_id}@{version.version}"
+            or contract.expiry != version.expiry
+            or contract.last_trade_at != version.last_trade_at
+            or contract.delivery_cutoff != version.delivery_cutoff
+            or contract.settlement_method != version.settlement_method
+        ):
+            raise FuturesError(
+                "futures lifecycle contract no longer matches canonical InstrumentVersion"
+            )
+
+    snapshot = _futures_contract_lifecycle_snapshot_for(contract)
+    current_lifecycle = (
+        contract.instrument,
+        contract.settlement_method,
+        contract.expiry,
+        contract.last_trade_at,
+        contract.delivery_cutoff,
+    )
+    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
+        raise FuturesError(
+            "futures lifecycle contract no longer matches construction authority"
+        )
 
     point = _utc(at, "at")
-    if type(physical_delivery_authorized) is not bool:
-        raise FuturesError("physical_delivery_authorized must be boolean")
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:
         return "TRADING_ENDED"
     if (
         contract.settlement_method == "PHYSICAL"
-        and not physical_delivery_authorized
         and point >= contract.delivery_cutoff
     ):
         return "DELIVERY_BLOCKED"
@@ -901,13 +1036,7 @@ def lifecycle_gate(
 def require_open_for_new_exposure(
     contract: FuturesContract,
     at: datetime,
-    *,
-    physical_delivery_authorized: bool = False,
 ) -> None:
-    state = lifecycle_gate(
-        contract,
-        at,
-        physical_delivery_authorized=physical_delivery_authorized,
-    )
+    state = lifecycle_gate(contract, at)
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")

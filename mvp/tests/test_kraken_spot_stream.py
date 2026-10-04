@@ -105,6 +105,33 @@ def subscription_binding(
 
 
 class KrakenSpotExecutionFrameTests(unittest.TestCase):
+    def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile text normalization")
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                touched.append("lt")
+                raise AssertionError("hostile integer comparison")
+
+        with self.assertRaisesRegex(KrakenSpotStreamError, "account_id"):
+            KrakenSpotExecutionsSubscriptionBinding.create(
+                account_id=HostileText("spot-live-1"),
+                connection_generation=1,
+                req_id=7,
+            )
+        with self.assertRaisesRegex(KrakenSpotStreamError, "connection_generation"):
+            KrakenSpotExecutionsSubscriptionBinding.create(
+                account_id="spot-live-1",
+                connection_generation=HostileInt(1),
+                req_id=7,
+            )
+        self.assertEqual(touched, [])
+
     def test_subscription_profile_requires_open_order_snapshot_without_trade_snapshot(self):
         self.assertEqual(
             dict(KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION),

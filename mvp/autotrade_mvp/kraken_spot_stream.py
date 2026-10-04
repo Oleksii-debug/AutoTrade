@@ -67,14 +67,13 @@ class KrakenSpotExecutionsSubscriptionBinding:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         if (
-            isinstance(connection_generation, bool)
-            or not isinstance(connection_generation, int)
+            type(connection_generation) is not int
             or connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if isinstance(req_id, bool) or not isinstance(req_id, int):
+        if type(req_id) is not int:
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
             )
@@ -119,14 +118,13 @@ class KrakenSpotExecutionsSubscriptionBinding:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if isinstance(self.req_id, bool) or not isinstance(self.req_id, int):
+        if type(self.req_id) is not int:
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
             )
@@ -194,7 +192,7 @@ _MAX_FRAME_BYTES = 4 * 1024 * 1024
 
 
 def _canonical_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise KrakenSpotStreamError(f"{name} must be non-empty text")
     if value != value.strip():
         raise KrakenSpotStreamError(f"{name} must be canonical text")
@@ -287,17 +285,13 @@ class KrakenSpotExecutionsSubscriptionAck:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if not isinstance(
-            self.subscription_binding,
-            KrakenSpotExecutionsSubscriptionBinding,
-        ):
+        if type(self.subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
             raise TypeError(
                 "subscription_binding must be "
                 "KrakenSpotExecutionsSubscriptionBinding"
@@ -334,10 +328,7 @@ def parse_executions_subscription_ack(
 ) -> KrakenSpotExecutionsSubscriptionAck:
     """Bind the exact server ACK to the qualified outbound subscription."""
 
-    if not isinstance(
-        subscription_binding,
-        KrakenSpotExecutionsSubscriptionBinding,
-    ):
+    if type(subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
         raise TypeError(
             "subscription_binding must be "
             "KrakenSpotExecutionsSubscriptionBinding"
@@ -560,8 +551,7 @@ class KrakenSpotExecutionReport:
 
         if self.trade_id is not None:
             if (
-                isinstance(self.trade_id, bool)
-                or not isinstance(self.trade_id, int)
+                type(self.trade_id) is not int
                 or self.trade_id < 0
             ):
                 raise KrakenSpotStreamError(
@@ -636,8 +626,7 @@ class KrakenSpotExecutionFrame:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
@@ -655,17 +644,16 @@ class KrakenSpotExecutionFrame:
         object.__setattr__(self, "frame_type", frame_type)
 
         if (
-            isinstance(self.sequence, bool)
-            or not isinstance(self.sequence, int)
+            type(self.sequence) is not int
             or self.sequence < 0
         ):
             raise KrakenSpotStreamError(
                 "Kraken executions sequence must be a non-negative integer"
             )
-        if not isinstance(self.reports, tuple):
+        if type(self.reports) is not tuple:
             raise TypeError("reports must be a tuple")
         if any(
-            not isinstance(report, KrakenSpotExecutionReport)
+            type(report) is not KrakenSpotExecutionReport
             for report in self.reports
         ):
             raise TypeError(
@@ -711,7 +699,7 @@ def parse_execution_frame(
             "Kraken executions frame type must be snapshot or update"
         )
     sequence = raw.get("sequence")
-    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+    if type(sequence) is not int or sequence < 0:
         raise KrakenSpotStreamError(
             "Kraken executions sequence must be a non-negative integer"
         )
@@ -874,8 +862,7 @@ class KrakenSpotExecutionStreamRecovery:
                 "Kraken Spot stream recovery permits LIVE only"
             )
         if (
-            isinstance(max_buffered_updates, bool)
-            or not isinstance(max_buffered_updates, int)
+            type(max_buffered_updates) is not int
             or max_buffered_updates < 1
             or max_buffered_updates > 100_000
         ):
@@ -944,10 +931,7 @@ class KrakenSpotExecutionStreamRecovery:
     ) -> None:
         """Require an exact successful ACK before accepting a snapshot."""
 
-        if not isinstance(
-            acknowledgement,
-            KrakenSpotExecutionsSubscriptionAck,
-        ):
+        if type(acknowledgement) is not KrakenSpotExecutionsSubscriptionAck:
             raise TypeError(
                 "acknowledgement must be KrakenSpotExecutionsSubscriptionAck"
             )
@@ -978,7 +962,7 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.AWAITING_SNAPSHOT
 
     def _require_scope(self, frame: KrakenSpotExecutionFrame) -> None:
-        if not isinstance(frame, KrakenSpotExecutionFrame):
+        if type(frame) is not KrakenSpotExecutionFrame:
             raise TypeError("frame must be KrakenSpotExecutionFrame")
         if (
             frame.account_id != self.account_id

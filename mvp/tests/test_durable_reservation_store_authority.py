@@ -230,6 +230,90 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
             self.assertIsNone(store_ref())
             self.assertIsNone(artifacts_ref())
 
+    def test_binding_is_not_observable_until_initial_reload_completes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            book = object.__new__(DurableReservationBook)
+
+            original_reload = DurableReservationBook._reload
+            reload_started = threading.Event()
+            release_reload = threading.Event()
+            initializer_done = threading.Event()
+            observer_entered = threading.Event()
+            observer_done = threading.Event()
+            outcomes: dict[str, object] = {}
+            outcomes_lock = threading.Lock()
+
+            def fenced_reload(value) -> None:
+                reload_started.set()
+                if not release_reload.wait(5):
+                    raise AssertionError("initial reload rendezvous timed out")
+                original_reload(value)
+
+            def initialize() -> None:
+                try:
+                    reservation_authority._initialize_reservation_store_binding(
+                        book,
+                        selected,
+                        environment="PAPER",
+                        account_id="acct-reservation-authority",
+                    )
+                except BaseException as error:  # captured for cross-thread assertion
+                    with outcomes_lock:
+                        outcomes["initialize_error"] = error
+                finally:
+                    initializer_done.set()
+
+            def observe() -> None:
+                observer_entered.set()
+                try:
+                    observed = reservation_authority._require_reservation_store_binding(
+                        book
+                    )
+                    with outcomes_lock:
+                        outcomes["observed_store"] = observed[0]
+                except BaseException as error:  # captured for cross-thread assertion
+                    with outcomes_lock:
+                        outcomes["observe_error"] = error
+                finally:
+                    observer_done.set()
+
+            DurableReservationBook._reload = fenced_reload
+            initializer_thread = threading.Thread(target=initialize)
+            observer_thread = threading.Thread(target=observe)
+            try:
+                initializer_thread.start()
+                self.assertTrue(reload_started.wait(5))
+                self.assertFalse(initializer_done.is_set())
+
+                observer_thread.start()
+                self.assertTrue(observer_entered.wait(5))
+
+                # The authority is provisionally registered for the initializing
+                # thread's re-entrant replay, but competing threads must not see
+                # it until durable replay succeeds. Before this fence an
+                # observer can complete against the empty in-memory projection.
+                self.assertFalse(observer_done.wait(0.25))
+
+                release_reload.set()
+                initializer_thread.join(5)
+                observer_thread.join(5)
+            finally:
+                release_reload.set()
+                DurableReservationBook._reload = original_reload
+                initializer_thread.join(5)
+                observer_thread.join(5)
+
+            self.assertFalse(initializer_thread.is_alive())
+            self.assertFalse(observer_thread.is_alive())
+            self.assertTrue(initializer_done.is_set())
+            self.assertTrue(observer_done.is_set())
+            self.assertNotIn("initialize_error", outcomes)
+            self.assertNotIn("observe_error", outcomes)
+            self.assertIs(outcomes.get("observed_store"), selected)
+            book._reload()
+
     def test_reinitialization_cannot_retarget_reservation_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

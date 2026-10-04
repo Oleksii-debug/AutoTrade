@@ -358,14 +358,19 @@ def _build_reservation_store_binding_accessors():
             object.__setattr__(value, "_book", ReservationBook())
             object.__setattr__(value, "_idempotency", {})
             bindings[object_id] = (weakref.ref(value), binding)
-        try:
-            DurableReservationBook._reload(value)
-        except Exception:
-            with lock:
+            # Keep construction atomic to every other thread. The binding is
+            # now present for this thread's re-entrant _reload() calls, but the
+            # same registry lock prevents another thread from observing the
+            # authority before durable replay has reconstructed _book and
+            # _idempotency. On replay failure the binding disappears before
+            # any other thread can acquire it.
+            try:
+                DurableReservationBook._reload(value)
+            except Exception:
                 entry = bindings.get(object_id)
                 if entry is not None and entry[0]() is value:
                     bindings.pop(object_id, None)
-            raise
+                raise
 
     def require(value: object) -> tuple[JournalStore, object, str]:
         if type(value) is not DurableReservationBook:

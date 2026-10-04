@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
                    'autotrade_numeric/', 'autotrade_foundation/')
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
-          'contracts/openapi/host-api.yaml', 'src/AutoTrade.Desktop/packages.lock.json',
+          'contracts/openapi/host-api.yaml', 'contracts/bindings/python/common_scalars.py',
+          'src/AutoTrade.Desktop/packages.lock.json',
           'packaging/windows/provider-free-inputs.json', 'provenance/release-dependency-manifest.json')
 
 

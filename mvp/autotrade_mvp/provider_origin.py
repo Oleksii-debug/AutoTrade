@@ -29,6 +29,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 
+from .durable_capabilities import DurableCapabilityRegistry
+from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .persistence import JournalStore, payload_digest
 from .provider_route_reads import (
     ProviderRouteReadError,
@@ -124,6 +126,20 @@ _RETAINED_PAYLOAD_KEYS = frozenset(
     }
 )
 _OBSERVED_PAYLOAD_KEYS = frozenset(set(_RETAINED_PAYLOAD_KEYS) | {"retained_event_id"})
+_WIRE_EXECUTION_PAYLOAD_KEYS = frozenset(
+    {
+        "attempt_id",
+        "qualified_query_digest",
+        "qualification_id",
+        "http_status",
+        "response_sha256",
+        "observed_at",
+        "wire_request_sha256",
+        "wire_request_semantics_sha256",
+        "terminal_authority_journal_sequence_cut",
+        "terminal_authority_verified_at",
+    }
+)
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -259,7 +275,10 @@ def _require_provider_origin_causal_chronology(
         name="prepared_at",
     )
     terminal = _parse_utc_text(
-        _exact_text(terminal_verified_at, name="terminal_authority_verified_at"),
+        _exact_text(
+            terminal_verified_at,
+            name="terminal_authority_verified_at",
+        ),
         name="terminal_authority_verified_at",
     )
     observed = _parse_utc_text(
@@ -268,7 +287,8 @@ def _require_provider_origin_causal_chronology(
     )
     if not prepared <= terminal <= observed:
         raise ProviderOriginError(
-            "provider-origin causal chronology requires Prepared <= terminal C/Q verification <= response observation"
+            "provider-origin causal chronology requires Prepared <= "
+            "terminal C/Q verification <= response observation"
         )
 
 
@@ -317,6 +337,7 @@ def _direct_wire_execution_claim_payload(
     attempt_id: str,
     qualified_query_digest: str,
     qualification_id: str,
+    http_status: int,
     response_sha256: str,
     observed_at: str,
     wire_request_sha256: str,
@@ -333,6 +354,8 @@ def _direct_wire_execution_claim_payload(
         qualification_id,
         name="wire execution qualification_id",
     )
+    if type(http_status) is not int or http_status < 100 or http_status > 599:
+        raise ProviderOriginError("wire execution HTTP status is invalid")
     response_digest = _exact_text(
         response_sha256,
         name="wire execution response_sha256",
@@ -371,6 +394,7 @@ def _direct_wire_execution_claim_payload(
         "attempt_id": attempt,
         "qualified_query_digest": qualified_digest,
         "qualification_id": qualification,
+        "http_status": http_status,
         "response_sha256": response_digest,
         "observed_at": observed,
         "wire_request_sha256": request_digest,
@@ -386,16 +410,81 @@ def _wire_execution_event(
     payload: dict[str, object],
     committed_at: str,
 ) -> dict[str, object]:
+    attempt_id = _exact_text(payload.get("attempt_id"), name="wire execution attempt_id")
     return {
+        # Global uniqueness is enforced by this deterministic event id.  The
+        # aggregate is the attempt so restart can discover the accepted claim
+        # without knowing the transmitted request digest in advance.
         "event_id": "provider-wire-execution:" + wire_request_sha256.removeprefix("sha256:"),
         "event_type": _WIRE_EXECUTION_EVENT,
         "aggregate_type": _WIRE_EXECUTION_AGGREGATE_TYPE,
-        "aggregate_id": wire_request_sha256,
+        "aggregate_id": attempt_id,
         "aggregate_version": "1",
         "payload": payload,
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at,
     }
+
+
+def _load_direct_wire_execution_claim(
+    store: JournalStore,
+    *,
+    attempt_id: str,
+) -> dict[str, object]:
+    attempt = _exact_text(attempt_id, name="wire execution attempt_id")
+    events = JournalStore.load_events(
+        store,
+        _WIRE_EXECUTION_AGGREGATE_TYPE,
+        attempt,
+    )
+    if len(events) != 1:
+        raise ProviderOriginError(
+            "direct wire execution claim is missing or ambiguous"
+        )
+    event = events[0]
+    if type(event) is not dict or set(event) != _EVENT_KEYS:
+        raise ProviderOriginError("direct wire execution claim schema is invalid")
+    payload = event.get("payload")
+    if type(payload) is not dict or set(payload) != _WIRE_EXECUTION_PAYLOAD_KEYS:
+        raise ProviderOriginError("direct wire execution claim payload is invalid")
+    expected = _direct_wire_execution_claim_payload(
+        attempt_id=attempt,
+        qualified_query_digest=payload.get("qualified_query_digest"),
+        qualification_id=payload.get("qualification_id"),
+        http_status=payload.get("http_status"),
+        response_sha256=payload.get("response_sha256"),
+        observed_at=payload.get("observed_at"),
+        wire_request_sha256=payload.get("wire_request_sha256"),
+        wire_request_semantics_sha256=payload.get(
+            "wire_request_semantics_sha256"
+        ),
+        terminal_authority_journal_sequence_cut=payload.get(
+            "terminal_authority_journal_sequence_cut"
+        ),
+        terminal_authority_verified_at=payload.get(
+            "terminal_authority_verified_at"
+        ),
+    )
+    request_digest = expected["wire_request_sha256"]
+    if (
+        event.get("event_id")
+        != "provider-wire-execution:" + request_digest.removeprefix("sha256:")
+        or event.get("event_type") != _WIRE_EXECUTION_EVENT
+        or event.get("aggregate_type") != _WIRE_EXECUTION_AGGREGATE_TYPE
+        or event.get("aggregate_id") != attempt
+        or event.get("aggregate_version") != 1
+        or payload != expected
+        or event.get("payload_hash") != payload_digest(expected)
+        or event.get("committed_at") != expected["observed_at"]
+    ):
+        raise ProviderOriginError(
+            "direct wire execution claim is corrupt"
+        )
+    _parse_utc_text(event.get("committed_at"), name="wire execution committed_at")
+    sequence = event.get("journal_sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise ProviderOriginError("direct wire execution claim sequence is invalid")
+    return expected
 
 
 def _require_direct_wire_execution_claim(
@@ -404,6 +493,7 @@ def _require_direct_wire_execution_claim(
     attempt_id: str,
     qualified_query_digest: str,
     qualification_id: str,
+    http_status: int,
     response_sha256: str,
     observed_at: str,
     wire_request_sha256: str,
@@ -415,6 +505,7 @@ def _require_direct_wire_execution_claim(
         attempt_id=attempt_id,
         qualified_query_digest=qualified_query_digest,
         qualification_id=qualification_id,
+        http_status=http_status,
         response_sha256=response_sha256,
         observed_at=observed_at,
         wire_request_sha256=wire_request_sha256,
@@ -422,36 +513,14 @@ def _require_direct_wire_execution_claim(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
-    events = JournalStore.load_events(
+    actual = _load_direct_wire_execution_claim(
         store,
-        _WIRE_EXECUTION_AGGREGATE_TYPE,
-        wire_request_sha256,
+        attempt_id=attempt_id,
     )
-    if len(events) != 1:
-        raise ProviderOriginError(
-            "direct wire execution claim is missing or ambiguous"
-        )
-    event = events[0]
-    if (
-        type(event) is not dict
-        or set(event) != _EVENT_KEYS
-        or event.get("event_id")
-        != "provider-wire-execution:" + wire_request_sha256.removeprefix("sha256:")
-        or event.get("event_type") != _WIRE_EXECUTION_EVENT
-        or event.get("aggregate_type") != _WIRE_EXECUTION_AGGREGATE_TYPE
-        or event.get("aggregate_id") != wire_request_sha256
-        or event.get("aggregate_version") != 1
-        or event.get("payload") != expected
-        or event.get("payload_hash") != payload_digest(expected)
-        or event.get("committed_at") != expected["observed_at"]
-    ):
+    if actual != expected:
         raise ProviderOriginError(
             "direct wire execution is already claimed by another attempt or is corrupt"
         )
-    _parse_utc_text(event.get("committed_at"), name="wire execution committed_at")
-    sequence = event.get("journal_sequence")
-    if type(sequence) is not int or sequence < 1:
-        raise ProviderOriginError("direct wire execution claim sequence is invalid")
 
 
 def _claim_direct_wire_execution(
@@ -460,6 +529,7 @@ def _claim_direct_wire_execution(
     attempt_id: str,
     qualified_query_digest: str,
     qualification_id: str,
+    http_status: int,
     response_sha256: str,
     observed_at: str,
     wire_request_sha256: str,
@@ -471,6 +541,7 @@ def _claim_direct_wire_execution(
         attempt_id=attempt_id,
         qualified_query_digest=qualified_query_digest,
         qualification_id=qualification_id,
+        http_status=http_status,
         response_sha256=response_sha256,
         observed_at=observed_at,
         wire_request_sha256=wire_request_sha256,
@@ -478,34 +549,35 @@ def _claim_direct_wire_execution(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
-    existing = JournalStore.load_events(
-        store,
-        _WIRE_EXECUTION_AGGREGATE_TYPE,
-        wire_request_sha256,
+    event = _wire_execution_event(
+        wire_request_sha256=wire_request_sha256,
+        payload=expected,
+        committed_at=observed_at,
     )
-    if not existing:
-        event = _wire_execution_event(
-            wire_request_sha256=wire_request_sha256,
-            payload=expected,
-            committed_at=observed_at,
-        )
+    try:
+        JournalStore.append_event(store, event)
+    except ValueError as error:
         try:
-            JournalStore.append_event(store, event)
-        except ValueError as error:
-            raced = JournalStore.load_events(
+            actual = _load_direct_wire_execution_claim(
                 store,
-                _WIRE_EXECUTION_AGGREGATE_TYPE,
-                wire_request_sha256,
+                attempt_id=attempt_id,
             )
-            if not raced:
-                raise ProviderOriginError(
-                    "direct wire execution claim could not be committed"
-                ) from error
+        except ProviderOriginError:
+            raise ProviderOriginError(
+                "direct wire execution is already claimed by another attempt "
+                "or the claim could not be committed"
+            ) from error
+        if actual != expected:
+            raise ProviderOriginError(
+                "direct wire execution is already claimed by another attempt "
+                "or is corrupt"
+            ) from error
     _require_direct_wire_execution_claim(
         store,
         attempt_id=attempt_id,
         qualified_query_digest=qualified_query_digest,
         qualification_id=qualification_id,
+        http_status=http_status,
         response_sha256=response_sha256,
         observed_at=observed_at,
         wire_request_sha256=wire_request_sha256,
@@ -513,7 +585,6 @@ def _claim_direct_wire_execution(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
-
 
 def _require_event(
     event: object,
@@ -1027,19 +1098,6 @@ class ProviderOriginJournal:
         )
 
         response_digest = "sha256:" + sha256(raw).hexdigest()
-        if execution_class == _DIRECT_EXECUTION_CLASS:
-            _claim_direct_wire_execution(
-                store,
-                attempt_id=attempt,
-                qualified_query_digest=snapshot["qualified_query_digest"],
-                qualification_id=snapshot["qualification_id"],
-                response_sha256=response_digest,
-                observed_at=observed_text,
-                wire_request_sha256=wire_request_sha256,
-                wire_request_semantics_sha256=wire_request_semantics_sha256,
-                terminal_authority_journal_sequence_cut=terminal_cut,
-                terminal_authority_verified_at=terminal_verified_at,
-            )
         artifact_id = _response_artifact_id(
             attempt_id=attempt,
             qualified_query_digest=snapshot["qualified_query_digest"],
@@ -1088,6 +1146,20 @@ class ProviderOriginJournal:
             or manifest.get("metadata") != metadata
         ):
             raise ProviderOriginError("provider response artifact conflicts with exact response")
+        if execution_class == _DIRECT_EXECUTION_CLASS:
+            _claim_direct_wire_execution(
+                store,
+                attempt_id=attempt,
+                qualified_query_digest=snapshot["qualified_query_digest"],
+                qualification_id=snapshot["qualification_id"],
+                http_status=http_status,
+                response_sha256=response_digest,
+                observed_at=observed_text,
+                wire_request_sha256=wire_request_sha256,
+                wire_request_semantics_sha256=wire_request_semantics_sha256,
+                terminal_authority_journal_sequence_cut=terminal_cut,
+                terminal_authority_verified_at=terminal_verified_at,
+            )
 
         common = {
             "origin_kind": _ORIGIN_KIND,
@@ -1143,14 +1215,17 @@ class ProviderOriginJournal:
         query_binding: QualifiedProviderReadQueryBinding,
     ) -> AuthenticatedReadResponseBinding:
         attempt = _exact_text(attempt_id, name="attempt_id")
-        events = JournalStore.load_events(self._require_store(), _AGGREGATE_TYPE, attempt)
+        store = self._require_store()
+        events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
         if len(events) == 3:
             return self.load_response_binding(attempt, query_binding)
-        if len(events) != 2:
+        if len(events) not in {1, 2}:
             raise ProviderOriginError(
-                "provider-origin recovery requires exact Prepared + Retained state"
+                "provider-origin recovery requires exact Prepared or "
+                "Prepared + Retained state"
             )
-        prepared, retained = events
+
+        prepared = events[0]
         prepared_payload = _require_event(
             prepared,
             attempt_id=attempt,
@@ -1160,7 +1235,186 @@ class ProviderOriginJournal:
         )
         snapshot = _qualified_query_snapshot(query_binding)
         if prepared_payload.get("qualified_query") != snapshot:
-            raise ProviderOriginError("recovery query differs from durable Prepared binding")
+            raise ProviderOriginError(
+                "recovery query differs from durable Prepared binding"
+            )
+
+        if len(events) == 1:
+            # A canonical direct response may have been durably retained and
+            # globally claimed immediately before a crash that prevented the
+            # attempt-local Retained event.  The claim is indexed by attempt_id
+            # while its deterministic request-hash event id still prevents the
+            # same wire execution from being claimed by another attempt.
+            claim = _load_direct_wire_execution_claim(
+                store,
+                attempt_id=attempt,
+            )
+            if (
+                claim["qualified_query_digest"]
+                != snapshot["qualified_query_digest"]
+                or claim["qualification_id"] != snapshot["qualification_id"]
+            ):
+                raise ProviderOriginError(
+                    "recovery wire claim differs from durable Prepared authority"
+                )
+            status = claim["http_status"]
+            if (
+                type(status) is not int
+                or status not in query_binding.accepted_success_statuses
+            ):
+                raise ProviderOriginError(
+                    "recovery wire claim status is outside qualified contract"
+                )
+            expected_semantics = (
+                qualified_authenticated_read_expected_wire_semantics_digest(
+                    query_binding.query_binding,
+                    provider_environment=query_binding.provider_environment,
+                )
+            )
+            if claim["wire_request_semantics_sha256"] != expected_semantics:
+                raise ProviderOriginError(
+                    "recovery wire claim semantics differ from qualified read"
+                )
+            observed_text = _exact_text(
+                claim["observed_at"],
+                name="recovery wire observed_at",
+            )
+            _require_provider_origin_causal_chronology(
+                prepared_at=prepared.get("committed_at"),
+                terminal_verified_at=claim["terminal_authority_verified_at"],
+                observed_at=observed_text,
+            )
+
+            response_digest = _exact_text(
+                claim["response_sha256"],
+                name="recovery response_sha256",
+            )
+            artifact_id = _response_artifact_id(
+                attempt_id=attempt,
+                qualified_query_digest=snapshot["qualified_query_digest"],
+                response_sha256=response_digest,
+            )
+            prepared_subject_digest = _exact_text(
+                prepared.get("payload_hash"),
+                name="prepared_subject_digest",
+            )
+            expected_metadata = {
+                "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
+                "attempt_id": attempt,
+                "prepared_subject_digest": prepared_subject_digest,
+                "qualified_query_digest": snapshot["qualified_query_digest"],
+                "qualification_id": snapshot["qualification_id"],
+                "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+                "qualified_route_rule_digest": snapshot[
+                    "qualified_route_rule_digest"
+                ],
+                "data_entitlement": snapshot["data_entitlement"],
+                "parser_identity": snapshot["parser_identity"],
+                "provider_environment": snapshot["provider_environment"],
+                "execution_class": _DIRECT_EXECUTION_CLASS,
+                "wire_request_sha256": claim["wire_request_sha256"],
+                "wire_request_semantics_sha256": claim[
+                    "wire_request_semantics_sha256"
+                ],
+                "terminal_authority_journal_sequence_cut": claim[
+                    "terminal_authority_journal_sequence_cut"
+                ],
+                "terminal_authority_verified_at": claim[
+                    "terminal_authority_verified_at"
+                ],
+            }
+            try:
+                manifest, raw = ArtifactStore.read_authenticated_snapshot(
+                    self._response_store,
+                    artifact_id,
+                )
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise ProviderOriginError(
+                    "recovery provider response artifact is unavailable"
+                ) from error
+            if (
+                type(manifest) is not dict
+                or manifest.get("artifact_id") != artifact_id
+                or manifest.get("sha256") != response_digest
+                or manifest.get("metadata") != expected_metadata
+                or "sha256:" + sha256(raw).hexdigest() != response_digest
+            ):
+                raise ProviderOriginError(
+                    "recovery provider response artifact differs from wire claim"
+                )
+
+            common = {
+                "origin_kind": _ORIGIN_KIND,
+                "prepared_event_id": prepared.get("event_id"),
+                "prepared_subject_digest": prepared_subject_digest,
+                "qualified_query_digest": snapshot["qualified_query_digest"],
+                "qualification_id": snapshot["qualification_id"],
+                "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+                "qualified_route_rule_digest": snapshot[
+                    "qualified_route_rule_digest"
+                ],
+                "data_entitlement": snapshot["data_entitlement"],
+                "parser_identity": snapshot["parser_identity"],
+                "transport_identity": prepared_payload["transport_identity"],
+                "network_policy_identity": prepared_payload[
+                    "network_policy_identity"
+                ],
+                "http_status": status,
+                "response_sha256": response_digest,
+                "response_artifact_id": artifact_id,
+                "observed_at": observed_text,
+                "execution_class": _DIRECT_EXECUTION_CLASS,
+                "wire_request_sha256": claim["wire_request_sha256"],
+                "wire_request_semantics_sha256": claim[
+                    "wire_request_semantics_sha256"
+                ],
+                "terminal_authority_journal_sequence_cut": claim[
+                    "terminal_authority_journal_sequence_cut"
+                ],
+                "terminal_authority_verified_at": claim[
+                    "terminal_authority_verified_at"
+                ],
+            }
+            retained_id = attempt + ":retained"
+            JournalStore.append_event(
+                store,
+                _event(
+                    event_id=retained_id,
+                    event_type=_RETAINED_EVENT,
+                    attempt_id=attempt,
+                    version=2,
+                    payload=common,
+                    committed_at=observed_text,
+                ),
+            )
+            events = JournalStore.load_events(
+                store,
+                _AGGREGATE_TYPE,
+                attempt,
+            )
+            if len(events) != 2:
+                raise ProviderOriginError(
+                    "provider-origin recovery could not establish Retained state"
+                )
+
+        prepared, retained = events
+        prepared_payload = _require_event(
+            prepared,
+            attempt_id=attempt,
+            event_type=_PREPARED_EVENT,
+            version=1,
+            payload_keys=_PREPARED_PAYLOAD_KEYS,
+        )
+        if prepared_payload.get("qualified_query") != snapshot:
+            raise ProviderOriginError(
+                "recovery query differs from durable Prepared binding"
+            )
         retained_payload = _require_event(
             retained,
             attempt_id=attempt,
@@ -1169,7 +1423,9 @@ class ProviderOriginJournal:
             payload_keys=_RETAINED_PAYLOAD_KEYS,
         )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
-            raise ProviderOriginError("Retained event is not bound to exact Prepared event")
+            raise ProviderOriginError(
+                "Retained event is not bound to exact Prepared event"
+            )
         _require_provider_origin_causal_chronology(
             prepared_at=prepared.get("committed_at"),
             terminal_verified_at=retained_payload.get(
@@ -1179,7 +1435,7 @@ class ProviderOriginJournal:
         )
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
             _require_direct_wire_execution_claim(
-                self._require_store(),
+                store,
                 attempt_id=attempt,
                 qualified_query_digest=_exact_text(
                     retained_payload.get("qualified_query_digest"),
@@ -1189,6 +1445,7 @@ class ProviderOriginJournal:
                     retained_payload.get("qualification_id"),
                     name="qualification_id",
                 ),
+                http_status=retained_payload.get("http_status"),
                 response_sha256=_exact_text(
                     retained_payload.get("response_sha256"),
                     name="response_sha256",
@@ -1213,15 +1470,21 @@ class ProviderOriginJournal:
                     name="terminal_authority_verified_at",
                 ),
             )
-        observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
+        observed_text = _exact_text(
+            retained_payload.get("observed_at"),
+            name="observed_at",
+        )
         JournalStore.append_event(
-            self._require_store(),
+            store,
             _event(
                 event_id=attempt + ":observed",
                 event_type=_OBSERVED_EVENT,
                 attempt_id=attempt,
                 version=3,
-                payload={**retained_payload, "retained_event_id": retained.get("event_id")},
+                payload={
+                    **retained_payload,
+                    "retained_event_id": retained.get("event_id"),
+                },
                 committed_at=observed_text,
             ),
         )
@@ -1355,6 +1618,7 @@ class ProviderOriginJournal:
                 attempt_id=attempt,
                 qualified_query_digest=snapshot["qualified_query_digest"],
                 qualification_id=snapshot["qualification_id"],
+                http_status=status,
                 response_sha256=response_digest,
                 observed_at=_exact_text(
                     retained_payload.get("observed_at"),
@@ -1436,6 +1700,7 @@ class ProviderOriginJournal:
             terminal_authority_verified_at=terminal_verified_at,
             _binding_token=_BINDING_TOKEN,
         )
+
 
 
 
@@ -1536,7 +1801,6 @@ ProviderOriginJournal.load_response_binding = _bind_provider_origin_response_loa
 del _bind_provider_origin_response_load
 del _register_provider_origin_response_binding_authority
 
-
 def execute_direct_provider_origin_read(
     *,
     origin: ProviderOriginJournal,
@@ -1561,6 +1825,21 @@ def execute_direct_provider_origin_read(
             "query_binding must be exact QualifiedProviderReadQueryBinding"
         )
     _require_qualified_provider_read_binding_authority(query_binding)
+    if type(capability_registry) is not DurableCapabilityRegistry:
+        raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
+    if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    authority_store = capability_registry.store
+    if qualification_registry.store is not authority_store:
+        raise ProviderOriginError(
+            "provider-origin C/Q authorities must share one JournalStore instance"
+        )
+    if origin._require_store() is not authority_store:
+        raise ProviderOriginError(
+            "provider-origin authority must share exact C/Q JournalStore instance"
+        )
     if type(transport) not in {
         BinanceSpotAuthenticatedReadTransport,
         BybitV5AuthenticatedReadTransport,

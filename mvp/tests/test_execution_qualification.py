@@ -8,6 +8,7 @@ from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
+import mvp.autotrade_mvp.execution_qualification as execution_qualification_module
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
@@ -322,6 +323,19 @@ class ExecutionQualificationTests(unittest.TestCase):
             **self.validation_kwargs(exec_model)
         )
 
+    def test_artifact_store_class_snapshot_replacement_is_not_authority(self):
+        exec_model = model()
+        with patch.object(
+            ArtifactStore,
+            "read_authenticated_snapshot",
+            side_effect=AssertionError(
+                "public class snapshot replacement must not become authority"
+            ),
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model)
+            )
+
     def test_artifact_store_subclass_cannot_supply_execution_evidence_authority(self):
         class DerivedArtifactStore(ArtifactStore):
             pass
@@ -352,8 +366,8 @@ class ExecutionQualificationTests(unittest.TestCase):
         exec_model = model()
         manifest = self.store.load_manifest(ARTIFACT_ID)
         with patch.object(
-            ArtifactStore,
-            "read_authenticated_snapshot",
+            execution_qualification_module,
+            "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
             return_value=(manifest, b"different execution evidence bytes"),
         ):
             with self.assertRaisesRegex(

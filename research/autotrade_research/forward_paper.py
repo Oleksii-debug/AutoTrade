@@ -549,22 +549,54 @@ class ForwardPaperEvidence:
             raise TypeError("outcomes must be an exact tuple")
         if type(self.operational_observations) is not tuple:
             raise TypeError("operational_observations must be an exact tuple")
+        prediction_snapshots: list[SealedPrediction] = []
         for item in self.predictions:
             if type(item) is not SealedPrediction:
                 raise TypeError("predictions must contain exact SealedPrediction records")
+            prediction_snapshots.append(
+                SealedPrediction(
+                    prediction_id=item.prediction_id,
+                    provider_capability=item.provider_capability,
+                    input_hash=item.input_hash,
+                    proposal_hash=item.proposal_hash,
+                    information_cutoff_at=item.information_cutoff_at,
+                    sealed_at=item.sealed_at,
+                    decision_deadline_at=item.decision_deadline_at,
+                    outcome_horizon_end_at=item.outcome_horizon_end_at,
+                    decision_latency_ms=item.decision_latency_ms,
+                )
+            )
+        outcome_snapshots: list[ForwardOutcome] = []
         for item in self.outcomes:
             if type(item) is not ForwardOutcome:
                 raise TypeError("outcomes must contain exact ForwardOutcome records")
+            outcome_snapshots.append(
+                ForwardOutcome(
+                    prediction_id=item.prediction_id,
+                    outcome_hash=item.outcome_hash,
+                    outcome_available_at=item.outcome_available_at,
+                    evaluated_at=item.evaluated_at,
+                )
+            )
+        operational_snapshots: list[OperationalObservation] = []
         for item in self.operational_observations:
             if type(item) is not OperationalObservation:
                 raise TypeError(
                     "operational_observations must contain exact OperationalObservation records"
                 )
+            operational_snapshots.append(
+                OperationalObservation(
+                    provider_capability=item.provider_capability,
+                    case=item.case,
+                    observed_at=item.observed_at,
+                    reconciled=item.reconciled,
+                )
+            )
         if type(self.costs_by_currency) not in {dict, _MAPPING_PROXY_TYPE}:
             raise TypeError("costs_by_currency must be an exact mapping")
         costs: dict[str, Decimal] = {}
         for currency, value in self.costs_by_currency.items():
-            if not isinstance(currency, str):
+            if type(currency) is not str:
                 raise TypeError("cost currency keys must be strings")
             code = _text(currency, name="cost currency").upper()
             if code in costs:
@@ -576,12 +608,12 @@ class ForwardPaperEvidence:
             )
         object.__setattr__(self, "exact_build_sha", build)
         object.__setattr__(self, "protocol_hash", protocol_hash)
-        object.__setattr__(self, "predictions", tuple(self.predictions))
-        object.__setattr__(self, "outcomes", tuple(self.outcomes))
+        object.__setattr__(self, "predictions", tuple(prediction_snapshots))
+        object.__setattr__(self, "outcomes", tuple(outcome_snapshots))
         object.__setattr__(
             self,
             "operational_observations",
-            tuple(self.operational_observations),
+            tuple(operational_snapshots),
         )
         object.__setattr__(
             self,
@@ -626,7 +658,7 @@ class ForwardPaperEvidence:
         )
         costs: dict[str, Decimal] = {}
         for currency, value in costs_by_currency.items():
-            if not isinstance(currency, str):
+            if type(currency) is not str:
                 raise TypeError("cost currency keys must be strings")
             code = _text(currency, name="cost currency").upper()
             if code in costs:
@@ -675,6 +707,30 @@ def assess_forward_paper(
         raise TypeError("protocol must be exact ForwardPaperProtocol")
     if type(evidence) is not ForwardPaperEvidence:
         raise TypeError("evidence must be exact ForwardPaperEvidence")
+
+    protocol = ForwardPaperProtocol(
+        campaign_id=protocol.campaign_id,
+        exact_build_sha=protocol.exact_build_sha,
+        protocol_hash=protocol.protocol_hash,
+        registered_at=protocol.registered_at,
+        starts_at=protocol.starts_at,
+        ends_at=protocol.ends_at,
+        minimum_predictions=protocol.minimum_predictions,
+        maximum_decision_latency_ms=protocol.maximum_decision_latency_ms,
+        required_provider_capabilities=protocol.required_provider_capabilities,
+        required_operational_cases=protocol.required_operational_cases,
+    )
+    evidence = ForwardPaperEvidence(
+        exact_build_sha=evidence.exact_build_sha,
+        protocol_hash=evidence.protocol_hash,
+        observed_until=evidence.observed_until,
+        predictions=evidence.predictions,
+        outcomes=evidence.outcomes,
+        operational_observations=evidence.operational_observations,
+        costs_by_currency=evidence.costs_by_currency,
+        costs_complete=evidence.costs_complete,
+        account_reconciliation_complete=evidence.account_reconciliation_complete,
+    )
 
     invalid: list[str] = []
     incomplete: list[str] = []
@@ -756,7 +812,7 @@ def assess_forward_paper(
         observed_cases = {
             item.case
             for item in evidence.operational_observations
-            if isinstance(item, OperationalObservation)
+            if type(item) is OperationalObservation
             and item.provider_capability == capability
             and item.reconciled
         }

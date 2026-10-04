@@ -172,6 +172,26 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 predictions=(forged, self.predictions()[1]),
             )
 
+    def test_mutated_prediction_is_revalidated_before_evidence_acceptance(self):
+        predictions = list(self.predictions())
+        object.__setattr__(
+            predictions[0],
+            "information_cutoff_at",
+            "2026-09-24T20:05:01Z",
+        )
+        with self.assertRaisesRegex(ForwardPaperError, "information cutoff"):
+            self.evidence(predictions=tuple(predictions))
+
+    def test_mutated_evidence_is_revalidated_at_assessment_boundary(self):
+        evidence = self.evidence()
+        object.__setattr__(
+            evidence.predictions[0],
+            "decision_latency_ms",
+            -1,
+        )
+        with self.assertRaisesRegex(ForwardPaperError, "decision_latency_ms"):
+            assess_forward_paper(self.protocol(), evidence)
+
     def test_complete_mechanics_can_be_valid_without_claiming_edge(self):
         result = assess_forward_paper(self.protocol(), self.evidence())
         self.assertEqual(result.evidence_status, "VALID")

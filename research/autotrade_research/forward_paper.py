@@ -71,7 +71,7 @@ def forward_paper_protocol_hash(
     required_provider_capabilities: Sequence[str],
     required_operational_cases: Sequence[str],
     required_regimes: Sequence[str] = (),
-    minimum_independent_decisions_per_regime: int = 1,
+    minimum_decision_units_per_regime: int = 1,
     required_simulation_limitations: Sequence[str] = (),
     reporting_currency: str = "USD",
     maximum_drawdown: object | None = None,
@@ -116,8 +116,8 @@ def forward_paper_protocol_hash(
     if "UNSPECIFIED" in regimes:
         raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
     independent_minimum = _positive_int(
-        minimum_independent_decisions_per_regime,
-        name="minimum_independent_decisions_per_regime",
+        minimum_decision_units_per_regime,
+        name="minimum_decision_units_per_regime",
     )
     raw_limitations = _unique_text(
         required_simulation_limitations,
@@ -167,7 +167,7 @@ def forward_paper_protocol_hash(
         payload.update(
             {
                 "required_regimes": list(regimes),
-                "minimum_independent_decisions_per_regime": independent_minimum,
+                "minimum_decision_units_per_regime": independent_minimum,
                 "required_simulation_limitations": list(limitations),
                 "reporting_currency": currency,
                 "maximum_drawdown": (
@@ -255,7 +255,7 @@ class ForwardPaperProtocol:
     required_provider_capabilities: tuple[str, ...]
     required_operational_cases: tuple[str, ...]
     required_regimes: tuple[str, ...] = ()
-    minimum_independent_decisions_per_regime: int = 1
+    minimum_decision_units_per_regime: int = 1
     required_simulation_limitations: tuple[str, ...] = ()
     reporting_currency: str = "USD"
     maximum_drawdown: Decimal | None = None
@@ -296,8 +296,8 @@ class ForwardPaperProtocol:
         if "UNSPECIFIED" in regimes:
             raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
         independent_minimum = _positive_int(
-            self.minimum_independent_decisions_per_regime,
-            name="minimum_independent_decisions_per_regime",
+            self.minimum_decision_units_per_regime,
+            name="minimum_decision_units_per_regime",
         )
         raw_limitations = _unique_text(
             self.required_simulation_limitations,
@@ -348,7 +348,7 @@ class ForwardPaperProtocol:
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
             required_regimes=regimes,
-            minimum_independent_decisions_per_regime=independent_minimum,
+            minimum_decision_units_per_regime=independent_minimum,
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,
@@ -385,7 +385,7 @@ class ForwardPaperProtocol:
         object.__setattr__(self, "required_regimes", regimes)
         object.__setattr__(
             self,
-            "minimum_independent_decisions_per_regime",
+            "minimum_decision_units_per_regime",
             independent_minimum,
         )
         object.__setattr__(
@@ -416,7 +416,7 @@ class ForwardPaperProtocol:
         required_provider_capabilities: Sequence[str],
         required_operational_cases: Sequence[str],
         required_regimes: Sequence[str] = (),
-        minimum_independent_decisions_per_regime: int = 1,
+        minimum_decision_units_per_regime: int = 1,
         required_simulation_limitations: Sequence[str] = (),
         reporting_currency: str = "USD",
         maximum_drawdown: object | None = None,
@@ -454,8 +454,8 @@ class ForwardPaperProtocol:
         if "UNSPECIFIED" in regimes:
             raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
         independent_minimum = _positive_int(
-            minimum_independent_decisions_per_regime,
-            name="minimum_independent_decisions_per_regime",
+            minimum_decision_units_per_regime,
+            name="minimum_decision_units_per_regime",
         )
         raw_limitations = _unique_text(
             required_simulation_limitations,
@@ -500,7 +500,7 @@ class ForwardPaperProtocol:
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
             required_regimes=regimes,
-            minimum_independent_decisions_per_regime=independent_minimum,
+            minimum_decision_units_per_regime=independent_minimum,
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,
@@ -520,7 +520,7 @@ class SealedPrediction:
     outcome_horizon_end_at: str
     decision_latency_ms: int
     regime: str = "UNSPECIFIED"
-    independence_key: str = "UNSPECIFIED"
+    dependence_unit_id: str = "UNSPECIFIED"
 
     def __post_init__(self) -> None:
         cutoff = _instant(
@@ -575,8 +575,8 @@ class SealedPrediction:
         )
         object.__setattr__(
             self,
-            "independence_key",
-            _text(self.independence_key, name="independence_key"),
+            "dependence_unit_id",
+            _text(self.dependence_unit_id, name="dependence_unit_id"),
         )
 
     @classmethod
@@ -593,7 +593,7 @@ class SealedPrediction:
         outcome_horizon_end_at: str,
         decision_latency_ms: int,
         regime: str = "UNSPECIFIED",
-        independence_key: str = "UNSPECIFIED",
+        dependence_unit_id: str = "UNSPECIFIED",
     ) -> "SealedPrediction":
         cutoff = _instant(information_cutoff_at, name="information_cutoff_at")
         sealed = _instant(sealed_at, name="sealed_at")
@@ -621,7 +621,7 @@ class SealedPrediction:
                 allow_zero=True,
             ),
             regime=_text(regime, name="regime").upper(),
-            independence_key=_text(independence_key, name="independence_key"),
+            dependence_unit_id=_text(dependence_unit_id, name="dependence_unit_id"),
         )
 
     @property
@@ -1004,10 +1004,10 @@ def assess_forward_paper(
     capability_counts = {
         capability: 0 for capability in protocol.required_provider_capabilities
     }
-    regime_independence: dict[str, set[str]] = {
+    regime_decision_units: dict[str, set[str]] = {
         regime: set() for regime in protocol.required_regimes
     }
-    independence_regime: dict[str, str] = {}
+    dependence_unit_regime: dict[str, str] = {}
     for prediction in evidence.predictions:
         if not isinstance(prediction, SealedPrediction):
             invalid.append("invalid_prediction_record")
@@ -1026,26 +1026,26 @@ def assess_forward_paper(
         else:
             capability_counts[prediction.provider_capability] += 1
         if protocol.required_regimes:
-            if prediction.regime not in regime_independence:
+            if prediction.regime not in regime_decision_units:
                 invalid.append("undeclared_regime")
             else:
-                if prediction.independence_key == "UNSPECIFIED":
-                    invalid.append("independence_key_unspecified")
+                if prediction.dependence_unit_id == "UNSPECIFIED":
+                    invalid.append("dependence_unit_id_unspecified")
                 else:
-                    prior_regime = independence_regime.get(
-                        prediction.independence_key
+                    prior_regime = dependence_unit_regime.get(
+                        prediction.dependence_unit_id
                     )
                     if (
                         prior_regime is not None
                         and prior_regime != prediction.regime
                     ):
-                        invalid.append("independence_key_regime_conflict")
+                        invalid.append("dependence_unit_id_regime_conflict")
                     else:
-                        independence_regime[
-                            prediction.independence_key
+                        dependence_unit_regime[
+                            prediction.dependence_unit_id
                         ] = prediction.regime
-                        regime_independence[prediction.regime].add(
-                            prediction.independence_key
+                        regime_decision_units[prediction.regime].add(
+                            prediction.dependence_unit_id
                         )
         if not prediction.met_deadline:
             operational_failures.append("decision_deadline_missed")
@@ -1057,10 +1057,10 @@ def assess_forward_paper(
     for capability, count in capability_counts.items():
         if count == 0:
             incomplete.append(f"missing_provider_capability:{capability}")
-    for regime, keys in regime_independence.items():
-        if len(keys) < protocol.minimum_independent_decisions_per_regime:
+    for regime, keys in regime_decision_units.items():
+        if len(keys) < protocol.minimum_decision_units_per_regime:
             incomplete.append(
-                f"minimum_independent_decisions_not_reached:{regime}"
+                f"minimum_decision_units_not_reached:{regime}"
             )
 
     outcomes_by_prediction: dict[str, ForwardOutcome] = {}

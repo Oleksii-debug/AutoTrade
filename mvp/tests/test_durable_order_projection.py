@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -857,7 +857,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             manifest = artifacts.load_manifest(ref["artifact_id"])
             authentic_bytes = artifacts.read_bytes(ref["artifact_id"])
-            forged_reader = unittest.mock.Mock(
+            forged_reader = Mock(
                 return_value=(manifest, authentic_bytes),
             )
             with patch.object(

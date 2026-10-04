@@ -145,6 +145,8 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_base_url = policy.base_url
             original_allowed_hosts = policy.allowed_hosts
             clock_utc_calls = []
+            lease_calls = []
+            final_guard_calls = []
 
             def quota_gate(*_args):
                 object.__setattr__(policy, "base_url", "https://evil.example")
@@ -165,23 +167,6 @@ class ProductionBybitBarrierTests(unittest.TestCase):
                     )
                 return READ_AT
 
-            intent_id, sender, request = self._sender_and_request(
-                runtime,
-                wire,
-                quota_gate=quota_gate,
-                clock_utc=clock_utc,
-            )
-            client_order_id = stable_client_order_id(
-                "BYBIT",
-                intent_id,
-                environment="PAPER",
-                account_id="account-1",
-                max_length=36,
-                client_id_format="TOKEN",
-            )
-            lease_calls = []
-            final_guard_calls = []
-
             @contextmanager
             def fake_lease(_self, token, **kwargs):
                 lease_calls.append((token, kwargs))
@@ -190,6 +175,20 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_lease = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                    clock_utc=clock_utc,
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
                 with self.assertRaisesRegex(
                     PermissionError,
                     "provider policy values changed",
@@ -223,29 +222,14 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             wire = _RecordingWire()
             handle = self._handle()
             clock_utc_calls = []
+            lease_calls = []
+            final_guard_calls = []
 
             def clock_utc():
                 clock_utc_calls.append("called")
                 if len(clock_utc_calls) == 2:
                     object.__setattr__(handle, "generation", 2)
                 return READ_AT
-
-            intent_id, sender, request = self._sender_and_request(
-                runtime,
-                wire,
-                credential_handle=handle,
-                clock_utc=clock_utc,
-            )
-            client_order_id = stable_client_order_id(
-                "BYBIT",
-                intent_id,
-                environment="PAPER",
-                account_id="account-1",
-                max_length=36,
-                client_id_format="TOKEN",
-            )
-            lease_calls = []
-            final_guard_calls = []
 
             @contextmanager
             def fake_lease(_self, token, **kwargs):
@@ -255,6 +239,20 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_lease = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    credential_handle=handle,
+                    clock_utc=clock_utc,
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
                 with self.assertRaisesRegex(
                     PermissionError,
                     "credential handle changed after composition",
@@ -280,7 +278,6 @@ class ProductionBybitBarrierTests(unittest.TestCase):
         with TemporaryDirectory() as root:
             runtime, _boundary = self._runtime(root)
             wire = _RecordingWire()
-            intent_id, sender, request = self._sender_and_request(runtime, wire)
             lease_calls = []
 
             @contextmanager
@@ -291,6 +288,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(runtime, wire)
                 dispatch_now = READ_AT.isoformat().replace("+00:00", "Z")
                 authority_calls = []
                 outcome = sender.dispatch(

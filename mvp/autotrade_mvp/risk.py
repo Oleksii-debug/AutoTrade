@@ -12,6 +12,11 @@ import re
 from typing import Iterable, Mapping, Sequence
 from uuid import UUID
 
+from research.autotrade_research.artifacts import (
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
+
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
@@ -543,17 +548,22 @@ def _verify_liquidation_headroom_evidence(
         or evidence_store is None
     ):
         return False
+    if type(evidence_store) is not ArtifactStore:
+        return False
     if evidence.scope != expected_scope or evidence.state_version != expected_state_version:
         return False
     point = _utc(decision_time, name="decision_time")
     if not (evidence.observed_at <= point < evidence.expires_at):
         return False
     try:
-        manifest = evidence_store.load_manifest(evidence.artifact_id)
-        raw = evidence_store.read_bytes(evidence.artifact_id)
+        authenticated_read = trusted_authenticated_reader(
+            evidence_store.root,
+            publication_store=evidence_store,
+        )
+        manifest, raw = authenticated_read(evidence.artifact_id)
     except Exception:
         return False
-    if type(manifest) is not dict or not isinstance(raw, bytes):
+    if type(manifest) is not dict or type(raw) is not bytes:
         return False
     actual = "sha256:" + sha256(raw).hexdigest()
     if (
@@ -575,7 +585,7 @@ def _verify_liquidation_headroom_evidence(
     metadata = manifest.get("metadata")
     if type(metadata) is not dict:
         return False
-    return all(metadata.get(key) == value for key, value in payload.items())
+    return metadata == payload
 
 
 @dataclass(frozen=True)
@@ -1587,11 +1597,18 @@ def evaluate_bound_risk(
     evidence_store: object | None = None,
     authoritative_risk_snapshot_id: str | None = None,
 ) -> RiskDecision:
+    # Bound financial authority must never be minted from a caller-selected
+    # liquidation evidence store. Until the product-owned sealed artifact/root
+    # authority is composed at this boundary, fail closed rather than accepting
+    # otherwise-canonical caller evidence.
+    if evidence_store is not None:
+        raise ValueError(
+            "caller-selected evidence_store cannot bind financial risk"
+        )
     decision = evaluate_risk(
         intent,
         context,
         policy,
-        evidence_store=evidence_store,
     )
     return bind_risk_decision(
         decision,

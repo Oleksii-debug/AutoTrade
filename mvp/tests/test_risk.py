@@ -2,8 +2,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.risk import (
     _canonical_decimal_text,
@@ -12,6 +17,7 @@ from mvp.autotrade_mvp.risk import (
     RiskContext,
     RiskIntent,
     RiskPolicy,
+    evaluate_bound_risk,
     evaluate_risk,
     risk_decision_fingerprint,
     stress_scenario_digest,
@@ -50,6 +56,18 @@ class _LiquidationEvidenceStore:
 
     def read_bytes(self, artifact_id):
         return self._objects[artifact_id]
+
+    def read_authenticated_snapshot(self, artifact_id):
+        return (dict(self._manifests[artifact_id]), self._objects[artifact_id])
+
+
+_REAL_LIQUIDATION_STORE_TEMPS = []
+
+
+def _real_liquidation_store() -> ArtifactStore:
+    directory = TemporaryDirectory()
+    _REAL_LIQUIDATION_STORE_TEMPS.append(directory)
+    return ArtifactStore(Path(directory.name) / "artifacts")
 
 
 def liquidation_evidence(
@@ -104,7 +122,16 @@ def liquidation_evidence(
         artifact_id=artifact_id,
         sha256=digest,
     )
-    store.add(evidence, payload)
+    if type(store) is ArtifactStore:
+        store.publish_bytes(
+            artifact_id=artifact_id,
+            data=raw,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            metadata=payload,
+        )
+    else:
+        store.add(evidence, payload)
     scope = LiquidationScope(
         provider_id=provider_id,
         account_id=account_id,
@@ -1732,7 +1759,7 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(bare_rule.passed)
         self.assertEqual(bare_rule.observed, "UNVERIFIED")
 
-        store = _LiquidationEvidenceStore()
+        store = _real_liquidation_store()
         bound = liquidation_evidence(store, headroom="0.25")
         exact = evaluate_risk(
             intent,
@@ -1749,7 +1776,7 @@ class IndependentRiskTests(unittest.TestCase):
 
     def test_negative_liquidation_headroom_is_evidence_not_a_parse_failure(self):
         configured = policy(min_liquidation_headroom="0.25")
-        store = _LiquidationEvidenceStore()
+        store = _real_liquidation_store()
         bound = liquidation_evidence(store, headroom="-0.10")
         increasing = evaluate_risk(
             RiskIntent.create(
@@ -1891,7 +1918,7 @@ class IndependentRiskTests(unittest.TestCase):
         )
 
     def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
-        store = _LiquidationEvidenceStore()
+        store = _real_liquidation_store()
         bound = liquidation_evidence(store, headroom="0.10")
         decision = evaluate_risk(
             RiskIntent.create(
@@ -1925,7 +1952,6 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertTrue(
             next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
         )
-
 
     def test_liquidation_evidence_scope_cannot_cross_account_environment_or_margin(self):
         store = _LiquidationEvidenceStore()
@@ -1965,7 +1991,7 @@ class IndependentRiskTests(unittest.TestCase):
             expected_state_version=7,
         )
 
-        future_store = _LiquidationEvidenceStore()
+        future_store = _real_liquidation_store()
         future = liquidation_evidence(
             future_store,
             headroom="0.50",
@@ -1985,7 +2011,7 @@ class IndependentRiskTests(unittest.TestCase):
             ).passed
         )
 
-        stale_store = _LiquidationEvidenceStore()
+        stale_store = _real_liquidation_store()
         stale = liquidation_evidence(
             stale_store,
             headroom="0.50",
@@ -2006,10 +2032,11 @@ class IndependentRiskTests(unittest.TestCase):
             ).passed
         )
 
-        tampered_store = _LiquidationEvidenceStore()
+        tampered_store = _real_liquidation_store()
         tampered = liquidation_evidence(tampered_store, headroom="0.50")
-        artifact_id = tampered["liquidation_headroom_evidence"].artifact_id
-        tampered_store._objects[artifact_id] = b"{}"
+        tampered_evidence = tampered["liquidation_headroom_evidence"]
+        tampered_manifest = tampered_store.load_manifest(tampered_evidence.artifact_id)
+        tampered_store._object_path(tampered_manifest["sha256"][7:]).write_bytes(b"{}")
         tampered_decision = evaluate_risk(
             intent,
             context(**tampered),
@@ -2022,6 +2049,157 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertFalse(tampered_rule.passed)
         self.assertEqual(tampered_rule.observed, "UNVERIFIED")
 
+    def test_bound_risk_rejects_caller_selected_liquidation_evidence_store(self):
+        store = _LiquidationEvidenceStore()
+        bound = liquidation_evidence(store, headroom="0.50")
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        binding = dict(
+            intent_hash="sha256:" + "a" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "100"},
+            capability_snapshot_id="cap-snapshot-1",
+            evaluated_at="2026-01-01T00:01:00Z",
+            valid_until="2026-01-01T00:05:00Z",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "caller-selected evidence_store cannot bind financial risk",
+        ):
+            evaluate_bound_risk(
+                intent,
+                context(**bound),
+                configured,
+                evidence_store=store,
+                **binding,
+            )
+
+        fail_closed = evaluate_bound_risk(
+            intent,
+            context(**bound),
+            configured,
+            **binding,
+        )
+        liquidation_rule = next(
+            item
+            for item in fail_closed.rules
+            if item.rule == "liquidation_headroom"
+        )
+        self.assertFalse(fail_closed.admitted)
+        self.assertFalse(liquidation_rule.passed)
+        self.assertEqual(liquidation_rule.observed, "UNVERIFIED")
+
+    def test_liquidation_admission_uses_pinned_reader_not_caller_store_methods(self):
+        store = _real_liquidation_store()
+        bound = liquidation_evidence(store, headroom="0.50")
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="100",
+            expected_state_version=7,
+        )
+        configured = policy(min_liquidation_headroom="0.25")
+        with (
+            patch.object(
+                store,
+                "read_authenticated_snapshot",
+                side_effect=AssertionError("caller snapshot method dispatched"),
+            ),
+            patch.object(
+                store,
+                "load_manifest",
+                side_effect=AssertionError("split manifest read"),
+            ),
+            patch.object(
+                store,
+                "read_bytes",
+                side_effect=AssertionError("split object read"),
+            ),
+        ):
+            decision = evaluate_risk(
+                intent, context(**bound), configured, evidence_store=store,
+            )
+        self.assertTrue(
+            next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
+        )
+
+        corrupt_store = _real_liquidation_store()
+        corrupt_bound = liquidation_evidence(corrupt_store, headroom="0.50")
+        corrupt_evidence = corrupt_bound["liquidation_headroom_evidence"]
+        corrupt_manifest = corrupt_store.load_manifest(corrupt_evidence.artifact_id)
+        corrupt_store._object_path(corrupt_manifest["sha256"][7:]).write_bytes(b"{}")
+        rejected = evaluate_risk(
+            intent,
+            context(**corrupt_bound),
+            configured,
+            evidence_store=corrupt_store,
+        )
+        rejected_rule = next(
+            x for x in rejected.rules if x.rule == "liquidation_headroom"
+        )
+        self.assertFalse(rejected_rule.passed)
+        self.assertEqual(rejected_rule.observed, "UNVERIFIED")
+
+        metadata_store = _real_liquidation_store()
+        metadata_bound = liquidation_evidence(metadata_store, headroom="0.50")
+        metadata_evidence = metadata_bound["liquidation_headroom_evidence"]
+        manifest_path = metadata_store._manifest_path(metadata_evidence.artifact_id)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["metadata"]["unqualified_extra"] = "must-not-be-authority"
+        manifest_path.write_text(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        extra = evaluate_risk(
+            intent,
+            context(**metadata_bound),
+            configured,
+            evidence_store=metadata_store,
+        )
+        self.assertFalse(
+            next(x for x in extra.rules if x.rule == "liquidation_headroom").passed
+        )
+
+    def test_liquidation_scope_is_verified_with_real_artifact_snapshot(self):
+        with TemporaryDirectory() as directory:
+            fixture = _LiquidationEvidenceStore()
+            bound = liquidation_evidence(fixture, headroom="0.50")
+            artifact_id = bound["liquidation_headroom_evidence"].artifact_id
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            artifacts.publish_bytes(
+                artifact_id=artifact_id,
+                data=fixture._objects[artifact_id],
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                metadata=fixture._manifests[artifact_id]["metadata"],
+            )
+            intent = RiskIntent.create(
+                symbol="ABC", side="BUY", quantity="1", price="100",
+                expected_state_version=7,
+            )
+            configured = policy(min_liquidation_headroom="0.25")
+            with (
+                patch.object(artifacts, "load_manifest", side_effect=AssertionError("split read")),
+                patch.object(artifacts, "read_bytes", side_effect=AssertionError("split read")),
+            ):
+                decision = evaluate_risk(
+                    intent, context(**bound), configured, evidence_store=artifacts,
+                )
+            self.assertTrue(
+                next(x for x in decision.rules if x.rule == "liquidation_headroom").passed
+            )
+
     def test_liquidation_evidence_identity_is_in_risk_fingerprint(self):
         intent = RiskIntent.create(
             symbol="ABC",
@@ -2032,7 +2210,7 @@ class IndependentRiskTests(unittest.TestCase):
         )
         configured = policy(min_liquidation_headroom="0.25")
 
-        store_a = _LiquidationEvidenceStore()
+        store_a = _real_liquidation_store()
         tier_a = liquidation_evidence(
             store_a,
             headroom="0.50",
@@ -2045,7 +2223,7 @@ class IndependentRiskTests(unittest.TestCase):
             evidence_store=store_a,
         )
 
-        store_b = _LiquidationEvidenceStore()
+        store_b = _real_liquidation_store()
         tier_b = liquidation_evidence(
             store_b,
             headroom="0.50",

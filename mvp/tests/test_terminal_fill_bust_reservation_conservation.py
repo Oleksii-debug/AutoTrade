@@ -61,8 +61,43 @@ class TerminalFillBustReservationConservationTests(unittest.TestCase):
         ):
             book.mark_unknown("reservation-1")
 
-    def test_non_filled_terminal_outcomes_cannot_acquire_post_bust_hold(self):
-        for outcome in ("CANCELED", "REJECTED", "PROVEN_ABSENT"):
+    def test_terminal_cancelled_bust_reverses_consumed_history_without_reholding_capacity(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="reservation-1",
+            intent_id="intent-1",
+            requirements={"CASH:USD": "120", "BUFFER:USD": "20"},
+            available={"CASH:USD": "1000", "BUFFER:USD": "1000"},
+        )
+        book.consume("reservation-1", {"CASH:USD": "100"})
+        cancelled = book.mark_terminal(
+            "reservation-1",
+            outcome="CANCELED",
+            resolution_evidence="provider-cancelled-evidence",
+        )
+        self.assertEqual(cancelled.state, "CANCELED")
+        self.assertEqual(cancelled.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+        restored = book.restore_consumption(
+            "reservation-1",
+            {"CASH:USD": "100"},
+        )
+
+        self.assertEqual(restored.state, "CANCELED")
+        self.assertEqual(
+            restored.resolution_evidence,
+            "provider-cancelled-evidence",
+        )
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("0"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(restored.remaining["BUFFER:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+        self.assertEqual(book.total_reserved("BUFFER:USD"), Decimal("0"))
+        self.assertEqual(book.active(), ())
+
+    def test_rejected_or_proven_absent_cannot_acquire_post_bust_authority(self):
+        for outcome in ("REJECTED", "PROVEN_ABSENT"):
             with self.subTest(outcome=outcome):
                 book = ReservationBook()
                 book.reserve(
@@ -71,8 +106,6 @@ class TerminalFillBustReservationConservationTests(unittest.TestCase):
                     requirements={"CASH:USD": "120"},
                     available={"CASH:USD": "1000"},
                 )
-                if outcome == "CANCELED":
-                    book.consume("reservation-1", {"CASH:USD": "100"})
                 book.mark_terminal(
                     "reservation-1",
                     outcome=outcome,

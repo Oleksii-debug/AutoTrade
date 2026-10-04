@@ -1875,19 +1875,13 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_symbol="ABC-USD",
             )
 
-        substituted_build = replace(
-            delta,
-            adapter_version="autotrade-test-market-adapter@2",
-        )
         with self.assertRaisesRegex(
             MarketDataError,
-            "differs from retained normalized identity",
+            "adapter build differs from identity material",
         ):
-            normalizer.apply_qualified_book_range(
-                substituted_build,
-                provider_id="provider-a",
-                venue_id="venue-a",
-                provider_symbol="ABC-USD",
+            replace(
+                delta,
+                adapter_version="autotrade-test-market-adapter@2",
             )
 
         self.assertEqual(
@@ -3326,6 +3320,63 @@ class MarketNormalizationTests(unittest.TestCase):
                     {"price": "100", "quantity": "1"},
                     adapter_version=value,
                 )
+
+    def test_normalized_event_adapter_build_identity_cannot_be_rewritten(self):
+        event = MarketNormalizer(registry()).normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=70,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        original_contract = event.to_contract_dict()
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "adapter build differs from identity material",
+        ):
+            replace(
+                event,
+                adapter_version="autotrade-test-market-adapter@2",
+            )
+
+        forged_identity_material = event._identity_material.replace(
+            TEST_ADAPTER_VERSION,
+            "autotrade-test-market-adapter@2",
+            1,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "event_id does not match normalized market event identity material",
+        ):
+            replace(
+                event,
+                adapter_version="autotrade-test-market-adapter@2",
+                _identity_material=forged_identity_material,
+            )
+
+        object.__setattr__(
+            event,
+            "adapter_version",
+            "autotrade-test-market-adapter@2",
+        )
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "build identity changed after construction",
+        ):
+            event.to_contract_dict()
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "adapter build differs from identity material",
+        ):
+            event.__post_init__()
+
+        self.assertEqual(
+            original_contract["adapter_version"],
+            TEST_ADAPTER_VERSION,
+        )
 
     def test_adapter_build_is_part_of_deterministic_event_identity(self):
         first = MarketNormalizer(registry()).normalize(

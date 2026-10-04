@@ -11,7 +11,6 @@ import json
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 import re
-import shlex
 import tomllib
 import xml.etree.ElementTree as ET
 
@@ -20,12 +19,16 @@ if __package__:
         dotnet_imported_package_reference_blockers,
         dotnet_lock_content_blockers,
         dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_tokens_are_locked,
     )
 else:
     from dotnet_lock import (
         dotnet_imported_package_reference_blockers,
         dotnet_lock_content_blockers,
         dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_tokens_are_locked,
     )
 
 
@@ -230,10 +233,10 @@ def _dotnet_dependency_lock_blockers(
         blockers.append("DOTNET_LOCKED_RESTORE_COMMAND_MISSING")
         return blockers
 
-    restore_tokens: list[list[str]] = []
+    restore_tokens: list[tuple[str, ...]] = []
     for index, command in enumerate(restore_commands, start=1):
         try:
-            tokens = shlex.split(command)
+            tokens = dotnet_restore_command_tokens(command)
         except ValueError:
             blockers.append(
                 "DOTNET_RESTORE_COMMAND_INVALID:"
@@ -241,10 +244,7 @@ def _dotnet_dependency_lock_blockers(
             )
             continue
         restore_tokens.append(tokens)
-        if (
-            "--locked-mode" not in tokens
-            and "RestoreLockedMode=true" not in command
-        ):
+        if not dotnet_restore_tokens_are_locked(tokens):
             blockers.append(
                 "DOTNET_RESTORE_NOT_LOCKED:"
                 f".github/workflows/dotnet-foundation.yml:{index}"

@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    _canonical_journal_authority_snapshot,
+    submission_attempt_aggregate_id,
+)
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
@@ -171,6 +174,14 @@ class RecoveryController:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    def _canonical_owner_store(self) -> JournalStore | None:
+        """Return only the exact unshadowed JournalStore selected for recovery."""
+
+        if self._owner_store is None:
+            return None
+        _canonical_journal_authority_snapshot(self._owner_store)
+        return self._owner_store
+
     @property
     def owner_scope(self) -> str:
         """Canonical durable owner scope used by this recovery controller."""
@@ -181,7 +192,8 @@ class RecoveryController:
     def durable_owner_store_path(self) -> Path | None:
         """Return the exact journal path backing sender fencing, if durable."""
 
-        return None if self._owner_store is None else self._owner_store.path
+        store = self._canonical_owner_store()
+        return None if store is None else store.path
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.
@@ -190,9 +202,11 @@ class RecoveryController:
         changes sender ownership.
         """
 
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             return ()
-        events = self._owner_store.load_events(
+        events = JournalStore.load_events(
+            store,
             self._OWNER_AGGREGATE_TYPE,
             self._owner_scope,
         )
@@ -247,7 +261,8 @@ class RecoveryController:
         *,
         expected_journal_sequence: int | None = None,
     ) -> None:
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             return
         payload = {
             "owner_id": owner.owner_id,
@@ -260,7 +275,8 @@ class RecoveryController:
                 f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        self._owner_store.append_event(
+        JournalStore.append_event(
+            store,
             {
                 "event_id": event_id,
                 "event_type": self._OWNER_EVENT_TYPE,
@@ -497,7 +513,8 @@ class RecoveryController:
         explicit opaque blocker instead of being silently forgotten.
         """
 
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             raise PermissionError(
                 "Durable submission recovery requires a journal-backed controller"
             )
@@ -505,8 +522,9 @@ class RecoveryController:
             environment,
             account_id,
         )
-        events = self._owner_store.load_events_by_aggregate_type(
-            "submission_attempt"
+        events = JournalStore.load_events_by_aggregate_type(
+            store,
+            "submission_attempt",
         )
         grouped: dict[str, list[dict[str, object]]] = {}
         for event in events:
@@ -634,7 +652,8 @@ class RecoveryController:
 
         if self.owner is None:
             raise RuntimeError("No active owner")
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             raise PermissionError(
                 "Journal-issued reconciliation requires a durable owner store"
             )
@@ -645,7 +664,7 @@ class RecoveryController:
             )
 
         checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
+            store,
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
             account_id=account_id,

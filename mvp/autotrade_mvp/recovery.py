@@ -381,6 +381,10 @@ class RecoveryController:
                 "SubmissionSending",
                 "SubmissionUnknown",
             ),
+            # A provider wrapper may swallow/mask a final-guard rejection.
+            # The dispatcher records Blocked first, then upgrades the outcome
+            # to UNKNOWN because an outbound side effect can no longer be
+            # disproved.  Recovery must preserve that legitimate ambiguity.
             (
                 "SubmissionPrepared",
                 "SubmissionBlocked",
@@ -449,6 +453,10 @@ class RecoveryController:
                 raise RuntimeError(
                     "Submission journal client order identity changed within one attempt"
                 )
+
+            # Sending is the outbound barrier and must repeat the exact durable
+            # sender identity. Other event kinds may omit owner fields, but if
+            # they carry them they may not contradict Prepared.
             if event.get("event_type") == "SubmissionSending":
                 if event_payload.get("owner_epoch") != prepared_epoch:
                     raise RuntimeError(
@@ -772,6 +780,9 @@ class RecoveryController:
                     }:
                         terminally_resolved_recovered.add(normalized_attempt)
 
+        # Validate the complete durable proof before mutating recovery state.
+        # A malformed checkpoint must fail closed without leaving this controller
+        # READY from a partially accepted proof.
         event_id = checkpoint.get("event_id")
         payload_hash = checkpoint.get("payload_hash")
         journal_sequence = checkpoint.get("journal_sequence")
@@ -843,6 +854,10 @@ class RecoveryController:
                     "reconciliation uncertainty identities must be non-empty strings"
                 )
             reported_unresolved.add(item.strip())
+        # Generic reconciliation uncertainty is snapshot-scoped and may clear
+        # on a later clean snapshot.  A previously recorded SENT_UNKNOWN
+        # attempt is different: its identity remains sticky until
+        # resolve_attempt() proves an evidence-bound terminal phase.
         self.unresolved_attempts = self._unresolved_send_attempts | reported_unresolved
         self.provider_reconciled = bool(consistent and not self.unresolved_attempts)
         if self.provider_reconciled:
@@ -872,6 +887,9 @@ class RecoveryController:
         if trusted:
             self.reason_codes.discard("clock_untrusted")
         else:
+            # A clock incident invalidates time-bound reconciliation/freshness
+            # evidence. Restoring clock health alone cannot reuse pre-incident
+            # readiness evidence.
             self.provider_reconciled = False
             self.reason_codes.add("clock_untrusted")
             self.reason_codes.add("clock_requalification_required")

@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.durable_reservations import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
+    POST_BUST_HOLD_STATE,
     ReservationBook,
     ReservationConflict,
     ReservationSnapshot,
@@ -276,6 +277,83 @@ class ReservationFoundationTests(unittest.TestCase):
             book.restore_consumption("r1", {"CASH:USD": "1"})
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
 
+    def test_terminal_filled_bust_reconstitutes_full_worst_case_hold(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r-terminal-bust",
+            intent_id="i-terminal-bust",
+            requirements={"CASH:USD": "120", "FEE:USD": "5"},
+            available={"CASH:USD": "1000", "FEE:USD": "100"},
+        )
+        book.consume(
+            "r-terminal-bust",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+        )
+        terminal = book.mark_terminal(
+            "r-terminal-bust",
+            outcome="FILLED",
+            resolution_evidence="provider-filled-before-late-bust",
+        )
+        self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(terminal.remaining["FEE:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+        restored = book.restore_consumption(
+            "r-terminal-bust",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+        )
+        self.assertEqual(restored.state, POST_BUST_HOLD_STATE)
+        self.assertIsNone(restored.resolution_evidence)
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("0"))
+        self.assertEqual(restored.consumed["FEE:USD"], Decimal("0"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("120"))
+        self.assertEqual(restored.remaining["FEE:USD"], Decimal("5"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("120"))
+        self.assertEqual(book.total_reserved("FEE:USD"), Decimal("5"))
+        self.assertEqual(book.active(), (restored,))
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "requires canonical reconciliation before UNKNOWN",
+        ):
+            book.mark_unknown("r-terminal-bust")
+        self.assertEqual(book.get("r-terminal-bust"), restored)
+
+    def test_terminal_filled_partial_bust_holds_original_minus_still_consumed(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r-terminal-partial",
+            intent_id="i-terminal-partial",
+            requirements={"CASH:USD": "120"},
+            available={"CASH:USD": "1000"},
+        )
+        book.consume("r-terminal-partial", {"CASH:USD": "100"})
+        book.mark_terminal(
+            "r-terminal-partial",
+            outcome="FILLED",
+            resolution_evidence="provider-filled-before-partial-bust",
+        )
+
+        restored = book.restore_consumption(
+            "r-terminal-partial",
+            {"CASH:USD": "40"},
+        )
+        self.assertEqual(restored.state, POST_BUST_HOLD_STATE)
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("60"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+
+        # A later evidence-derived refill may consume the post-bust hold without
+        # converting it into ordinary WORKING/UNKNOWN authority.
+        refilled = book.consume(
+            "r-terminal-partial",
+            {"CASH:USD": "20"},
+        )
+        self.assertEqual(refilled.state, POST_BUST_HOLD_STATE)
+        self.assertEqual(refilled.consumed["CASH:USD"], Decimal("80"))
+        self.assertEqual(refilled.remaining["CASH:USD"], Decimal("40"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("40"))
+
     def test_partial_fill_reduces_reservation_and_cancel_releases_remainder(self):
         book = ReservationBook()
         book.reserve(
@@ -467,7 +545,6 @@ class ReservationFoundationTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
 
-
     def test_filled_terminal_releases_only_unused_worst_case_remainder(self):
         book = ReservationBook()
         book.reserve(
@@ -505,7 +582,6 @@ class ReservationFoundationTests(unittest.TestCase):
                         resolution_evidence="provider-history",
                     )
                 self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
-
 
 
 if __name__ == "__main__":

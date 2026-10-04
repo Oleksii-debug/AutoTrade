@@ -231,6 +231,17 @@ def cookie_principal(headers, origin):
     return HostPrincipal('local-owner', token, public_session_reference(token))
 
 
+def _owned_desktop_session_sink(*, origin, actor, token):
+    """Acknowledge direct parent pairing without persisting its short-lived bearer.
+
+    The owned WPF parent is the pairing HTTP client and receives the exact token in
+    that response. Persisting the same bearer in Credential Manager would widen
+    the secret lifetime/surface without adding a recovery path: if the parent
+    loses the response it terminates this child and a later launch pairs anew.
+    """
+    del origin, actor, token
+
+
 def build_product(data_dir, *, port=0, desktop_session_sink=None):
     if port == 0:
         import socket
@@ -372,7 +383,11 @@ def main(argv=None):
         start_parent_watchdog(args.parent_pid)
     if args.restore_backup:
         restore_product_backup(args.restore_backup, args.data_dir)
-    runtime, launch_url = build_product(args.data_dir, port=args.port)
+    runtime, launch_url = build_product(
+        args.data_dir,
+        port=args.port,
+        desktop_session_sink=_owned_desktop_session_sink if args.desktop_child else None,
+    )
     def stop(*_):
         Thread(target=runtime.close, daemon=True).start()
     signal.signal(signal.SIGINT, stop)

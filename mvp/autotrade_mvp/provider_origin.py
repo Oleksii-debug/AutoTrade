@@ -70,6 +70,9 @@ _PROVIDER_ORIGIN_KIND = "PROVIDER_ORIGIN"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _PROVIDER_ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
+_EXECUTION_RECEIPT_REF_RE = re.compile(
+    r"^provider-read-execution:sha256:[0-9a-f]{64}$"
+)
 _TEST_INJECTED_REF_RE = re.compile(
     r"^test-injected-provider-response:sha256:[0-9a-f]{64}$"
 )
@@ -112,6 +115,8 @@ _RETAINED_PAYLOAD_KEYS = frozenset(
         "response_sha256",
         "response_artifact_id",
         "observed_at",
+        "transport_execution_receipt_ref",
+        "terminal_authority_journal_sequence_cut",
     }
 )
 _OBSERVED_PAYLOAD_KEYS = frozenset(set(_RETAINED_PAYLOAD_KEYS) | {"retained_event_id"})
@@ -314,6 +319,42 @@ def _require_event(
     return payload
 
 
+
+def _execution_receipt_ref(
+    *,
+    attempt_id: str,
+    qualified_query_digest: str,
+    qualification_id: str,
+    qualified_route_rule_digest: str,
+    transport_identity: str,
+    network_policy_identity: str,
+    http_status: int,
+    response_sha256: str,
+    observed_at: str,
+    terminal_authority_journal_sequence_cut: int,
+) -> str:
+    material = {
+        "attempt_id": attempt_id,
+        "qualified_query_digest": qualified_query_digest,
+        "qualification_id": qualification_id,
+        "qualified_route_rule_digest": qualified_route_rule_digest,
+        "transport_identity": transport_identity,
+        "network_policy_identity": network_policy_identity,
+        "http_status": http_status,
+        "response_sha256": response_sha256,
+        "observed_at": observed_at,
+        "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
+    }
+    return "provider-read-execution:sha256:" + sha256(
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
 def _origin_ref(
     *,
     origin_kind: str,
@@ -325,6 +366,8 @@ def _origin_ref(
     response_artifact_id: str,
     observed_at: str,
     journal_sequence: int,
+    transport_execution_receipt_ref: str | None,
+    terminal_authority_journal_sequence_cut: int | None,
 ) -> str:
     material = {
         "attempt_id": attempt_id,
@@ -335,6 +378,9 @@ def _origin_ref(
         "response_artifact_id": response_artifact_id,
         "observed_at": observed_at,
         "journal_sequence": journal_sequence,
+        "origin_kind": origin_kind,
+        "transport_execution_receipt_ref": transport_execution_receipt_ref,
+        "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
     }
     if origin_kind == _PROVIDER_ORIGIN_KIND:
         prefix = "provider-origin:sha256:"
@@ -373,6 +419,8 @@ class AuthenticatedReadResponseBinding:
     parser_identity: str
     transport_identity: str
     network_policy_identity: str
+    transport_execution_receipt_ref: str | None
+    terminal_authority_journal_sequence_cut: int | None
     http_status: int
     observed_at: str
     response_sha256: str
@@ -433,6 +481,26 @@ class AuthenticatedReadResponseBinding:
         )
         if expected_ref_re.fullmatch(self.origin_ref) is None:
             raise ProviderOriginError("origin_ref does not match response origin classification")
+        if self.origin_kind == _PROVIDER_ORIGIN_KIND:
+            if (
+                type(self.transport_execution_receipt_ref) is not str
+                or _EXECUTION_RECEIPT_REF_RE.fullmatch(
+                    self.transport_execution_receipt_ref
+                )
+                is None
+                or type(self.terminal_authority_journal_sequence_cut) is not int
+                or self.terminal_authority_journal_sequence_cut < 1
+            ):
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN binding lacks canonical transport execution receipt"
+                )
+        elif (
+            self.transport_execution_receipt_ref is not None
+            or self.terminal_authority_journal_sequence_cut is not None
+        ):
+            raise ProviderOriginError(
+                "TEST_INJECTED binding cannot carry provider execution receipt"
+            )
         if type(self.http_status) is not int or not 200 <= self.http_status <= 299:
             raise ProviderOriginError("provider-origin HTTP status must be exact 2xx")
         if type(self.response_bytes) is not bytes or not self.response_bytes:

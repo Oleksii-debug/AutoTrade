@@ -881,7 +881,8 @@ def execute_bybit_credential_probe_wire_query(
         raise ProviderCoreError(
             "Bybit credential probe timeout must be exact integer 1..120"
         )
-    client = wire_client if wire_client is not None else BybitCredentialProbeUrllibClient()
+    direct_provider_transport = wire_client is None
+    client = BybitCredentialProbeUrllibClient() if direct_provider_transport else wire_client
     if not hasattr(client, "send"):
         raise TypeError("wire_client must implement send")
     request = BybitCredentialProbeHttpRequest(
@@ -903,6 +904,10 @@ def execute_bybit_credential_probe_wire_query(
         decoded,
         expected_api_key=headers["X-BAPI-API-KEY"],
     )
+    if api_key_echo_confirmed and not direct_provider_transport:
+        raise ProviderCoreError(
+            "successful Bybit credential probe requires direct production transport"
+        )
     return BybitCredentialProbeWireResponse(
         http_status=raw_response.http_status,
         response=decoded,

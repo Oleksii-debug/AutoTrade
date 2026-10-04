@@ -128,9 +128,9 @@ class StrategyEconomicsAuthorityAssessment:
             raise StrategyEconomicsAuthorityError(
                 "strategy economics assessment must be issued canonically"
             )
-        if self.status not in {"INCONCLUSIVE", "QUALIFIED"}:
+        if self.status != "INCONCLUSIVE":
             raise StrategyEconomicsAuthorityError(
-                "strategy economics assessment status is invalid"
+                "positive strategy economics issuance is unavailable on current main"
             )
         for name in (
             "binding_fingerprint",
@@ -154,10 +154,6 @@ class StrategyEconomicsAuthorityAssessment:
         if set(verified) & set(unresolved):
             raise StrategyEconomicsAuthorityError(
                 "an economics owner cannot be both verified and unresolved"
-            )
-        if self.status == "QUALIFIED" and unresolved:
-            raise StrategyEconomicsAuthorityError(
-                "QUALIFIED strategy economics cannot retain unresolved owners"
             )
         object.__setattr__(self, "verified_owners", verified)
         object.__setattr__(self, "unresolved_owners", unresolved)

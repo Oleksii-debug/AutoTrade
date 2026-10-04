@@ -28,6 +28,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 
+from .durable_capabilities import DurableCapabilityRegistry
+from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .persistence import JournalStore, payload_digest
 from .provider_route_reads import (
     ProviderRouteReadError,
@@ -1409,6 +1411,21 @@ def execute_direct_provider_origin_read(
             "query_binding must be exact QualifiedProviderReadQueryBinding"
         )
     _require_qualified_provider_read_binding_authority(query_binding)
+    if type(capability_registry) is not DurableCapabilityRegistry:
+        raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
+    if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    authority_store = capability_registry.store
+    if qualification_registry.store is not authority_store:
+        raise ProviderOriginError(
+            "provider-origin C/Q authorities must share one JournalStore instance"
+        )
+    if origin._require_store() is not authority_store:
+        raise ProviderOriginError(
+            "provider-origin authority must share exact C/Q JournalStore instance"
+        )
     if type(transport) not in {
         BinanceSpotAuthenticatedReadTransport,
         BybitV5AuthenticatedReadTransport,

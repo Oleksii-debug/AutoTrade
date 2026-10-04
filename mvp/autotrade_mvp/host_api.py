@@ -259,8 +259,7 @@ class HostCommandStore:
                 reason_codes=("command_id_conflict",),
             )
 
-        expected = int(expected_raw)
-        if expected != self.state_version:
+        if expected_raw != str(self.state_version):
             result = CommandResult(
                 command_id=command_id,
                 status="CONFLICT",
@@ -384,9 +383,15 @@ class HostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
+        current = self.cursor
         if isinstance(after, str):
             if not is_valid_common_scalar("Sequence", after):
                 raise ValueError("Cursor must be a canonical Sequence")
+            current_text = str(current)
+            if len(after) > len(current_text) or (
+                len(after) == len(current_text) and after > current_text
+            ):
+                raise ValueError("Cursor is ahead of host state")
             cursor = int(after)
         elif type(after) is int:
             cursor = after
@@ -394,7 +399,7 @@ class HostCommandStore:
             raise ValueError("Cursor must be a canonical Sequence")
         if cursor < 0:
             raise ValueError("Cursor must be non-negative")
-        if cursor > self.cursor:
+        if cursor > current:
             raise ValueError("Cursor is ahead of host state")
         if self._events:
             oldest = self._events[0].cursor

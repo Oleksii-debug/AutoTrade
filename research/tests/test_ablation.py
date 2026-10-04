@@ -1709,8 +1709,15 @@ class AblationTests(unittest.TestCase):
 
             for field, forged_value in (
                 ("scientific_registry", attacker_science),
+                ("experience_memory", ExperienceMemory(root / "attacker-memory.sqlite3")),
+                ("artifact_store", ArtifactStore(root / "attacker-artifacts")),
                 ("protocol_id", attacker_registration.protocol_id),
                 ("protocol_hash", attacker_registration.protocol_hash),
+                ("source_revision", "8" * 40),
+                ("causal_cutoff", evaluation_cutoff - timedelta(minutes=1)),
+                ("granted_permissions", {"ATTACKER"}),
+                ("task", "attacker-task"),
+                ("instrument_family", "CRYPTO"),
             ):
                 tampered_authority = AblationQualificationAuthority(
                     scientific_registry=science,
@@ -1744,6 +1751,32 @@ class AblationTests(unittest.TestCase):
                 )
                 self.assertEqual(tampered.required_lower_bound, Decimal("0"), field)
                 self.assertEqual(tampered.uncertainty_multiplier, Decimal("0"), field)
+
+            in_place_tamper = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            in_place_tamper.granted_permissions.add("ATTACKER")
+            in_place_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=in_place_tamper,
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(
+                in_place_result.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
 
             self.assertFalse(
                 hasattr(

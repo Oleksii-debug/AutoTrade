@@ -1174,5 +1174,77 @@ class AccessibleStatusTests(unittest.TestCase):
             self.assertNotIn("{", text)
 
 
+    def test_autonomous_episode_progress_and_block_reason_preserve_accessible_main_semantics(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "0",
+                "fills": {},
+                "active_reservations": [],
+                "completed_episodes": 3,
+                "total_episodes": 5,
+                "mode": "provider-free",
+                "session_status": "BLOCKED",
+                "reason": "operator hold",
+            }
+        )
+        self.assertIn("Autonomous episodes: 3 of 5", text)
+        self.assertIn("Model mode: provider-free", text)
+        self.assertIn("Blocked reason: operator hold", text)
+
+    def test_autonomous_progress_and_block_reason_reject_hostile_scalars_without_execution(self):
+        class Hostile:
+            def __str__(self):
+                raise AssertionError("accessible status must not execute hostile __str__")
+
+            def __format__(self, _spec):
+                raise AssertionError("accessible status must not execute hostile __format__")
+
+            def __eq__(self, _other):
+                raise AssertionError("accessible status must not execute hostile __eq__")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "0",
+                "fills": {},
+                "active_reservations": [],
+                "completed_episodes": Hostile(),
+                "total_episodes": Hostile(),
+                "mode": Hostile(),
+                "session_status": "BLOCKED",
+                "reason": Hostile(),
+            }
+        )
+        self.assertIn("Autonomous episodes: Unavailable of Unavailable", text)
+        self.assertIn("Model mode: Unavailable", text)
+        self.assertIn("Blocked reason: Unavailable", text)
+
+    def test_autonomous_progress_rejects_impossible_counts(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "completed_episodes": 6,
+                "total_episodes": 5,
+                "mode": "provider-free",
+            }
+        )
+        self.assertIn("Autonomous episodes: Unavailable of Unavailable", text)
+        self.assertIn("Model mode: provider-free", text)
+
+
 if __name__ == "__main__":
     unittest.main()

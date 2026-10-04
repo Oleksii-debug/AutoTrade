@@ -341,6 +341,39 @@ def format_accessible_status(
         ]
     )
 
+    if "completed_episodes" in status:
+        completed_episodes = status.get("completed_episodes")
+        total_episodes = status.get("total_episodes")
+        completed_text = (
+            str(completed_episodes)
+            if type(completed_episodes) is int and completed_episodes >= 0
+            else "Unavailable"
+        )
+        total_text = (
+            str(total_episodes)
+            if type(total_episodes) is int and total_episodes >= 0
+            else "Unavailable"
+        )
+        if (
+            type(completed_episodes) is int
+            and type(total_episodes) is int
+            and (completed_episodes < 0 or total_episodes < 0 or completed_episodes > total_episodes)
+        ):
+            completed_text = "Unavailable"
+            total_text = "Unavailable"
+        mode = status.get("mode")
+        mode_text = (
+            mode.strip()
+            if type(mode) is str and mode.strip()
+            else "Unavailable"
+        )
+        lines.extend(
+            [
+                f"Autonomous episodes: {completed_text} of {total_text}",
+                f"Model mode: {mode_text}",
+            ]
+        )
+
     if state == "needs_recovery":
         lines.append("Action required: recovery or reconciliation is needed before trusting current state")
 
@@ -353,6 +386,8 @@ def format_accessible_status(
             f"Journal sequence: {_canonical_sequence_value(status, 'journal_sequence')}",
             "Order submission during this read: none",
         ])
+        if _safe_text(status.get("session_status"), "") == "BLOCKED":
+            lines.append(f"Blocked reason: {_value(status, 'reason')}")
         reservations = status.get("active_reservations", [])
         if type(reservations) not in {list, tuple}:
             lines.append("Active reservations: unavailable; malformed state")

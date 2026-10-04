@@ -545,6 +545,9 @@ class MarketNormalizer:
         self._provider_book_cursor: dict[
             tuple[str, str, str, str], int
         ] = {}
+        self._provider_book_baseline_cursor: dict[
+            tuple[str, str, str, str], int
+        ] = {}
         self._book_event_keys: dict[
             str, tuple[str, str, str, str]
         ] = {}
@@ -553,6 +556,9 @@ class MarketNormalizer:
             tuple[str, str, str, str], deque[str]
         ] = {}
         self._active_book_generation: dict[
+            tuple[str, str, str, str], int
+        ] = {}
+        self._generic_book_generation: dict[
             tuple[str, str, str, str], int
         ] = {}
         self._invalidated_provider_book_generations: set[
@@ -974,6 +980,7 @@ class MarketNormalizer:
         self._book_last_available_at.pop(key, None)
         self._book_levels.pop(key, None)
         self._provider_book_cursor.pop(key, None)
+        self._provider_book_baseline_cursor.pop(key, None)
 
     def provider_book_generation(
         self,
@@ -1010,6 +1017,7 @@ class MarketNormalizer:
         self._book_last_available_at.pop(key, None)
         self._book_levels.pop(key, None)
         self._provider_book_cursor.pop(key, None)
+        self._provider_book_baseline_cursor.pop(key, None)
         self._clear_retained_book_events(key)
 
     def provider_book_cursor(
@@ -1076,6 +1084,10 @@ class MarketNormalizer:
             raise MarketDataError("provider book baseline requires BOOK_SNAPSHOT")
         if "BOOK_PROVIDER_CONTINUITY_PENDING" not in event.quality_flags:
             raise MarketDataError("snapshot is not pending provider continuity")
+        if "BOOK_RANGE_CONTINUITY_UNVERIFIED" in event.quality_flags:
+            raise MarketDataError(
+                "snapshot provider continuity is not qualified"
+            )
         if any(
             flag in event.quality_flags
             for flag in (
@@ -1099,6 +1111,7 @@ class MarketNormalizer:
             raise MarketDataError("provider snapshot baseline is crossed")
         self._book_levels[key] = materialized
         self._provider_book_cursor[key] = cursor
+        self._provider_book_baseline_cursor[key] = cursor
         self._book_state[key] = "BOOTSTRAPPING"
         # Snapshot availability is a causal prerequisite for every buffered
         # delta replay. Preserve it as a non-executable lower bound so the
@@ -1300,6 +1313,25 @@ class MarketNormalizer:
         cursor = admission.prior_sequence
 
         if admission.disposition == "DISCARD":
+            if "CORRECTION" in event.quality_flags:
+                baseline_cursor = self._provider_book_baseline_cursor.get(key)
+                if (
+                    baseline_cursor is None
+                    or admission.last_sequence > baseline_cursor
+                ):
+                    # A correction to any range covered after the accepted
+                    # snapshot can change levels already materialized into the
+                    # current book.  Sequence policy may classify that old range
+                    # as DISCARD relative to the current cursor, but correction
+                    # semantics take precedence: rebuild from a fresh snapshot.
+                    self._book_state[key] = "GAPPED"
+                    self._book_last_available_at.pop(key, None)
+                    self._book_levels.pop(key, None)
+                    self._provider_book_cursor.pop(key, None)
+                    self._provider_book_baseline_cursor.pop(key, None)
+                    raise MarketDataError(
+                        "historical provider range correction requires book rebuild"
+                    )
             return admission
         if (
             "DUPLICATE" in event.quality_flags
@@ -1315,6 +1347,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             return admission
 
         if admission.next_sequence != admission.last_sequence:
@@ -1336,6 +1369,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range event is not eligible for executable application"
             )
@@ -1351,6 +1385,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range delta exceeds the configured book-depth resource envelope"
             )
@@ -1359,6 +1394,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range delta would create a crossed book"
             )
@@ -1641,6 +1677,37 @@ class MarketNormalizer:
                 raise MarketDataError(
                     "provider book event belongs to a superseded stream generation"
                 )
+        elif book_kind:
+            generic_generation = self._generic_book_generation.get(stream_key)
+            if generic_generation is not None and update.stream_generation is None:
+                raise MarketDataError(
+                    "book stream requires the active stream generation"
+                )
+            if update.stream_generation is not None:
+                if (
+                    generic_generation is not None
+                    and update.stream_generation < generic_generation
+                ):
+                    raise MarketDataError(
+                        "book event belongs to a superseded stream generation"
+                    )
+                if (
+                    generic_generation is None
+                    or update.stream_generation > generic_generation
+                ):
+                    # A generation boundary invalidates the previous materialized
+                    # book before any event from the new subscription can use it.
+                    # The new generation must establish its own snapshot baseline;
+                    # a first delta therefore remains non-executable.
+                    self._generic_book_generation[
+                        stream_key
+                    ] = update.stream_generation
+                    self._book_state[stream_key] = "UNINITIALIZED"
+                    self._book_last_available_at.pop(stream_key, None)
+                    self._book_levels.pop(stream_key, None)
+                    self._provider_book_cursor.pop(stream_key, None)
+                    self._provider_book_baseline_cursor.pop(stream_key, None)
+                    self._clear_retained_book_events(stream_key)
         try:
             normalized_payload = self._normalize_payload(
                 instrument,
@@ -1663,6 +1730,7 @@ class MarketNormalizer:
                 self._book_last_available_at.pop(stream_key, None)
                 self._book_levels.pop(stream_key, None)
                 self._provider_book_cursor.pop(stream_key, None)
+                self._provider_book_baseline_cursor.pop(stream_key, None)
             raise
         provider_continuity_fields = {
             "first_sequence",

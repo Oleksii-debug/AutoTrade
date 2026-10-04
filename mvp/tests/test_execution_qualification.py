@@ -233,6 +233,69 @@ class ExecutionQualificationTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertGreater(result.fill_price, Decimal("101"))
 
+    def test_qualified_order_lot_size_cannot_undercut_instrument_quantity_step(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_quantity_step",
+        ):
+            simulate_qualified_execution(
+                order=order(lot_size="0.1"),
+                observation=observation(),
+                model=exec_model,
+                qualification=qualification(exec_model),
+                instrument=instrument(),
+                asset_class="CASH_EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+                purpose="REPLAY",
+            )
+
+    def test_qualified_limit_price_must_match_instrument_price_tick(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_limit_price_rules",
+        ):
+            simulate_qualified_execution(
+                order=order(
+                    order_type="LIMIT",
+                    limit_price="101.005",
+                ),
+                observation=observation(),
+                model=exec_model,
+                qualification=qualification(exec_model),
+                instrument=instrument(),
+                asset_class="CASH_EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+                purpose="REPLAY",
+            )
+
+    def test_qualified_liquidity_price_must_match_instrument_price_tick(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_ask_rules",
+        ):
+            simulate_qualified_execution(
+                order=order(
+                    order_type="LIMIT",
+                    limit_price="102",
+                ),
+                observation=observation(ask="101.005"),
+                model=exec_model,
+                qualification=qualification(exec_model),
+                instrument=instrument(),
+                asset_class="CASH_EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+                purpose="REPLAY",
+            )
+
     def test_cost_assumption_change_invalidates_qualification(self):
         qualified = model(slippage_bps="5")
         changed = model(slippage_bps="6")

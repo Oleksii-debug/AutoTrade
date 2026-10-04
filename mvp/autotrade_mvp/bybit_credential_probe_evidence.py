@@ -17,10 +17,12 @@ import hmac
 import json
 import math
 import re
+from threading import RLock
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from weakref import ref as weakref_ref
 
 from .bybit_credential_nonacceptance import (
     BybitCredentialNonAcceptance,
@@ -87,6 +89,67 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PROVIDER_ECHO_ATTESTATION = object()
+
+
+class _CredentialProbeReceiptState(NamedTuple):
+    handle_id: str
+    account_id: str
+    credential_provider: str
+    credential_environment: str
+    credential_provider_environment: str
+    credential_purpose: str
+    credential_generation: int
+    provider_environment: str
+    source_uri: str
+    response_surface: str
+    product_family: str
+    request_timestamp_ms: int
+    recv_window_ms: int
+    http_status: int
+    ret_code: int
+    response_sha256: str
+    observed_at: str
+    api_key_echo_confirmed: bool
+    classification: str
+
+
+def _build_receipt_state_registry():
+    records: dict[int, tuple[object, _CredentialProbeReceiptState]] = {}
+    lock = RLock()
+
+    def discard(identity: int, dead_ref: object) -> None:
+        with lock:
+            current = records.get(identity)
+            if current is not None and current[0] is dead_ref:
+                records.pop(identity, None)
+
+    def register(evidence: object, state: _CredentialProbeReceiptState) -> None:
+        identity = id(evidence)
+        evidence_ref = weakref_ref(
+            evidence,
+            lambda dead_ref, identity=identity: discard(identity, dead_ref),
+        )
+        with lock:
+            current = records.get(identity)
+            if current is not None and current[0]() is not None:
+                raise ProviderCoreError(
+                    "Bybit credential probe receipt identity collision"
+                )
+            records[identity] = (evidence_ref, state)
+
+    def require(evidence: object) -> _CredentialProbeReceiptState:
+        with lock:
+            current = records.get(id(evidence))
+            if current is None or current[0]() is not evidence:
+                raise ProviderCoreError(
+                    "Bybit credential probe receipt issuance snapshot unavailable"
+                )
+            return current[1]
+
+    return register, require
+
+
+_register_receipt_state, _require_receipt_state = _build_receipt_state_registry()
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -452,7 +515,7 @@ class BybitCredentialProbeWireResponse:
 BybitCredentialProbeWireQuery = Callable[..., BybitCredentialProbeWireResponse]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BybitCredentialProbeEvidence:
     credential_handle: PersistentCredentialHandle
     provider_environment: str
@@ -564,6 +627,7 @@ class BybitCredentialProbeEvidence:
         object.__setattr__(self, "recv_window_ms", recv_window_ms)
         object.__setattr__(self, "observed_at", observed_at)
         object.__setattr__(self, "classification", classification)
+        _register_receipt_state(self, _credential_probe_receipt_state(self))
 
     @property
     def send_authority(self) -> bool:
@@ -578,33 +642,109 @@ class BybitCredentialProbeEvidence:
         return False
 
 
+def _credential_probe_receipt_state(
+    evidence: BybitCredentialProbeEvidence,
+) -> _CredentialProbeReceiptState:
+    handle = evidence.credential_handle
+    if type(handle) is not PersistentCredentialHandle:
+        raise ProviderCoreError(
+            "Bybit credential probe receipt subject mutated after issuance"
+        )
+    text_values = (
+        handle.handle_id,
+        handle.account_id,
+        handle.provider,
+        handle.environment,
+        handle.provider_environment,
+        handle.purpose,
+        evidence.provider_environment,
+        evidence.source_uri,
+        evidence.response_surface,
+        evidence.product_family,
+        evidence.response_sha256,
+        evidence.observed_at,
+    )
+    if any(type(value) is not str for value in text_values):
+        raise ProviderCoreError(
+            "Bybit credential probe receipt text state mutated after issuance"
+        )
+    if type(handle.generation) is not int:
+        raise ProviderCoreError(
+            "Bybit credential probe receipt generation mutated after issuance"
+        )
+    integer_values = (
+        evidence.request_timestamp_ms,
+        evidence.recv_window_ms,
+        evidence.http_status,
+        evidence.ret_code,
+    )
+    if any(type(value) is not int for value in integer_values):
+        raise ProviderCoreError(
+            "Bybit credential probe receipt integer state mutated after issuance"
+        )
+    if type(evidence.api_key_echo_confirmed) is not bool:
+        raise ProviderCoreError(
+            "Bybit credential probe receipt echo state mutated after issuance"
+        )
+    if type(evidence.classification) is not BybitCredentialNonAcceptance:
+        raise ProviderCoreError(
+            "Bybit credential probe receipt classification mutated after issuance"
+        )
+    return _CredentialProbeReceiptState(
+        handle_id=handle.handle_id,
+        account_id=handle.account_id,
+        credential_provider=handle.provider,
+        credential_environment=handle.environment,
+        credential_provider_environment=handle.provider_environment,
+        credential_purpose=handle.purpose,
+        credential_generation=handle.generation,
+        provider_environment=evidence.provider_environment,
+        source_uri=evidence.source_uri,
+        response_surface=evidence.response_surface,
+        product_family=evidence.product_family,
+        request_timestamp_ms=evidence.request_timestamp_ms,
+        recv_window_ms=evidence.recv_window_ms,
+        http_status=evidence.http_status,
+        ret_code=evidence.ret_code,
+        response_sha256=evidence.response_sha256,
+        observed_at=evidence.observed_at,
+        api_key_echo_confirmed=evidence.api_key_echo_confirmed,
+        classification=evidence.classification.value,
+    )
+
+
 def bybit_credential_probe_receipt_metadata(
     evidence: BybitCredentialProbeEvidence,
 ) -> dict[str, object]:
     if type(evidence) is not BybitCredentialProbeEvidence:
         raise TypeError("evidence must be exact BybitCredentialProbeEvidence")
-    handle = evidence.credential_handle
+    live_state = _credential_probe_receipt_state(evidence)
+    issued_state = _require_receipt_state(evidence)
+    if live_state != issued_state:
+        raise ProviderCoreError(
+            "Bybit credential probe evidence mutated after receipt issuance"
+        )
     return {
         "evidence_kind": "BYBIT_CREDENTIAL_PROBE",
         "provider": "BYBIT",
-        "provider_environment": evidence.provider_environment,
-        "credential_handle_id": handle.handle_id,
-        "account_id": handle.account_id,
-        "credential_environment": handle.environment,
-        "credential_provider_environment": handle.provider_environment,
-        "credential_purpose": handle.purpose,
-        "credential_generation": handle.generation,
-        "source_uri": evidence.source_uri,
-        "response_surface": evidence.response_surface,
-        "product_family": evidence.product_family,
-        "request_timestamp_ms": evidence.request_timestamp_ms,
-        "recv_window_ms": evidence.recv_window_ms,
-        "http_status": evidence.http_status,
-        "ret_code": evidence.ret_code,
-        "response_sha256": evidence.response_sha256,
-        "observed_at": evidence.observed_at,
-        "api_key_echo_confirmed": evidence.api_key_echo_confirmed,
-        "classification": evidence.classification.value,
+        "provider_environment": issued_state.provider_environment,
+        "credential_handle_id": issued_state.handle_id,
+        "account_id": issued_state.account_id,
+        "credential_environment": issued_state.credential_environment,
+        "credential_provider_environment": issued_state.credential_provider_environment,
+        "credential_purpose": issued_state.credential_purpose,
+        "credential_generation": issued_state.credential_generation,
+        "source_uri": issued_state.source_uri,
+        "response_surface": issued_state.response_surface,
+        "product_family": issued_state.product_family,
+        "request_timestamp_ms": issued_state.request_timestamp_ms,
+        "recv_window_ms": issued_state.recv_window_ms,
+        "http_status": issued_state.http_status,
+        "ret_code": issued_state.ret_code,
+        "response_sha256": issued_state.response_sha256,
+        "observed_at": issued_state.observed_at,
+        "api_key_echo_confirmed": issued_state.api_key_echo_confirmed,
+        "classification": issued_state.classification,
         "send_authority": False,
         "retirement_authority": False,
         "takeover_authority": False,

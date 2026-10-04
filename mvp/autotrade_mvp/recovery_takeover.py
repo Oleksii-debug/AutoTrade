@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from . import credential_transition_receipt as transition
@@ -39,10 +38,7 @@ from .credential_transition_receipt import (
 )
 from .persistence import JournalStore, payload_digest
 from .recovery import HostState, OwnerFence, RecoveryController
-from .sender_authority import (
-    SenderAuthorityLease,
-    takeover_authority_window,
-)
+from .sender_authority import SenderAuthorityLease, takeover_authority_window
 from .windows_secrets import (
     PersistentCredentialHandle,
     ProtectedCredentialVault,
@@ -60,6 +56,14 @@ _EVIDENCE = "RecoveryTakeoverEvidenceIssued"
 _COMPLETED = "RecoveryTakeoverOwnerCommitted"
 _EVENT_TYPES = (_STARTED, _EVIDENCE, _COMPLETED)
 _SEAL_PURPOSE = "AUTOTRADE_DURABLE_TAKEOVER_EVIDENCE_V1"
+_IDENTITY_FIELDS = (
+    "takeover_id",
+    "owner_scope",
+    "source_owner_id",
+    "source_owner_epoch",
+    "target_owner_id",
+    "target_owner_epoch",
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,12 @@ def _text(value: object, *, name: str) -> str:
     if type(value) is not str or not value.strip():
         raise DurableTakeoverError(f"{name} is required")
     return value.strip()
+
+
+def _positive_int(value: object, *, name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise DurableTakeoverError(f"{name} must be a positive integer")
+    return value
 
 
 def _takeover_id(
@@ -165,7 +175,37 @@ def _append_takeover_event(
     loaded = JournalStore.load_events(store, _TAKEOVER_AGGREGATE_TYPE, takeover_id)
     if len(loaded) != version:
         raise DurableTakeoverError("takeover journal version did not advance exactly once")
+    if loaded[-1].get("event_id") != event["event_id"]:
+        raise DurableTakeoverError("takeover journal appended a different event identity")
     return loaded[-1]
+
+
+def _validate_started_payload(
+    payload: dict[str, object],
+    *,
+    takeover_id: str,
+) -> tuple[OwnerFence, OwnerFence]:
+    owner_scope = _text(payload.get("owner_scope"), name="owner_scope")
+    source = OwnerFence(
+        owner_id=_text(payload.get("source_owner_id"), name="source_owner_id"),
+        epoch=_positive_int(payload.get("source_owner_epoch"), name="source_owner_epoch"),
+    )
+    target = OwnerFence(
+        owner_id=_text(payload.get("target_owner_id"), name="target_owner_id"),
+        epoch=_positive_int(payload.get("target_owner_epoch"), name="target_owner_epoch"),
+    )
+    if target.owner_id == source.owner_id:
+        raise DurableTakeoverError("takeover target owner must differ from source owner")
+    if target.epoch != source.epoch + 1:
+        raise DurableTakeoverError("takeover owner epoch transition is invalid")
+    expected_id = _takeover_id(
+        owner_scope=owner_scope,
+        source=source,
+        target=target,
+    )
+    if takeover_id != expected_id or payload.get("takeover_id") != expected_id:
+        raise DurableTakeoverError("takeover durable identity is not canonical")
+    return source, target
 
 
 def _validate_takeover_events(
@@ -173,24 +213,43 @@ def _validate_takeover_events(
     *,
     takeover_id: str,
 ) -> tuple[dict[str, object], ...]:
-    if len(events) > len(_EVENT_TYPES):
-        raise DurableTakeoverError("takeover journal has too many events")
+    if not events or len(events) > len(_EVENT_TYPES):
+        raise DurableTakeoverError("takeover journal cardinality is invalid")
     validated: list[dict[str, object]] = []
+    started_payload: dict[str, object] | None = None
     for index, event in enumerate(events, start=1):
         if type(event) is not dict:
             raise DurableTakeoverError("takeover journal event is invalid")
+        expected_type = _EVENT_TYPES[index - 1]
+        payload = event.get("payload")
         if (
             event.get("aggregate_type") != _TAKEOVER_AGGREGATE_TYPE
             or event.get("aggregate_id") != takeover_id
-            or event.get("event_type") != _EVENT_TYPES[index - 1]
+            or event.get("event_type") != expected_type
             or event.get("aggregate_version") != index
+            or type(payload) is not dict
+            or payload_digest(payload) != event.get("payload_hash")
         ):
             raise DurableTakeoverError("takeover journal sequence is invalid")
-        payload = event.get("payload")
-        if type(payload) is not dict or payload_digest(payload) != event.get("payload_hash"):
-            raise DurableTakeoverError("takeover journal payload integrity is invalid")
-        if payload.get("takeover_id") != takeover_id:
-            raise DurableTakeoverError("takeover journal identity is invalid")
+        expected_event_id = _event_id(
+            takeover_id=takeover_id,
+            version=index,
+            event_type=expected_type,
+            payload=payload,
+        )
+        if event.get("event_id") != expected_event_id:
+            raise DurableTakeoverError("takeover journal event identity is invalid")
+        if index == 1:
+            _validate_started_payload(payload, takeover_id=takeover_id)
+            started_payload = payload
+        else:
+            if started_payload is None:
+                raise DurableTakeoverError("takeover journal start is missing")
+            for field_name in _IDENTITY_FIELDS:
+                if payload.get(field_name) != started_payload.get(field_name):
+                    raise DurableTakeoverError(
+                        "takeover identity changed across durable transition"
+                    )
         validated.append(event)
     return tuple(validated)
 
@@ -218,8 +277,6 @@ def _pending_for_scope(
 ) -> tuple[str, tuple[dict[str, object], ...]] | None:
     pending: list[tuple[str, tuple[dict[str, object], ...]]] = []
     for aggregate_id, events in _takeover_groups(store).items():
-        if not events:
-            continue
         payload = events[0]["payload"]
         if payload.get("owner_scope") != owner_scope:
             continue
@@ -291,10 +348,7 @@ def _seal_entropy(vault: ProtectedCredentialVault, subject: dict[str, object]) -
     ).digest()
 
 
-def _seal_evidence(
-    vault: ProtectedCredentialVault,
-    subject: dict[str, object],
-) -> str:
+def _seal_evidence(vault: ProtectedCredentialVault, subject: dict[str, object]) -> str:
     message = ("takeover-evidence:" + payload_digest(subject)).encode("utf-8")
     try:
         sealed = vault._protector.protect(
@@ -375,18 +429,22 @@ def _require_reconciliation(
     account_id: str,
     environment: str,
 ) -> dict[str, object]:
+    # Reconstruct sticky SubmissionSending/SubmissionUnknown state first, then
+    # let the current owner-bound provider checkpoint prove terminal resolution.
+    # Reject only after that checkpoint has had a chance to discharge an old
+    # UNKNOWN with exact provider evidence.
     controller._recover_scoped_submission_uncertainty_from_owner_scope()
-    if controller.unresolved_attempts:
-        raise DurableTakeoverError(
-            "takeover is blocked by unresolved SubmissionSending/SubmissionUnknown"
-        )
     checkpoint = controller.record_reconciliation_checkpoint(
         reconciliation_id=reconciliation_id,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
     )
-    if not controller.provider_reconciled or controller.unresolved_attempts:
+    if controller.unresolved_attempts:
+        raise DurableTakeoverError(
+            "takeover is blocked by unresolved SubmissionSending/SubmissionUnknown"
+        )
+    if not controller.provider_reconciled:
         raise DurableTakeoverError("takeover requires current complete reconciliation")
     return checkpoint
 
@@ -394,6 +452,7 @@ def _require_reconciliation(
 def _validate_started_request(
     started: dict[str, object],
     *,
+    takeover_id: str,
     owner_scope: str,
     new_owner_id: str,
     handle: PersistentCredentialHandle,
@@ -401,16 +460,7 @@ def _validate_started_request(
     provider_id: str,
     lease: SenderAuthorityLease,
 ) -> tuple[OwnerFence, OwnerFence]:
-    source = OwnerFence(
-        owner_id=_text(started.get("source_owner_id"), name="source_owner_id"),
-        epoch=int(started.get("source_owner_epoch")),
-    )
-    target = OwnerFence(
-        owner_id=_text(started.get("target_owner_id"), name="target_owner_id"),
-        epoch=int(started.get("target_owner_epoch")),
-    )
-    if target.epoch != source.epoch + 1:
-        raise DurableTakeoverError("takeover owner epoch transition is invalid")
+    source, target = _validate_started_payload(started, takeover_id=takeover_id)
     expected = {
         "owner_scope": owner_scope,
         "target_owner_id": new_owner_id,
@@ -426,8 +476,41 @@ def _validate_started_request(
     }
     for key, value in expected.items():
         if started.get(key) != value:
-            raise DurableTakeoverError(f"pending takeover {key} does not match resume request")
+            raise DurableTakeoverError(
+                f"pending takeover {key} does not match resume request"
+            )
     return source, target
+
+
+def _expected_evidence_subject(
+    *,
+    takeover_id: str,
+    owner_scope: str,
+    source: OwnerFence,
+    target: OwnerFence,
+    started_event: dict[str, object],
+    started_payload: dict[str, object],
+    lease: SenderAuthorityLease,
+    receipt: CredentialTransitionReceipt,
+) -> dict[str, object]:
+    return {
+        "takeover_id": takeover_id,
+        "owner_scope": owner_scope,
+        "source_owner_id": source.owner_id,
+        "source_owner_epoch": source.epoch,
+        "target_owner_id": target.owner_id,
+        "target_owner_epoch": target.epoch,
+        "started_event_id": started_event["event_id"],
+        "journal_path": lease.journal_path,
+        "gate_path": lease.gate_path,
+        "reconciliation_event_id": started_payload["reconciliation_event_id"],
+        "credential_transition_receipt_id": receipt.receipt_id,
+        "credential_transition_sequence": receipt.transition_sequence,
+        "credential_transition_operation": receipt.operation,
+        "credential_prior_generation": receipt.prior_generation,
+        "credential_vault_authority_sha256": receipt.vault_authority_sha256,
+        "credential_record_state_sha256": receipt.record_state_sha256,
+    }
 
 
 def execute_durable_takeover(
@@ -498,7 +581,9 @@ def execute_durable_takeover(
                 raise DurableTakeoverError(
                     "takeover source credential generation is not current and active"
                 )
-            prior_receipt_id = None if prior_receipt is None else prior_receipt.receipt_id
+            prior_receipt_id = (
+                None if prior_receipt is None else prior_receipt.receipt_id
+            )
             takeover_id = _takeover_id(
                 owner_scope=owner_scope,
                 source=source,
@@ -538,6 +623,7 @@ def execute_durable_takeover(
             started_payload = events[0]["payload"]
             source, target = _validate_started_request(
                 started_payload,
+                takeover_id=takeover_id,
                 owner_scope=owner_scope,
                 new_owner_id=target_owner_id,
                 handle=handle,
@@ -569,7 +655,8 @@ def execute_durable_takeover(
                 environment=handle.environment,
             )
             if (
-                checkpoint["event_id"] != started_payload.get("reconciliation_event_id")
+                checkpoint["event_id"]
+                != started_payload.get("reconciliation_event_id")
                 or checkpoint["payload_hash"]
                 != started_payload.get("reconciliation_payload_hash")
                 or checkpoint["journal_sequence"]
@@ -604,24 +691,16 @@ def execute_durable_takeover(
                 receipt,
                 started=started_payload,
             )
-            evidence_subject: dict[str, object] = {
-                "takeover_id": takeover_id,
-                "owner_scope": owner_scope,
-                "source_owner_id": source.owner_id,
-                "source_owner_epoch": source.epoch,
-                "target_owner_id": target.owner_id,
-                "target_owner_epoch": target.epoch,
-                "started_event_id": events[0]["event_id"],
-                "journal_path": lease.journal_path,
-                "gate_path": lease.gate_path,
-                "reconciliation_event_id": started_payload["reconciliation_event_id"],
-                "credential_transition_receipt_id": receipt.receipt_id,
-                "credential_transition_sequence": receipt.transition_sequence,
-                "credential_transition_operation": receipt.operation,
-                "credential_prior_generation": receipt.prior_generation,
-                "credential_vault_authority_sha256": receipt.vault_authority_sha256,
-                "credential_record_state_sha256": receipt.record_state_sha256,
-            }
+            evidence_subject = _expected_evidence_subject(
+                takeover_id=takeover_id,
+                owner_scope=owner_scope,
+                source=source,
+                target=target,
+                started_event=events[0],
+                started_payload=started_payload,
+                lease=lease,
+                receipt=receipt,
+            )
             evidence_payload = dict(evidence_subject)
             evidence_payload["issuer_seal_b64"] = _seal_evidence(
                 vault,
@@ -650,9 +729,21 @@ def execute_durable_takeover(
                 current_receipt,
                 started=started_payload,
             )
-            if evidence_payload.get("credential_transition_receipt_id") != receipt.receipt_id:
+            expected_evidence = _expected_evidence_subject(
+                takeover_id=takeover_id,
+                owner_scope=owner_scope,
+                source=source,
+                target=target,
+                started_event=events[0],
+                started_payload=started_payload,
+                lease=lease,
+                receipt=receipt,
+            )
+            observed_evidence = dict(evidence_payload)
+            observed_evidence.pop("issuer_seal_b64", None)
+            if observed_evidence != expected_evidence:
                 raise DurableTakeoverError(
-                    "issued takeover evidence does not match current vault receipt"
+                    "issued takeover evidence does not match current authorities"
                 )
 
         durable_owner = controller._latest_durable_owner()
@@ -679,7 +770,9 @@ def execute_durable_takeover(
                 "credential_transition_receipt_id": receipt.receipt_id,
                 "recovery_owner_event_id": recovery_owner_event["event_id"],
                 "recovery_owner_payload_hash": recovery_owner_event["payload_hash"],
-                "recovery_owner_journal_sequence": recovery_owner_event["journal_sequence"],
+                "recovery_owner_journal_sequence": recovery_owner_event[
+                    "journal_sequence"
+                ],
             }
             completion_event = _append_takeover_event(
                 store,

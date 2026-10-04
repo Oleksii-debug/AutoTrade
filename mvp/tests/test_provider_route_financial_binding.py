@@ -2,8 +2,10 @@ from dataclasses import replace
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.persistence import payload_digest
 from mvp.autotrade_mvp.provider_route_financial_binding import (
     ProviderRouteFinancialBindingError,
+    build_selected_provider_route_financial_submission_scope,
     require_financial_binding_matches_selected_route,
 )
 from mvp.tests.test_financial_send_authority import binding as financial_binding
@@ -24,6 +26,11 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
     @staticmethod
     def _matching_binding(route):
         provider_scope = route.qualification.scope.provider_scope
+        submission_scope = build_selected_provider_route_financial_submission_scope(
+            route,
+            account_id=route.candidate.account_id,
+            runtime_environment=provider_scope.runtime_environment,
+        )
         return replace(
             financial_binding(),
             provider_scope_digest=provider_scope.content_digest,
@@ -34,6 +41,7 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
             entity_policy_id=route.candidate.entity_policy_id,
             capability_snapshot_id=route.capability_snapshot_id,
             qualification_identity_digest=route.qualification_id,
+            submission_scope_digest=payload_digest(submission_scope),
         )
 
     def test_exact_selected_route_c_and_q_match_financial_binding(self):
@@ -43,6 +51,59 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
                 self._matching_binding(route),
                 route,
             )
+
+    def test_canonical_financial_submission_scope_is_constructible_from_selected_route(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            scope = build_selected_provider_route_financial_submission_scope(
+                route,
+                account_id=route.candidate.account_id,
+                runtime_environment=provider_scope.runtime_environment,
+            )
+            binding = self._matching_binding(route)
+            self.assertEqual(payload_digest(scope), binding.submission_scope_digest)
+            self.assertEqual(scope["provider_id"], route.candidate.provider_id)
+            self.assertEqual(scope["account_id"], route.candidate.account_id)
+            self.assertEqual(
+                scope["provider_environment"],
+                route.candidate.provider_environment,
+            )
+            self.assertEqual(
+                scope["provider_route_capability_snapshot_id"],
+                route.capability_snapshot_id,
+            )
+            self.assertEqual(
+                scope["provider_route_qualification_id"],
+                route.qualification_id,
+            )
+
+    def test_canonical_financial_submission_scope_rejects_other_account(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            provider_scope = route.qualification.scope.provider_scope
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "account differs from selected provider route",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id="other-account",
+                    runtime_environment=provider_scope.runtime_environment,
+                )
+
+    def test_canonical_financial_submission_scope_rejects_other_runtime(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "environment differs from selected provider route",
+            ):
+                build_selected_provider_route_financial_submission_scope(
+                    route,
+                    account_id=route.candidate.account_id,
+                    runtime_environment="LIVE",
+                )
 
     def test_other_qualification_id_cannot_relabel_financial_binding(self):
         with TemporaryDirectory() as directory:

@@ -147,6 +147,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
             blockers.append(f'DOTNET_PROJECT_LOCK_TARGET_INVALID:{relative}')
             continue
         seen_target_packages: dict[str, str] = {}
+        target_dependency_edges: list[tuple[str, list[dict[str, str]]]] = []
         for package_name, record in sorted(target.items(), key=lambda item: str(item[0]).casefold()):
             if (
                 not isinstance(package_name, str)
@@ -193,7 +194,7 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                     f'{relative}:{package_name}:{target_name}'
                 )
             try:
-                _lock_dependency_edges(
+                dependency_edges = _lock_dependency_edges(
                     record.get('dependencies'),
                     relative=relative,
                     target_name=target_name,
@@ -204,6 +205,8 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                     f'DOTNET_PROJECT_LOCK_DEPENDENCY_EDGES_INVALID:'
                     f'{relative}:{target_name}:{package_name}'
                 )
+                dependency_edges = []
+            target_dependency_edges.append((package_name, dependency_edges))
 
             if kind != 'Direct':
                 continue
@@ -238,6 +241,22 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
                     f'DOTNET_PROJECT_LOCK_REQUESTED_MISMATCH:'
                     f'{relative}:{expected_name}@{expected_version}:{requested}'
                 )
+
+        for package_name, dependency_edges in target_dependency_edges:
+            for edge in dependency_edges:
+                dependency_name = edge['name']
+                target_record_name = seen_target_packages.get(dependency_name.casefold())
+                if target_record_name is None:
+                    blockers.append(
+                        f'DOTNET_PROJECT_LOCK_DEPENDENCY_TARGET_MISSING:'
+                        f'{relative}:{target_name}:{package_name}:{dependency_name}'
+                    )
+                elif dependency_name != target_record_name:
+                    blockers.append(
+                        f'DOTNET_PROJECT_LOCK_DEPENDENCY_EDGE_CASE_MISMATCH:'
+                        f'{relative}:{target_name}:{package_name}:'
+                        f'{dependency_name}:{target_record_name}'
+                    )
 
     for folded, (name, version) in sorted(declared_casefold.items()):
         if not seen_direct[folded]:

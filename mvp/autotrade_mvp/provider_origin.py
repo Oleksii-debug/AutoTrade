@@ -439,6 +439,7 @@ def _load_provider_origin_account_acquisition_binding(
     *,
     attempt_id: str,
     query_binding: QualifiedProviderReadQueryBinding,
+    prepared_event: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     attempt = _exact_text(attempt_id, name="account acquisition attempt_id")
     events = JournalStore.load_events(
@@ -494,7 +495,40 @@ def _load_provider_origin_account_acquisition_binding(
         raise ProviderOriginError(
             "provider-origin account acquisition binding sequence is invalid"
         )
-    return dict(expected["account_acquisition"])
+    acquisition = expected["account_acquisition"]
+    if sequence <= acquisition["issued_journal_sequence"]:
+        raise ProviderOriginError(
+            "provider-origin account acquisition binding does not follow acquisition issuance"
+        )
+    if prepared_event is not None:
+        if type(prepared_event) is not dict:
+            raise ProviderOriginError(
+                "provider-origin Prepared event is unavailable for acquisition binding"
+            )
+        prepared_sequence = prepared_event.get("journal_sequence")
+        if (
+            type(prepared_sequence) is not int
+            or prepared_sequence < 1
+            or sequence >= prepared_sequence
+        ):
+            raise ProviderOriginError(
+                "provider-origin account acquisition binding must precede Prepared"
+            )
+        prepared_committed = _exact_text(
+            prepared_event.get("committed_at"),
+            name="provider-origin Prepared committed_at",
+        )
+        if _parse_utc_text(
+            committed,
+            name="account acquisition committed_at",
+        ) > _parse_utc_text(
+            prepared_committed,
+            name="provider-origin Prepared committed_at",
+        ):
+            raise ProviderOriginError(
+                "provider-origin account acquisition binding follows Prepared time"
+            )
+    return dict(acquisition)
 
 
 def _append_provider_origin_account_acquisition_binding(
@@ -2066,6 +2100,7 @@ class ProviderOriginJournal:
             self._require_store(),
             attempt_id=attempt,
             query_binding=query_binding,
+            prepared_event=prepared,
         )
         retained_payload = _require_event(
             retained,

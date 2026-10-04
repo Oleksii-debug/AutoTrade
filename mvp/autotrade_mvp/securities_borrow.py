@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import json
 from typing import Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -20,6 +20,15 @@ from research.autotrade_research.artifacts.store import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_abs,
+    exact_add,
+    exact_subtract,
+    exact_sum,
+    parse_bounded_exact_decimal,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
@@ -68,29 +77,39 @@ def _version(value: int) -> int:
     return value
 
 
-def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+def _exact(operation, *values: Decimal) -> Decimal:
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite() or result < 0 or (positive and result == 0):
+        return operation(*values)
+    except ExactDecimalError as error:
+        raise BorrowEvidenceError(
+            "securities-borrow arithmetic exceeds exact resource authority"
+        ) from error
+
+
+def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
+    try:
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be a finite decimal within the exact resource envelope"
+        ) from error
+    if result < 0 or (positive and result == 0):
         word = "positive" if positive else "non-negative"
         raise ValueError(f"{name} must be a {word} finite decimal")
     return result
 
 
 def _signed_decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be a finite decimal within the exact resource envelope"
+        ) from error
 
 
 def incremental_short_borrow_quantity(
@@ -110,19 +129,24 @@ def incremental_short_borrow_quantity(
         reserved_position_delta,
         name="reserved_position_delta",
     )
-    base = current + reserved
-    signed = qty if normalized_side == "BUY" else -qty
-    resulting = base + signed
-    base_short = max(Decimal("0"), -base)
-    resulting_short = max(Decimal("0"), -resulting)
-    return max(Decimal("0"), resulting_short - base_short)
+    zero = Decimal("0")
+    base = _exact(exact_add, current, reserved)
+    signed = qty if normalized_side == "BUY" else _exact(exact_subtract, zero, qty)
+    resulting = _exact(exact_add, base, signed)
+    base_short = _exact(exact_abs, base) if base < 0 else zero
+    resulting_short = _exact(exact_abs, resulting) if resulting < 0 else zero
+    if resulting_short <= base_short:
+        return zero
+    return _exact(exact_subtract, resulting_short, base_short)
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    text = format(value, "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise BorrowEvidenceError(
+            "securities-borrow decimal exceeds exact rendering authority"
+        ) from error
 
 
 def _instant(value: str, *, name: str) -> str:
@@ -664,7 +688,7 @@ class DurableBorrowRecallProjection:
                     raise BorrowRecallConflict("resolution references unknown recall")
                 if _dt(evidence.effective_at) < _dt(recall.effective_at):
                     raise BorrowRecallConflict("resolution predates recall")
-                after = resolved[evidence.recall_id] + evidence.resolved_quantity
+                after = _exact(exact_add, resolved[evidence.recall_id], evidence.resolved_quantity)
                 if after > recall.quantity:
                     raise BorrowRecallConflict("resolution exceeds recalled quantity")
                 resolved[evidence.recall_id] = after
@@ -684,11 +708,11 @@ class DurableBorrowRecallProjection:
         recall = self._recalls.get(rid)
         if recall is None:
             raise KeyError(rid)
-        return recall.quantity - self._resolved.get(rid, Decimal("0"))
+        return _exact(exact_subtract, recall.quantity, self._resolved.get(rid, Decimal("0")))
 
     @property
     def active_quantity(self) -> Decimal:
-        return sum((self.remaining(rid) for rid in self._recalls), Decimal("0"))
+        return _exact(exact_sum, (self.remaining(rid) for rid in self._recalls))
 
     @property
     def active_recall_ids(self) -> tuple[str, ...]:

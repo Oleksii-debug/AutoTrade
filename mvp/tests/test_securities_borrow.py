@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -185,6 +185,42 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             restarted.project_equity_state(short).recalled_quantity,
             Decimal("3"),
         )
+
+    def test_recall_arithmetic_is_independent_of_ambient_decimal_context(self):
+        cases = (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_CEILING),
+        )
+        for precision, rounding in cases:
+            with self.subTest(precision=precision, rounding=rounding):
+                with TemporaryDirectory() as directory:
+                    store = JournalStore(f"{directory}/journal.sqlite3")
+                    projection = EvidencedBorrowRecallProjection(
+                        store,
+                        provider_id=PROVIDER_ID,
+                        account_id=ACCOUNT_ID,
+                        environment=ENVIRONMENT,
+                        instrument_id=INSTRUMENT_ID,
+                        instrument_version=1,
+                    )
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        projection.record_recall(
+                            recall(quantity="1000000000000000000000000000000")
+                        )
+                        projection.resolve_recall(
+                            resolution(
+                                resolved_quantity="999999999999999999999999999999"
+                            )
+                        )
+                        self.assertEqual(
+                            projection.remaining("recall-1"),
+                            Decimal("1"),
+                        )
+                        self.assertEqual(projection.active_quantity, Decimal("1"))
 
     def test_partial_resolution_is_evidence_bound_and_idempotent(self):
         projection = self.projection()

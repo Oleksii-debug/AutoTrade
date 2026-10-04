@@ -110,6 +110,36 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
             environment="PAPER",
         )
 
+    def _execute(self):
+        return execute_durable_takeover(
+            self.controller,
+            new_owner_id="host-b",
+            vault=self.vault,
+            handle=self.handle,
+            execution_identity="windows-user-1",
+            reconciliation_id="takeover-ready",
+            provider_id="SIMULATED",
+        )
+
+    def test_private_canonical_window_rebind_before_call_is_never_executed(self) -> None:
+        calls = []
+
+        @contextmanager
+        def rebound_window(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("pre-call canonical takeover window executed")
+            yield
+
+        with patch.object(
+            takeover_module,
+            "_CANONICAL_TAKEOVER_AUTHORITY_WINDOW",
+            new=rebound_window,
+        ):
+            result = self._execute()
+
+        self.assertEqual(result.target_owner.owner_id, "host-b")
+        self.assertEqual(calls, [])
+
     def test_phase_two_callback_cannot_retarget_phase_three_takeover_window(self) -> None:
         calls = []
 
@@ -126,15 +156,7 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
         self.protector.on_next_protect = rebind_during_credential_transition
-        result = execute_durable_takeover(
-            self.controller,
-            new_owner_id="host-b",
-            vault=self.vault,
-            handle=self.handle,
-            execution_identity="windows-user-1",
-            reconciliation_id="takeover-ready",
-            provider_id="SIMULATED",
-        )
+        result = self._execute()
 
         self.assertEqual(result.target_owner.owner_id, "host-b")
         self.assertEqual(calls, [])

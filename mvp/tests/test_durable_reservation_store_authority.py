@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import gc
+import threading
 import unittest
 import weakref
 
@@ -108,6 +109,95 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
                     account_id="acct-reservation-authority",
                 )
 
+            self.assertIs(vars(book)["store"], selected)
+            book._reload()
+
+    def test_concurrent_initializers_cannot_retarget_first_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            replacement = JournalStore(root / "replacement.sqlite3")
+            book = object.__new__(DurableReservationBook)
+
+            original_require = (
+                reservation_authority.require_exact_journal_store_authority
+            )
+            selected_arrived = threading.Event()
+            replacement_arrived = threading.Event()
+            release_selected = threading.Event()
+            release_replacement = threading.Event()
+            outcomes: dict[str, BaseException | None] = {}
+            outcomes_lock = threading.Lock()
+
+            def fenced_require(store, *args, **kwargs):
+                if store is selected:
+                    selected_arrived.set()
+                    if not release_selected.wait(5):
+                        raise AssertionError("selected initializer rendezvous timed out")
+                elif store is replacement:
+                    replacement_arrived.set()
+                    if not release_replacement.wait(5):
+                        raise AssertionError("replacement initializer rendezvous timed out")
+                return original_require(store, *args, **kwargs)
+
+            def initialize(label: str, store: JournalStore) -> None:
+                error = None
+                try:
+                    reservation_authority._initialize_reservation_store_binding(
+                        book,
+                        store,
+                        environment="PAPER",
+                        account_id="acct-reservation-authority",
+                    )
+                except BaseException as caught:  # captured for cross-thread assertion
+                    error = caught
+                with outcomes_lock:
+                    outcomes[label] = error
+
+            reservation_authority.require_exact_journal_store_authority = fenced_require
+            try:
+                selected_thread = threading.Thread(
+                    target=initialize,
+                    args=("selected", selected),
+                )
+                replacement_thread = threading.Thread(
+                    target=initialize,
+                    args=("replacement", replacement),
+                )
+                selected_thread.start()
+                replacement_thread.start()
+
+                self.assertTrue(selected_arrived.wait(5))
+                self.assertTrue(replacement_arrived.wait(5))
+
+                # Both calls are now past the old unlocked registration precheck.
+                # Let the selected store publish first, then release the stale
+                # competing initializer. It must recheck under the publication
+                # lock instead of overwriting the first binding.
+                release_selected.set()
+                selected_thread.join(5)
+                self.assertFalse(selected_thread.is_alive())
+
+                release_replacement.set()
+                replacement_thread.join(5)
+                self.assertFalse(replacement_thread.is_alive())
+            finally:
+                release_selected.set()
+                release_replacement.set()
+                reservation_authority.require_exact_journal_store_authority = (
+                    original_require
+                )
+
+            self.assertIsNone(outcomes.get("selected"))
+            self.assertIsInstance(outcomes.get("replacement"), ReservationConflict)
+            self.assertRegex(
+                str(outcomes["replacement"]),
+                "already established",
+            )
+            bound_store, _identity, _scope = (
+                reservation_authority._require_reservation_store_binding(book)
+            )
+            self.assertIs(bound_store, selected)
             self.assertIs(vars(book)["store"], selected)
             book._reload()
 

@@ -844,23 +844,32 @@ class FuturesLifecycleTests(unittest.TestCase):
         ):
             lifecycle_gate(forged, utc(29, 12))
 
-    def test_manual_post_init_cannot_mint_forged_lifecycle_authority(self):
+    def test_manual_init_cannot_mint_forged_lifecycle_authority(self):
+        source = self._linear_contract(settlement_method="PHYSICAL")
         forged = object.__new__(FuturesContract)
-        with self.assertRaisesRegex(
-            FuturesError, "normal constructor execution"
-        ):
-            forged.__post_init__()
+        FuturesContract.__init__(
+            forged,
+            instrument=source.instrument,
+            payoff=source.payoff,
+            multiplier=source.multiplier,
+            quote_currency=source.quote_currency,
+            settlement_currency=source.settlement_currency,
+            last_trade_at=source.last_trade_at,
+            delivery_cutoff=source.delivery_cutoff,
+            expiry=source.expiry,
+            settlement_method=source.settlement_method,
+            price_base_currency=source.price_base_currency,
+            canonical_instrument=source.canonical_instrument,
+        )
 
-        object.__setattr__(forged, "instrument", "forged")
-        object.__setattr__(forged, "settlement_method", "CASH")
-        object.__setattr__(forged, "expiry", utc(30, 21))
-        object.__setattr__(forged, "last_trade_at", utc(30, 20))
-        object.__setattr__(forged, "delivery_cutoff", utc(29, 12))
-        object.__setattr__(forged, "canonical_instrument", None)
         with self.assertRaisesRegex(
             FuturesError, "lifecycle authority is not established"
         ):
             lifecycle_gate(forged, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "lifecycle authority is not established"
+        ):
+            require_open_for_new_exposure(forged, utc(29, 12))
 
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(

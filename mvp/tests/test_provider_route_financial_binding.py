@@ -6,10 +6,12 @@ from mvp.autotrade_mvp.persistence import payload_digest
 from mvp.autotrade_mvp.provider_route_financial_binding import (
     ProviderRouteFinancialBindingError,
     build_selected_provider_route_financial_submission_scope,
+    build_selected_provider_route_transport_capability_registry,
     require_financial_binding_matches_selected_route,
 )
 from mvp.tests.test_financial_send_authority import binding as financial_binding
 from mvp.tests.test_provider_route_dispatch import ProviderRouteDispatchTests
+from mvp.tests.test_provider_selection import NOW
 
 
 class ProviderRouteFinancialBindingTests(unittest.TestCase):
@@ -104,6 +106,32 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
                     account_id=route.candidate.account_id,
                     runtime_environment="LIVE",
                 )
+
+    def test_selected_route_c_is_directly_reusable_by_existing_transport_registry(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            registry = build_selected_provider_route_transport_capability_registry(route)
+            current = registry.require_verified(
+                provider_id=route.candidate.provider_id,
+                account_id=route.candidate.account_id,
+                entity_id=route.candidate.entity_id,
+                environment=route.qualification.scope.provider_scope.runtime_environment,
+                provider_environment=route.candidate.provider_environment,
+                instrument_version=route.capability.instrument_version,
+                at=NOW,
+            )
+            self.assertIs(current, route.capability)
+            self.assertEqual(current.snapshot_id, route.capability_snapshot_id)
+
+    def test_transport_registry_projection_rejects_retargeted_route_capability(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            object.__setattr__(route.capability, "account_id", "retargeted-account")
+            with self.assertRaisesRegex(
+                ProviderRouteFinancialBindingError,
+                "capability differs from transport scope",
+            ):
+                build_selected_provider_route_transport_capability_registry(route)
 
     def test_other_qualification_id_cannot_relabel_financial_binding(self):
         with TemporaryDirectory() as directory:

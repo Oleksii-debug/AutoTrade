@@ -24,7 +24,9 @@ from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import HostState, OwnerFence, RecoveryController
 from .simulation_runtime_checkpoint import (
+    AutonomousRuntimeCheckpointError,
     checkpoint_path as autonomous_runtime_checkpoint_path,
+    verify_autonomous_runtime_checkpoint_backup_evidence,
 )
 
 
@@ -1139,6 +1141,8 @@ def create_backup(
         or runtime_checkpoint_source.is_symlink()
     )
     runtime_checkpoint_digest_at_cut: str | None = None
+    runtime_checkpoint_source_store_identity = None
+    journal_source = state / "journal.sqlite3"
     if runtime_checkpoint_present_at_cut:
         try:
             if (
@@ -1166,13 +1170,20 @@ def create_backup(
                 "Autonomous runtime checkpoint changed before journal snapshot"
             )
         runtime_checkpoint_digest_at_cut = digest_after
+        try:
+            runtime_checkpoint_source_store_identity = JournalStore(
+                journal_source
+            ).store_identity
+        except (OSError, RuntimeError, ValueError) as error:
+            raise BackupError(
+                "Autonomous runtime checkpoint source journal identity is unavailable"
+            ) from error
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
     source_rechecks: list[tuple[Path, str]] = []
     try:
-        journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
         journal_digest, journal_size, journal_schema = _backup_sqlite(
             journal_source, journal_target
@@ -1227,6 +1238,31 @@ def create_backup(
                 raise BackupError(
                     "Autonomous runtime checkpoint changed across journal snapshot"
                 )
+            if runtime_checkpoint_source_store_identity is None:
+                raise BackupError(
+                    "Autonomous runtime checkpoint source journal identity is missing"
+                )
+            try:
+                checkpoint_document = (
+                    stage / evidence_relative
+                ).read_text(encoding="utf-8")
+                snapshot_store = JournalStore(journal_target)
+                verify_autonomous_runtime_checkpoint_backup_evidence(
+                    state,
+                    snapshot_store,
+                    source_store_identity=runtime_checkpoint_source_store_identity,
+                    checkpoint_document=checkpoint_document,
+                )
+            except (
+                AutonomousRuntimeCheckpointError,
+                OSError,
+                RuntimeError,
+                UnicodeError,
+                ValueError,
+            ) as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint does not match staged journal snapshot"
+                ) from error
             entries.append(
                 _entry(
                     _RUNTIME_CHECKPOINT_EVIDENCE_PATH,

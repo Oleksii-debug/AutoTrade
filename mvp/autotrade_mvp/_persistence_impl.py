@@ -2386,6 +2386,7 @@ class JournalStore:
             raise ValueError("state_version must be a non-negative integer")
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
+        frozen_result = json.loads(result_json)
         result_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
@@ -2426,7 +2427,7 @@ class JournalStore:
                 ),
             )
             connection.commit()
-        return result, True
+        return frozen_result, True
 
     def commit_command(
         self,
@@ -2471,6 +2472,7 @@ class JournalStore:
 
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
+        frozen_result = json.loads(result_json)
         result_hash = (
             "sha256:" + sha256(result_json.encode("utf-8")).hexdigest()
         )
@@ -2480,6 +2482,12 @@ class JournalStore:
         for envelope, outbox_topic in events:
             if not isinstance(envelope, dict):
                 raise ValueError("Each event envelope must be an object")
+            envelope_json = canonical_json(envelope)
+            frozen_envelope = json.loads(envelope_json)
+            if type(frozen_envelope) is not dict:
+                raise ValueError("Each event envelope must serialize to an object")
+            envelope = frozen_envelope
+
             event_id = self._require_text(envelope.get("event_id"), "event_id")
             if event_id in seen_event_ids:
                 raise ValueError("event_id is duplicated within the transaction")
@@ -2505,7 +2513,7 @@ class JournalStore:
                 raise ValueError("payload_hash does not match payload")
             committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
             if outbox_topic is not None:
-                self._require_text(outbox_topic, "outbox_topic")
+                outbox_topic = self._require_text(outbox_topic, "outbox_topic")
             prepared.append(
                 {
                     "event_id": event_id,
@@ -2517,9 +2525,9 @@ class JournalStore:
                     "payload_hash": supplied_hash,
                     "committed_at": committed_at,
                     "outbox_topic": outbox_topic,
-                    "envelope_json": canonical_json(envelope),
-                    "envelope_hash": _event_envelope_digest(canonical_json(envelope)),
-                    "outbox_payload": canonical_json(envelope),
+                    "envelope_json": envelope_json,
+                    "envelope_hash": _event_envelope_digest(envelope_json),
+                    "outbox_payload": envelope_json,
                 }
             )
 
@@ -2765,7 +2773,7 @@ class JournalStore:
                     )
 
                 connection.commit()
-                return result, True, tuple(appended)
+                return frozen_result, True, tuple(appended)
             except Exception:
                 connection.rollback()
                 raise

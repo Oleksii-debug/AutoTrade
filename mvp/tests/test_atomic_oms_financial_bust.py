@@ -186,6 +186,41 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertFalse(atomic_bust(ro, re, rr, projected, provider))
             self.assert_busted(ro, re, rr)
 
+    def test_exact_retry_survives_unrelated_later_reservation_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            self.assertTrue(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    projected,
+                    provider,
+                )
+            )
+            reservations.reserve(
+                command_id="later-reservation-command",
+                idempotency_key="later-reservation-idempotency",
+                reservation_id="later-reservation",
+                intent_id="later-intent",
+                requirements={"CASH:EUR": "3"},
+                available={"CASH:EUR": "3"},
+            )
+
+            ro, re, rr = books(JournalStore(path))
+            self.assertFalse(
+                atomic_bust(ro, re, rr, projected, provider)
+            )
+            self.assert_busted(ro, re, rr)
+            self.assertEqual(
+                rr.get("later-reservation").remaining["CASH:EUR"],
+                Decimal("3"),
+            )
+
     def test_precommit_failure_leaves_oms_and_economics_unbusted(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

@@ -110,6 +110,43 @@ class AutonomousSimulationTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertLess(pending[0].amount, 0)
 
+    def test_pending_settlement_survives_restart_without_early_capital_release(self):
+        prices = ["100", "101", "103", "90", "110", "120", "121"]
+        with TemporaryDirectory() as d:
+            with patch.object(simulation_module, "INITIAL_CASH", Decimal("150")):
+                first = run(d, prices, stop_after_episodes=4)
+                self.assertEqual(first["status"], "PAUSED")
+                self.assertEqual(first["new_outbound_requests"], 2)
+
+                before_evidence = run(d, prices, stop_after_episodes=6)
+                self.assertEqual(before_evidence["status"], "PAUSED")
+                self.assertEqual(before_evidence["new_outbound_requests"], 0)
+                self.assertEqual(before_evidence["decisions"][5]["decision"], "NO_TRADE")
+                self.assertIsNone(before_evidence["decisions"][5]["order_id"])
+
+                after_evidence = run(d, prices)
+                self.assertEqual(after_evidence["status"], "COMPLETED")
+                self.assertEqual(after_evidence["new_outbound_requests"], 1)
+                self.assertEqual(after_evidence["decisions"][6]["status"], "FILLED")
+
+                replay = run(d, prices)
+                self.assertEqual(replay["status"], "COMPLETED")
+                self.assertEqual(replay["new_outbound_requests"], 0)
+                self.assertEqual(replay["decisions"], after_evidence["decisions"])
+
+            store = JournalStore(Path(d) / "journal.sqlite3")
+            settlement_events = store.load_events_by_aggregate_type("settlement_book")
+            self.assertEqual(
+                [event["event_type"] for event in settlement_events],
+                [
+                    "SettlementObligationsRegistered",
+                    "SettlementObligationsRegistered",
+                    "SettlementEvidenceApplied",
+                    "SettlementEvidenceApplied",
+                    "SettlementObligationsRegistered",
+                ],
+            )
+
     def test_consecutive_buy_signals_do_not_add_duplicate_exposure(self):
         with TemporaryDirectory() as d:
             result = run(d, [str(x) for x in range(100, 120)])

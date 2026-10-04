@@ -91,10 +91,17 @@ class ExecutionRealismTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
             model(fee_rate=HostileDecimal("0.001"))
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(price_quantum=HostileDecimal("0.01"))
         self.assertEqual(HostileDecimal.finite_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
             order(order_id=HostileText("sim-1"))
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price_grid_evidence_sha256 is required",
+        ):
+            model(price_grid_evidence_sha256=HostileText("b" * 64))
         self.assertEqual(HostileText.strip_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
@@ -154,6 +161,18 @@ class ExecutionRealismTests(unittest.TestCase):
         object.__setattr__(mutated_model, "latency_ms", -1)
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
             simulate_execution(order(), exact_observation, mutated_model)
+
+        mutated_grid_model = model()
+        object.__setattr__(
+            mutated_grid_model,
+            "price_grid_instrument_version",
+            "XYZ@v1",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "must exactly match order instrument_version",
+        ):
+            simulate_execution(order(), exact_observation, mutated_grid_model)
 
         injected_order = order()
         object.__setattr__(injected_order, "shadow_authority", "forged")

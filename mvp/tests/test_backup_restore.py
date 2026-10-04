@@ -34,6 +34,7 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.recovery import OwnerFence, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 def _reseal_backup_manifest(backup: Path) -> None:
@@ -289,6 +290,45 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue(restore_requires_reconciliation(restored))
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
+
+    def test_real_autonomous_runtime_checkpoint_is_quarantined_by_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "autonomous-state"
+            artifacts = root / "artifacts"
+            _artifact_store(artifacts)
+            run_autonomous_simulation(
+                ["100", "101", "102", "103"],
+                state,
+                run_id="backup-runtime-checkpoint",
+                now="2026-09-25T08:00:00Z",
+            )
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            authority_key = state / ".autonomous-runtime-authority.key"
+            self.assertTrue(checkpoint.is_file())
+            self.assertTrue(authority_key.is_file())
+            source_checkpoint = checkpoint.read_bytes()
+
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest = verify_backup(backup)
+            self.assertEqual(
+                manifest["runtime_checkpoint_evidence"],
+                "QUARANTINED",
+            )
+            self.assertEqual(
+                (
+                    backup
+                    / "restore-evidence"
+                    / "autonomous-runtime-checkpoint.json"
+                ).read_bytes(),
+                source_checkpoint,
+            )
+            self.assertFalse(
+                any(
+                    item.name == ".autonomous-runtime-authority.key"
+                    for item in backup.rglob("*")
+                )
+            )
 
     def test_autonomous_runtime_checkpoint_is_quarantined_without_authority_key(self):
         with TemporaryDirectory() as directory:

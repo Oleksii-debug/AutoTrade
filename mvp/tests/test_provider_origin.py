@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    _response_artifact_id,
     execute_direct_provider_origin_read,
     observe_provider_origin_json_response,
 )
@@ -444,6 +445,45 @@ class ProviderOriginJournalTests(unittest.TestCase):
             )
             self.assertEqual(len(claims), 1)
             self.assertEqual(claims[0]["payload"]["http_status"], 200)
+
+            claim_payload = claims[0]["payload"]
+            artifact_id = _response_artifact_id(
+                attempt_id=attempt_id,
+                qualified_query_digest=claim_payload["qualified_query_digest"],
+                response_sha256=claim_payload["response_sha256"],
+            )
+            response_store = origin._response_store
+            manifest = response_store.load_manifest(artifact_id)
+            object_path = response_store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            exact_bytes = object_path.read_bytes()
+            object_path.unlink()
+
+            missing_artifact_restart = self._origin(
+                JournalStore(journal.path),
+                directory,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "recovery provider response artifact is unavailable",
+            ):
+                missing_artifact_restart.recover_response_binding(
+                    attempt_id,
+                    binding,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            object_path.write_bytes(exact_bytes)
 
             restarted = self._origin(JournalStore(journal.path), directory)
             recovered = restarted.recover_response_binding(

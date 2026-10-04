@@ -1218,81 +1218,87 @@ class RegisteredAblationPopulation:
 
 
 
-_ABLATION_AUTHORITY_POLICY_BINDING_LOCK = RLock()
-_ABLATION_AUTHORITY_POLICY_BINDINGS: dict[
-    int,
-    tuple[object, ScientificRegistry, str, str],
-] = {}
+def _make_ablation_authority_policy_binding():
+    """Create one process-local issuance ledger hidden behind closure-owned state."""
 
+    lock = RLock()
+    bindings: dict[
+        int,
+        tuple[object, ScientificRegistry, str, str],
+    ] = {}
 
-def _register_ablation_authority_policy_binding(
-    authority: object,
-    *,
-    scientific_registry: ScientificRegistry,
-    protocol_id: str,
-    protocol_hash: str,
-) -> None:
-    """Freeze the construction-time registry/protocol binding outside the instance."""
-
-    if type(authority) is not AblationQualificationAuthority:
-        return
-    authority_id = id(authority)
-
-    def release(
-        reference: object,
+    def register(
+        authority: object,
         *,
-        authority_id: int = authority_id,
-        bindings: dict[
-            int,
-            tuple[object, ScientificRegistry, str, str],
-        ] = _ABLATION_AUTHORITY_POLICY_BINDINGS,
-        lock: RLock = _ABLATION_AUTHORITY_POLICY_BINDING_LOCK,
+        scientific_registry: ScientificRegistry,
+        protocol_id: str,
+        protocol_hash: str,
     ) -> None:
+        if type(authority) is not AblationQualificationAuthority:
+            return
+        authority_id = id(authority)
+
+        def release(
+            reference: object,
+            *,
+            authority_id: int = authority_id,
+            bindings: dict[
+                int,
+                tuple[object, ScientificRegistry, str, str],
+            ] = bindings,
+            lock: RLock = lock,
+        ) -> None:
+            with lock:
+                current = bindings.get(authority_id)
+                if current is not None and current[0] is reference:
+                    bindings.pop(authority_id, None)
+
+        reference = weakref_ref(authority, release)
         with lock:
-            current = bindings.get(authority_id)
-            if current is not None and current[0] is reference:
-                bindings.pop(authority_id, None)
-
-    reference = weakref_ref(authority, release)
-    with _ABLATION_AUTHORITY_POLICY_BINDING_LOCK:
-        existing = _ABLATION_AUTHORITY_POLICY_BINDINGS.get(authority_id)
-        if existing is not None and existing[0]() is authority:
-            raise RuntimeError("ablation qualification authority policy binding already exists")
-        if existing is not None and existing[0]() is not None:
-            raise RuntimeError("ablation qualification authority identity collision")
-        _ABLATION_AUTHORITY_POLICY_BINDINGS[authority_id] = (
-            reference,
-            scientific_registry,
-            protocol_id,
-            protocol_hash,
-        )
-
-
-def _issued_ablation_authority_policy_binding(
-    authority: object,
-) -> tuple[ScientificRegistry, str, str]:
-    """Return only the externally frozen binding for one live issued authority."""
-
-    if type(authority) is not AblationQualificationAuthority:
-        raise ProtocolViolation("ablation qualification authority type is invalid")
-    authority_id = id(authority)
-    with _ABLATION_AUTHORITY_POLICY_BINDING_LOCK:
-        bound = _ABLATION_AUTHORITY_POLICY_BINDINGS.get(authority_id)
-        if bound is None or bound[0]() is not authority:
-            raise ProtocolViolation(
-                "ablation qualification authority was not issued by the canonical constructor"
+            existing = bindings.get(authority_id)
+            if existing is not None and existing[0]() is authority:
+                raise RuntimeError(
+                    "ablation qualification authority policy binding already exists"
+                )
+            if existing is not None and existing[0]() is not None:
+                raise RuntimeError(
+                    "ablation qualification authority identity collision"
+                )
+            bindings[authority_id] = (
+                reference,
+                scientific_registry,
+                protocol_id,
+                protocol_hash,
             )
-        return bound[1], bound[2], bound[3]
+
+    def resolve(
+        authority: object,
+    ) -> tuple[ScientificRegistry, str, str]:
+        if type(authority) is not AblationQualificationAuthority:
+            raise ProtocolViolation(
+                "ablation qualification authority type is invalid"
+            )
+        authority_id = id(authority)
+        with lock:
+            bound = bindings.get(authority_id)
+            if bound is None or bound[0]() is not authority:
+                raise ProtocolViolation(
+                    "ablation qualification authority was not issued by "
+                    "the canonical constructor"
+                )
+            return bound[1], bound[2], bound[3]
+
+    return register, resolve
 
 
-class AblationQualificationAuthority:
-    """Resolve qualification evidence only through canonical persistent authorities.
+(
+    _register_ablation_authority_policy_binding,
+    _issued_ablation_authority_policy_binding,
+) = _make_ablation_authority_policy_binding()
 
-    The authority never publishes evidence. It consumes an append-only scientific
-    protocol, recomputes the complete ExperienceMemory population at the frozen
-    causal cutoff, and reads pre-existing immutable outcome artifacts from the
-    canonical ArtifactStore.
-    """
+
+def _make_ablation_qualification_authority_init(register_policy_binding):
+    """Capture the private policy issuer without exposing it as constructor input."""
 
     def __init__(
         self,
@@ -1318,8 +1324,13 @@ class AblationQualificationAuthority:
             raise ValueError("protocol_id is required")
         if not isinstance(protocol_hash, str):
             raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if (
+            not isinstance(source_revision, str)
+            or _GIT_SHA.fullmatch(source_revision) is None
+        ):
+            raise ValueError(
+                "source_revision must be an exact 40-character lowercase git SHA"
+            )
         if not isinstance(granted_permissions, set) or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty set")
         self.scientific_registry = scientific_registry
@@ -1332,12 +1343,28 @@ class AblationQualificationAuthority:
         self.granted_permissions = set(granted_permissions)
         self.task = task
         self.instrument_family = instrument_family
-        _register_ablation_authority_policy_binding(
+        register_policy_binding(
             self,
             scientific_registry=scientific_registry,
             protocol_id=self.protocol_id,
             protocol_hash=self.protocol_hash,
         )
+
+    return __init__
+
+
+class AblationQualificationAuthority:
+    """Resolve qualification evidence only through canonical persistent authorities.
+
+    The authority never publishes evidence. It consumes an append-only scientific
+    protocol, recomputes the complete ExperienceMemory population at the frozen
+    causal cutoff, and reads pre-existing immutable outcome artifacts from the
+    canonical ArtifactStore.
+    """
+
+    __init__ = _make_ablation_qualification_authority_init(
+        _register_ablation_authority_policy_binding
+    )
 
     def _load_outcome(
         self,
@@ -1507,6 +1534,11 @@ class AblationQualificationAuthority:
                     complete=True,
                 )
         return population, outcomes
+
+
+del _register_ablation_authority_policy_binding
+del _make_ablation_qualification_authority_init
+del _make_ablation_authority_policy_binding
 
 
 def _registered_policy_context(

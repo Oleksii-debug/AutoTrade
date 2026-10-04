@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from .authority import AuthorityService
+from .capabilities import CapabilityRegistry
 from .dispatch import DispatchOutcome
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
@@ -801,6 +802,61 @@ class FinanciallyBoundBybitOrderSender:
             raise FinancialSendAuthorityError(
                 "Bybit sender and financial issuer belong to different production hosts"
             )
+
+        selected_route = getattr(
+            issuer,
+            "_FinancialSendAuthorityIssuer__selected_route",
+            None,
+        )
+        if type(selected_route) is not SelectedProviderRoute:
+            raise FinancialSendAuthorityError(
+                "Bybit product sender requires selected provider route authority"
+            )
+        route_capability = selected_route.capability
+        route_candidate = selected_route.candidate
+        sender_provider_environment = sender.provider_environment
+        sender_capability_id = getattr(
+            sender,
+            "_ProductionBybitOrderSender__capability_snapshot_id",
+            None,
+        )
+        sender_capability_registry = getattr(
+            sender,
+            "_ProductionBybitOrderSender__capability_registry",
+            None,
+        )
+        if (
+            sender_provider_environment != route_candidate.provider_environment
+            or sender_capability_id != selected_route.capability_snapshot_id
+        ):
+            raise FinancialSendAuthorityError(
+                "Bybit sender provider scope differs from selected provider route"
+            )
+        if type(sender_capability_registry) is not CapabilityRegistry:
+            raise FinancialSendAuthorityError(
+                "Bybit sender capability registry is not canonical"
+            )
+        registry_state = vars(sender_capability_registry)
+        if type(registry_state) is not dict:
+            raise FinancialSendAuthorityError(
+                "Bybit sender capability registry state is not canonical"
+            )
+        by_id = registry_state.get("_by_id")
+        by_identity = registry_state.get("_by_identity")
+        if type(by_id) is not dict or type(by_identity) is not dict:
+            raise FinancialSendAuthorityError(
+                "Bybit sender capability registry state is not canonical"
+            )
+        history = by_identity.get(route_capability.identity)
+        if (
+            by_id.get(route_capability.snapshot_id) is not route_capability
+            or type(history) is not list
+            or not any(item is route_capability for item in history)
+        ):
+            raise FinancialSendAuthorityError(
+                "Bybit sender does not retain exact selected provider capability"
+            )
+
         sender_dispatch_function = ProductionBybitOrderSender.dispatch
         sender_dispatch = sender.dispatch
         if (
@@ -854,7 +910,6 @@ class FinanciallyBoundBybitOrderSender:
         now: str,
         client_id_max_length: int = 36,
         client_id_format: str = "TOKEN",
-        final_barrier_clock: Callable[[], str] | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
         self._require_sender_dispatch_authority()
@@ -898,7 +953,6 @@ class FinanciallyBoundBybitOrderSender:
             authority_check=authority_check,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
-            final_barrier_clock=final_barrier_clock,
             submission_scope=submission_scope_snapshot,
         )
 

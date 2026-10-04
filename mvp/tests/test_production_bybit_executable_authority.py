@@ -128,6 +128,70 @@ class ProductionBybitExecutableAuthorityTests(unittest.TestCase):
             wire_client=wire,
         )
 
+    def test_capability_clock_code_mutation_is_zero_callback_zero_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            transport = sender._ProductionBybitOrderSender__transport
+            clock = transport.clock_utc
+            original_code = clock.__code__
+
+            def forged_clock():
+                return _NOW
+
+            authority_calls = []
+            try:
+                clock.__code__ = forged_clock.__code__
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "capability clock authority code changed",
+                ):
+                    sender.dispatch(
+                        attempt_id="attempt-clock-code-retarget",
+                        intent_id="intent-clock-code-retarget",
+                        intent_hash="sha256:" + "5" * 64,
+                        request={"symbol": "BTCUSDT"},
+                        now="2026-10-04T01:59:59Z",
+                        authority_check=lambda *_args: (
+                            authority_calls.append("called")
+                            or (True, "authorized")
+                        ),
+                    )
+            finally:
+                clock.__code__ = original_code
+
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_capability_clock_retarget_is_zero_callback_zero_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            transport = sender._ProductionBybitOrderSender__transport
+            transport.clock_utc = lambda: _NOW
+
+            authority_calls = []
+            with self.assertRaisesRegex(
+                PermissionError,
+                "capability clock authority changed",
+            ):
+                sender.dispatch(
+                    attempt_id="attempt-clock-retarget",
+                    intent_id="intent-clock-retarget",
+                    intent_hash="sha256:" + "6" * 64,
+                    request={"symbol": "BTCUSDT"},
+                    now="2026-10-04T02:00:00Z",
+                    authority_check=lambda *_args: (
+                        authority_calls.append("called")
+                        or (True, "authorized")
+                    ),
+                )
+
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(wire.requests, [])
+
     def test_transport_class_rebind_is_zero_callback_zero_wire(self):
         with TemporaryDirectory() as root:
             runtime = self._runtime(root)

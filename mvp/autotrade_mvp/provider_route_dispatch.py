@@ -186,9 +186,11 @@ def bind_selected_provider_route_submission_scope(
     if submission_scope is None:
         result: dict[str, Any] = {}
     else:
-        if not isinstance(submission_scope, Mapping):
-            raise TypeError("submission_scope must be a mapping")
-        result = dict(submission_scope)
+        if type(submission_scope) is not dict:
+            raise TypeError("submission_scope must be an exact dict")
+        if any(type(key) is not str for key in submission_scope):
+            raise TypeError("submission_scope keys must be exact strings")
+        result = dict.copy(submission_scope)
     collision = _RESERVED_SCOPE_KEYS.intersection(result)
     if collision:
         raise ProviderRouteDispatchError(

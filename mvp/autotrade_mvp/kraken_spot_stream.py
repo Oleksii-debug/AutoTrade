@@ -1377,13 +1377,20 @@ class KrakenSpotExecutionStreamRecovery:
                 "Kraken buffered provider fills require gap-free stream "
                 "recovery awaiting REST reconciliation"
             )
+        if type(instrument_versions) is not dict:
+            raise TypeError("instrument_versions must be an exact dict")
+        if type(fee_currency_by_symbol) is not dict:
+            raise TypeError("fee_currency_by_symbol must be an exact dict")
+        instrument_snapshot = dict.copy(instrument_versions)
+        fee_currency_snapshot = dict.copy(fee_currency_by_symbol)
+
         fills: list[ProviderFillEvidence] = []
         for frame in self._buffered_updates:
             fills.extend(
                 _provider_fills_from_execution_frame(
                     frame,
-                    instrument_versions=instrument_versions,
-                    fee_currency_by_symbol=fee_currency_by_symbol,
+                    instrument_versions=instrument_snapshot,
+                    fee_currency_by_symbol=fee_currency_snapshot,
                 )
             )
         return tuple(fills)

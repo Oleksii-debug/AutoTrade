@@ -971,6 +971,71 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             )
 
 
+    def test_empty_fill_batch_still_validates_and_detaches_authority_maps(self):
+        touched: list[str] = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping iteration")
+
+            def copy(self):
+                touched.append("copy")
+                raise AssertionError("hostile mapping copy")
+
+        recovery = KrakenSpotExecutionStreamRecovery(account_id="spot-live-1")
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=1,
+                    reports=[
+                        {
+                            "order_id": "O-EMPTY-BATCH",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "instrument_versions must be an exact dict"):
+            recovery.buffered_provider_fills(
+                instrument_versions=HostileDict(
+                    {"BTC/USD": "CRYPTO:BTC-USD:v1"}
+                ),
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+        with self.assertRaisesRegex(TypeError, "fee_currency_by_symbol must be an exact dict"):
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol=HostileDict({"BTC/USD": "USD"}),
+            )
+        self.assertEqual(touched, [])
+
+        self.assertEqual(
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            ),
+            (),
+        )
+
     def test_provider_fill_extraction_requires_recovery_admission(self):
         recovery = KrakenSpotExecutionStreamRecovery(
             account_id="spot-live-1",

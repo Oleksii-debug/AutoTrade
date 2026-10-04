@@ -634,6 +634,61 @@ class Section17BlindedReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(BlindingError, "keys mismatch"):
             BlindedFeederCheckpoint.from_record({**record, "extra": 1})
 
+    def test_unregistered_identity_namespace_cannot_encode_hidden_name(self):
+        with self.assertRaisesRegex(BlindingError, "registered neutral"):
+            IdentityField(("instrument_id",), "BITCOIN", required=True)
+
+    def test_identity_and_calendar_prefix_paths_are_rejected(self):
+        with self.assertRaisesRegex(BlindingError, "unique and non-overlapping"):
+            BlindingProfile(
+                identity_fields=(IdentityField(("meta",), "ENTITY"),),
+                calendar_fields=(CalendarField(("meta", "published_at")),),
+            )
+
+    def test_rejects_natural_language_absolute_calendar_cue(self):
+        source = dataset(
+            event(
+                "one",
+                payload_extra={"description": "Released March 12, 2024 after close"},
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "undeclared absolute date"):
+            self.blind(source)
+
+    def test_rejects_numeric_absolute_calendar_cue(self):
+        source = dataset(
+            event(
+                "one",
+                payload_extra={"description": "Released 03/12/2024 after close"},
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "undeclared absolute date"):
+            self.blind(source)
+
+    def test_strategy_view_exposes_no_privileged_blinding_metadata(self):
+        source = dataset(event("btc-2024-03-12-kraken"))
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T10:00:00Z",
+            experiment_id="strategy-boundary",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        view = feeder.view()
+        for name in (
+            "source_dataset_sha256",
+            "experiment_id",
+            "profile_sha256",
+            "mapping_sha256",
+            "shuffle_key_sha256",
+            "shuffle_key_commitment_sha256",
+            "training_cutoff_uncertainty",
+        ):
+            self.assertFalse(hasattr(view, name), name)
+        self.assertEqual(view.events[0].payload["instrument_id"], "Instrument 001")
+        self.assertEqual(view.events[0].payload["provider_id"], "Provider 001")
+
     def test_hostile_dataset_and_profile_subclasses_are_rejected(self):
         class HostileDataset(CausalDataset):
             pass

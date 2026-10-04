@@ -28,22 +28,22 @@ from .feeder import CausalDataset, CausalEvent
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _NAMESPACE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ABSOLUTE_DATE_PATTERNS = (
-    re.compile(r"(?<!\\d)(?:19|20)\\d{2}-\\d{2}-\\d{2}(?!\\d)"),
+    re.compile(r"(?<!\d)(?:19|20)\d{2}-\d{2}-\d{2}(?!\d)"),
     re.compile(
-        r"(?<!\\d)(?:(?:19|20)\\d{2}[/.]\\d{1,2}[/.]\\d{1,2}"
-        r"|\\d{1,2}[/.]\\d{1,2}[/.](?:19|20)\\d{2})(?!\\d)"
+        r"(?<!\d)(?:(?:19|20)\d{2}[/.]\d{1,2}[/.]\d{1,2}"
+        r"|\d{1,2}[/.]\d{1,2}[/.](?:19|20)\d{2})(?!\d)"
     ),
     re.compile(
-        r"(?i)\\b(?:"
+        r"(?i)\b(?:"
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,)?\\s+(?:19|20)\\d{2}\\b"
+        r")\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+(?:19|20)\d{2}\b"
     ),
     re.compile(
-        r"(?i)\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:"
+        r"(?i)\b\d{1,2}(?:st|nd|rd|th)?\s+(?:"
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")(?:,)?\\s+(?:19|20)\\d{2}\\b"
+        r")(?:,)?\s+(?:19|20)\d{2}\b"
     ),
 )
 _SCHEMA_VERSION = 1

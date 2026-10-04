@@ -933,7 +933,83 @@ def measure_declared_financial_operation(
             raise error_type(
                 "predeclared financial event appeared before monotonic measurement start"
             )
-        result = operation()
+
+        verifier = require_operation_authority
+        verifier_code = verifier.__code__
+        verifier_defaults = verifier.__defaults__
+        verifier_kwdefaults = verifier.__kwdefaults__
+        verifier_closure_snapshot = tuple_for(
+            (cell, cell.cell_contents) for cell in verifier.__closure__ or ()
+        )
+        callback_continuation = (
+            verifier,
+            verifier_code,
+            verifier_defaults,
+            verifier_kwdefaults,
+            verifier_closure_snapshot,
+            get_event,
+            store,
+            expected,
+            require_expected_event,
+            pre_sequence,
+            clock,
+            start_ns,
+            type_for,
+            int_type,
+            error_type,
+            measurement_schema_version,
+            plan,
+            measurement_event_type,
+            measurement_aggregate_type,
+            measurement_id,
+            str_for,
+            expected_index,
+            payload_digest_for,
+            datetime_type,
+            timezone_type,
+            append_event,
+            decode_measurement,
+        )
+        callback_continuation, result = (callback_continuation, operation())
+        (
+            require_operation_authority,
+            verifier_code,
+            verifier_defaults,
+            verifier_kwdefaults,
+            verifier_closure_snapshot,
+            get_event,
+            store,
+            expected,
+            require_expected_event,
+            pre_sequence,
+            clock,
+            start_ns,
+            type_for,
+            int_type,
+            error_type,
+            measurement_schema_version,
+            plan,
+            measurement_event_type,
+            measurement_aggregate_type,
+            measurement_id,
+            str_for,
+            expected_index,
+            payload_digest_for,
+            datetime_type,
+            timezone_type,
+            append_event,
+            decode_measurement,
+        ) = callback_continuation
+        for cell, expected_value in verifier_closure_snapshot:
+            cell.cell_contents = expected_value
+        if (
+            require_operation_authority.__code__ is not verifier_code
+            or require_operation_authority.__defaults__ is not verifier_defaults
+            or require_operation_authority.__kwdefaults__ is not verifier_kwdefaults
+        ):
+            raise error_type(
+                "measurement verifier authority changed during financial operation"
+            )
         require_operation_authority()
         # Bind the expected durable event before sampling the terminal clock. If the
         # operation returned without publishing it, an unrelated commit racing with

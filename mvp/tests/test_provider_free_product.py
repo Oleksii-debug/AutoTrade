@@ -492,6 +492,71 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             finally:
                 client.close()
 
+    def test_native_header_client_uses_same_paired_owner_session(self):
+        with TemporaryDirectory() as directory:
+            captured = []
+            client = ProductClient(
+                directory,
+                desktop_session_sink=lambda **values: captured.append(values),
+            )
+            try:
+                self.assertEqual(len(captured), 1)
+                token = captured[0]['token']
+                browser_state = client.state()
+
+                connection = http.client.HTTPConnection(
+                    '127.0.0.1',
+                    client.port,
+                    timeout=30,
+                )
+                try:
+                    connection.request(
+                        'GET',
+                        '/api/v1/state',
+                        headers={
+                            'Origin': client.origin,
+                            'Authorization': 'AutoTrade-Session ' + token,
+                            'X-AutoTrade-Actor': 'local-owner',
+                        },
+                    )
+                    response = connection.getresponse()
+                    native_state = json.loads(response.read())
+                    self.assertEqual(response.status, 200)
+                finally:
+                    connection.close()
+
+                self.assertEqual(
+                    native_state['permission_summary']['session'],
+                    browser_state['permission_summary']['session'],
+                )
+                self.assertEqual(
+                    native_state['permission_summary']['actor'],
+                    'local-owner',
+                )
+
+                connection = http.client.HTTPConnection(
+                    '127.0.0.1',
+                    client.port,
+                    timeout=30,
+                )
+                try:
+                    connection.request(
+                        'GET',
+                        '/api/v1/state',
+                        headers={
+                            'Origin': client.origin,
+                            'Authorization': 'AutoTrade-Session ' + token,
+                            'X-AutoTrade-Actor': 'wrong-actor',
+                        },
+                    )
+                    response = connection.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, 403)
+                finally:
+                    connection.close()
+            finally:
+                client.close()
+
     def test_pairing_store_failure_revokes_token_and_allows_exact_code_retry(self):
         with TemporaryDirectory() as directory:
             captured = []

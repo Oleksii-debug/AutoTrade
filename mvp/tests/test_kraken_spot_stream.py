@@ -950,6 +950,76 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 fee_currency_by_symbol={"BTC/USD": "USD"},
             )
 
+
+    def test_admitted_fill_evidence_is_carried_into_required_rest_crosscheck(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=60,
+                reports=[
+                    {
+                        "order_id": "O-HANDOFF",
+                        "cl_ord_id": "client-handoff",
+                        "exec_id": "E-HANDOFF",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=59,
+                    reports=[
+                        {
+                            "order_id": "O-HANDOFF-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        recovery.apply_frame(frame)
+
+        fills = recovery.buffered_provider_fills(
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )
+        plan = recovery.rest_crosscheck_plan()
+        evidence = recovery.evidence()
+
+        self.assertEqual(len(fills), 1)
+        self.assertIn(fills[0].evidence_refs[0], plan.evidence_refs)
+        self.assertIn(fills[0].evidence_refs[0], evidence.buffered_update_evidence_refs)
+        self.assertFalse(plan.trading_ready)
+        self.assertFalse(evidence.trading_ready)
+        self.assertEqual(
+            evidence.phase,
+            KrakenSpotExecutionStreamRecovery.REST_RECONCILIATION_REQUIRED,
+        )
+
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
         huge_integer = b"9" * 1000
         raw_sequence = (

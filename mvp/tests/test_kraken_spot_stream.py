@@ -11,7 +11,6 @@ from mvp.autotrade_mvp.kraken_spot_stream import (
     KrakenSpotStreamError,
     parse_execution_frame,
     parse_executions_subscription_ack,
-    provider_fills_from_execution_frame,
 )
 
 
@@ -112,6 +111,55 @@ def subscription_binding(
 
 
 class KrakenSpotExecutionFrameTests(unittest.TestCase):
+    def provider_fills_from_admitted_frame(
+        self,
+        frame,
+        *,
+        instrument_versions,
+    ):
+        if frame.frame_type != "update" or frame.sequence < 1:
+            raise AssertionError("test helper requires an update with positive sequence")
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id=frame.account_id,
+            environment=frame.environment,
+        )
+        generation = recovery.begin_connection()
+        self.assertEqual(generation, frame.connection_generation)
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id=frame.account_id,
+            connection_generation=generation,
+            req_id=7,
+            environment=frame.environment,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=frame.sequence - 1,
+                    reports=[
+                        {
+                            "order_id": "O-ADMISSION-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id=frame.account_id,
+                connection_generation=generation,
+                environment=frame.environment,
+            )
+        )
+        recovery.apply_frame(frame)
+        return recovery.buffered_provider_fills(
+            instrument_versions=instrument_versions,
+        )
+
     def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
         touched: list[str] = []
 
@@ -514,7 +562,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             connection_generation=1,
         )
 
-        fills = provider_fills_from_execution_frame(
+        fills = self.provider_fills_from_admitted_frame(
             frame,
             instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
         )
@@ -554,7 +602,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             connection_generation=1,
         )
         self.assertEqual(
-            provider_fills_from_execution_frame(
+            self.provider_fills_from_admitted_frame(
                 frame,
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
             ),
@@ -580,7 +628,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             KrakenSpotStreamError,
             "unmapped Kraken executions symbol",
         ):
-            provider_fills_from_execution_frame(
+            self.provider_fills_from_admitted_frame(
                 frame,
                 instrument_versions={},
             )
@@ -599,7 +647,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             KrakenSpotStreamError,
             "fees span multiple currencies",
         ):
-            provider_fills_from_execution_frame(
+            self.provider_fills_from_admitted_frame(
                 mixed_frame,
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
             )
@@ -630,7 +678,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             KrakenSpotStreamError,
             "fee array is empty.*fee currency is unproven",
         ):
-            provider_fills_from_execution_frame(
+            self.provider_fills_from_admitted_frame(
                 frame,
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
             )
@@ -654,7 +702,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             account_id="spot-live-1",
             connection_generation=1,
         )
-        fill = provider_fills_from_execution_frame(
+        fill = self.provider_fills_from_admitted_frame(
             frame,
             instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
         )[0]
@@ -687,7 +735,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             "exec_type": "trade",
             "order_status": "partially_filled",
         }
-        first = provider_fills_from_execution_frame(
+        first = self.provider_fills_from_admitted_frame(
             parse_execution_frame(
                 frame_bytes(
                     frame_type="update",
@@ -702,7 +750,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         changed = dict(common)
         changed["last_price"] = 25001
         changed["cost"] = 25001
-        second = provider_fills_from_execution_frame(
+        second = self.provider_fills_from_admitted_frame(
             parse_execution_frame(
                 frame_bytes(
                     frame_type="update",
@@ -760,7 +808,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                     KrakenSpotStreamError,
                     "margin_borrow=false is provider-evidenced",
                 ):
-                    provider_fills_from_execution_frame(
+                    self.provider_fills_from_admitted_frame(
                         frame,
                         instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
                     )
@@ -790,8 +838,100 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             KrakenSpotStreamError,
             r"cost differs from exact last_qty \* last_price",
         ):
-            provider_fills_from_execution_frame(
+            self.provider_fills_from_admitted_frame(
                 frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
+
+    def test_provider_fill_extraction_requires_recovery_admission(self):
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        recovery.begin_connection()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "require gap-free stream recovery",
+        ):
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
+    def test_sequence_gap_clears_fill_buffer_and_blocks_extraction(self):
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=1,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=2,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-TRADE",
+                            "exec_id": "E-GAP-TRADE",
+                            "exec_type": "trade",
+                            "order_status": "partially_filled",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        self.assertEqual(len(recovery.evidence().buffered_update_evidence_refs), 1)
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=4,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-LATE",
+                            "exec_type": "status",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        self.assertEqual(recovery.evidence().buffered_update_evidence_refs, ())
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "require gap-free stream recovery",
+        ):
+            recovery.buffered_provider_fills(
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
             )
 

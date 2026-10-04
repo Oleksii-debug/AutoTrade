@@ -876,7 +876,7 @@ def parse_execution_frame(
     )
 
 
-def provider_fills_from_execution_frame(
+def _provider_fills_from_execution_frame(
     frame: object,
     *,
     instrument_versions: Mapping[str, str],
@@ -1337,6 +1337,32 @@ class KrakenSpotExecutionStreamRecovery:
             query_order_chunks=chunks,
             evidence_refs=tuple(self._crosscheck_evidence_refs),
         )
+
+    def buffered_provider_fills(
+        self,
+        *,
+        instrument_versions: Mapping[str, str],
+    ) -> tuple[ProviderFillEvidence, ...]:
+        """Return fills only from updates admitted by this recovery sequence.
+
+        These remain provider observations for canonical reconciliation. They do
+        not grant READY or bypass the required REST cross-check.
+        """
+
+        if self.phase != self.REST_RECONCILIATION_REQUIRED:
+            raise KrakenSpotStreamError(
+                "Kraken buffered provider fills require gap-free stream "
+                "recovery awaiting REST reconciliation"
+            )
+        fills: list[ProviderFillEvidence] = []
+        for frame in self._buffered_updates:
+            fills.extend(
+                _provider_fills_from_execution_frame(
+                    frame,
+                    instrument_versions=instrument_versions,
+                )
+            )
+        return tuple(fills)
 
     def evidence(self) -> KrakenSpotStreamRecoveryEvidence:
         """Return an immutable, explicitly non-READY reconciliation handoff."""

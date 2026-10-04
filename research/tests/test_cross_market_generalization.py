@@ -160,7 +160,7 @@ def evidence(
     )
 
 
-def complete_evidence(**overrides):
+def complete_evidence(overrides=None):
     rows = {
         ("crypto", "bull"): evidence(
             "crypto",
@@ -187,7 +187,8 @@ def complete_evidence(**overrides):
             digest_char="7",
         ),
     }
-    rows.update(overrides)
+    if overrides:
+        rows.update(overrides)
     return tuple(rows[key] for key in sorted(rows))
 
 
@@ -216,7 +217,7 @@ class CrossMarketGeneralizationTests(unittest.TestCase):
 
     def test_negative_execution_adjusted_score_is_retained_not_cherry_picked(self):
         rows = complete_evidence(
-            **{
+            {
                 ("crypto", "crisis"): evidence(
                     "crypto",
                     "crisis",

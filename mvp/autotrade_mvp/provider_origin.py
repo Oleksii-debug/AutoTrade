@@ -418,6 +418,7 @@ def _require_direct_wire_execution_claim(
         or event.get("aggregate_version") != 1
         or event.get("payload") != expected
         or event.get("payload_hash") != payload_digest(expected)
+        or event.get("committed_at") != expected["observed_at"]
     ):
         raise ProviderOriginError(
             "direct wire execution is already claimed by another attempt or is corrupt"

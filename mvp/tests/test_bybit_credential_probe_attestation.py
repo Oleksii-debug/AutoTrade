@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from types import MappingProxyType
 
+import mvp.autotrade_mvp.bybit_credential_probe_evidence as probe_module
 from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeEvidence,
     BybitCredentialProbeRawHttpResponse,
@@ -161,6 +162,121 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 wire_client=client,
             )
         self.assertEqual(len(client.requests), 1)
+
+    def test_direct_transport_class_or_send_retarget_cannot_mint_attestation(self):
+        body = (
+            b'{"retCode":0,"retMsg":"OK","result":'
+            b'{"apiKey":"probe-key","secret":""}}'
+        )
+
+        class ForgedDirectClient:
+            def send(self, request):
+                del request
+                return BybitCredentialProbeRawHttpResponse(
+                    http_status=200,
+                    body=body,
+                )
+
+        original_type = probe_module.BybitCredentialProbeUrllibClient
+        original_init = original_type.__init__
+        original_send = original_type.send
+        try:
+            probe_module.BybitCredentialProbeUrllibClient = ForgedDirectClient
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "transport type authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            probe_module.BybitCredentialProbeUrllibClient = original_type
+
+        original_build_opener = probe_module.build_opener
+        original_raw_response_type = probe_module.BybitCredentialProbeRawHttpResponse
+        forged_opener_called = False
+
+        def forged_build_opener(*args, **kwargs):
+            nonlocal forged_opener_called
+            del args, kwargs
+            forged_opener_called = True
+            raise AssertionError("forged opener executed")
+
+        try:
+            probe_module.build_opener = forged_build_opener
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+            self.assertFalse(forged_opener_called)
+        finally:
+            probe_module.build_opener = original_build_opener
+
+        class ForgedRawResponse:
+            pass
+
+        try:
+            probe_module.BybitCredentialProbeRawHttpResponse = ForgedRawResponse
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "dependency authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            probe_module.BybitCredentialProbeRawHttpResponse = original_raw_response_type
+
+        def forged_init(self, *, max_response_bytes=1024 * 1024):
+            del max_response_bytes
+            self.send = lambda request: BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=body,
+            )
+
+        try:
+            original_type.__init__ = forged_init
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "constructor authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            original_type.__init__ = original_init
+
+        def forged_send(self, request):
+            del self, request
+            return BybitCredentialProbeRawHttpResponse(
+                http_status=200,
+                body=body,
+            )
+
+        try:
+            original_type.send = forged_send
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "transport send authority",
+            ):
+                execute_bybit_credential_probe_wire_query(
+                    source_uri="https://api.bybit.com/v5/user/query-api",
+                    headers=_headers(),
+                    timeout_seconds=15,
+                )
+        finally:
+            original_type.send = original_send
 
     def test_injected_wire_client_can_exercise_nonattested_rejection_path(self):
         client = _FakeWireClient(

@@ -650,7 +650,8 @@ class ScientificRegistry:
                 "locked holdout dataset_version must be a positive integer"
             )
         try:
-            dataset_digest = vintage_registry.digest(
+            dataset_digest = HistoricalVintageRegistry.digest(
+                vintage_registry,
                 canonical_dataset_id,
                 dataset_version,
             )

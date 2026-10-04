@@ -271,8 +271,12 @@ class HostNetworkTests(unittest.TestCase):
             target="/api/v1/state",
             headers=self.headers(),
         )
-        self.assertEqual(response.status, 400)
-        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            self.body(response),
+            {"error": "SNAPSHOT_BUSY", "retryable": True},
+        )
+        self.assertEqual(dict(response.headers)["Retry-After"], "1")
         self.assertEqual(calls["count"], 4)
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):

@@ -47,6 +47,7 @@ _CSP = (
     "form-action 'self'; "
     "connect-src 'self'; "
     "script-src 'self'; "
+    "worker-src 'none'; "
     "style-src 'self'; "
     "img-src 'self'"
 )
@@ -225,9 +226,21 @@ def load_immutable_web_bundle(
         raise TypeError("web bundle bodies must be an exact dict")
     if len(asset_bodies) > _MAX_ASSETS:
         raise ValueError("web bundle body set has too many assets")
-    body_paths = tuple(asset_bodies)
-    if any(type(path) is not str for path in body_paths):
-        raise TypeError("web bundle body paths must be exact strings")
+    # Validate the full caller-owned body graph before manifest membership
+    # lookups or hashing. This keeps hostile scalar callbacks out of the trust
+    # boundary and enforces the aggregate release envelope before SHA-256 work.
+    total_body_bytes = 0
+    for body_path, body_bytes in asset_bodies.items():
+        if type(body_path) is not str:
+            raise TypeError("web bundle body paths must be exact strings")
+        _canonical_asset_path(body_path)
+        if type(body_bytes) is not bytes:
+            raise TypeError("web bundle asset body must be immutable bytes")
+        if len(body_bytes) > _MAX_ASSET_BYTES:
+            raise ValueError("web bundle asset body exceeds the release envelope")
+        total_body_bytes += len(body_bytes)
+        if total_body_bytes > _MAX_BUNDLE_BYTES:
+            raise ValueError("web bundle body set exceeds the release size envelope")
 
     def reject_duplicate_keys(
         pairs: list[tuple[str, object]],

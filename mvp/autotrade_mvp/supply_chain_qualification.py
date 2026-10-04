@@ -13,10 +13,10 @@ import json
 from pathlib import Path
 from uuid import UUID
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 from mvp.autotrade_mvp.qualification_attestation import (

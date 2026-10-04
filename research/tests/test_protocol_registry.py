@@ -469,6 +469,72 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             self.assertEqual(accepted["prior_access_count"], 0)
             self.assertEqual(accepted["untouched"], 1)
 
+    def test_vintage_registry_instance_shadow_cannot_mint_holdout_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            registered = science.register_protocol(protocol())
+            vintages = HistoricalVintageRegistry(root / "historical-vintages")
+            manifest = _vintage_manifest("shadow")
+            vintages.commit(manifest)
+
+            # Python instances permit method shadowing through __dict__.  The
+            # science boundary must reconstruct a clean WP-10 owner rather than
+            # dispatching an attacker-supplied instance attribute.
+            vintages.load = lambda *_args, **_kwargs: _vintage_manifest("b")
+            with self.assertRaisesRegex(
+                TypeError,
+                "unexpected mutable instance state",
+            ):
+                science.preregister_locked_holdout(
+                    registered.protocol_id,
+                    vintage_registry=vintages,
+                    dataset_id=manifest["dataset_id"],
+                    dataset_version=1,
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+    def test_corrupt_preregistration_chronology_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            science = ScientificRegistry(path)
+            registered = science.register_protocol(protocol())
+            preregister_holdout(science, registered.protocol_id)
+
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DROP TRIGGER protocol_locked_holdouts_no_update"
+                )
+                cursor = connection.execute(
+                    "UPDATE protocol_locked_holdouts SET created_at=? "
+                    "WHERE protocol_id=?",
+                    ("not-an-authoritative-time", registered.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "created_at must be exact timezone-aware ISO text",
+            ):
+                science.locked_holdout_registration(registered.protocol_id)
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "created_at must be exact timezone-aware ISO text",
+            ):
+                science.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-admit-under-corrupt-prereg"},
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
     def test_repeated_holdout_use_cannot_remain_untouched(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
-from typing import Iterable
+from typing import Callable, Iterable
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .durable_capabilities import DurableCapabilityRegistry
@@ -65,7 +66,6 @@ ASSET_FAMILY_COMPATIBILITY = {
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_SELECTED_ROUTE_TOKEN = object()
 
 
 class ProviderSelectionError(ValueError):
@@ -214,28 +214,120 @@ class ProviderCandidate:
         )
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class SelectedProviderRoute:
-    """Sealed binding of static route composition to one exact current C/Q pair."""
+def _install_selected_route_authority() -> tuple[
+    type[object],
+    Callable[..., object],
+]:
+    """Create the route type and its non-exported canonical selection issuer.
 
-    candidate: ProviderCandidate
-    capability: CapabilitySnapshot
-    qualification: AcceptedProviderQualification
-    decision_journal_sequence_cut: int
+    The binding table is closure-owned and keyed by exact object identity. Weak
+    references have no callbacks: dead entries are pruned only during later
+    canonical issuance, so external code cannot erase or mint authority by
+    invoking a weakref callback.  Every authority-bearing field read revalidates
+    the construction snapshot before returning caller-visible state.
+    """
 
-    def __init__(
-        self,
+    route_ref = weakref_ref
+    bindings: dict[
+        int,
+        tuple[
+            object,
+            ProviderCandidate,
+            CapabilitySnapshot,
+            AcceptedProviderQualification,
+            int,
+        ],
+    ] = {}
+    authority_fields = frozenset(
+        {
+            "candidate",
+            "capability",
+            "qualification",
+            "decision_journal_sequence_cut",
+            "qualification_id",
+            "capability_snapshot_id",
+        }
+    )
+
+    def authority_changed() -> None:
+        message = "selected provider route authority changed"
+        # The generic selector must not statically depend on the financial
+        # product layer.  When that layer is already loaded, preserve its
+        # established domain error at the product boundary; otherwise use the
+        # selector's own fail-closed error.
+        try:
+            from .financial_send_authority import FinancialSendAuthorityError
+        except (ImportError, AttributeError):
+            raise ProviderSelectionError(message)
+        raise FinancialSendAuthorityError(message)
+
+    @dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
+    class SelectedProviderRoute:
+        """Selection-issued binding of static route composition to exact C/Q."""
+
+        candidate: ProviderCandidate
+        capability: CapabilitySnapshot
+        qualification: AcceptedProviderQualification
+        decision_journal_sequence_cut: int
+
+        def __init__(
+            self,
+            *,
+            candidate: ProviderCandidate,
+            capability: CapabilitySnapshot,
+            qualification: AcceptedProviderQualification,
+            decision_journal_sequence_cut: int,
+            _selection_token: object | None = None,
+        ) -> None:
+            del candidate, capability, qualification, decision_journal_sequence_cut
+            del _selection_token
+            raise ProviderSelectionError(
+                "SelectedProviderRoute must come from canonical provider selection"
+            )
+
+        def __getattribute__(self, name: str) -> object:
+            if name in authority_fields:
+                binding = bindings.get(id(self))
+                if binding is None:
+                    authority_changed()
+                bound_ref, candidate, capability, qualification, decision_cut = binding
+                if bound_ref() is not self:
+                    authority_changed()
+                try:
+                    current_candidate = object.__getattribute__(self, "candidate")
+                    current_capability = object.__getattribute__(self, "capability")
+                    current_qualification = object.__getattribute__(self, "qualification")
+                    current_cut = object.__getattribute__(
+                        self,
+                        "decision_journal_sequence_cut",
+                    )
+                except AttributeError:
+                    authority_changed()
+                if (
+                    current_candidate is not candidate
+                    or current_capability is not capability
+                    or current_qualification is not qualification
+                    or type(current_cut) is not int
+                    or current_cut != decision_cut
+                ):
+                    authority_changed()
+            return object.__getattribute__(self, name)
+
+        @property
+        def qualification_id(self) -> str:
+            return self.qualification.qualification_id
+
+        @property
+        def capability_snapshot_id(self) -> str:
+            return self.capability.snapshot_id
+
+    def issue_selected_route(
         *,
         candidate: ProviderCandidate,
         capability: CapabilitySnapshot,
         qualification: AcceptedProviderQualification,
         decision_journal_sequence_cut: int,
-        _selection_token: object | None = None,
-    ) -> None:
-        if _selection_token is not _SELECTED_ROUTE_TOKEN:
-            raise ProviderSelectionError(
-                "SelectedProviderRoute must come from canonical provider selection"
-            )
+    ) -> SelectedProviderRoute:
         if type(candidate) is not ProviderCandidate:
             raise TypeError("candidate must be exact ProviderCandidate")
         if type(capability) is not CapabilitySnapshot:
@@ -248,23 +340,41 @@ class SelectedProviderRoute:
             type(decision_journal_sequence_cut) is not int
             or decision_journal_sequence_cut < 0
         ):
-            raise ProviderSelectionError("decision cut must be a non-negative exact integer")
-        object.__setattr__(self, "candidate", candidate)
-        object.__setattr__(self, "capability", capability)
-        object.__setattr__(self, "qualification", qualification)
+            raise ProviderSelectionError(
+                "decision cut must be a non-negative exact integer"
+            )
+
+        dead = [
+            key
+            for key, (existing_ref, *_rest) in tuple(bindings.items())
+            if existing_ref() is None
+        ]
+        for key in dead:
+            bindings.pop(key, None)
+
+        route = object.__new__(SelectedProviderRoute)
+        object.__setattr__(route, "candidate", candidate)
+        object.__setattr__(route, "capability", capability)
+        object.__setattr__(route, "qualification", qualification)
         object.__setattr__(
-            self,
+            route,
             "decision_journal_sequence_cut",
             decision_journal_sequence_cut,
         )
+        bindings[id(route)] = (
+            route_ref(route),
+            candidate,
+            capability,
+            qualification,
+            decision_journal_sequence_cut,
+        )
+        return route
 
-    @property
-    def qualification_id(self) -> str:
-        return self.qualification.qualification_id
+    return SelectedProviderRoute, issue_selected_route
 
-    @property
-    def capability_snapshot_id(self) -> str:
-        return self.capability.snapshot_id
+
+SelectedProviderRoute, _selected_route_issuer = _install_selected_route_authority()
+del _install_selected_route_authority
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,21 +426,15 @@ def _unsupported_features(request: ProviderRouteRequest) -> frozenset[str]:
     )
 
 
-def select_provider(
+def _select_provider_impl(
     request: ProviderRouteRequest,
     candidates: Iterable[ProviderCandidate],
     *,
     at: datetime,
     capability_registry: DurableCapabilityRegistry,
     qualification_registry: DurableProviderQualificationRegistry,
+    route_issuer: Callable[..., SelectedProviderRoute],
 ) -> ProviderSelection:
-    """Resolve one exact route from durable C/Q authority or fail closed.
-
-    C and Q are both replayed at one captured global journal sequence. If the
-    shared JournalStore advances while selection is evaluating candidates, no
-    route is returned; the caller must retry against a fresh decision cut.
-    """
-
     if type(request) is not ProviderRouteRequest:
         raise TypeError("request must be exact ProviderRouteRequest")
     if type(capability_registry) is not DurableCapabilityRegistry:
@@ -429,12 +533,11 @@ def select_provider(
                     "eligible route lacks resolved canonical authority"
                 )
             eligible.append(
-                SelectedProviderRoute(
+                route_issuer(
                     candidate=candidate,
                     capability=capability,
                     qualification=qualification,
                     decision_journal_sequence_cut=decision_cut,
-                    _selection_token=_SELECTED_ROUTE_TOKEN,
                 )
             )
 
@@ -489,3 +592,45 @@ def select_provider(
         decisions=tuple(decisions),
         decision_journal_sequence_cut=decision_cut,
     )
+
+
+def _install_provider_selector(
+    route_issuer: Callable[..., SelectedProviderRoute],
+    implementation: Callable[..., ProviderSelection],
+) -> Callable[..., ProviderSelection]:
+    """Bind canonical route issuance into the only public selector entry point."""
+
+    def select_provider(
+        request: ProviderRouteRequest,
+        candidates: Iterable[ProviderCandidate],
+        *,
+        at: datetime,
+        capability_registry: DurableCapabilityRegistry,
+        qualification_registry: DurableProviderQualificationRegistry,
+    ) -> ProviderSelection:
+        """Resolve one exact route from durable C/Q authority or fail closed.
+
+        C and Q are both replayed at one captured global journal sequence. If the
+        shared JournalStore advances while selection is evaluating candidates,
+        no route is returned; the caller must retry against a fresh decision cut.
+        """
+
+        return implementation(
+            request,
+            candidates,
+            at=at,
+            capability_registry=capability_registry,
+            qualification_registry=qualification_registry,
+            route_issuer=route_issuer,
+        )
+
+    return select_provider
+
+
+select_provider = _install_provider_selector(
+    _selected_route_issuer,
+    _select_provider_impl,
+)
+del _selected_route_issuer
+del _select_provider_impl
+del _install_provider_selector

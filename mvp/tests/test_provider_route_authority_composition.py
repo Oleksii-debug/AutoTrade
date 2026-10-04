@@ -196,6 +196,33 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                 route.decision_journal_sequence_cut,
             )
 
+    def test_route_submission_scope_rejects_polymorphic_mapping_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            _journal, _capabilities, _qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            touched = []
+
+            class HostileScope(dict):
+                def __iter__(self):
+                    touched.append("iter")
+                    raise AssertionError("unexpected scope iteration")
+
+                def items(self):
+                    touched.append("items")
+                    raise AssertionError("unexpected scope items")
+
+                def keys(self):
+                    touched.append("keys")
+                    raise AssertionError("unexpected scope keys")
+
+            with self.assertRaisesRegex(TypeError, "exact dict"):
+                bind_selected_provider_route_submission_scope(
+                    route,
+                    HostileScope({"provider_id": "BYBIT"}),
+                )
+            self.assertEqual(touched, [])
+
     def test_route_submission_scope_rejects_reserved_identity_override(self):
         with TemporaryDirectory() as directory:
             _journal, _capabilities, _qualifications, route, _dispatcher, _q1, _harness = (

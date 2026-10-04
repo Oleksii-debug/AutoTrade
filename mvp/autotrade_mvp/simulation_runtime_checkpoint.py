@@ -234,6 +234,16 @@ def _stable_runtime_components(
         raise TypeError("completed autonomous episodes must be a list or tuple")
 
     run_id, _build_sha, protocol_digest = _protocol_identity(protocol)
+    identity = store.store_identity
+    store_identity = {
+        "canonical_path": identity.canonical_path,
+        "filesystem_device": identity.filesystem_device,
+        "filesystem_inode": identity.filesystem_inode,
+        "identity_source": identity.identity_source,
+        "windows_volume_serial": identity.windows_volume_serial,
+        "windows_file_index_high": identity.windows_file_index_high,
+        "windows_file_index_low": identity.windows_file_index_low,
+    }
     before = JournalStore.whole_store_state_cut(store)
 
     if JournalStore.pending_outbox_count(store) != 0:
@@ -295,6 +305,7 @@ def _stable_runtime_components(
 
     common = {
         "cut": before,
+        "journal_store_identity": store_identity,
         "run_id": run_id,
         "protocol_digest": protocol_digest,
         "completed_episodes": len(completed_values),

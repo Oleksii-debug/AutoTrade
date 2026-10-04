@@ -75,6 +75,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
         request_marker: str,
         terminal_cut_delta: int = 0,
         canonical_prepared: bool = True,
+        artifact_export: bool = False,
     ):
         """Seed only the durable recovery state; this is not provider-wire proof."""
 
@@ -134,7 +135,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
             media_type="application/octet-stream",
             rights={
                 "storage": True,
-                "export": False,
+                "export": artifact_export,
                 "rights_id": "qualified-provider-origin-response:v1",
             },
             source_refs=[],
@@ -650,6 +651,47 @@ class ProviderOriginJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ProviderOriginError,
                 "predates durable Prepared",
+            ):
+                restarted.recover_response_binding(attempt_id, binding)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+
+    def test_prepared_claim_recovery_rejects_exportable_response_artifact(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                _capabilities,
+                _qualifications,
+                _route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[]}}'
+            attempt_id, _artifact_id = self._seed_direct_claim_artifact(
+                origin,
+                journal,
+                binding,
+                body,
+                request_marker="exportable-artifact",
+                artifact_export=True,
+            )
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "artifact differs from wire claim",
             ):
                 restarted.recover_response_binding(attempt_id, binding)
             self.assertEqual(

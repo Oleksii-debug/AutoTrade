@@ -271,6 +271,20 @@ class ExecutionOracleTests(unittest.TestCase):
                         result=result,
                     )
 
+    def test_oracle_rejects_off_grid_market_reference(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "market reference price is not aligned to authoritative price quantum",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=observation(ask="101.005"),
+                model=m,
+                result=result,
+            )
+
     def test_oracle_rejects_market_price_that_differs_from_adverse_tick_bound(self):
         o, q, m = order(), observation(), model()
         result = simulate_execution(o, q, m)

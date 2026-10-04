@@ -582,7 +582,7 @@ class CorporateSettlementTests(unittest.TestCase):
                 payload={"per_share": "1", "currency": "USD"},
             )
 
-        hostile_tz = object.__new__(HostileTzinfo)
+        hostile_tz = HostileTzinfo()
         with self.assertRaisesRegex(ValueError, "fixed built-in timezone"):
             corporate_event(
                 event_id="tzinfo-subclass",

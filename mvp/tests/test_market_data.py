@@ -1875,19 +1875,13 @@ class MarketNormalizationTests(unittest.TestCase):
                 provider_symbol="ABC-USD",
             )
 
-        substituted_build = replace(
-            delta,
-            adapter_version="autotrade-test-market-adapter@2",
-        )
         with self.assertRaisesRegex(
             MarketDataError,
-            "differs from retained normalized identity",
+            "adapter build differs from identity material",
         ):
-            normalizer.apply_qualified_book_range(
-                substituted_build,
-                provider_id="provider-a",
-                venue_id="venue-a",
-                provider_symbol="ABC-USD",
+            replace(
+                delta,
+                adapter_version="autotrade-test-market-adapter@2",
             )
 
         self.assertEqual(

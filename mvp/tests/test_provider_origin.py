@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -85,7 +86,8 @@ class ProviderOriginJournalTests(unittest.TestCase):
             recovered = restarted.load_response_binding(attempt_id, binding)
             self.assertEqual(recovered, recorded)
             observation = observe_provider_origin_json_response(
-                response_binding=recovered,
+                origin_journal=restarted,
+                attempt_id=attempt_id,
                 query_binding=binding,
             )
             self.assertEqual(observation.origin_ref, recorded.origin_ref)
@@ -100,6 +102,47 @@ class ProviderOriginJournalTests(unittest.TestCase):
             self.assertEqual(
                 observation.payload["result"]["list"][0]["equity"],
                 "10.25",
+            )
+
+    def test_mutated_loaded_binding_cannot_relabel_durable_response_bytes(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
+                network_policy_identity="sha256:" + "a" * 64,
+                recorded_at=NOW,
+            )
+            recorded = self._record(
+                origin,
+                attempt_id,
+                binding,
+                body=b'{"retCode":0,"result":{"equity":"10.25"}}',
+            )
+            caller_copy = origin.load_response_binding(attempt_id, binding)
+            forged = b'{"retCode":0,"result":{"equity":"999999.99"}}'
+            object.__setattr__(caller_copy, "response_bytes", forged)
+            object.__setattr__(
+                caller_copy,
+                "response_sha256",
+                "sha256:" + sha256(forged).hexdigest(),
+            )
+
+            observation = observe_provider_origin_json_response(
+                origin_journal=origin,
+                attempt_id=attempt_id,
+                query_binding=binding,
+            )
+            self.assertEqual(observation.origin_ref, recorded.origin_ref)
+            self.assertEqual(
+                observation.response_binding.response_sha256,
+                recorded.response_sha256,
+            )
+            self.assertEqual(observation.payload["result"]["equity"], "10.25")
+            self.assertNotEqual(
+                observation.response_binding.response_sha256,
+                caller_copy.response_sha256,
             )
 
     def test_journal_never_embeds_provider_response_bytes(self):

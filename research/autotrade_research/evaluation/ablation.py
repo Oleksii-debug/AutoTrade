@@ -1956,6 +1956,26 @@ del _make_ablation_authority_policy_binding
 def _make_registered_policy_context(resolve_policy_binding):
     """Capture all authority-bearing construction state outside public attributes."""
 
+    def _assert_canonical_method_surface(
+        value: object,
+        owner_type: type,
+        label: str,
+    ) -> None:
+        state = object.__getattribute__(value, "__dict__")
+        shadowed = tuple(
+            sorted(
+                name
+                for name in state
+                if name in owner_type.__dict__
+                and callable(getattr(owner_type, name, None))
+            )
+        )
+        if shadowed:
+            raise ProtocolViolation(
+                f"ablation qualification {label} shadows canonical methods: "
+                + ", ".join(shadowed)
+            )
+
     def _registered_policy_context(
         authority: object,
     ) -> tuple[
@@ -2059,6 +2079,21 @@ def _make_registered_policy_context(resolve_policy_binding):
             raise ProtocolViolation(
                 "ablation qualification authority artifact store is not canonical"
             )
+        _assert_canonical_method_surface(
+            scientific_registry,
+            ScientificRegistry,
+            "registry",
+        )
+        _assert_canonical_method_surface(
+            experience_memory,
+            ExperienceMemory,
+            "memory",
+        )
+        _assert_canonical_method_surface(
+            artifact_store,
+            ArtifactStore,
+            "artifact store",
+        )
         if (
             type(protocol_id) is not str
             or not protocol_id

@@ -528,11 +528,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             self.assertEqual(evaluation["prior_access_count"], 1)
             self.assertEqual(evaluation["untouched"], 0)
 
-    def test_locked_evaluation_must_match_preregistered_forward_period_and_role(self):
+    def test_locked_holdout_preregistration_must_match_forward_period_and_role(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = registry.register_protocol(protocol())
-            exhaust_trials(registry, p.protocol_id)
 
             wrong_window = holdout_identity(
                 start="2026-02-01",
@@ -540,27 +539,28 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "match registered forward_period",
+                "must match forward_period with role LOCKED_FORWARD",
             ):
-                registry.register_evaluation(
+                registry.preregister_locked_holdout(
                     p.protocol_id,
-                    holdout_id="wrong-window",
                     holdout_identity=wrong_window,
-                    result={"net_utility": "0.030"},
                 )
 
             wrong_role = holdout_identity(role="VALIDATION")
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "role must be LOCKED_FORWARD",
+                "must match forward_period with role LOCKED_FORWARD",
             ):
-                registry.register_evaluation(
+                registry.preregister_locked_holdout(
                     p.protocol_id,
-                    holdout_id="wrong-role",
                     holdout_identity=wrong_role,
-                    result={"net_utility": "0.030"},
                 )
 
+            registry.preregister_locked_holdout(
+                p.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
+            exhaust_trials(registry, p.protocol_id)
             accepted = registry.register_evaluation(
                 p.protocol_id,
                 holdout_id="registered-forward",
@@ -572,16 +572,31 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
     def test_holdout_alias_cannot_be_rebound_to_different_evidence(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
-            p = registry.register_protocol(protocol())
+            first = registry.register_protocol(protocol())
             registry.record_holdout_access(
-                p.protocol_id,
+                first.protocol_id,
                 holdout_id="locked-forward",
                 holdout_identity=holdout_identity("a"),
                 purpose="initial-inspection",
             )
+
+            second_payload = protocol()
+            second_payload["hypothesis"] = "independent protocol bound to dataset B"
+            second = registry.register_protocol(second_payload)
+            registry.preregister_locked_holdout(
+                second.protocol_id,
+                holdout_identity=holdout_identity("b"),
+            )
+            for index in range(second_payload["trial_budget"]):
+                registry.record_trial(
+                    second.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "registered", "index": index},
+                )
+
             with self.assertRaisesRegex(ProtocolConflict, "cannot be rebound"):
                 registry.register_evaluation(
-                    p.protocol_id,
+                    second.protocol_id,
                     holdout_id="locked-forward",
                     holdout_identity=holdout_identity("b"),
                     result={"net_utility": "0.030"},

@@ -118,8 +118,81 @@ def _decimal_identity(value: Decimal) -> str:
         ) from error
 
 
+def _install_futures_contract_lifecycle_authority():
+    """Return a construction metaclass plus an integrity verifier.
+
+    Registration occurs only after type.__call__ completes the ordinary
+    __new__ -> generated dataclass __init__ -> __post_init__ path.  Calling
+    object.__new__, __new__, __init__, or __post_init__ directly therefore
+    cannot mint lifecycle authority.
+    """
+
+    authorities: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[str, str, datetime, datetime, datetime],
+        ],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    class LifecycleAuthorityMeta(type):
+        def __call__(cls, *args, **kwargs):
+            value = super().__call__(*args, **kwargs)
+            if type(value) is cls:
+                prune_dead()
+                object_id = id(value)
+                current = authorities.get(object_id)
+                if current is not None and current[0]() is not None:
+                    raise FuturesError(
+                        "futures lifecycle authority identity collision"
+                    )
+                snapshot = (
+                    value.instrument,
+                    value.settlement_method,
+                    value.expiry,
+                    value.last_trade_at,
+                    value.delivery_cutoff,
+                )
+                authorities[object_id] = (weakref.ref(value), snapshot)
+            return value
+
+    def snapshot_for(
+        value: object,
+    ) -> tuple[str, str, datetime, datetime, datetime]:
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise FuturesError("futures lifecycle authority is not established")
+        value_ref, snapshot = entry
+        current = value_ref()
+        if current is value:
+            return snapshot
+        if current is None:
+            authorities.pop(id(value), None)
+            raise FuturesError("futures lifecycle authority is not established")
+        raise FuturesError("futures lifecycle authority identity collision")
+
+    return LifecycleAuthorityMeta, snapshot_for
+
+
+(
+    _FuturesContractLifecycleMeta,
+    _futures_contract_lifecycle_snapshot_for,
+) = _install_futures_contract_lifecycle_authority()
+del _install_futures_contract_lifecycle_authority
+
+
 @dataclass(frozen=True)
-class FuturesContract:
+class FuturesContract(metaclass=_FuturesContractLifecycleMeta):
     instrument: str
     payoff: Literal["LINEAR", "INVERSE"]
     multiplier: Decimal
@@ -251,99 +324,7 @@ class FuturesContract:
         )
 
 
-def _bind_futures_contract_lifecycle_authority(
-    contract_type: type,
-    validation_post_init,
-):
-    """Bind lifecycle minting to successful normal construction only.
-
-    The registration capability stays closure-owned.  A forged exact instance
-    created with object.__new__ cannot acquire lifecycle authority by importing
-    a module-level helper or by calling __post_init__ manually.
-    """
-
-    authorities: dict[
-        int,
-        tuple[
-            weakref.ReferenceType,
-            tuple[str, str, datetime, datetime, datetime],
-        ],
-    ] = {}
-    provisional: dict[int, weakref.ReferenceType] = {}
-
-    def prune_dead() -> None:
-        for states in (authorities, provisional):
-            dead = [
-                object_id
-                for object_id, entry in tuple(states.items())
-                if (entry[0] if isinstance(entry, tuple) else entry)() is None
-            ]
-            for object_id in dead:
-                states.pop(object_id, None)
-
-    def construction_new(cls, *args, **kwargs):
-        del args, kwargs
-        value = object.__new__(cls)
-        if cls is contract_type:
-            prune_dead()
-            provisional[id(value)] = weakref.ref(value)
-        return value
-
-    def construction_post_init(value) -> None:
-        if type(value) is not contract_type:
-            validation_post_init(value)
-            return
-
-        prune_dead()
-        value_ref = provisional.pop(id(value), None)
-        if value_ref is None or value_ref() is not value:
-            raise FuturesError(
-                "futures lifecycle authority requires normal constructor execution"
-            )
-
-        validation_post_init(value)
-        object_id = id(value)
-        current = authorities.get(object_id)
-        if current is not None and current[0]() is not None:
-            raise FuturesError("futures lifecycle authority is already established")
-        snapshot = (
-            value.instrument,
-            value.settlement_method,
-            value.expiry,
-            value.last_trade_at,
-            value.delivery_cutoff,
-        )
-        authorities[object_id] = (weakref.ref(value), snapshot)
-
-    def snapshot_for(
-        value: object,
-    ) -> tuple[str, str, datetime, datetime, datetime]:
-        if type(value) is not contract_type:
-            raise FuturesError("lifecycle authority requires exact FuturesContract")
-        prune_dead()
-        entry = authorities.get(id(value))
-        if entry is None:
-            raise FuturesError("futures lifecycle authority is not established")
-        value_ref, snapshot = entry
-        current = value_ref()
-        if current is value:
-            return snapshot
-        if current is None:
-            authorities.pop(id(value), None)
-            raise FuturesError("futures lifecycle authority is not established")
-        raise FuturesError("futures lifecycle authority identity collision")
-
-    contract_type.__new__ = staticmethod(construction_new)
-    contract_type.__post_init__ = construction_post_init
-    return snapshot_for
-
-
-_futures_contract_lifecycle_snapshot_for = _bind_futures_contract_lifecycle_authority(
-    FuturesContract,
-    FuturesContract.__post_init__,
-)
-del _bind_futures_contract_lifecycle_authority
-
+del _FuturesContractLifecycleMeta
 
 @dataclass(frozen=True)
 class FuturesSettlementScope:

@@ -12,6 +12,7 @@ from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from fractions import Fraction
 import json
 from typing import Literal
 
@@ -646,6 +647,91 @@ def _exact_product(*values: Decimal, name: str) -> Decimal:
         ) from error
 
 
+def _bounded_rational(value: Fraction, *, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise ExecutionRealismError(
+            f"{name} exceeds exact rational resource envelope"
+        ) from error
+
+
+def _market_projected_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    projection = model.price_projection
+    if projection is None:
+        raise ExecutionRealismError(
+            "MARKET execution requires authoritative price projection policy"
+        )
+    if projection.instrument_version != order.instrument_version:
+        raise ExecutionRealismError(
+            "price projection instrument_version must match order instrument_version"
+        )
+
+    available = as_fraction(observation.available_volume)
+    participation = (
+        _bounded_rational(as_fraction(capacity) / available, name="market participation")
+        if available > 0
+        else Fraction(0, 1)
+    )
+    maximum_participation = as_fraction(model.max_participation)
+    impact_fraction = (
+        _bounded_rational(
+            participation / maximum_participation,
+            name="market impact fraction",
+        )
+        if maximum_participation > 0
+        else Fraction(0, 1)
+    )
+    impact_fraction = min(impact_fraction, Fraction(1, 1))
+    impact_bps = _bounded_rational(
+        as_fraction(model.impact_bps_at_max_participation) * impact_fraction,
+        name="market impact bps",
+    )
+    total_bps = _bounded_rational(
+        _bounded_rational(
+            as_fraction(additional_spread_bps)
+            + as_fraction(model.slippage_bps)
+            + impact_bps,
+            name="market total bps before scenario",
+        )
+        * as_fraction(model.scenario_cost_multiplier),
+        name="market total bps",
+    )
+    price_delta = _bounded_rational(
+        as_fraction(base_price) * total_bps / Fraction(10000, 1),
+        name="market price delta",
+    )
+    unrounded = _bounded_rational(
+        as_fraction(base_price) + price_delta
+        if order.side == "BUY"
+        else as_fraction(base_price) - price_delta,
+        name="market projected price",
+    )
+    try:
+        fill_price = round_fraction_to_quantum(
+            unrounded,
+            projection.price_quantum,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "market price projection exceeds exact arithmetic resource envelope"
+        ) from error
+    if fill_price <= 0:
+        raise ExecutionRealismError(
+            "configured adverse costs produce non-positive execution price"
+        )
+    return fill_price
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
     try:
         return round_fraction_to_quantum(
@@ -946,33 +1032,14 @@ def simulate_execution(
             observation,
             model,
         )
-        participation = (
-            capacity / observation.available_volume
-            if observation.available_volume > 0
-            else Decimal("0")
+        fill_price = _market_projected_price(
+            order=order,
+            observation=observation,
+            model=model,
+            capacity=capacity,
+            base_price=base_price,
+            additional_spread_bps=additional_spread_bps,
         )
-        impact_fraction = (
-            participation / model.max_participation
-            if model.max_participation > 0
-            else Decimal("0")
-        )
-        impact_bps = (
-            model.impact_bps_at_max_participation
-            * min(impact_fraction, Decimal("1"))
-        )
-        total_bps = (
-            additional_spread_bps + model.slippage_bps + impact_bps
-        ) * model.scenario_cost_multiplier
-        price_delta = base_price * total_bps / Decimal("10000")
-        fill_price = (
-            base_price + price_delta
-            if order.side == "BUY"
-            else base_price - price_delta
-        )
-        if fill_price <= 0:
-            raise ExecutionRealismError(
-                "configured adverse costs produce non-positive execution price"
-            )
 
     notional = _exact_product(
         capacity,

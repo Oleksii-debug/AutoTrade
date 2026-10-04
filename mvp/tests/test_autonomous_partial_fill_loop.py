@@ -1,5 +1,6 @@
 """Product-level exact partial-fill, settlement and real process-crash acceptance."""
 from decimal import Decimal, Inexact, Rounded, localcontext
+from datetime import datetime
 from copy import deepcopy
 import io
 import os
@@ -136,6 +137,12 @@ session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121
                     "--at", NOW, "--prices", ",".join(PRICES), "--execution-profile", PROFILE, "--target-quantity", "2"]), 0)
             self.assertEqual(len(owners(directory)[1].transactions), 7)
             self.assertTrue(get_economic_report(directory)["financial_equality_verified"])
+            store = owners(directory)[0]
+            seed = store.load_events_by_aggregate_type("economic_book")[0]
+            first_checkpoint = store.load_events_by_aggregate_type("account_reconciliation")[0]
+            self.assertEqual(seed["committed_at"], NOW)
+            self.assertLess(datetime.fromisoformat(seed["committed_at"]),
+                            datetime.fromisoformat(first_checkpoint["payload"]["resource_availability"]["query_started_at"]))
 
     def test_partial_finances_equal_full_fill_and_ignore_ambient_decimal_precision(self):
         with TemporaryDirectory() as partial, TemporaryDirectory() as full:

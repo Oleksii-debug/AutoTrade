@@ -1242,13 +1242,17 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         reconciliation_events=reconciliation_events,
     )
     if economic_events:
-        plan = economic.prepare_batch_mutation((seed,), committed_at=timestamp)
+        seed_at = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                   - timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
+        plan = economic.prepare_batch_mutation((seed,), committed_at=seed_at)
         if len(economic_events) != 1 or not plan.already_committed:
             raise ValueError("canonical simulation seed bootstrap is invalid")
     else:
+        seed_at = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                   - timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
         economic.append(
             seed,
-            committed_at=timestamp,
+            committed_at=seed_at,
             expected_journal_sequence=bootstrap_cut["journal_sequence"],
             expected_whole_store_counts=bootstrap_cut["counts"],
         )
@@ -2765,7 +2769,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
     economic.append(book_external_cash_flow(
         transaction_id=_uuid("loop-seed-transaction", run_id), cause_event_id=_uuid("loop-seed-cause", run_id),
-        currency="USD", amount=protocol["initial_cash"]))
+        currency="USD", amount=protocol["initial_cash"]), committed_at=protocol["start_time"])
     if provider.cash != economic.cash("USD") or provider.positions.get(INSTRUMENT, Decimal("0")) != economic.position(INSTRUMENT):
         raise ValueError("simulator snapshot conflicts with canonical economic state")
     artifacts = ArtifactStore(root / "artifacts")

@@ -16,6 +16,11 @@
 | #1478 | `b97c5037b262d086b505d9196f08e7e33b41b472` | відновлення збереженого internal fill |
 | #1502 | `c40af5eb137e8f4a00cf7713f65d3e0b8bcbbb94` | перевірка авторитетного replay snapshot до підпису |
 
+Під час фінальної перевірки додатково перенесено лише нові capital-causal
+зміни `authority.py` і їхні регресії з #1488
+`3eb7beee9dbedfc2ac57da2acfd7622c69dd2cac`. Callback-free registry та
+власні integration repairs збережено; поточний чужий head не перезаписано.
+
 ## Продуктові виправлення інтеграції
 
 1. Прив'язка `AuthorityService.store` встановлюється до перевірки складеного
@@ -54,6 +59,14 @@
     резерв і settlement obligation. Recovery приймає лише точний фінансовий
     prefix збережених fills, перевірений проти історичного admission/send.
     Повторний запуск не створює нових order, fill, fees чи obligations.
+12. Capital cut охоплює provenance read і economic projection в одному
+    стабільному journal cut. Всі economic facts мають передувати provider query,
+    а їхній journal head — точному reconciliation checkpoint. Старий cash
+    admission без потрібного capital receipt не відновлює dispatch authority.
+    Deposit між history read і projection відхиляється з нульовим резервом.
+13. Початкові гроші отримують детермінований committed_at: start time для
+    autonomous loop і одну microsecond перед query для single-episode bootstrap.
+    Фізичний час запуску процесу більше не стає часом simulated seed economics.
 
 Приклад того самого продуктового CLI, без іншого engine:
 
@@ -98,6 +111,10 @@ dotnet run --project tests/Contracts.DotNet/Contracts.DotNet.csproj --configurat
 Для незалежних паралельних suite застосовуються окремі TMPDIR; canonical
 `tools/verify.py` виконує suite послідовно. ArtifactStore координує parent
 namespace, тому одночасні suite зі спільним `/tmp` можуть коректно отримати busy.
+Temp fixtures для повного suite мають бути поза Git checkout, наприклад окремий
+каталог у `/tmp`: packaged-trust tests правильно відхиляють встановлений runtime
+усередині source checkout. Помилка вибору test TMPDIR не виправляється
+послабленням production trust boundary.
 
 Точні завершені результати й head SHA фіксуються в описі інтеграційного PR.
 Queued/pending CI не означає PASS. Після merge необхідний повторний прогін

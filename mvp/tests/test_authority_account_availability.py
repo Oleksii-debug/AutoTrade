@@ -374,6 +374,107 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             )
             self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
 
+    def test_admission_rejects_local_economic_truth_after_provider_query_started(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-during-provider-query",
+                    cause_event_id="capital-during-provider-query-event",
+                    currency="USD",
+                    amount="900",
+                ),
+                committed_at="2026-09-24T18:00:10Z",
+            )
+            # A later journal event with a backdated committed_at must not hide
+            # the earlier economic mutation that occurred inside the provider cut.
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-backdated-after-query-mutation",
+                    cause_event_id="capital-backdated-after-query-mutation-event",
+                    currency="USD",
+                    amount="50",
+                ),
+                committed_at="2026-09-24T17:59:30Z",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider availability predates local economic financial truth",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "900"},
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+    def test_admission_rejects_local_economic_truth_after_provider_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-after-provider-checkpoint",
+                    cause_event_id="capital-after-provider-checkpoint-event",
+                    currency="USD",
+                    amount="950",
+                ),
+                committed_at="2026-09-24T18:00:40Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "provider availability predates local economic financial truth",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "900"},
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
     def test_admission_rejects_capital_change_after_projection_before_commit(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -430,6 +531,33 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 reservations.total_reserved("CASH:USD"),
                 Decimal("0"),
             )
+
+    def test_admission_rejects_cash_writer_after_causal_history_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(store, directory, amount="50")
+            authority = AuthorityService(store, settlement_book=settlement, economic_book=economic)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(store, environment=ENVIRONMENT, account_id=ACCOUNT_ID)
+            original = authority_module._authority_store_call
+            injected = False
+
+            def read_then_deposit(service, method, *args, **kwargs):
+                nonlocal injected
+                result = original(service, method, *args, **kwargs)
+                if not injected and method == "load_events" and args == ("economic_book", economic.book_id):
+                    injected = True
+                    economic.append(book_external_cash_flow(transaction_id="racing-deposit",
+                        cause_event_id="racing-deposit-cause", currency="USD", amount="950"),
+                        committed_at="2026-09-24T18:00:40Z")
+                return result
+
+            with patch.object(authority_module, "_authority_store_call", side_effect=read_then_deposit):
+                with self.assertRaisesRegex(AuthorityConflict, "capital authority changed while spendable cash was projected"):
+                    _admit(authority, reservations, checkpoint, reservation_requirements={"CASH:USD": "900"})
+            self.assertTrue(injected)
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_dispatch_rechecks_current_local_settlement_capital(self):
         with TemporaryDirectory() as directory:
@@ -576,35 +704,124 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 )
             self.assertTrue(injected)
 
-    def test_bybit_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
+    def test_restart_with_local_capital_rejects_legacy_cash_admission_without_capital_cut(self):
         with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            _seed_settlement, _seed_economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            legacy_authority = AuthorityService(store)
+            legacy_authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                legacy_authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            risk_event = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]
+            self.assertNotIn(
+                "settlement_capital_adjustment",
+                risk_event["payload"]["reservation_availability_evidence"],
+            )
+            self.assertEqual(
+                _dispatch(legacy_authority, admitted),
+                (True, "allowed"),
+            )
+
+            restarted_store = JournalStore(path)
             artifact_root = Path(directory) / "settlement-evidence"
             artifacts = ArtifactStore(artifact_root)
-            settlement = DurableSettlementBook(
-                store,
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="TESTNET",
+            restarted_settlement = DurableSettlementBook(
+                restarted_store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
                 evidence_artifact_root=artifact_root,
                 evidence_artifact_store=artifacts,
             )
-            economic = DurableProviderEconomicBook(
-                store,
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
+            restarted_economic = DurableProviderEconomicBook(
+                restarted_store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+            )
+            restarted_authority = AuthorityService(
+                restarted_store,
+                settlement_book=restarted_settlement,
+                economic_book=restarted_economic,
             )
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "requires provider_environment",
+                "lacks required settlement capital evidence",
             ):
-                AuthorityService(
-                    store,
-                    settlement_book=settlement,
-                    economic_book=economic,
+                restarted_authority._validate_durable_financial_evidence(
+                    admitted,
+                    restarted_authority._policies[admitted.policy_id],
+                    require_transaction_cut=True,
                 )
+            self.assertEqual(
+                _dispatch(restarted_authority, admitted),
+                (False, "financial_evidence_invalid"),
+            )
+
+    def test_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
+        cases = (
+            ("BYBIT", "bybit-account", "TESTNET"),
+            ("KRAKEN", "kraken-account", "FUTURES_DEMO"),
+        )
+        for provider_id, account_id, provider_environment in cases:
+            with self.subTest(
+                provider_id=provider_id,
+                provider_environment=provider_environment,
+            ), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                artifact_root = Path(directory) / "settlement-evidence"
+                artifacts = ArtifactStore(artifact_root)
+                if provider_id != "BYBIT":
+                    # The current settlement owner already rejects unqualified
+                    # provider domains before capital composition can occur.
+                    with self.assertRaisesRegex(ValueError, "provider_environment must equal runtime environment"):
+                        DurableSettlementBook(store, provider_id=provider_id, account_id=account_id,
+                            environment="PAPER", provider_environment=provider_environment,
+                            evidence_artifact_root=artifact_root, evidence_artifact_store=artifacts)
+                    self.assertEqual(store.current_journal_sequence(), 0)
+                    continue
+                settlement = DurableSettlementBook(
+                    store,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                    evidence_artifact_root=artifact_root,
+                    evidence_artifact_store=artifacts,
+                )
+                economic = DurableProviderEconomicBook(
+                    store,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment="PAPER",
+                )
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "requires provider_environment",
+                ):
+                    AuthorityService(
+                        store,
+                        settlement_book=settlement,
+                        economic_book=economic,
+                    )
 
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:

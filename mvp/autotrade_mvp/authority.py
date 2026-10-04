@@ -618,13 +618,11 @@ def _authority_service_capital_operations():
                     "settlement and economic capital scopes do not match"
                 )
             # DurableProviderEconomicBook does not yet retain provider_environment.
-            # Never collapse BYBIT TESTNET/DEMO into generic PAPER authority.
-            if (
-                scope.provider_id == "BYBIT"
-                and scope.provider_environment != scope.environment
-            ):
+            # Until it does, never collapse a provider-specific domain into the
+            # broader runtime environment for any provider.
+            if scope.provider_environment != scope.environment:
                 raise AuthorityConflict(
-                    "BYBIT capital authority requires provider_environment "
+                    "capital authority requires provider_environment "
                     "in the durable economic book"
                 )
 
@@ -698,6 +696,11 @@ def _authority_service_capital_operations():
             or scope.environment != economic_book.environment
         ):
             raise AuthorityConflict("capital authority scope changed")
+        if scope.provider_environment != scope.environment:
+            raise AuthorityConflict(
+                "capital authority requires provider_environment "
+                "in the durable economic book"
+            )
         return settlement_book, economic_book
 
     def resolve(
@@ -705,6 +708,7 @@ def _authority_service_capital_operations():
         provider_available: Mapping[str, object],
         resources: tuple[str, ...],
         *,
+        provider_evidence: Mapping[str, object] | None = None,
         required: bool = False,
     ) -> dict[str, object] | None:
         settlement_book, economic_book = binding(service, required=required)
@@ -715,9 +719,87 @@ def _authority_service_capital_operations():
         )
         if not cash_resources:
             return None
+        if not isinstance(provider_evidence, Mapping):
+            raise AuthorityConflict(
+                "settlement capital requires provider availability evidence"
+            )
 
         store = _authority_service_store(service, required=True)
+        # Capture before reading either provider provenance or local economics.
+        # A writer between the causal history read and projection must not turn
+        # newer cash into capital backed by the older provider snapshot.
         before = _authority_store_call(service, "current_journal_sequence")
+        checkpoint_event_id = _text(
+            provider_evidence.get("checkpoint_event_id"),
+            name="checkpoint_event_id",
+        )
+        checkpoint = _authority_store_call(service, "get_event", checkpoint_event_id)
+        if (
+            checkpoint is None
+            or checkpoint.get("event_type") != "AccountReconciled"
+            or checkpoint.get("aggregate_type") != "account_reconciliation"
+        ):
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint is unavailable"
+            )
+        checkpoint_sequence = checkpoint.get("journal_sequence")
+        if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint sequence is invalid"
+            )
+        if (
+            provider_evidence.get("scope_latest_checkpoint_event_id")
+            != checkpoint_event_id
+            or provider_evidence.get("checkpoint_payload_hash")
+            != checkpoint.get("payload_hash")
+            or provider_evidence.get("scope_latest_checkpoint_journal_sequence")
+            != checkpoint_sequence
+        ):
+            raise AuthorityConflict(
+                "settlement capital requires the exact current provider checkpoint"
+            )
+        checkpoint_payload = checkpoint.get("payload")
+        if not isinstance(checkpoint_payload, Mapping):
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint is malformed"
+            )
+        resource_evidence = checkpoint_payload.get("resource_availability")
+        if not isinstance(resource_evidence, Mapping):
+            raise AuthorityConflict(
+                "settlement capital provider resource evidence is missing"
+            )
+        provider_query_started = _instant(
+            resource_evidence.get("query_started_at"),
+            name="resource_availability.query_started_at",
+        )
+
+        economic_events = _authority_store_call(
+            service,
+            "load_events",
+            "economic_book",
+            economic_book.book_id,
+        )
+        if economic_events:
+            economic_head = economic_events[-1]
+            economic_sequence = economic_head.get("journal_sequence")
+            if type(economic_sequence) is not int or economic_sequence <= 0:
+                raise AuthorityConflict(
+                    "settlement capital economic head sequence is invalid"
+                )
+            if economic_sequence >= checkpoint_sequence:
+                raise AuthorityConflict(
+                    "provider availability predates local economic financial truth"
+                )
+            for economic_event in economic_events:
+                economic_committed_at = _instant(
+                    economic_event.get("committed_at"),
+                    name="economic_book.committed_at",
+                )
+                if economic_committed_at >= provider_query_started:
+                    raise AuthorityConflict(
+                        "provider availability predates local economic financial truth"
+                    )
+
         DurableProviderEconomicBook.refresh(economic_book)
         projection = DurableSettlementBook.project(
             settlement_book,
@@ -3062,6 +3144,16 @@ class AuthorityService:
         raw_capital_adjustment = availability_evidence.get(
             "settlement_capital_adjustment"
         )
+        settlement_book, _economic_book = _authority_service_capital_binding(self)
+        if (
+            require_transaction_cut
+            and settlement_book is not None
+            and raw_capital_adjustment is None
+            and any(resource.startswith("CASH:") for resource in risk_requirements)
+        ):
+            raise AuthorityConflict(
+                "durable admission lacks required settlement capital evidence"
+            )
         if raw_capital_adjustment is not None:
             risk_journal_sequence = risk_event.get("journal_sequence")
             if type(risk_journal_sequence) is not int:
@@ -4552,6 +4644,7 @@ class AuthorityService:
                     self,
                     canonical_available,
                     required_resource_names,
+                    provider_evidence=availability_evidence,
                     required=False,
                 )
                 if capital_cut is not None:
@@ -5293,6 +5386,7 @@ class AuthorityService:
                         self,
                         current_provider_available,
                         tuple(sorted(risk_requirements)),
+                        provider_evidence=current_provider_evidence,
                         required=True,
                     )
                     assert current_capital is not None

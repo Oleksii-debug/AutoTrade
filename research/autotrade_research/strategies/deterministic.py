@@ -496,7 +496,7 @@ class RegisteredStrategyRunReceipt:
     def __post_init__(self) -> None:
         if type(self.strategy_snapshot) is not str or not self.strategy_snapshot:
             raise ValueError("strategy_snapshot is required")
-        strategy = ReturnThresholdBaseline.restore(self.strategy_snapshot)
+        strategy = _restore_threshold_strategy_snapshot(self.strategy_snapshot)
         if strategy.snapshot() != self.strategy_snapshot:
             raise ValueError("strategy_snapshot must use canonical snapshot bytes")
         if strategy.descriptor is None:
@@ -656,7 +656,7 @@ def verify_registered_strategy_run(
         raise ValueError(
             "registered run receipt proposal does not match supplied proposal"
         )
-    strategy = ReturnThresholdBaseline.restore(receipt.strategy_snapshot)
+    strategy = _restore_threshold_strategy_snapshot(receipt.strategy_snapshot)
     replayed = run_baseline(
         strategy,
         receipt.observations,
@@ -1255,10 +1255,11 @@ class ReturnThresholdBaseline:
         if descriptor is not None:
             if not isinstance(descriptor, StrategyDescriptor):
                 raise TypeError("descriptor must be StrategyDescriptor or None")
-            if descriptor.family != "DETERMINISTIC_RETURN_THRESHOLD":
+            expected_family = _threshold_family_for_type(type(self))
+            if descriptor.family != expected_family:
                 raise ValueError(
-                    "return-threshold descriptor family must be "
-                    "DETERMINISTIC_RETURN_THRESHOLD"
+                    f"descriptor family must be {expected_family} "
+                    "for this strategy implementation"
                 )
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
@@ -1353,25 +1354,16 @@ class ReturnThresholdBaseline:
                 ),
             )
         window = eligible[-self.lookback:]
-        first = window[0].price
-        last = window[-1].price
-        # The registered decision is exact. Ambient Decimal precision and
-        # rounding are not part of strategy identity or receipt authority.
-        initial = as_fraction(first)
-        change = bounded_fraction((as_fraction(last) - initial) / initial)
-        threshold = as_fraction(self.threshold)
-        if change > threshold:
-            action = "BUY"
-            quantity = self.proposal_quantity
-            reason = "registered deterministic return threshold exceeded"
-        elif change < -threshold:
-            action = "SELL"
-            quantity = self.proposal_quantity
-            reason = "registered deterministic negative return threshold exceeded"
-        else:
-            action = "HOLD"
-            quantity = Decimal("0")
-            reason = "registered deterministic threshold not exceeded"
+        action, reason = _threshold_signal(
+            type(self),
+            window,
+            self.threshold,
+        )
+        quantity = (
+            self.proposal_quantity
+            if action in {"BUY", "SELL"}
+            else Decimal("0")
+        )
         return DeterministicProposal(
             symbol=name,
             action=action,
@@ -1393,7 +1385,8 @@ class ReturnThresholdBaseline:
 
     def snapshot(self) -> str:
         payload = {
-            "schema_version": 5,
+            "schema_version": 6,
+            "strategy_family": _threshold_family_for_type(type(self)),
             "lookback": self.lookback,
             "threshold": str(self.threshold),
             "proposal_quantity": str(self.proposal_quantity),
@@ -1432,6 +1425,15 @@ class ReturnThresholdBaseline:
 
     @classmethod
     def restore(cls, snapshot: str) -> "ReturnThresholdBaseline":
+        if cls not in (
+            ReturnThresholdBaseline,
+            MeanReversionThresholdBaseline,
+            BreakoutThresholdBaseline,
+        ):
+            raise TypeError(
+                "strategy must be ReturnThresholdBaseline, "
+                "MeanReversionThresholdBaseline or BreakoutThresholdBaseline"
+            )
         try:
             payload = _read_strict_strategy_json(snapshot)
         except (TypeError, ValueError) as error:
@@ -1439,19 +1441,31 @@ class ReturnThresholdBaseline:
         if (
             type(payload) is not dict
             or type(payload.get("schema_version")) is not int
-            or payload["schema_version"] not in {1, 2, 3, 4, 5}
+            or payload["schema_version"] not in {1, 2, 3, 4, 5, 6}
         ):
             raise ValueError("unsupported strategy snapshot")
         version = payload["schema_version"]
+        if version < 6 and cls is not ReturnThresholdBaseline:
+            raise ValueError(
+                "legacy strategy snapshot can only restore ReturnThresholdBaseline"
+            )
+        if version == 6:
+            family = _text(payload.get("strategy_family"), name="strategy_family")
+            if family != _threshold_family_for_type(cls):
+                raise ValueError(
+                    "strategy snapshot family does not match restore implementation"
+                )
         expected = {"schema_version", "lookback", "threshold", "proposal_quantity", "history"}
-        if version in {2, 3, 4, 5}:
+        if version in {2, 3, 4, 5, 6}:
             expected.add("seen_events")
-        if version in {3, 4, 5}:
+        if version in {3, 4, 5, 6}:
             expected.add("descriptor")
-        if version in {4, 5}:
+        if version in {4, 5, 6}:
             expected.add("descriptor_fingerprint")
-        if version == 5:
+        if version in {5, 6}:
             expected.add("configuration_fingerprint")
+        if version == 6:
+            expected.add("strategy_family")
         if set(payload) != expected or not isinstance(payload["history"], dict):
             raise ValueError("strategy snapshot structure is invalid")
         if version in {2, 3, 4, 5} and not isinstance(payload["seen_events"], dict):
@@ -1589,6 +1603,103 @@ class ReturnThresholdBaseline:
         return strategy
 
 
+class MeanReversionThresholdBaseline(ReturnThresholdBaseline):
+    """Transparent exact-rational mean-reversion research control."""
+
+
+class BreakoutThresholdBaseline(ReturnThresholdBaseline):
+    """Transparent exact-rational causal breakout research control."""
+
+
+def _threshold_family_for_type(strategy_type: type) -> str:
+    if strategy_type is ReturnThresholdBaseline:
+        return "DETERMINISTIC_RETURN_THRESHOLD"
+    if strategy_type is MeanReversionThresholdBaseline:
+        return "DETERMINISTIC_MEAN_REVERSION_THRESHOLD"
+    if strategy_type is BreakoutThresholdBaseline:
+        return "DETERMINISTIC_BREAKOUT_THRESHOLD"
+    raise TypeError(
+        "strategy must be ReturnThresholdBaseline, "
+        "MeanReversionThresholdBaseline or BreakoutThresholdBaseline"
+    )
+
+
+def _threshold_signal(
+    strategy_type: type,
+    window: list[CausalObservation],
+    threshold_value: Decimal,
+) -> tuple[str, str]:
+    """Return one exact zero-model gross signal; never economic qualification."""
+
+    if type(window) is not list or len(window) < 2:
+        raise ValueError("threshold strategy window must contain at least two observations")
+    threshold = as_fraction(threshold_value)
+    first = as_fraction(window[0].price)
+    last = as_fraction(window[-1].price)
+
+    if strategy_type in (
+        ReturnThresholdBaseline,
+        MeanReversionThresholdBaseline,
+    ):
+        change = bounded_fraction((last - first) / first)
+        if strategy_type is ReturnThresholdBaseline:
+            if change > threshold:
+                return "BUY", "registered deterministic return threshold exceeded"
+            if change < -threshold:
+                return "SELL", "registered deterministic negative return threshold exceeded"
+            return "HOLD", "registered deterministic threshold not exceeded"
+        if change > threshold:
+            return "SELL", "registered deterministic mean-reversion upper threshold exceeded"
+        if change < -threshold:
+            return "BUY", "registered deterministic mean-reversion lower threshold exceeded"
+        return "HOLD", "registered deterministic mean-reversion threshold not exceeded"
+
+    if strategy_type is BreakoutThresholdBaseline:
+        prior_prices = [as_fraction(item.price) for item in window[:-1]]
+        prior_high = max(prior_prices)
+        prior_low = min(prior_prices)
+        one = as_fraction(Decimal("1"))
+        upper = bounded_fraction(prior_high * bounded_fraction(one + threshold))
+        lower = bounded_fraction(prior_low * bounded_fraction(one - threshold))
+        if last > upper:
+            return "BUY", "registered deterministic upside breakout threshold exceeded"
+        if last < lower:
+            return "SELL", "registered deterministic downside breakout threshold exceeded"
+        return "HOLD", "registered deterministic breakout threshold not exceeded"
+
+    raise TypeError(
+        "strategy must be ReturnThresholdBaseline, "
+        "MeanReversionThresholdBaseline or BreakoutThresholdBaseline"
+    )
+
+
+def _restore_threshold_strategy_snapshot(snapshot: str) -> ReturnThresholdBaseline:
+    """Restore the exact strategy family encoded by one canonical snapshot."""
+
+    try:
+        payload = _read_strict_strategy_json(snapshot)
+    except (TypeError, ValueError) as error:
+        raise ValueError("strategy snapshot is invalid") from error
+    if type(payload) is not dict or type(payload.get("schema_version")) is not int:
+        raise ValueError("unsupported strategy snapshot")
+    version = payload["schema_version"]
+    if version in {1, 2, 3, 4, 5}:
+        strategy_type = ReturnThresholdBaseline
+    elif version == 6:
+        family = _text(payload.get("strategy_family"), name="strategy_family")
+        mapping = {
+            "DETERMINISTIC_RETURN_THRESHOLD": ReturnThresholdBaseline,
+            "DETERMINISTIC_MEAN_REVERSION_THRESHOLD": MeanReversionThresholdBaseline,
+            "DETERMINISTIC_BREAKOUT_THRESHOLD": BreakoutThresholdBaseline,
+        }
+        strategy_type = mapping.get(family)
+        if strategy_type is None:
+            raise ValueError("unsupported deterministic threshold strategy family")
+    else:
+        raise ValueError("unsupported strategy snapshot")
+    return strategy_type.restore(snapshot)
+
+
 def run_baseline(
     strategy: ReturnThresholdBaseline,
     observations: Iterable[CausalObservation],
@@ -1596,8 +1707,15 @@ def run_baseline(
     decision_time: datetime,
     symbol: str,
 ) -> DeterministicProposal:
+    _threshold_family_for_type(type(strategy))
+    if type(observations) not in (list, tuple):
+        raise TypeError("observations must be an exact built-in list or tuple")
     cutoff = _time(decision_time, name="decision_time")
-    for observation in observations:
+    detached = tuple(
+        _readmit_causal_observation(observation)
+        for observation in observations
+    )
+    for observation in detached:
         strategy.ingest(observation, simulation_time=cutoff)
     return strategy.propose(symbol=symbol, decision_time=cutoff)
 
@@ -1612,8 +1730,7 @@ def run_registered_baseline(
 ) -> tuple[DeterministicProposal, RegisteredStrategyRunReceipt]:
     """Run a registered strategy from pristine state and mint replay evidence."""
 
-    if type(strategy) is not ReturnThresholdBaseline:
-        raise TypeError("strategy must be ReturnThresholdBaseline")
+    _threshold_family_for_type(type(strategy))
     if strategy.descriptor is None:
         raise ValueError("registered runner requires a registered strategy descriptor")
     if strategy._observations_by_id or any(strategy._history.values()):
@@ -1621,16 +1738,16 @@ def run_registered_baseline(
     if type(strategy.descriptor) is not StrategyDescriptor:
         raise TypeError("registered runner descriptor must be canonical StrategyDescriptor")
     pristine_snapshot = strategy.snapshot()
-    materialized = tuple(observations)
-    for observation in materialized:
-        if type(observation) is not CausalObservation:
-            raise TypeError(
-                "registered runner observations must contain CausalObservation values"
-            )
+    if type(observations) not in (list, tuple):
+        raise TypeError("observations must be an exact built-in list or tuple")
+    materialized = tuple(
+        _readmit_causal_observation(observation)
+        for observation in observations
+    )
     event_ids = tuple(item.event_id for item in materialized)
     if len(set(event_ids)) != len(event_ids):
         raise ValueError("registered runner observations contain duplicate event_id")
-    runner = ReturnThresholdBaseline.restore(pristine_snapshot)
+    runner = _restore_threshold_strategy_snapshot(pristine_snapshot)
     proposal = run_baseline(
         runner,
         materialized,

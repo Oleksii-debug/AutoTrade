@@ -12,9 +12,11 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from research.autotrade_research.strategies.deterministic import (
+    BreakoutThresholdBaseline,
     CausalObservation,
     DeterministicProposal,
     EconomicsBoundProposal,
+    MeanReversionThresholdBaseline,
     NoTradeBaseline,
     RegisteredStrategyRunReceipt,
     ReturnThresholdBaseline,
@@ -282,7 +284,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             canonical.replace('"lookback":2', '"lookback":Infinity', 1),
             canonical.replace('"lookback":2', '"lookback":2.0', 1),
             canonical.replace('"lookback":2', '"lookback":' + "9" * 257, 1),
-            canonical.replace('"schema_version":5', '"schema_version":true', 1),
+            canonical.replace('"schema_version":6', '"schema_version":true', 1),
         )
         for index, raw in enumerate(invalid):
             with self.subTest(index=index), self.assertRaises(ValueError):
@@ -799,6 +801,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload["schema_version"] = 3
         del payload["descriptor_fingerprint"]
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
@@ -956,6 +959,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload = json.loads(strategy.snapshot())
         payload["schema_version"] = 4
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
@@ -2171,6 +2175,207 @@ class DeterministicStrategyTests(unittest.TestCase):
             body["confidence_basis"]["strategy_economics_binding_sha256"],
             canonical.fingerprint,
         )
+
+
+    def family_descriptor(self, *, family, strategy_id, minimum_history=2):
+        return self.descriptor(
+            strategy_id=strategy_id,
+            family=family,
+            minimum_history=minimum_history,
+        )
+
+    def test_strategy_implementation_requires_matching_descriptor_family(self):
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            MeanReversionThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            )
+
+    def test_trend_and_mean_reversion_are_distinct_exact_controls(self):
+        rising = [obs(0, "100"), obs(1, "102")]
+        trend = run_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        mean = run_baseline(
+            MeanReversionThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(trend.action, "BUY")
+        self.assertEqual(mean.action, "SELL")
+        self.assertEqual(trend.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(mean.economic_edge_claim, "UNPROVEN")
+        self.assertEqual(trend.model_calls, 0)
+        self.assertEqual(mean.model_calls, 0)
+
+    def test_breakout_uses_only_prior_causal_window_with_exact_arithmetic(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+            strategy_id="breakout-control",
+            minimum_history=3,
+        )
+        proposal = run_baseline(
+            BreakoutThresholdBaseline(
+                lookback=3, threshold="0.01", proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "101"), obs(2, "103")],
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(proposal.quantity, Decimal("2"))
+        self.assertEqual(
+            proposal.evidence_event_ids,
+            ("event-0", "event-1", "event-2"),
+        )
+        self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_family_snapshot_restart_preserves_exact_strategy_semantics(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+            strategy_id="mean-control",
+        )
+        strategy = MeanReversionThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        strategy.ingest(
+            obs(1, "102"),
+            simulation_time=BASE + timedelta(minutes=1),
+        )
+        restored = MeanReversionThresholdBaseline.restore(strategy.snapshot())
+        self.assertEqual(
+            restored.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "family does not match"):
+            ReturnThresholdBaseline.restore(strategy.snapshot())
+
+    def test_legacy_snapshot_cannot_be_reinterpreted_as_new_family(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["schema_version"] = 5
+        del payload["strategy_family"]
+        legacy = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        ReturnThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            MeanReversionThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            BreakoutThresholdBaseline.restore(legacy)
+
+    def test_registered_receipts_replay_each_supported_strategy_family(self):
+        cases = (
+            (
+                ReturnThresholdBaseline,
+                self.descriptor(),
+                "BUY",
+            ),
+            (
+                MeanReversionThresholdBaseline,
+                self.family_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-control",
+                ),
+                "SELL",
+            ),
+            (
+                BreakoutThresholdBaseline,
+                self.family_descriptor(
+                    family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+                    strategy_id="breakout-control",
+                    minimum_history=3,
+                ),
+                "BUY",
+            ),
+        )
+        for strategy_type, descriptor, expected_action in cases:
+            with self.subTest(strategy=strategy_type.__name__):
+                lookback = descriptor.minimum_history
+                observations = (
+                    [obs(0, "100"), obs(1, "102")]
+                    if lookback == 2
+                    else [obs(0, "100"), obs(1, "101"), obs(2, "103")]
+                )
+                decision_time = BASE + timedelta(minutes=lookback - 1)
+                proposal, receipt = run_registered_baseline(
+                    strategy_type(
+                        lookback=lookback,
+                        threshold="0.01",
+                        proposal_quantity="1",
+                        descriptor=descriptor,
+                    ),
+                    observations,
+                    decision_time=decision_time,
+                    symbol="AAA",
+                    instrument_version="instrument:aaa@7",
+                )
+                self.assertEqual(proposal.action, expected_action)
+                self.assertEqual(
+                    verify_registered_strategy_run(proposal, receipt),
+                    receipt.fingerprint,
+                )
+                restored_receipt = RegisteredStrategyRunReceipt.from_json(
+                    receipt.to_json()
+                )
+                self.assertEqual(
+                    verify_registered_strategy_run(
+                        restored_receipt.proposal,
+                        restored_receipt,
+                    ),
+                    receipt.fingerprint,
+                )
+                self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_registered_runner_rejects_generator_before_observation_iteration(self):
+        touched = []
+        def hostile_generator():
+            touched.append("iterated")
+            yield obs(0, "100")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in list or tuple"):
+            run_registered_baseline(
+                ReturnThresholdBaseline(
+                    lookback=2, threshold="0.01", proposal_quantity="1",
+                    descriptor=self.descriptor(),
+                ),
+                hostile_generator(),
+                decision_time=BASE,
+                symbol="AAA",
+                instrument_version="instrument:aaa@7",
+            )
+        self.assertEqual(touched, [])
+
 
 if __name__ == "__main__":
     unittest.main()

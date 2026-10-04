@@ -555,6 +555,29 @@ class ClaimStore:
             if item.available_at <= time and item.ingested_at <= time
         ]
 
+        # A source revision is one immutable source view. If the same
+        # source/revision asserts competing values for the same semantic fact,
+        # moving the extraction to another locator must not bypass the
+        # contradiction fence. Locator scopes revision supersession below; it
+        # is not an authority to make one revision self-contradictory.
+        revision_facts: dict[
+            tuple[str, str, str, str],
+            list[InformationClaim],
+        ] = {}
+        for item in visible_history:
+            revision_key = (
+                item.source_id,
+                item.source_revision,
+                item.subject,
+                item.predicate,
+            )
+            revision_facts.setdefault(revision_key, []).append(item)
+        for revision_claims in revision_facts.values():
+            if len({item.value for item in revision_claims}) > 1:
+                raise ValueError(
+                    "one source revision contains contradictory extracted values"
+                )
+
         chains: dict[
             tuple[str, str, str, str],
             list[InformationClaim],
@@ -570,15 +593,6 @@ class ClaimStore:
 
         effective_per_source: list[InformationClaim] = []
         for chain in chains.values():
-            by_revision: dict[str, list[InformationClaim]] = {}
-            for item in chain:
-                by_revision.setdefault(item.source_revision, []).append(item)
-            for revision_claims in by_revision.values():
-                if len({item.value for item in revision_claims}) > 1:
-                    raise ValueError(
-                        "one source revision contains contradictory extracted values"
-                    )
-
             latest = max(
                 chain,
                 key=lambda item: (

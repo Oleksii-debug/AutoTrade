@@ -58,7 +58,7 @@ class PerpetualFundingConflict(PerpetualFundingError):
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise PerpetualFundingError(f"{name} is required")
     return value.strip()
 
@@ -481,6 +481,10 @@ class DurablePerpetualFundingAuthority:
     ) -> tuple[PerpetualFundingObservation, ProviderResponseObservation]:
         self._require_bound_financial_authority()
         reference = _text(evidence_ref, "evidence_ref")
+        if self.economic_book.environment in {"PAPER", "LIVE"}:
+            raise PerpetualFundingError(
+                "PAPER/LIVE perpetual funding requires durable provider-origin authority"
+            )
         try:
             source = self.evidence_resolver(reference)
         except Exception as error:

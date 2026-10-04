@@ -53,7 +53,7 @@ def funding_capability():
             provider_id="BINANCE",
             account_id="acct-1",
             entity_id="entity-1",
-            environment="PAPER",
+            environment="SIMULATION",
             instrument_version=f"{FUNDING_ID}@1",
             observed_at=observed,
             expires_at=expires,
@@ -216,7 +216,7 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             store,
             provider_id="BINANCE",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         if seed and not book.transactions:
             seed_position(book)
@@ -232,6 +232,98 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
         )
         return authority, book
 
+    def test_paper_and_live_funding_reject_content_evidence_before_resolver_callback(self):
+        evidence = sealed_funding()
+
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                touched = []
+
+                def resolver(_reference):
+                    touched.append("called")
+                    return evidence
+
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                book = DurableProviderEconomicBook(
+                    store,
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment=environment,
+                )
+                seed_position(book)
+                authority = DurablePerpetualFundingAuthority(
+                    store,
+                    economic_book=book,
+                    instrument_registry=InstrumentRegistry(
+                        versions=(perpetual_version(),)
+                    ),
+                    evidence_resolver=resolver,
+                    funding_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingError,
+                    "requires durable provider-origin authority",
+                ):
+                    authority.apply(evidence.evidence_ref)
+
+                self.assertEqual(touched, [])
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("perpetual_funding"),
+                    [],
+                )
+                self.assertEqual(len(book.transactions), 1)
+
+    def test_paper_funding_rejects_polymorphic_evidence_ref_without_callback(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile evidence-ref callback executed")
+
+        evidence = sealed_funding()
+        with TemporaryDirectory() as directory:
+            touched = []
+
+            def resolver(_reference):
+                touched.append("called")
+                return evidence
+
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            seed_position(book)
+            authority = DurablePerpetualFundingAuthority(
+                store,
+                economic_book=book,
+                instrument_registry=InstrumentRegistry(
+                    versions=(perpetual_version(),)
+                ),
+                evidence_resolver=resolver,
+                funding_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+            with self.assertRaisesRegex(
+                PerpetualFundingError,
+                "evidence_ref is required",
+            ):
+                authority.apply(HostileText(evidence.evidence_ref))
+
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(touched, [])
+            self.assertEqual(
+                store.load_events_by_aggregate_type("perpetual_funding"),
+                [],
+            )
+            self.assertEqual(len(book.transactions), 1)
+
     def test_arbitrary_funding_normalizer_cannot_be_injected(self):
         evidence = sealed_funding()
         with TemporaryDirectory() as directory:
@@ -240,7 +332,7 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 store,
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
             )
             seed_position(book)
             resolver = {evidence.evidence_ref: evidence}

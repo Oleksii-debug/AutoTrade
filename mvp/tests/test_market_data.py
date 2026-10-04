@@ -3341,6 +3341,21 @@ class MarketNormalizationTests(unittest.TestCase):
                 adapter_version="autotrade-test-market-adapter@2",
             )
 
+        forged_identity_material = event._identity_material.replace(
+            TEST_ADAPTER_VERSION,
+            "autotrade-test-market-adapter@2",
+            1,
+        )
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "event_id does not match normalized market event identity material",
+        ):
+            replace(
+                event,
+                adapter_version="autotrade-test-market-adapter@2",
+                _identity_material=forged_identity_material,
+            )
+
         object.__setattr__(
             event,
             "adapter_version",

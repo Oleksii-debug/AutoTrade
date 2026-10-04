@@ -19,6 +19,8 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from .champion import CandidateApproval
+
 
 _SHA256_PREFIX = "sha256:"
 
@@ -528,39 +530,6 @@ class CandidateWave:
 
 
 @dataclass(frozen=True, slots=True)
-class CandidateEvaluation:
-    candidate_artifact_hash: str
-    evaluation_status: str
-    evaluation_hash: str
-    science_gate_passed: bool
-    retention_gate_passed: bool
-    risk_gate_passed: bool
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "candidate_artifact_hash",
-            _digest(self.candidate_artifact_hash, name="candidate_artifact_hash"),
-        )
-        status = _text(self.evaluation_status, name="evaluation_status")
-        if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
-            raise ValueError("evaluation_status must be PASS, FAIL, or INCONCLUSIVE")
-        object.__setattr__(self, "evaluation_status", status)
-        object.__setattr__(
-            self,
-            "evaluation_hash",
-            _digest(self.evaluation_hash, name="evaluation_hash"),
-        )
-        for field_name in (
-            "science_gate_passed",
-            "retention_gate_passed",
-            "risk_gate_passed",
-        ):
-            if type(getattr(self, field_name)) is not bool:
-                raise TypeError(f"{field_name} must be boolean")
-
-
-@dataclass(frozen=True, slots=True)
 class CandidateResolution:
     action: str
     reasons: tuple[str, ...]
@@ -570,7 +539,7 @@ class CandidateResolution:
     def __post_init__(self) -> None:
         action = _text(self.action, name="action")
         if action not in {
-            "ELIGIBLE_AUTO_PROMOTION",
+            "HANDOFF_AUTO_PROMOTION_AUTHORITY",
             "AWAITING_CONFIRMATION",
             "REJECTED",
             "CONTINUE_VALIDATION",
@@ -592,46 +561,52 @@ class CandidateResolution:
 
 def resolve_candidate(
     wave: CandidateWave,
-    evaluation: CandidateEvaluation,
+    approval: CandidateApproval,
+    *,
+    resolved_at: datetime,
 ) -> CandidateResolution:
-    """Resolve workflow state without changing champion routing.
+    """Resolve wave workflow without changing champion routing.
 
-    The existing ChampionRegistry remains the publication/promotion authority.
-    This function only produces a deterministic handoff decision.
+    CandidateApproval is the existing canonical scientific/promotion handoff.
+    This coordinator performs only deterministic workflow checks.  The existing
+    ChampionRegistry remains the sole publication/promotion authority and
+    re-verifies the approval against ScientificRegistry before routing changes.
     """
 
     if not isinstance(wave, CandidateWave):
         raise TypeError("wave must be CandidateWave")
-    if not isinstance(evaluation, CandidateEvaluation):
-        raise TypeError("evaluation must be CandidateEvaluation")
+    if not isinstance(approval, CandidateApproval):
+        raise TypeError("approval must be CandidateApproval")
+    current = _time(resolved_at, name="resolved_at")
     if wave.policy.policy_hash != wave.policy_hash:
         raise ValueError("bound learning-wave policy changed after candidate creation")
-    if evaluation.candidate_artifact_hash != wave.candidate_artifact_hash:
-        raise ValueError("evaluation does not bind this candidate artifact")
+    if approval.candidate_id != wave.candidate_id:
+        raise ValueError("approval does not bind this candidate identity")
+    if approval.artifact_hash != wave.candidate_artifact_hash:
+        raise ValueError("approval does not bind this candidate artifact")
 
     reasons: list[str] = []
-    if not evaluation.science_gate_passed:
-        reasons.append("LEARNING_WAVE.SCIENCE_GATE_FAILED")
-    if not evaluation.retention_gate_passed:
+    expired = current >= approval.evidence_valid_until
+    if expired:
+        reasons.append("LEARNING_WAVE.APPROVAL_EVIDENCE_EXPIRED")
+    if approval.evaluation_status == "FAIL":
+        reasons.append("LEARNING_WAVE.EVALUATION_FAILED")
+    if not approval.retention_passed:
         reasons.append("LEARNING_WAVE.RETENTION_GATE_FAILED")
-    if not evaluation.risk_gate_passed:
+    if not approval.risk_passed:
         reasons.append("LEARNING_WAVE.RISK_GATE_FAILED")
 
-    if evaluation.evaluation_status == "FAIL":
+    if reasons:
         action = "REJECTED"
-        reasons.insert(0, "LEARNING_WAVE.EVALUATION_FAILED")
-    elif reasons:
-        action = "REJECTED"
-    elif evaluation.evaluation_status == "INCONCLUSIVE":
+    elif approval.evaluation_status == "INCONCLUSIVE":
         action = "CONTINUE_VALIDATION"
         reasons.append("LEARNING_WAVE.EVALUATION_INCONCLUSIVE")
+    elif wave.promotion_mode == "AUTO":
+        action = "HANDOFF_AUTO_PROMOTION_AUTHORITY"
+        reasons.append("LEARNING_WAVE.CANONICAL_APPROVAL_READY_FOR_AUTO_POLICY")
     else:
-        if wave.promotion_mode == "AUTO":
-            action = "ELIGIBLE_AUTO_PROMOTION"
-            reasons.append("LEARNING_WAVE.ALL_GATES_PASS_AUTO_POLICY")
-        else:
-            action = "AWAITING_CONFIRMATION"
-            reasons.append("LEARNING_WAVE.ALL_GATES_PASS_CONFIRMATION_POLICY")
+        action = "AWAITING_CONFIRMATION"
+        reasons.append("LEARNING_WAVE.CANONICAL_APPROVAL_READY_FOR_CONFIRMATION")
 
     payload = {
         "wave_id": wave.wave_id,
@@ -646,11 +621,17 @@ def resolve_candidate(
         "training_population_root": wave.training_population.root_hash,
         "validation_population_root": wave.validation_population.root_hash,
         "validation_opened_at": wave.validation_opened_at.isoformat(),
-        "evaluation_hash": evaluation.evaluation_hash,
-        "evaluation_status": evaluation.evaluation_status,
-        "science_gate_passed": evaluation.science_gate_passed,
-        "retention_gate_passed": evaluation.retention_gate_passed,
-        "risk_gate_passed": evaluation.risk_gate_passed,
+        "resolved_at": current.isoformat(),
+        "approval_evidence_id": approval.evidence_id,
+        "approval_valid_until": approval.evidence_valid_until.isoformat(),
+        "approval_status": approval.evaluation_status,
+        "approval_retention_passed": approval.retention_passed,
+        "approval_risk_passed": approval.risk_passed,
+        "approval_authority_scope_id": approval.authority_scope_id,
+        "approval_protocol_id": approval.protocol_id,
+        "approval_protocol_hash": approval.protocol_hash,
+        "approval_evaluation_id": approval.evaluation_id,
+        "approval_evaluation_result_hash": approval.evaluation_result_hash,
         "promotion_mode": wave.promotion_mode,
         "action": action,
         "reasons": reasons,

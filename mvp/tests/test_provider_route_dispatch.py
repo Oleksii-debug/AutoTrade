@@ -132,7 +132,12 @@ class ProviderRouteDispatchTests(unittest.TestCase):
         self._qualification_auth_patch.start()
         self.addCleanup(self._qualification_auth_patch.stop)
 
-    def setup_route(self, directory: str):
+    def setup_route(
+        self,
+        directory: str,
+        *,
+        q_valid_until: str = "2026-10-05T05:00:00Z",
+    ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
@@ -149,7 +154,10 @@ class ProviderRouteDispatchTests(unittest.TestCase):
             evidence_store=ArtifactStore(evidence_root),
             evidence_root=evidence_root,
         )
-        q1, receipt1, protocol1 = accepted_spot_q(ordinal=40)
+        q1, receipt1, protocol1 = accepted_spot_q(
+            ordinal=40,
+            valid_until=q_valid_until,
+        )
         qualifications._append_accepted(
             protocol_key=protocol1.key,
             record=q1,
@@ -307,7 +315,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
                 final_barrier_clock=lambda: "2026-10-04T05:06:00Z",
             )
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertEqual(outcome.reason, "provider_capability_not_exact_current")
+            self.assertEqual(outcome.reason, "provider_qualification_not_exact_current")
             self.assertEqual(wire, [])
             events = journal.load_events(
                 "submission_attempt",
@@ -321,7 +329,10 @@ class ProviderRouteDispatchTests(unittest.TestCase):
 
     def test_q_expiry_at_final_barrier_produces_zero_wire(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
+            journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(
+                directory,
+                q_valid_until="2026-10-04T05:07:00Z",
+            )
             wire = []
 
             def transport(_client_id, _request, final_guard):
@@ -335,7 +346,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
                 capabilities,
                 qualifications,
                 transport,
-                final_barrier_clock=lambda: "2026-10-05T05:00:00Z",
+                final_barrier_clock=lambda: "2026-10-04T05:07:00Z",
             )
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(outcome.reason, "provider_capability_not_exact_current")

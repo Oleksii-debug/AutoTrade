@@ -122,6 +122,10 @@ class RecoveryIssuedDispatcher:
             raise TypeError("store must be exact JournalStore")
         if type(owner) is not OwnerFence:
             raise TypeError("owner must be exact OwnerFence")
+        if type(owner.owner_id) is not str or not owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(owner.epoch) is not int or owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
         _require_executable_authority()
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
@@ -163,6 +167,20 @@ class RecoveryIssuedDispatcher:
             raise PermissionError("recovery controller authority changed")
         if type(self.__store) is not JournalStore:
             raise PermissionError("submission journal authority changed")
+        if type(self.__owner) is not OwnerFence:
+            raise PermissionError("recovery owner authority changed")
+        if type(self.__owner.owner_id) is not str or not self.__owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(self.__owner.epoch) is not int or self.__owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
+        if type(self.__environment) is not str or self.__environment not in _CANONICAL_ENVIRONMENTS:
+            raise PermissionError("issued dispatcher environment authority changed")
+        if (
+            type(self.__account_id) is not str
+            or not self.__account_id
+            or self.__account_id != self.__account_id.strip()
+        ):
+            raise PermissionError("issued dispatcher account authority changed")
         _require_executable_authority()
         if self.__sender_check.__self__ is not self.__recovery:
             raise PermissionError("bound recovery sender authority changed")

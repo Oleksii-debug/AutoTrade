@@ -257,7 +257,7 @@ class RecoveryIssuedDispatcher:
             self.__sender_check(owner_id, owner_epoch)
             self._require_durable_reconciliation_authority(provider)
 
-        return self.__dispatcher.dispatch(
+        outcome = self.__dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash=intent_hash,
@@ -272,6 +272,17 @@ class RecoveryIssuedDispatcher:
             sender_check=canonical_sender_check,
             submission_scope=submission_scope,
         )
+        if outcome.status == "UNKNOWN":
+            # The GuardedDispatcher has already persisted the ambiguous durable
+            # chronology. Reflect that fact into recovery immediately so
+            # readiness/admission cannot remain optimistically READY until a
+            # later send happens to re-enter the final barrier.
+            _CANONICAL_RECOVER_DURABLE_UNCERTAINTY(
+                self.__recovery,
+                environment=self.__environment,
+                account_id=self.__account_id,
+            )
+        return outcome
 
 
 def build_recovery_issued_dispatcher(

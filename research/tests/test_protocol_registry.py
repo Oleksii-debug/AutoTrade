@@ -52,6 +52,10 @@ def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30",
 
 def exhaust_trials(registry: ScientificRegistry, protocol_id: str) -> None:
     """Close the registered development population before testing holdout semantics."""
+    registry.preregister_locked_holdout(
+        protocol_id,
+        holdout_identity=holdout_identity(),
+    )
     remaining = registry.completeness(protocol_id)["remaining_trial_budget"]
     for index in range(remaining):
         registry.record_trial(
@@ -256,6 +260,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
+            registry.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             registry.record_trial(
                 registered.protocol_id,
                 status="FAILED",
@@ -492,6 +500,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             registered = first.register_protocol(protocol())
+            first.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             first.record_trial(
                 registered.protocol_id,
                 status="FAILED",

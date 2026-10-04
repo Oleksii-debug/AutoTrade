@@ -11,13 +11,13 @@ WP-29 before PAPER/LIVE accounting can mutate.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import re
 import weakref
 
-from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import canonical_json
 from .provider_core import ProviderResponseObservation, Surface
 from .provider_origin import (
@@ -66,13 +66,32 @@ def _transaction_time(value: object) -> datetime:
     text = _text(value, name="transactionTime")
     if not text.isascii() or not text.isdigit():
         raise ProviderFundingIncomeError("transactionTime must be exact epoch-millisecond text")
-    millis = int(text)
+    try:
+        millis = int(text)
+    except ValueError as error:
+        raise ProviderFundingIncomeError(
+            "transactionTime must be exact epoch-millisecond text"
+        ) from error
     if millis <= 0:
         raise ProviderFundingIncomeError("transactionTime must be positive")
+    if str(millis) != text:
+        raise ProviderFundingIncomeError(
+            "transactionTime must use canonical epoch-millisecond text"
+        )
+    seconds, remainder_millis = divmod(millis, 1000)
     try:
-        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(
+            milliseconds=remainder_millis
+        )
     except (OverflowError, OSError, ValueError) as error:
         raise ProviderFundingIncomeError("transactionTime is outside supported UTC range") from error
+
+
+def _uppercase_ascii_text(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if not text.isascii() or text != text.upper():
+        raise ProviderFundingIncomeError(f"{name} must be canonical uppercase ASCII text")
+    return text
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -315,6 +334,12 @@ def _bybit_funding_income_observations_impl(
 
     query = qualified.query_binding.query_binding.query
     expected_category = query["category"]
+    expected_currency = query.get("currency")
+    if expected_currency is not None:
+        expected_currency = _uppercase_ascii_text(
+            expected_currency,
+            name="qualified query currency",
+        )
     observations: list[ProviderFundingIncomeObservation] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(result["list"]):
@@ -340,10 +365,24 @@ def _bybit_funding_income_observations_impl(
             )
         seen_ids.add(provider_transaction_id)
         symbol = _text(item.get("symbol"), name="symbol")
-        currency = _text(item.get("currency"), name="currency").upper()
+        currency = _uppercase_ascii_text(item.get("currency"), name="currency")
+        if expected_currency is not None and currency != expected_currency:
+            raise ProviderFundingIncomeError(
+                "Bybit funding row escaped the qualified currency scope"
+            )
         side = _text(item.get("side"), name="side")
         provider_transaction_at = _transaction_time(item.get("transactionTime"))
         funding_amount = _decimal(funding, name="funding")
+        fee = _decimal(item.get("fee"), name="fee")
+        cash_flow = _decimal(item.get("cashFlow"), name="cashFlow")
+        change = _decimal(item.get("change"), name="change")
+        if (
+            as_fraction(change)
+            != as_fraction(cash_flow) + as_fraction(funding_amount) - as_fraction(fee)
+        ):
+            raise ProviderFundingIncomeError(
+                "Bybit funding row violates change = cashFlow + funding - fee"
+            )
         material = {
             "schema_version": "1.0.0",
             "origin_ref": binding.origin_ref,

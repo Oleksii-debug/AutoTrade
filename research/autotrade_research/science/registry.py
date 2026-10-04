@@ -596,16 +596,6 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         if not isinstance(result, dict) or not result:
             raise ProtocolViolation("evaluation result must be a non-empty object")
-        if result.get("stopping_rule_triggered") is True:
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "triggered stopping rule requires immutable artifact evidence"
-                ) from error
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)
@@ -620,6 +610,47 @@ class ScientificRegistry:
                 holdout_identity=holdout_identity,
             )
             protocol_payload = json.loads(p["payload_json"])
+            trial_budget = protocol_payload["trial_budget"]
+            trial_rows = con.execute(
+                """
+                SELECT trial_id,status,payload_hash,payload_json
+                FROM trials
+                WHERE protocol_id=?
+                ORDER BY trial_id
+                """,
+                (protocol,),
+            ).fetchall()
+            recorded_trials = len(trial_rows)
+            for trial in trial_rows:
+                try:
+                    trial_payload = json.loads(trial["payload_json"])
+                except json.JSONDecodeError as error:
+                    raise ProtocolViolation(
+                        "registered trial payload is corrupt"
+                    ) from error
+                if (
+                    trial["status"]
+                    not in {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
+                    or not isinstance(trial_payload, dict)
+                    or not trial_payload
+                    or _canonical(trial_payload) != trial["payload_json"]
+                    or _hash(trial_payload) != trial["payload_hash"]
+                ):
+                    raise ProtocolViolation(
+                        "registered trial population integrity mismatch"
+                    )
+            if recorded_trials != trial_budget:
+                # The locked holdout is authorized only by the exact
+                # preregistered trial population.  A short population is
+                # incomplete; an oversized population is corrupt/legacy state,
+                # not "more complete" evidence.  AutoTrade also has no
+                # canonical adjudicator for early stopping yet, so neither
+                # condition may grant holdout access.
+                raise ProtocolViolation(
+                    "locked holdout requires the exact registered trial budget; "
+                    "early stopping and oversized trial populations are not "
+                    "admitted holdout-access authorities"
+                )
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],
                 "forward_period",
@@ -888,25 +919,16 @@ class ScientificRegistry:
                 raise ProtocolViolation(
                     f"locked evaluation does not prove {required_true}"
                 )
-        if trial_state["remaining_trial_budget"] > 0:
-            if result.get("stopping_rule_triggered") is not True:
-                raise ProtocolViolation(
-                    "candidate promotion before trial-budget exhaustion requires "
-                    "an explicitly triggered registered stopping rule"
-                )
-            if result.get("stopping_rules_hash") != trial_state["stopping_rules_hash"]:
-                raise ProtocolViolation(
-                    "early-stop evidence is not bound to the registered stopping rules"
-                )
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "early-stop promotion requires immutable stopping evidence"
-                ) from error
+        if trial_state["remaining_trial_budget"] != 0:
+            # Historical databases may already contain a locked evaluation
+            # created by an older build that treated caller-declared stopping
+            # evidence as authority.  The current scientific contract has no
+            # canonical stopping adjudicator, so restart/migration must not
+            # preserve that obsolete bypass at promotion time.
+            raise ProtocolViolation(
+                "candidate promotion requires full registered trial closure; "
+                "early stopping is not an admitted promotion authority"
+            )
         return evidence
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:
@@ -955,6 +977,10 @@ class ScientificRegistry:
             )
             counts[row["status"]] = counts.get(row["status"], 0) + 1
         total = len(trial_rows)
+        if total > budget:
+            raise ProtocolViolation(
+                "registered trial population exceeds preregistered trial budget"
+            )
         return {
             "trial_budget": budget,
             "recorded_trials": total,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 import weakref
@@ -190,13 +191,13 @@ class PreparedReservationMutation:
 
 @dataclass(frozen=True)
 class _DurableReservationStoreBinding:
-    store: JournalStore
+    store_ref: weakref.ReferenceType
     store_identity: object
     environment: str
     account_id: str
     scope_id: str
-    resolution_artifact_store: ArtifactStore | None
-    resolution_artifact_reader: object | None
+    resolution_artifact_store_ref: weakref.ReferenceType | None
+    resolution_artifact_reader_ref: weakref.ReferenceType | None
 
 
 def _build_reservation_store_binding_accessors():
@@ -206,39 +207,45 @@ def _build_reservation_store_binding_accessors():
     carries a caller-discoverable removal callback; manually invoking that
     callback can erase a live trust binding and make reinitialization appear to
     be first composition. Callback-free weakrefs plus identity checks preserve
-    fail-closed binding semantics while still allowing dead ids to be pruned.
+    fail-closed binding semantics. The registry weak-references selected
+    authority resources too, so a dead owner cannot retain JournalStore,
+    ArtifactStore, or retained-reader capabilities until a future access.
     """
 
     bindings: dict[
         int,
         tuple[weakref.ReferenceType, _DurableReservationStoreBinding],
     ] = {}
+    lock = RLock()
 
     def prune_dead() -> None:
-        dead = [
-            object_id
-            for object_id, (value_ref, _binding) in bindings.items()
-            if value_ref() is None
-        ]
-        for object_id in dead:
-            bindings.pop(object_id, None)
+        with lock:
+            dead = [
+                object_id
+                for object_id, (value_ref, _binding) in bindings.items()
+                if value_ref() is None
+            ]
+            for object_id in dead:
+                bindings.pop(object_id, None)
 
     def registered_binding(
         value: object,
     ) -> _DurableReservationStoreBinding | None:
-        entry = bindings.get(id(value))
-        if entry is None:
-            return None
-        value_ref, binding = entry
-        current = value_ref()
-        if current is value:
-            return binding
-        if current is None:
-            bindings.pop(id(value), None)
-            return None
-        raise ReservationConflict(
-            "durable reservation binding identity collision"
-        )
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return None
+            value_ref, binding = entry
+            current = value_ref()
+            if current is value:
+                return binding
+            if current is None:
+                bindings.pop(object_id, None)
+                return None
+            raise ReservationConflict(
+                "durable reservation binding identity collision"
+            )
 
     def is_registered(value: object) -> bool:
         try:
@@ -317,24 +324,35 @@ def _build_reservation_store_binding_accessors():
         object.__setattr__(value, "_idempotency", {})
 
         object_id = id(value)
-        bindings[object_id] = (
-            weakref.ref(value),
-            _DurableReservationStoreBinding(
-                store=store,
-                store_identity=identity,
-                environment=normalized_environment,
-                account_id=normalized_account,
-                scope_id=scope_id,
-                resolution_artifact_store=resolution_artifact_store,
-                resolution_artifact_reader=reader,
+        binding = _DurableReservationStoreBinding(
+            store_ref=weakref.ref(store),
+            store_identity=identity,
+            environment=normalized_environment,
+            account_id=normalized_account,
+            scope_id=scope_id,
+            resolution_artifact_store_ref=(
+                None
+                if resolution_artifact_store is None
+                else weakref.ref(resolution_artifact_store)
+            ),
+            resolution_artifact_reader_ref=(
+                None if reader is None else weakref.ref(reader)
             ),
         )
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is not None and entry[0]() is not value:
+                raise ReservationConflict(
+                    "durable reservation binding identity collision"
+                )
+            bindings[object_id] = (weakref.ref(value), binding)
         try:
             DurableReservationBook._reload(value)
         except Exception:
-            entry = bindings.get(object_id)
-            if entry is not None and entry[0]() is value:
-                bindings.pop(object_id, None)
+            with lock:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
+                    bindings.pop(object_id, None)
             raise
 
     def require(value: object) -> tuple[JournalStore, object, str]:
@@ -359,7 +377,32 @@ def _build_reservation_store_binding_accessors():
             raise ReservationConflict(
                 "durable reservation instance state is shadowed"
             )
-        if state.get("store") is not binding.store:
+        store = binding.store_ref()
+        artifact_store = (
+            None
+            if binding.resolution_artifact_store_ref is None
+            else binding.resolution_artifact_store_ref()
+        )
+        artifact_reader = (
+            None
+            if binding.resolution_artifact_reader_ref is None
+            else binding.resolution_artifact_reader_ref()
+        )
+        if store is None:
+            raise ReservationConflict(
+                "durable reservation JournalStore was released while book is live"
+            )
+        if (
+            binding.resolution_artifact_store_ref is not None
+            and artifact_store is None
+        ) or (
+            binding.resolution_artifact_reader_ref is not None
+            and artifact_reader is None
+        ):
+            raise ReservationConflict(
+                "durable reservation evidence authority was released while book is live"
+            )
+        if state.get("store") is not store:
             raise ReservationConflict(
                 "durable reservation JournalStore changed after construction"
             )
@@ -372,17 +415,15 @@ def _build_reservation_store_binding_accessors():
                 "durable reservation scope changed after construction"
             )
         if (
-            state.get("resolution_artifact_store")
-            is not binding.resolution_artifact_store
-            or state.get("_resolution_artifact_reader")
-            is not binding.resolution_artifact_reader
+            state.get("resolution_artifact_store") is not artifact_store
+            or state.get("_resolution_artifact_reader") is not artifact_reader
         ):
             raise ReservationConflict(
                 "durable reservation evidence authority changed after construction"
             )
         try:
             current = require_exact_journal_store_authority(
-                binding.store,
+                store,
                 subject="durable reservation JournalStore",
             )
         except (TypeError, RuntimeError) as error:
@@ -393,7 +434,7 @@ def _build_reservation_store_binding_accessors():
             raise ReservationConflict(
                 "durable reservation JournalStore generation changed"
             )
-        return binding.store, binding.store_identity, binding.scope_id
+        return store, binding.store_identity, binding.scope_id
 
     return is_registered, initialize, require
 

@@ -343,6 +343,130 @@ class InformationClaim:
         )
 
 
+_SOURCE_DOCUMENT_STATE_FIELDS = frozenset(
+    {
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "title",
+        "passage",
+        "published_at",
+        "available_at",
+        "ingested_at",
+        "rights_basis",
+        "locator",
+    }
+)
+_INFORMATION_CLAIM_STATE_FIELDS = frozenset(
+    {
+        "claim_id",
+        "subject",
+        "predicate",
+        "value",
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "published_at",
+        "available_at",
+        "ingested_at",
+        "passage_hash",
+        "locator",
+        "rights_basis",
+        "syndication_key",
+        "conflict_key",
+        "untrusted_content",
+        "permission_effect",
+    }
+)
+
+
+def _exact_instance_state(
+    value: object,
+    *,
+    expected_type: type,
+    expected_fields: frozenset[str],
+    subject: str,
+) -> dict[str, object]:
+    """Snapshot a canonical dataclass without dispatching through a subclass."""
+
+    if type(value) is not expected_type:
+        raise ValueError(f"{subject} must be exact {expected_type.__name__}")
+    raw_state = vars(value)
+    if type(raw_state) is not dict:
+        raise ValueError(f"{subject} state must be a canonical object")
+    state = dict.copy(raw_state)
+    if any(type(key) is not str for key in state) or set(state) != expected_fields:
+        raise ValueError(f"{subject} state is incomplete or has unexpected fields")
+    return state
+
+
+def _reseal_source_document(document: object) -> SourceDocument:
+    state = _exact_instance_state(
+        document,
+        expected_type=SourceDocument,
+        expected_fields=_SOURCE_DOCUMENT_STATE_FIELDS,
+        subject="document",
+    )
+    for field in (
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "title",
+        "passage",
+        "rights_basis",
+        "locator",
+    ):
+        if type(state[field]) is not str:
+            raise ValueError(f"document {field} must be canonical text")
+    for field in ("published_at", "available_at", "ingested_at"):
+        if type(state[field]) is not datetime:
+            raise ValueError(f"document {field} must be exact datetime")
+    return SourceDocument.create(
+        source_id=state["source_id"],
+        source_revision=state["source_revision"],
+        source_kind=state["source_kind"],
+        title=state["title"],
+        passage=state["passage"],
+        published_at=state["published_at"],
+        available_at=state["available_at"],
+        ingested_at=state["ingested_at"],
+        rights_basis=state["rights_basis"],
+        locator=state["locator"],
+    )
+
+
+def _reseal_information_claim(claim: object) -> InformationClaim:
+    state = _exact_instance_state(
+        claim,
+        expected_type=InformationClaim,
+        expected_fields=_INFORMATION_CLAIM_STATE_FIELDS,
+        subject="claim",
+    )
+    for field in (
+        "claim_id",
+        "subject",
+        "predicate",
+        "value",
+        "source_id",
+        "source_revision",
+        "source_kind",
+        "passage_hash",
+        "locator",
+        "rights_basis",
+        "syndication_key",
+        "conflict_key",
+        "permission_effect",
+    ):
+        if type(state[field]) is not str:
+            raise ValueError(f"claim {field} must be canonical text")
+    for field in ("published_at", "available_at", "ingested_at"):
+        if type(state[field]) is not datetime:
+            raise ValueError(f"claim {field} must be exact datetime")
+    if type(state["untrusted_content"]) is not bool:
+        raise ValueError("claim untrusted_content must be exact bool")
+    return InformationClaim(**state)
+
+
 @dataclass(frozen=True)
 class InformationSnapshot:
     """Causal, content-addressed view of claims visible at one replay cutoff."""
@@ -416,7 +540,7 @@ class ClaimStore:
 
     @property
     def claims(self) -> tuple[InformationClaim, ...]:
-        return tuple(self._claims)
+        return tuple(_reseal_information_claim(item) for item in self._claims)
 
     @staticmethod
     def build_claim(
@@ -426,8 +550,7 @@ class ClaimStore:
         predicate: str,
         value: str,
     ) -> InformationClaim:
-        if not isinstance(document, SourceDocument):
-            raise ValueError("document must be a SourceDocument")
+        document = _reseal_source_document(document)
         normalized_subject = _text(subject, name="subject")
         normalized_predicate = _text(predicate, name="predicate")
         normalized_value = _text(value, name="value")
@@ -468,6 +591,7 @@ class ClaimStore:
         )
 
     def add(self, claim: InformationClaim) -> tuple[InformationClaim, bool]:
+        claim = _reseal_information_claim(claim)
         if claim.permission_effect != "NONE" or claim.untrusted_content is not True:
             raise ValueError("information claims cannot grant authority")
         existing_history = self._history_by_id.get(claim.claim_id)
@@ -476,8 +600,8 @@ class ClaimStore:
                 raise ValueError("claim identity conflict")
             canonical_id = self._syndication.get(claim.syndication_key)
             if canonical_id is not None:
-                return self._by_id[canonical_id], False
-            return existing_history, False
+                return _reseal_information_claim(self._by_id[canonical_id]), False
+            return _reseal_information_claim(existing_history), False
 
         # Provenance history and the canonical deduplicated claim view have
         # different responsibilities. Every distinct source revision is
@@ -507,17 +631,18 @@ class ClaimStore:
                 del self._by_id[duplicate_id]
                 self._by_id[claim.claim_id] = claim
                 self._syndication[claim.syndication_key] = claim.claim_id
-                return claim, False
-            return existing_duplicate, False
+                return _reseal_information_claim(claim), False
+            return _reseal_information_claim(existing_duplicate), False
 
         self._claims.append(claim)
         self._by_id[claim.claim_id] = claim
         self._syndication[claim.syndication_key] = claim.claim_id
-        return claim, True
+        return _reseal_information_claim(claim), True
 
     def conflicts_for(self, claim: InformationClaim) -> tuple[InformationClaim, ...]:
+        claim = _reseal_information_claim(claim)
         return tuple(
-            item
+            _reseal_information_claim(item)
             for item in self._claims
             if item.conflict_key == claim.conflict_key and item.value != claim.value
         )
@@ -525,7 +650,8 @@ class ClaimStore:
     def available_at(self, cutoff: datetime) -> tuple[InformationClaim, ...]:
         time = _time(cutoff, name="cutoff")
         return tuple(
-            sorted(
+            _reseal_information_claim(item)
+            for item in sorted(
                 (
                     item
                     for item in self._claims
@@ -640,7 +766,8 @@ class ClaimStore:
                 representatives[item.syndication_key] = item
 
         return tuple(
-            sorted(
+            _reseal_information_claim(item)
+            for item in sorted(
                 representatives.values(),
                 key=lambda item: (
                     max(item.available_at, item.ingested_at),
@@ -690,7 +817,8 @@ class ClaimStore:
     def revisions(self, source_id: str) -> tuple[InformationClaim, ...]:
         identifier = _text(source_id, name="source_id")
         return tuple(
-            sorted(
+            _reseal_information_claim(item)
+            for item in sorted(
                 (
                     item
                     for item in self._history_by_id.values()

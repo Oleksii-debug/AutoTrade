@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import backup as backup_module
 from mvp.autotrade_mvp.backup import (
     BACKUP_SCHEMA_VERSION,
     BackupCompatibilityError,
@@ -393,6 +394,112 @@ class BackupRestoreTests(unittest.TestCase):
                 )
             )
             self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_runtime_checkpoint_created_during_sqlite_snapshot_aborts_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            self.assertFalse(checkpoint.exists())
+            original_backup_sqlite = backup_module._backup_sqlite
+            injected = False
+
+            def backup_then_create_checkpoint(source, destination):
+                nonlocal injected
+                result = original_backup_sqlite(source, destination)
+                if not injected:
+                    injected = True
+                    checkpoint.write_bytes(
+                        b'{"sealed":"post-journal-generation"}\n'
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=backup_then_create_checkpoint,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "runtime checkpoint inventory changed across journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_runtime_checkpoint_advance_during_sqlite_snapshot_aborts_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            checkpoint.write_bytes(b'{"sealed":"generation-a"}\n')
+            original_backup_sqlite = backup_module._backup_sqlite
+            injected = False
+
+            def backup_then_advance_checkpoint(source, destination):
+                nonlocal injected
+                result = original_backup_sqlite(source, destination)
+                if not injected:
+                    injected = True
+                    checkpoint.write_bytes(b'{"sealed":"generation-b"}\n')
+                return result
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=backup_then_advance_checkpoint,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "runtime checkpoint changed across journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_runtime_checkpoint_created_after_staging_fsync_aborts_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            self.assertFalse(checkpoint.exists())
+            original_fsync_tree = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_create_checkpoint(stage_root):
+                nonlocal injected
+                result = original_fsync_tree(stage_root)
+                if (
+                    not injected
+                    and Path(stage_root).name.startswith(".autotrade-backup-")
+                ):
+                    injected = True
+                    checkpoint.write_bytes(
+                        b'{"sealed":"late-prepublication-generation"}\n'
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_create_checkpoint,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "runtime checkpoint inventory changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
     def test_runtime_checkpoint_manifest_claim_must_match_inventory(self):
         with TemporaryDirectory() as directory:

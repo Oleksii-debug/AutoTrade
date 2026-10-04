@@ -536,6 +536,37 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_source_hash_io_race_is_a_controlled_backup_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_hash = backup_module._sha256_file
+            injected = False
+
+            def fail_checkpoint_hash(path):
+                nonlocal injected
+                if Path(path) == checkpoint and not injected:
+                    injected = True
+                    raise OSError("simulated concurrent source disappearance")
+                return original_hash(path)
+
+            with patch.object(
+                backup_module,
+                "_sha256_file",
+                side_effect=fail_checkpoint_hash,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "changed before journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_partial_runtime_consistency_evidence_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

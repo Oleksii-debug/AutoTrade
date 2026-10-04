@@ -313,6 +313,9 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
+        self.assertIn("github.event.pull_request.base.ref", workflow)
+        self.assertIn("__autotrade_live_base", workflow)
+        self.assertIn('github.event.pull_request.base.sha', workflow)
 
 
     def test_ordinary_protected_sentinel_modification_requires_exact_scope(self):
@@ -479,6 +482,115 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(blocked.returncode, 2)
         self.assertIn("content change without exact authorization", blocked.stdout)
         self.assertEqual(authorized.returncode, 0, authorized.stderr)
+
+    def test_public_module_entrypoint_blocks_diverged_candidate(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-diverged@example.invalid")
+            git("config", "user.name", "Guard Diverged")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "root")
+            root_sha = git("rev-parse", "HEAD")
+            (root / "accepted.txt").write_text("accepted\n", encoding="utf-8")
+            git("add", "accepted.txt")
+            git("commit", "-m", "accepted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "stale", root_sha)
+            (root / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+            git("add", "candidate.txt")
+            git("commit", "-m", "diverged candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("head is not descended from exact base revision", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_sparse_mass_deletion(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-sparse@example.invalid")
+            git("config", "user.name", "Guard Sparse")
+            for index in range(100):
+                (root / f"path-{index}.txt").write_text(
+                    f"{index}\n",
+                    encoding="utf-8",
+                )
+            git("add", ".")
+            git("commit", "-m", "full base")
+            base_sha = git("rev-parse", "HEAD")
+            for index in range(60):
+                (root / f"path-{index}.txt").unlink()
+            git("add", "-A")
+            git("commit", "-m", "sparse replacement candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("mass base-tree deletion", completed.stdout)
 
     def test_public_module_help_bootstraps_from_repository_root(self):
         repository_root = Path(__file__).resolve().parents[2]

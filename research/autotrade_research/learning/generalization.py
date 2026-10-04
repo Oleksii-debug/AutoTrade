@@ -515,6 +515,36 @@ class MarketRegimeEvidence:
         )
 
 
+def _detach_population(
+    value: PopulationCoverageManifest,
+) -> PopulationCoverageManifest:
+    if type(value) is not PopulationCoverageManifest:
+        raise TypeError(
+            "population must be exact PopulationCoverageManifest"
+        )
+    return PopulationCoverageManifest(
+        candidate_hash=value.candidate_hash,
+        frozen_protocol_hash=value.frozen_protocol_hash,
+        input_snapshot_hash=value.input_snapshot_hash,
+        causal_cutoff=value.causal_cutoff,
+        permission_classes=value.permission_classes,
+        task=value.task,
+        instrument_family=value.instrument_family,
+        eligible_episode_ids=value.eligible_episode_ids,
+        included_episode_ids=value.included_episode_ids,
+        exclusions=value.exclusions,
+        episode_digests=value.episode_digests,
+        eligible_outcomes=value.eligible_outcomes,
+        included_outcomes=value.included_outcomes,
+        eligible_no_trade_count=value.eligible_no_trade_count,
+        included_no_trade_count=value.included_no_trade_count,
+        included_regime_counts=value.included_regime_counts,
+        included_labels_complete_by_regime=
+            value.included_labels_complete_by_regime,
+        digest=value.digest,
+    )
+
+
 def _detach_evidence(value: MarketRegimeEvidence) -> MarketRegimeEvidence:
     if type(value) is not MarketRegimeEvidence:
         raise TypeError(
@@ -523,7 +553,7 @@ def _detach_evidence(value: MarketRegimeEvidence) -> MarketRegimeEvidence:
     return MarketRegimeEvidence(
         asset_class=value.asset_class,
         regime=value.regime,
-        population=value.population,
+        population=_detach_population(value.population),
         execution_adjusted_net_score=value.execution_adjusted_net_score,
         observations=value.observations,
         costs_complete=value.costs_complete,

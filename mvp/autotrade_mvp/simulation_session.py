@@ -1561,6 +1561,28 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     store = JournalStore(root / "journal.sqlite3")
     run_id = protocol["run_id"]
     events = store.load_events(_LOOP_AGGREGATE, run_id)
+    from .simulation_runtime_checkpoint import (
+        _issue_autonomous_runtime_authority_key,
+        _require_autonomous_runtime_authority_key,
+    )
+    protocol = dict(protocol)
+    if not events:
+        protocol["runtime_authority_key_sha256"] = (
+            _issue_autonomous_runtime_authority_key(root)
+        )
+    else:
+        first = events[0]
+        if (
+            first["event_type"] != "AutonomousSimulationStarted"
+            or type(first.get("payload")) is not dict
+            or type(first["payload"].get("protocol")) is not dict
+        ):
+            raise ValueError("autonomous simulation start authority is invalid")
+        key_identity = first["payload"]["protocol"].get(
+            "runtime_authority_key_sha256"
+        )
+        _require_autonomous_runtime_authority_key(root, key_identity)
+        protocol["runtime_authority_key_sha256"] = key_identity
     protocol_digest = payload_digest(protocol)
     started_at = datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
     instruments = _loop_instrument(started_at)
@@ -1575,7 +1597,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "provider_state": provider.export_state(),
         }, protocol["start_time"])
         events = store.load_events(_LOOP_AGGREGATE, run_id)
-    if events[0]["event_type"] != "AutonomousSimulationStarted" or events[0]["payload"]["protocol_digest"] != protocol_digest:
+    if (
+        events[0]["event_type"] != "AutonomousSimulationStarted"
+        or events[0]["payload"]["protocol_digest"] != protocol_digest
+        or events[0]["payload"]["protocol"] != protocol
+    ):
         raise ValueError("autonomous simulation protocol/input identity changed")
     completed = []
     active = None

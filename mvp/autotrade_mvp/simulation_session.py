@@ -1661,6 +1661,158 @@ def _autonomous_reconciliation(
     return checkpoint, snapshot
 
 
+def _recover_autonomous_zero_wire_completion(
+    store: JournalStore,
+    root: Path,
+    protocol: dict[str, object],
+    active: dict[str, object],
+    prior_state: dict[str, object],
+) -> None:
+    """Complete a durably started episode that provably cannot have sent.
+
+    HOLD/NO_TRADE episodes never enter the risk/admission/order/dispatcher
+    branch. Recovery therefore reuses the frozen Started decision, but only
+    while canonical economics, OMS, reservations and submission history prove
+    that no financial/send-side mutation appeared after that decision.
+    """
+
+    from .durable_order_projection import DurableOrderBookProjection
+
+    expected_fields = {
+        "episode",
+        "decision",
+        "financial_cut",
+        "protocol_digest",
+        "allocation_status",
+    }
+    if set(active) != expected_fields:
+        raise ValueError("zero-wire autonomous start payload is malformed")
+    episode = active["episode"]
+    decision = active["decision"]
+    if type(episode) is not int or not 1 <= episode <= len(protocol["prices"]):
+        raise ValueError("zero-wire autonomous episode is invalid")
+    if decision not in {"HOLD", "NO_TRADE"}:
+        raise ValueError("autonomous episode is not proven zero-wire")
+    protocol_digest = payload_digest(protocol)
+    if active["protocol_digest"] != protocol_digest:
+        raise ValueError("zero-wire autonomous protocol identity differs")
+    financial_cut = active["financial_cut"]
+    if (
+        type(financial_cut) is not int
+        or financial_cut < 0
+        or financial_cut >= store.current_journal_sequence()
+    ):
+        raise ValueError("zero-wire autonomous financial cut is invalid")
+
+    run_id = protocol["run_id"]
+    key = f"{run_id}:{episode}"
+    timestamp = (
+        datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
+        + timedelta(seconds=episode - 1)
+    ).isoformat().replace("+00:00", "Z")
+    provider = SimulatedProvider.from_state(prior_state)
+    economic = DurableProviderEconomicBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+    )
+    if (
+        economic.cash("USD") != provider.cash
+        or economic.position(INSTRUMENT)
+        != provider.positions.get(INSTRUMENT, Decimal("0"))
+    ):
+        raise ValueError(
+            "zero-wire autonomous economics changed after start"
+        )
+
+    artifacts = ArtifactStore(root / "artifacts")
+    reservations = DurableReservationBook(
+        store,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        resolution_artifact_store=artifacts,
+        resolution_artifact_root=root / "artifacts",
+    )
+    if reservations.active():
+        raise ValueError(
+            "zero-wire autonomous episode has active reservations"
+        )
+    orders = DurableOrderBookProjection(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        host_id="local-simulation",
+        owner_epoch="1",
+    )
+    if any(order.state != "FILLED" for order in orders.snapshots):
+        raise ValueError(
+            "zero-wire autonomous episode has unresolved OMS obligations"
+        )
+    attempt_id = _uuid("loop-attempt", key)
+    if store.load_events(
+        "submission_attempt",
+        submission_attempt_aggregate_id(
+            environment=ENVIRONMENT,
+            account_id=ACCOUNT,
+            attempt_id=attempt_id,
+        ),
+    ):
+        raise ValueError(
+            "zero-wire autonomous episode has submission attempt evidence"
+        )
+
+    checkpoint, _ = _autonomous_reconciliation(
+        store,
+        provider,
+        economic,
+        protocol,
+        timestamp,
+        f"{key}:after",
+    )
+    price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
+    equity = exact_add(
+        economic.cash("USD"),
+        exact_multiply(economic.position(INSTRUMENT), price),
+    )
+    emergency_at = protocol["emergency_at_episode"]
+    emergency = (
+        emergency_at is not None
+        and episode >= emergency_at
+    )
+    result = {
+        "episode": episode,
+        "status": decision,
+        "decision": decision,
+        "cash": canonical_decimal_text(economic.cash("USD")),
+        "position": canonical_decimal_text(
+            economic.position(INSTRUMENT)
+        ),
+        "equity": canonical_decimal_text(equity),
+        "reconciled": True,
+        "order_id": None,
+        "fill_id": None,
+        "reconciliation_event_id": checkpoint["event_id"],
+        "protocol_digest": protocol_digest,
+        "provider_state": provider.export_state(),
+        "emergency": emergency,
+    }
+    _loop_event(
+        store,
+        run_id,
+        "AutonomousEpisodeCompleted",
+        str(episode),
+        result,
+        timestamp,
+    )
+    for item in store.pending_outbox(limit=1000):
+        store.mark_outbox_delivered(
+            item["outbox_id"],
+            expected_envelope_hash=item["envelope_hash"],
+        )
+
+
 def _recover_autonomous_observed_fill(
     store: JournalStore,
     root: Path,
@@ -2048,18 +2200,33 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         else:
             raise ValueError("unsupported autonomous simulation event")
     if active is not None:
+        prior_state = (
+            completed[-1]["provider_state"]
+            if completed
+            else events[0]["payload"]["provider_state"]
+        )
         if observed is not None:
-            prior_state = (
-                completed[-1]["provider_state"]
-                if completed
-                else events[0]["payload"]["provider_state"]
-            )
             _recover_autonomous_observed_fill(
                 store,
                 root,
                 protocol,
                 active,
                 observed,
+                prior_state,
+            )
+            return _run_autonomous_locked(
+                root,
+                values,
+                protocol,
+                stop_after_episodes,
+                selected_policy,
+            )
+        if active.get("decision") in {"HOLD", "NO_TRADE"}:
+            _recover_autonomous_zero_wire_completion(
+                store,
+                root,
+                protocol,
+                active,
                 prior_state,
             )
             return _run_autonomous_locked(

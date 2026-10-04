@@ -314,42 +314,45 @@ class _ReplayState:
     aggregate_version: int
 
 
-_BINDINGS: dict[
-    int,
-    tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
-] = {}
-_BINDINGS_LOCK = threading.RLock()
+def _build_provider_account_acquisition_binding_methods():
+    """Keep exact JournalStore selection outside caller-mutable module state."""
 
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
+    ] = {}
+    lock = threading.RLock()
 
-class DurableProviderAccountAcquisitionAuthority:
-    """Issue and revalidate serialized provider-account acquisition generations."""
-
-    __slots__ = ("store", "_journal_store_identity", "__weakref__")
-
-    def __init_subclass__(cls, **_kwargs) -> None:
-        raise TypeError(
-            "DurableProviderAccountAcquisitionAuthority cannot be subclassed"
+    def registered(
+        value: object,
+    ) -> tuple[weakref.ReferenceType, JournalStoreIdentity] | None:
+        object_id = id(value)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        value_ref, store_ref, identity = entry
+        current = value_ref()
+        if current is value:
+            return store_ref, identity
+        if current is None:
+            bindings.pop(object_id, None)
+            return None
+        raise ProviderAccountAcquisitionError(
+            "provider account acquisition authority identity collision"
         )
 
-    def __init__(self, store: JournalStore) -> None:
-        if type(self) is not DurableProviderAccountAcquisitionAuthority:
+    def initialize(value: object, store: JournalStore) -> None:
+        if type(value) is not DurableProviderAccountAcquisitionAuthority:
             raise TypeError(
                 "authority must be exact DurableProviderAccountAcquisitionAuthority"
             )
-        authority_id = id(self)
-        with _BINDINGS_LOCK:
-            existing = _BINDINGS.get(authority_id)
-            if existing is not None:
-                existing_authority = existing[0]()
-                if existing_authority is self:
-                    raise ProviderAccountAcquisitionError(
-                        "provider account acquisition authority is already initialized"
-                    )
-                if existing_authority is not None:
-                    raise ProviderAccountAcquisitionError(
-                        "provider account acquisition authority identity collision"
-                    )
-                _BINDINGS.pop(authority_id, None)
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
+        with lock:
+            if registered(value) is not None:
+                raise ProviderAccountAcquisitionError(
+                    "provider account acquisition authority is already initialized"
+                )
             selected = require_exact_journal_store_authority(
                 store,
                 subject="provider account acquisition journal",
@@ -358,44 +361,47 @@ class DurableProviderAccountAcquisitionAuthority:
                 selected,
                 subject="visible provider account acquisition journal identity",
             )
-            module_owned = require_exact_journal_store_identity(
+            retained = require_exact_journal_store_identity(
                 selected,
-                subject="module-owned provider account acquisition journal identity",
+                subject="retained provider account acquisition journal identity",
             )
-            self.store = store
-            self._journal_store_identity = visible
-            _BINDINGS[authority_id] = (
-                weakref.ref(self),
+            object.__setattr__(value, "store", store)
+            object.__setattr__(value, "_journal_store_identity", visible)
+            bindings[id(value)] = (
+                weakref.ref(value),
                 weakref.ref(store),
-                module_owned,
+                retained,
             )
 
-    def _journal_authority(self) -> tuple[JournalStore, JournalStoreIdentity]:
-        if type(self) is not DurableProviderAccountAcquisitionAuthority:
+    def require(
+        value: object,
+    ) -> tuple[JournalStore, JournalStoreIdentity]:
+        if type(value) is not DurableProviderAccountAcquisitionAuthority:
             raise TypeError(
                 "authority must be exact DurableProviderAccountAcquisitionAuthority"
             )
-        with _BINDINGS_LOCK:
-            binding = _BINDINGS.get(id(self))
-        if binding is None or binding[0]() is not self:
+        with lock:
+            binding = registered(value)
+        if binding is None:
             raise ProviderAccountAcquisitionError(
                 "provider account acquisition composition is unavailable"
             )
-        selected_store = binding[1]()
+        store_ref, retained_identity = binding
+        selected_store = store_ref()
         if selected_store is None:
             raise ProviderAccountAcquisitionError(
                 "provider account acquisition journal is unavailable"
             )
         expected = require_exact_journal_store_identity(
-            binding[2],
-            subject="module-owned provider account acquisition journal identity",
+            retained_identity,
+            subject="retained provider account acquisition journal identity",
         )
-        if self.store is not selected_store:
+        if object.__getattribute__(value, "store") is not selected_store:
             raise ProviderAccountAcquisitionError(
                 "provider account acquisition composition changed"
             )
         visible = require_exact_journal_store_identity(
-            self._journal_store_identity,
+            object.__getattribute__(value, "_journal_store_identity"),
             subject="visible provider account acquisition journal identity",
         )
         if visible != expected:
@@ -411,6 +417,23 @@ class DurableProviderAccountAcquisitionAuthority:
                 "provider account acquisition journal authority changed"
             )
         return selected_store, expected
+
+    return initialize, require
+
+
+class DurableProviderAccountAcquisitionAuthority:
+    """Issue and revalidate serialized provider-account acquisition generations."""
+
+    __slots__ = ("store", "_journal_store_identity", "__weakref__")
+
+    def __init_subclass__(cls, **_kwargs) -> None:
+        raise TypeError(
+            "DurableProviderAccountAcquisitionAuthority cannot be subclassed"
+        )
+
+    __init__, _journal_authority = (
+        _build_provider_account_acquisition_binding_methods()
+    )
 
     def _replay(
         self,

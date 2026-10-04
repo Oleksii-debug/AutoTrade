@@ -207,6 +207,25 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 connection_generation=1,
             )
 
+    def test_trade_frame_rejects_string_encoded_numeric_fields(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-STRING","exec_id":"E-STRING","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD","side":"buy",'
+            b'"last_qty":"1.0","last_price":25000,'
+            b'"fees":[{"asset":"USD","qty":1}],'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],"sequence":4}'
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "last_qty must be an exact JSON number",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
     def test_non_trade_report_cannot_carry_trade_only_economics(self):
         raw = frame_bytes(
             reports=[

@@ -5,6 +5,9 @@ from research.autotrade_research.evaluation.gates import (
     GateDecision,
     GateEvidenceRef,
 )
+from research.autotrade_research.evaluation.scientific_trial_owner import (
+    gate_profile_subject_digest,
+)
 from research.tests.test_evaluation_gates import evidence, profile
 
 
@@ -67,6 +70,25 @@ class EvaluationGateExactTextIngressTests(unittest.TestCase):
                 base,
                 required_regimes=(HostileText("normal"), "stress"),
             )
+        self.assertNoHostileCallbacks()
+
+    def test_subject_hash_revalidates_post_construction_profile_text_authority(self):
+        mutated = profile()
+        object.__setattr__(mutated, "profile_id", HostileText("gate-v1"))
+
+        with self.assertRaises(TypeError):
+            gate_profile_subject_digest(mutated)
+        self.assertNoHostileCallbacks()
+
+        HostileText.reset()
+        mutated = profile()
+        object.__setattr__(
+            mutated,
+            "baseline_ids",
+            (HostileText("cash"), "passive", "champion"),
+        )
+        with self.assertRaises(TypeError):
+            gate_profile_subject_digest(mutated)
         self.assertNoHostileCallbacks()
 
     def test_evaluation_evidence_identity_text_rejects_subclasses_before_dispatch(self):

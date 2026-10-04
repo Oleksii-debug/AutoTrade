@@ -99,6 +99,30 @@ def _text(value: object, *, name: str) -> str:
     return value
 
 
+def _snapshot_kwdefaults(
+    value: object,
+    *,
+    name: str,
+) -> tuple[tuple[str, object], ...] | None:
+    """Freeze keyword defaults without invoking caller-defined equality."""
+
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} must be an exact dict or None"
+        )
+    keys: list[str] = []
+    for key in value:
+        if type(key) is not str:
+            raise RuntimeTargetHostRunnerError(
+                f"{name} keys must be exact strings"
+            )
+        keys.append(key)
+    keys.sort()
+    return tuple((key, value[key]) for key in keys)
+
+
 def _snapshot_operations(
     plan: DeclaredRuntimeEventPlan,
     operations: object,
@@ -204,7 +228,10 @@ def _callable_authority_state(value: object) -> tuple[
                 function.__code__,
                 function.__defaults__,
                 kwdefaults,
-                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+                _snapshot_kwdefaults(
+                    kwdefaults,
+                    name=f"{function.__qualname__}.__kwdefaults__",
+                ),
             )
         )
         namespace = function.__globals__
@@ -281,8 +308,21 @@ def _require_callable_authority(
             or function.__defaults__ is not defaults
             or function.__kwdefaults__ is not kwdefaults
             or (
-                kwdefaults is not None
-                and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                kwdefault_items is None
+                and function.__kwdefaults__ is not None
+            )
+            or (
+                kwdefault_items is not None
+                and (
+                    type(function.__kwdefaults__) is not dict
+                    or tuple(sorted(function.__kwdefaults__)) != tuple(
+                        key for key, _expected in kwdefault_items
+                    )
+                    or any(
+                        function.__kwdefaults__[key] is not expected
+                        for key, expected in kwdefault_items
+                    )
+                )
             )
         ):
             raise RuntimeTargetHostRunnerError(

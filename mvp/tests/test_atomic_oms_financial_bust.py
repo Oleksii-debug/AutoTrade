@@ -389,6 +389,38 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(HostileProjectedFill.field_reads, 0)
             self.assertEqual(economics.transactions, ())
 
+    def test_atomic_barrier_rejects_polymorphic_prepared_binding_before_field_access(self):
+        class HostileBinding(accounting_impl.PreparedProviderFillBinding):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile prepared binding field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, reservations = books(store)
+            hostile = object.__new__(HostileBinding)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact PreparedProviderFillBinding",
+            ):
+                accounting_impl.commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="hostile-prepared-binding",
+                    idempotency_key="hostile-prepared-binding",
+                    reservation_id="reservation-never-read",
+                    usage={},
+                    transactions=(),
+                    provider_fill_binding=hostile,
+                )
+            self.assertEqual(HostileBinding.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
+
     def test_provider_fill_binding_rejects_polymorphic_plan_before_field_access(self):
         class HostilePlan(ProviderFillFinancialPlan):
             field_reads = 0

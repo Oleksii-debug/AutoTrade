@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -9,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
     ExecutionQualificationError,
@@ -24,11 +26,34 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
-INSTRUMENT_BINDING = "c" * 64
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
 PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
+
+
+def instrument(*, price_tick="0.01"):
+    return InstrumentVersion(
+        instrument_id=INSTRUMENT_ID,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="share",
+        contract_multiplier="1",
+        price_tick=price_tick,
+        quantity_step="1",
+        minimum_quantity="1",
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
 
 
 def model(**overrides):
@@ -45,13 +70,7 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
-        price_projection=ExecutionPriceProjectionPolicy(
-            policy_id="ADVERSE_INSTRUMENT_TICK",
-            policy_version="1",
-            instrument_version="ABC@v1",
-            price_quantum="0.01",
-            instrument_metadata_binding=INSTRUMENT_BINDING,
-        ),
+        price_projection=ExecutionPriceProjectionPolicy.from_instrument(instrument()),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -60,7 +79,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -73,7 +92,7 @@ def order(**overrides):
 
 def observation(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -96,7 +115,7 @@ def qualification(exec_model, **overrides):
         protocol_sha256=PROTOCOL,
         evidence_artifact_id=ARTIFACT_ID,
         evidence_sha256=EVIDENCE,
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
     )
     values.update(overrides)
     return ExecutionModelQualification(**values)
@@ -122,8 +141,9 @@ class ExecutionQualificationTests(unittest.TestCase):
         values = dict(
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
@@ -139,6 +159,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             observation=observation(),
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
@@ -285,9 +306,9 @@ class ExecutionQualificationTests(unittest.TestCase):
                     exec_model,
                     qualification=qualification(
                         exec_model,
-                        instrument_version="ABC@v1",
+                        instrument_version=INSTRUMENT_REF,
                     ),
-                    instrument_version="XYZ@v2",
+                    instrument_version="22222222-2222-4222-8222-222222222222@2",
                 )
             )
 
@@ -344,6 +365,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             observation=observation(),
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
@@ -361,6 +383,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     observation=observation(),
                     model=exec_model,
                     qualification=qualification(exec_model),
+            instrument=instrument(),
                     asset_class="EQUITY",
                     protocol_sha256=PROTOCOL,
                     artifact_store=self.store,

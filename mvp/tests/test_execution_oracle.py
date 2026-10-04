@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_oracle import (
@@ -208,6 +208,41 @@ class ExecutionOracleTests(unittest.TestCase):
         m = model()
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
+    def test_oracle_limit_arithmetic_is_invariant_to_ambient_decimal_context(self):
+        o = order(
+            order_type="LIMIT",
+            quantity="9999999999999999999.99",
+            lot_size="0.01",
+            limit_price="102.12345678901234567890123456789",
+        )
+        q = observation(
+            available_volume="12345678901234567890.12",
+            ask="101",
+        )
+        m = model(
+            max_participation="0.123456789012345678",
+            fee_rate="0.001234567890123456789",
+        )
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
 
     def test_oracle_rejects_quantity_above_participation_capacity(self):
         o = order(quantity="20")

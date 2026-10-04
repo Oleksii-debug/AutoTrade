@@ -8,8 +8,15 @@ against optimistic quantity, price, fee and causal-time errors.
 from __future__ import annotations
 
 from datetime import timedelta, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    exact_multiply,
+    is_exact_decimal_multiple,
+    round_fraction_to_quantum,
+)
 from .execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
@@ -26,9 +33,26 @@ class ExecutionOracleError(ValueError):
     pass
 
 
+def _oracle_exact_product(*values: Decimal, name: str) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    return lots * lot_size
+    try:
+        return round_fraction_to_quantum(
+            as_fraction(quantity),
+            lot_size,
+            mode="FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            "quantity rounding exceeds exact arithmetic resource envelope"
+        ) from error
 
 
 def _detached_execution_result(result: SimulatedExecution) -> SimulatedExecution:
@@ -135,14 +159,25 @@ def assert_conservative_execution(
         raise ExecutionOracleError("filled quantity cannot be negative")
     if result.filled_quantity > order.quantity:
         raise ExecutionOracleError("filled quantity exceeds order quantity")
-    if result.filled_quantity % order.lot_size != 0:
+    try:
+        result_is_lot_multiple = is_exact_decimal_multiple(
+            result.filled_quantity,
+            order.lot_size,
+        )
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            "filled quantity lot check exceeds exact arithmetic resource envelope"
+        ) from error
+    if not result_is_lot_multiple:
         raise ExecutionOracleError("filled quantity violates lot size")
 
+    independent_participating_volume = _oracle_exact_product(
+        observation.available_volume,
+        model.max_participation,
+        name="independent participation capacity",
+    )
     independent_capacity = _round_down(
-        min(
-            order.quantity,
-            observation.available_volume * model.max_participation,
-        ),
+        min(order.quantity, independent_participating_volume),
         order.lot_size,
     )
     if result.filled_quantity > independent_capacity:
@@ -213,8 +248,18 @@ def assert_conservative_execution(
             if order.side == "SELL" and result.fill_price < order.limit_price:
                 raise ExecutionOracleError("sell limit filled below limit")
 
+        independent_notional = _oracle_exact_product(
+            result.filled_quantity,
+            result.fill_price,
+            name="independent execution notional",
+        )
+        independent_proportional_fee = _oracle_exact_product(
+            independent_notional,
+            model.fee_rate,
+            name="independent execution fee",
+        )
         independent_min_fee = max(
-            result.filled_quantity * result.fill_price * model.fee_rate,
+            independent_proportional_fee,
             model.minimum_fee,
         )
         if result.fee < independent_min_fee:

@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_realism import (
@@ -208,6 +208,36 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, expected)
         self.assertEqual(result.fee, Decimal("10") * expected * Decimal("0.001"))
+
+    def test_limit_execution_is_invariant_to_ambient_decimal_context(self):
+        def execute(*, precision, rounding):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                return simulate_execution(
+                    order(
+                        order_type="LIMIT",
+                        quantity="9999999999999999999.99",
+                        lot_size="0.01",
+                        limit_price="102.12345678901234567890123456789",
+                    ),
+                    top(
+                        available_volume="12345678901234567890.12",
+                        ask="101",
+                    ),
+                    model(
+                        max_participation="0.123456789012345678",
+                        fee_rate="0.001234567890123456789",
+                    ),
+                )
+
+        low_floor = execute(precision=6, rounding=ROUND_FLOOR)
+        low_ceiling = execute(precision=6, rounding=ROUND_CEILING)
+        high_precision = execute(precision=80, rounding=ROUND_CEILING)
+        self.assertEqual(low_floor, low_ceiling)
+        self.assertEqual(low_floor, high_precision)
+        self.assertEqual(low_floor.status, "PARTIAL")
+        self.assertGreater(low_floor.filled_quantity, Decimal("0"))
 
     def test_available_volume_and_participation_create_partial_fill(self):
         result = simulate_execution(

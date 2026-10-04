@@ -218,7 +218,7 @@ class DurableModelBudget:
             "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "committed_at": self._clock(),
+            "committed_at": _text(self._clock(), name="clock result"),
         }
 
     @staticmethod

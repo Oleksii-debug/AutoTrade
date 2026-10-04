@@ -125,6 +125,30 @@ class DurableModelBudgetTests(unittest.TestCase):
                 [],
             )
 
+    def test_hostile_clock_result_is_rejected_before_text_method_or_journal_mutation(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile clock result strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(ValueError, "clock result is required"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-clock-result",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: HostileText(NOW),
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-hostile-clock-result"),
+                [],
+            )
+
     def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
             journal = RecordingJournalStore(Path(directory) / "journal.db")

@@ -250,6 +250,62 @@ class MarketNormalizationTests(unittest.TestCase):
             "READY",
         )
 
+    def test_correction_and_replay_cannot_cross_adapter_build_silently(self):
+        normalizer = MarketNormalizer(registry())
+        first = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100.01", "quantity": "1", "side": "buy"},
+                sequence=88,
+                revision=0,
+                adapter_version=TEST_ADAPTER_V1,
+            )
+        )
+        correction = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100.02", "quantity": "1", "side": "buy"},
+                sequence=88,
+                revision=1,
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=2),
+                adapter_version=TEST_ADAPTER_V1,
+            )
+        )
+        self.assertEqual(first.adapter_version, TEST_ADAPTER_V1)
+        self.assertEqual(correction.adapter_version, TEST_ADAPTER_V1)
+        self.assertIn("CORRECTION", correction.quality_flags)
+
+        with self.assertRaisesRegex(
+            SequenceConflict,
+            "adapter_version changed within active stream generation",
+        ):
+            normalizer.normalize(
+                raw(
+                    "TRADE",
+                    {"price": "100.03", "quantity": "1", "side": "buy"},
+                    sequence=88,
+                    revision=2,
+                    available=at() + timedelta(seconds=3),
+                    ingested=at() + timedelta(seconds=4),
+                    adapter_version=TEST_ADAPTER_V2,
+                )
+            )
+
+        accepted = normalizer.normalize(
+            raw(
+                "TRADE",
+                {"price": "100.03", "quantity": "1", "side": "buy"},
+                sequence=88,
+                revision=2,
+                available=at() + timedelta(seconds=3),
+                ingested=at() + timedelta(seconds=4),
+                adapter_version=TEST_ADAPTER_V1,
+            )
+        )
+        self.assertEqual(accepted.adapter_version, TEST_ADAPTER_V1)
+        self.assertIn("CORRECTION", accepted.quality_flags)
+
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

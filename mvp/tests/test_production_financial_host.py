@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from threading import Condition, Event, Thread
 import unittest
 
+from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
@@ -41,6 +42,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             server=object(),
             instance_fence=_FenceStub(),
             admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
 
     def test_exposed_config_mutation_cannot_retarget_financial_scope(self):

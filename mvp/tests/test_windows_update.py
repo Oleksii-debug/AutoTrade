@@ -1756,5 +1756,164 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         self.assertEqual(HostileText.callbacks, 0)
 
 
+    def test_post_construction_evidence_tamper_fails_before_callbacks(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered evidence callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        forged_backup = BackupEvidence(
+            manifest_sha256="sha256:" + "c" * 64,
+            source_sha=CURRENT_SOURCE,
+            journal_schema_version=1,
+            verification_status="PASS",
+            reconciliation_required_after_restore=True,
+        )
+        object.__setattr__(
+            forged_backup,
+            "verification_status",
+            HostileText("PASS"),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=forged_backup,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        forged_migration = MigrationEvidence(
+            from_schema_version=1,
+            to_schema_version=2,
+            source_sha=CANDIDATE_SOURCE,
+            evidence_sha256="sha256:" + "d" * 64,
+            verification_status="PASS",
+            rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
+        )
+        object.__setattr__(
+            forged_migration,
+            "evidence_sha256",
+            HostileText("sha256:" + "d" * 64),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=2,
+                backup_evidence=self.backup,
+                migration_evidence=forged_migration,
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_post_construction_checkpoint_tamper_is_revalidated(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered checkpoint callback executed")
+
+            strip = _trip
+            upper = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        checkpoint = start_update_checkpoint(plan, trust=self.trust)
+        object.__setattr__(
+            checkpoint,
+            "update_completed_steps",
+            (HostileText("VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH"),),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            advance_update_checkpoint(
+                plan,
+                checkpoint,
+                "QUIESCE_NEW_ADMISSIONS",
+                trust=self.trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            serialize_update_checkpoint(checkpoint)
+        self.assertEqual(HostileText.callbacks, 0)
+
+    def test_post_construction_plan_and_trust_tamper_fail_closed(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def _trip(self, *_args, **_kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("tampered authority callback executed")
+
+            strip = _trip
+            encode = _trip
+            __eq__ = _trip
+            __hash__ = _trip
+
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        object.__setattr__(plan, "plan_json", HostileText(plan.plan_json))
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            start_update_checkpoint(plan, trust=self.trust)
+        self.assertEqual(HostileText.callbacks, 0)
+
+        forged_trust = WindowsUpdateTrustContext(
+            evidence_store=self.store,
+            evidence_root=self.evidence_root,
+            qualification_policy=self.trust_policy,
+            expected_policy_id=self.trust_policy.policy_id,
+            expected_policy_version=self.trust_policy.policy_version,
+        )
+        object.__setattr__(
+            forged_trust,
+            "expected_policy_id",
+            HostileText(self.trust_policy.policy_id),
+        )
+        HostileText.callbacks = 0
+        with self.assertRaises(WindowsUpdateError):
+            build_windows_update_plan(
+                current_release=self.current,
+                candidate_release=self.candidate,
+                current_journal_schema_version=1,
+                candidate_journal_schema_version=1,
+                backup_evidence=self.backup,
+                trust=forged_trust,
+            )
+        self.assertEqual(HostileText.callbacks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

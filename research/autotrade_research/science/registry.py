@@ -753,11 +753,10 @@ class ScientificRegistry:
                 canonical_dataset_id,
                 dataset_version,
             )
-            dataset_digest = HistoricalVintageRegistry.digest(
-                authoritative_vintages,
-                canonical_dataset_id,
-                dataset_version,
-            )
+            # Bind the exact owner-validated snapshot already read above.  A
+            # second filesystem read here could mix coverage from one manifest
+            # with a digest from a concurrently replaced/corrupt file.
+            dataset_digest = _hash(vintage_manifest)
         except (HistoricalDataError, FileNotFoundError, OSError, ValueError) as error:
             raise ProtocolViolation(
                 "locked holdout historical vintage is unavailable or invalid"

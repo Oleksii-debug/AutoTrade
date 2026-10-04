@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import mvp.autotrade_mvp.runtime_load_measurement as measurement_module
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.runtime_load_evidence import ExpectedJournalEvent
@@ -225,6 +226,311 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                     operation=operation,
                 )
 
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_replace_post_callback_measurement_authority(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            original = measurement_module._require_expected_event
+
+            def operation():
+                _append(store, expected)
+                measurement_module._require_expected_event = (
+                    lambda *_args, **_kwargs: {"journal_sequence": 1}
+                )
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement authority changed during financial operation: "
+                        "_require_expected_event",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                measurement_module._require_expected_event = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_replace_payload_digest_transitive_hash_authority(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-digest-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            digest_namespace = measurement_module.payload_digest.__globals__
+            original = digest_namespace["sha256"]
+
+            def operation():
+                _append(store, expected)
+                digest_namespace["sha256"] = lambda *_args, **_kwargs: None
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: payload_digest.sha256",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                digest_namespace["sha256"] = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_replace_canonical_json_serializer(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-json-dumps-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            original = json_module.dumps
+
+            def operation():
+                _append(store, expected)
+                json_module.dumps = lambda *_args, **_kwargs: "{}"
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: canonical_json.json.dumps",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                json_module.dumps = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_mutate_canonical_json_serializer_code_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-json-dumps-code-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            serializer = json_module.dumps
+            original_code = serializer.__code__
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError("forged json.dumps executed")
+
+            self.assertEqual(serializer.__code__.co_freevars, forged.__code__.co_freevars)
+            try:
+                def operation():
+                    _append(store, expected)
+                    serializer.__code__ = forged.__code__
+
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement executable authority changed during financial operation: "
+                        "canonical_json.json.dumps",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                serializer.__code__ = original_code
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_replace_plan_digest_binding(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-plan-digest-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            namespace = type(plan).digest.fget.__globals__
+            original = namespace["payload_digest"]
+
+            def operation():
+                _append(store, expected)
+                namespace["payload_digest"] = lambda *_args, **_kwargs: HASH
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: DeclaredRuntimeEventPlan.digest.payload_digest",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                namespace["payload_digest"] = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_kwdefault_mutation_cannot_execute_equality_in_measurement_fence(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-kwdefault-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            kwdefaults = JournalStore.append_event.__kwdefaults__
+            self.assertIs(type(kwdefaults), dict)
+            original = kwdefaults["outbox_topic"]
+            equality_called = False
+
+            class HostileValue:
+                def __eq__(self, other):
+                    nonlocal equality_called
+                    equality_called = True
+                    raise AssertionError("keyword-default equality callback executed")
+
+            def operation():
+                _append(store, expected)
+                kwdefaults["outbox_topic"] = HostileValue()
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement executable authority changed during financial operation: "
+                        "JournalStore.append_event",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                kwdefaults["outbox_topic"] = original
+
+            self.assertFalse(equality_called)
             event_types = tuple(
                 event["event_type"]
                 for event in store.load_events_after_journal_sequence(0)

@@ -1,0 +1,54 @@
+name: WP-65 Python 3.13 target-host
+
+on:
+  pull_request:
+    paths:
+      - "mvp/autotrade_mvp/runtime_load_measurement.py"
+      - "mvp/autotrade_mvp/runtime_target_host_runner.py"
+      - "mvp/tests/test_runtime_load_measurement.py"
+      - "mvp/tests/test_runtime_target_host_runner.py"
+      - "mvp/tests/test_runtime_target_host_runner_resource_cut.py"
+      - ".github/workflows/wp65-python313.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  target-host-runner:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13.16"
+      - name: Run WP-65 target-host runner on required clock-contract runtime
+        run: >-
+          python -m unittest -v
+          mvp.tests.test_runtime_load_measurement
+          mvp.tests.test_runtime_target_host_runner
+          mvp.tests.test_runtime_target_host_runner_resource_cut
+      - name: Write exact-head Python 3.13 target-host evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite wp65-target-host-python313
+          --command "python -m unittest -v mvp.tests.test_runtime_load_measurement mvp.tests.test_runtime_target_host_runner mvp.tests.test_runtime_target_host_runner_resource_cut"
+          --output "artifacts/wp65-target-host-python313-${{ runner.os }}.json"
+      - name: Upload exact-head Python 3.13 target-host evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: wp65-target-host-python313-${{ runner.os }}
+          path: artifacts/wp65-target-host-python313-${{ runner.os }}.json
+          if-no-files-found: error

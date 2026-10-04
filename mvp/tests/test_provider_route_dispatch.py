@@ -9,6 +9,7 @@ from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_core import Surface
 from mvp.autotrade_mvp.provider_qualification_authority import (
     _derive_accepted_provider_qualification,
     parse_provider_qualification_campaign,
@@ -16,6 +17,9 @@ from mvp.autotrade_mvp.provider_qualification_authority import (
 from mvp.autotrade_mvp.provider_route_dispatch import (
     ProviderRouteDispatchError,
     dispatch_selected_provider_route,
+)
+from mvp.autotrade_mvp.provider_route_reads import (
+    qualified_read_route_semantic_claim,
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -58,6 +62,14 @@ def successor_spot_q(*, old_qualification_id: str, ordinal: int = 41):
         raw_ref=raw_ref,
     )
     payload["product_family"] = "SPOT"
+    claim_key, claim_digest = qualified_read_route_semantic_claim(
+        provider_id="BYBIT",
+        endpoint="/v5/account/wallet-balance",
+        surface=Surface.AUTHENTICATED_READ,
+        permission_scope="ACCOUNT.READ",
+    )
+    payload["route_semantics"][claim_key] = claim_digest
+    payload["route_semantics"] = dict(sorted(payload["route_semantics"].items()))
     campaign_raw = canonical_json(payload).encode("utf-8")
     campaign_ref = EvidenceArtifactRef(
         artifact_id=_artifact_id(ordinal),

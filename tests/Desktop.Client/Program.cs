@@ -336,14 +336,22 @@ internal static class Program
                     HttpStatusCode.ServiceUnavailable,
                     new { error = "SNAPSHOT_BUSY", retryable = true }));
         });
+        MemoryPendingCommandStore pendingStore = new();
         AuthenticatedEmergencyHostClient busyClient = new(
             new HttpClient(busyHandler),
             HostOrigin,
-            sessions);
+            sessions,
+            pendingStore);
 
         await Check.ThrowsAsync<EmergencySnapshotBusyException>(
             () => busyClient.GetStatusAsync(CancellationToken.None),
             "canonical SNAPSHOT_BUSY was collapsed into a generic disconnect/error");
+        await Check.ThrowsAsync<EmergencySnapshotBusyException>(
+            () => busyClient.BlockNewExposureAsync(CancellationToken.None),
+            "emergency block did not stop at the retryable pre-command snapshot boundary");
+        Check.True(
+            pendingStore.Payload is null,
+            "snapshot contention minted or persisted an emergency command before coherent state existed");
 
         DelegateHandler malformedHandler = new((request, _, _) =>
         {

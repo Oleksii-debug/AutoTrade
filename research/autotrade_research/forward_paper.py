@@ -24,10 +24,11 @@ class ForwardPaperError(ValueError):
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ForwardPaperError(f"{name} is required")
     return value.strip()
 
@@ -187,10 +188,10 @@ def forward_paper_protocol_hash(
 
 
 def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (str, int, Decimal):
         raise ForwardPaperError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ForwardPaperError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -203,7 +204,7 @@ def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
 def _canonical_decimal_text(value: Decimal) -> str:
     """Render one exact Decimal without representation-only trailing zeros."""
 
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ForwardPaperError("canonical decimal must be finite Decimal")
     sign, digits_tuple, exponent = value.as_tuple()
     digits = list(digits_tuple)
@@ -225,7 +226,7 @@ def _canonical_decimal_text(value: Decimal) -> str:
 
 
 def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+    if type(value) is not int:
         raise ForwardPaperError(f"{name} must be an integer")
     minimum = 0 if allow_zero else 1
     if value < minimum:
@@ -234,12 +235,22 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 
 def _unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise ForwardPaperError(f"{name} must be a sequence")
+    if type(values) not in (list, tuple):
+        raise ForwardPaperError(f"{name} must be a plain list or tuple")
     normalized = tuple(_text(value, name=name) for value in values)
     if len(set(normalized)) != len(normalized):
         raise ForwardPaperError(f"{name} contains duplicates")
     return normalized
+
+
+def _plain_records(values: object, *, name: str) -> tuple[object, ...]:
+    if type(values) not in (list, tuple):
+        raise ForwardPaperError(f"{name} must be a plain list or tuple")
+    return tuple(values)
+
+
+def _is_plain_mapping(value: object) -> bool:
+    return type(value) in (dict, _MAPPING_PROXY_TYPE)
 
 
 @dataclass(frozen=True)
@@ -847,8 +858,8 @@ class ForwardPaperEvidence:
             or type(self.account_reconciliation_complete) is not bool
         ):
             raise ForwardPaperError("completion flags must be boolean")
-        if not isinstance(self.costs_by_currency, Mapping):
-            raise TypeError("costs_by_currency must be a mapping")
+        if not _is_plain_mapping(self.costs_by_currency):
+            raise TypeError("costs_by_currency must be a plain mapping")
         costs: dict[str, Decimal] = {}
         for currency, value in self.costs_by_currency.items():
             if not isinstance(currency, str):
@@ -863,19 +874,34 @@ class ForwardPaperEvidence:
             )
         object.__setattr__(self, "exact_build_sha", build)
         object.__setattr__(self, "protocol_hash", protocol_hash)
-        object.__setattr__(self, "predictions", tuple(self.predictions))
-        object.__setattr__(self, "outcomes", tuple(self.outcomes))
+        object.__setattr__(
+            self,
+            "predictions",
+            _plain_records(self.predictions, name="predictions"),
+        )
+        object.__setattr__(
+            self,
+            "outcomes",
+            _plain_records(self.outcomes, name="outcomes"),
+        )
         object.__setattr__(
             self,
             "operational_observations",
-            tuple(self.operational_observations),
+            _plain_records(
+                self.operational_observations,
+                name="operational_observations",
+            ),
         )
         object.__setattr__(
             self,
             "costs_by_currency",
             MappingProxyType(costs),
         )
-        object.__setattr__(self, "paper_economics", tuple(self.paper_economics))
+        object.__setattr__(
+            self,
+            "paper_economics",
+            _plain_records(self.paper_economics, name="paper_economics"),
+        )
         raw_limitations = _unique_text(
             self.simulation_limitations,
             name="simulation_limitations",
@@ -917,8 +943,8 @@ class ForwardPaperEvidence:
         _instant(observed_until, name="observed_until")
         if type(costs_complete) is not bool or type(account_reconciliation_complete) is not bool:
             raise ForwardPaperError("completion flags must be boolean")
-        if not isinstance(costs_by_currency, Mapping):
-            raise TypeError("costs_by_currency must be a mapping")
+        if not _is_plain_mapping(costs_by_currency):
+            raise TypeError("costs_by_currency must be a plain mapping")
         costs: dict[str, Decimal] = {}
         for currency, value in costs_by_currency.items():
             if not isinstance(currency, str):
@@ -931,14 +957,23 @@ class ForwardPaperEvidence:
             exact_build_sha=build,
             protocol_hash=_hash(protocol_hash, name="protocol_hash"),
             observed_until=observed_until,
-            predictions=tuple(predictions),
-            outcomes=tuple(outcomes),
-            operational_observations=tuple(operational_observations),
+            predictions=_plain_records(predictions, name="predictions"),
+            outcomes=_plain_records(outcomes, name="outcomes"),
+            operational_observations=_plain_records(
+                operational_observations,
+                name="operational_observations",
+            ),
             costs_by_currency=MappingProxyType(costs),
             costs_complete=costs_complete,
             account_reconciliation_complete=account_reconciliation_complete,
-            paper_economics=tuple(paper_economics),
-            simulation_limitations=tuple(simulation_limitations),
+            paper_economics=_plain_records(
+                paper_economics,
+                name="paper_economics",
+            ),
+            simulation_limitations=_unique_text(
+                simulation_limitations,
+                name="simulation_limitations",
+            ),
             evaluation_profile_hash=evaluation_profile_hash,
         )
 
@@ -969,10 +1004,47 @@ def assess_forward_paper(
 ) -> ForwardPaperAssessment:
     """Validate frozen forward evidence without declaring economic edge."""
 
-    if not isinstance(protocol, ForwardPaperProtocol):
-        raise TypeError("protocol must be ForwardPaperProtocol")
-    if not isinstance(evidence, ForwardPaperEvidence):
-        raise TypeError("evidence must be ForwardPaperEvidence")
+    if type(protocol) is not ForwardPaperProtocol:
+        raise TypeError("protocol must be exact ForwardPaperProtocol")
+    if type(evidence) is not ForwardPaperEvidence:
+        raise TypeError("evidence must be exact ForwardPaperEvidence")
+
+    # Frozen dataclasses are convenience immutability, not a trust boundary:
+    # object.__setattr__ can still alter an instance after construction. Re-admit
+    # the complete top-level protocol/evidence through canonical constructors
+    # before evaluating any caller-retained object.
+    protocol = ForwardPaperProtocol.create(
+        campaign_id=protocol.campaign_id,
+        exact_build_sha=protocol.exact_build_sha,
+        protocol_hash=protocol.protocol_hash,
+        registered_at=protocol.registered_at,
+        starts_at=protocol.starts_at,
+        ends_at=protocol.ends_at,
+        minimum_predictions=protocol.minimum_predictions,
+        maximum_decision_latency_ms=protocol.maximum_decision_latency_ms,
+        required_provider_capabilities=protocol.required_provider_capabilities,
+        required_operational_cases=protocol.required_operational_cases,
+        required_regimes=protocol.required_regimes,
+        minimum_decision_units_per_regime=protocol.minimum_decision_units_per_regime,
+        required_simulation_limitations=protocol.required_simulation_limitations,
+        reporting_currency=protocol.reporting_currency,
+        maximum_drawdown=protocol.maximum_drawdown,
+        evaluation_profile_hash=protocol.evaluation_profile_hash,
+    )
+    evidence = ForwardPaperEvidence.create(
+        exact_build_sha=evidence.exact_build_sha,
+        protocol_hash=evidence.protocol_hash,
+        observed_until=evidence.observed_until,
+        predictions=evidence.predictions,
+        outcomes=evidence.outcomes,
+        operational_observations=evidence.operational_observations,
+        costs_by_currency=evidence.costs_by_currency,
+        costs_complete=evidence.costs_complete,
+        account_reconciliation_complete=evidence.account_reconciliation_complete,
+        paper_economics=evidence.paper_economics,
+        simulation_limitations=evidence.simulation_limitations,
+        evaluation_profile_hash=evidence.evaluation_profile_hash,
+    )
 
     invalid: list[str] = []
     incomplete: list[str] = []
@@ -1009,7 +1081,24 @@ def assess_forward_paper(
     }
     dependence_unit_regime: dict[str, str] = {}
     for prediction in evidence.predictions:
-        if not isinstance(prediction, SealedPrediction):
+        if type(prediction) is not SealedPrediction:
+            invalid.append("invalid_prediction_record")
+            continue
+        try:
+            prediction = SealedPrediction.create(
+                prediction_id=prediction.prediction_id,
+                provider_capability=prediction.provider_capability,
+                input_hash=prediction.input_hash,
+                proposal_hash=prediction.proposal_hash,
+                information_cutoff_at=prediction.information_cutoff_at,
+                sealed_at=prediction.sealed_at,
+                decision_deadline_at=prediction.decision_deadline_at,
+                outcome_horizon_end_at=prediction.outcome_horizon_end_at,
+                decision_latency_ms=prediction.decision_latency_ms,
+                regime=prediction.regime,
+                dependence_unit_id=prediction.dependence_unit_id,
+            )
+        except (ForwardPaperError, TypeError):
             invalid.append("invalid_prediction_record")
             continue
         if prediction.prediction_id in prediction_by_id:
@@ -1065,7 +1154,17 @@ def assess_forward_paper(
 
     outcomes_by_prediction: dict[str, ForwardOutcome] = {}
     for outcome in evidence.outcomes:
-        if not isinstance(outcome, ForwardOutcome):
+        if type(outcome) is not ForwardOutcome:
+            invalid.append("invalid_outcome_record")
+            continue
+        try:
+            outcome = ForwardOutcome.create(
+                prediction_id=outcome.prediction_id,
+                outcome_hash=outcome.outcome_hash,
+                outcome_available_at=outcome.outcome_available_at,
+                evaluated_at=outcome.evaluated_at,
+            )
+        except (ForwardPaperError, TypeError):
             invalid.append("invalid_outcome_record")
             continue
         if outcome.prediction_id in outcomes_by_prediction:
@@ -1098,7 +1197,7 @@ def assess_forward_paper(
         observed_cases = {
             item.case
             for item in evidence.operational_observations
-            if isinstance(item, OperationalObservation)
+            if type(item) is OperationalObservation
             and item.provider_capability == capability
             and item.reconciled
         }
@@ -1106,7 +1205,17 @@ def assess_forward_paper(
             incomplete.append(f"missing_operational_case:{capability}:{case}")
 
     for item in evidence.operational_observations:
-        if not isinstance(item, OperationalObservation):
+        if type(item) is not OperationalObservation:
+            invalid.append("invalid_operational_observation")
+            continue
+        try:
+            item = OperationalObservation.create(
+                provider_capability=item.provider_capability,
+                case=item.case,
+                observed_at=item.observed_at,
+                reconciled=item.reconciled,
+            )
+        except (ForwardPaperError, TypeError):
             invalid.append("invalid_operational_observation")
             continue
         if item.provider_capability not in capability_counts:
@@ -1122,7 +1231,25 @@ def assess_forward_paper(
     economics_by_prediction: dict[str, PaperDecisionEconomics] = {}
     economics_by_sequence: dict[int, PaperDecisionEconomics] = {}
     for item in evidence.paper_economics:
-        if not isinstance(item, PaperDecisionEconomics):
+        if type(item) is not PaperDecisionEconomics:
+            invalid.append("invalid_paper_economics_record")
+            continue
+        try:
+            item = PaperDecisionEconomics.create(
+                prediction_id=item.prediction_id,
+                currency=item.currency,
+                sequence=item.sequence,
+                realized_at=item.realized_at,
+                gross_pnl=item.gross_pnl,
+                fees=item.fees,
+                spread_cost=item.spread_cost,
+                slippage_cost=item.slippage_cost,
+                net_pnl=item.net_pnl,
+                equity_before=item.equity_before,
+                equity_after=item.equity_after,
+                peak_equity_before=item.peak_equity_before,
+            )
+        except (ForwardPaperError, TypeError):
             invalid.append("invalid_paper_economics_record")
             continue
         if item.prediction_id in economics_by_prediction:

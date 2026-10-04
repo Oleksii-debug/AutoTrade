@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -80,12 +81,19 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             "tools/baseline.py",
             "tools/build_provenance_manifest.py",
             "tools/check_nvda_qualification.py",
+            "tools/contract_version_guard.py",
+            "tools/generate_common_scalar_bindings.py",
+            "tools/generate_common_scalar_corpus.py",
+            "tools/generate_host_api_routes.py",
+            "tools/qualification/prepare_lean_composition.py",
             "tools/verify.py",
             "tools/write_ci_evidence.py",
             "tests/Contracts.DotNet/Contracts.DotNet.csproj",
             "tests/Contracts.DotNet/Program.cs",
             "tests/Desktop.Client/Desktop.Client.csproj",
             "tests/Desktop.Client/Program.cs",
+            "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
+            "tests/Integration/LeanAdoption/Program.cs",
             "contracts/fixtures/common-scalars.corpus.json",
         }
         self.assertEqual(INTEGRATION_HARNESS_ROOTS, expected)
@@ -101,6 +109,44 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                 self.assertEqual(
                     result.protected_violations,
                     (f"{path} (unauthorized trust-root modification)",),
+                )
+
+    def test_direct_python_tool_workflow_harnesses_are_registered(self):
+        invoked = set()
+        workflow_dir = REPO_ROOT / ".github" / "workflows"
+        pattern = re.compile(r"\\bpython\\s+(tools/[A-Za-z0-9_./-]+\\.py)\\b")
+        for workflow in workflow_dir.glob("*.y*ml"):
+            if workflow.is_file():
+                invoked.update(
+                    pattern.findall(workflow.read_text(encoding="utf-8"))
+                )
+
+        self.assertGreaterEqual(len(invoked), 8)
+        self.assertEqual(
+            invoked - INTEGRATION_HARNESS_ROOTS,
+            set(),
+            "every directly executed Python tool must be an exact-approved harness root",
+        )
+        self.assertIn(
+            "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
+            INTEGRATION_HARNESS_ROOTS,
+        )
+        self.assertIn(
+            "tests/Integration/LeanAdoption/Program.cs",
+            INTEGRATION_HARNESS_ROOTS,
+        )
+
+    def test_integration_harness_deletion_is_also_protected(self):
+        for path in sorted(INTEGRATION_HARNESS_ROOTS):
+            with self.subTest(path=path):
+                result = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="D", path=path)],
+                )
+                self.assertFalse(result.allowed)
+                self.assertTrue(
+                    any(path in item for item in result.protected_violations),
+                    result.protected_violations,
                 )
 
     def test_bootstrap_trust_roots_are_exact_and_fail_closed(self):

@@ -243,6 +243,7 @@ class AuthenticatedHostApplication:
         if not callable(snapshot_provider):
             raise TypeError("snapshot_provider must be callable")
         self.security_boundary = security_boundary
+        self._journal = journal
         self.host_id = host_id.strip()
         self.public_origin = _authenticated_origin(public_origin)
         self._principal_resolver = principal_resolver
@@ -345,6 +346,11 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
+        # UiSnapshot is one operator observation, not a loose collection of
+        # individually valid reads. Pin the global append-only journal cut
+        # across both the durable Host projection and the product projector so
+        # cash/risk/orders/jobs cannot be assembled from different moments.
+        journal_cut = self._journal.current_journal_sequence()
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
@@ -354,6 +360,8 @@ class AuthenticatedHostApplication:
                 role=authenticated_role,
             ),
         )
+        if self._journal.current_journal_sequence() != journal_cut:
+            raise ValueError("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
         payload = dict(projected)

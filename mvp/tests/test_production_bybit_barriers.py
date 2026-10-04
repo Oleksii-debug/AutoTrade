@@ -15,7 +15,10 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
-from mvp.autotrade_mvp.provider_transport import BYBIT_V5_ENDPOINT_POLICIES
+from mvp.autotrade_mvp.provider_transport import (
+    BYBIT_V5_ENDPOINT_POLICIES,
+    ProviderEndpointPolicy,
+)
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
@@ -33,6 +36,17 @@ class _RecordingWire:
     def send(self, request):
         self.requests.append(request)
         return b'{"retCode":0,"retMsg":"OK","result":{"orderId":"must-not-send"}}'
+
+
+class _HostileTimestamp(int):
+    comparison_calls = 0
+
+    def __lt__(self, _other):
+        type(self).comparison_calls += 1
+        raise AssertionError("hostile timestamp comparison executed")
+
+    def __str__(self):
+        raise AssertionError("hostile timestamp string conversion executed")
 
 
 class ProductionBybitBarrierTests(unittest.TestCase):
@@ -81,6 +95,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
         quota_gate=None,
         clock_millis=None,
         clock_utc=None,
+        recv_window_ms=5000,
     ):
         capability = write_capability(
             family="LINEAR_DERIVATIVES",
@@ -129,6 +144,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             clock_utc=clock_utc or (lambda: READ_AT),
             quota_gate=quota_gate,
             wire_client=wire,
+            recv_window_ms=recv_window_ms,
         )
         return intent_id, sender, guarded_order_projection(request)
 
@@ -209,6 +225,164 @@ class ProductionBybitBarrierTests(unittest.TestCase):
 
             self.assertEqual(len(lease_calls), 1)
             self.assertEqual(final_guard_calls, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_callback_time_policy_object_replacement_is_rejected_before_signing(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            replacement = ProviderEndpointPolicy(
+                provider_id="BYBIT",
+                environment="PAPER",
+                base_url="https://evil.example",
+                allowed_hosts=frozenset({"evil.example"}),
+            )
+            transport_holder = {}
+
+            def quota_gate(*_args):
+                transport_holder["transport"].policy = replacement
+
+            intent_id, sender, request = self._sender_and_request(
+                runtime,
+                wire,
+                quota_gate=quota_gate,
+            )
+            transport = sender._ProductionBybitOrderSender__transport
+            transport_holder["transport"] = transport
+            canonical_policy = BYBIT_V5_ENDPOINT_POLICIES["TESTNET"]
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "transport policy authority changed before signing",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after policy replacement"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+                transport.policy = canonical_policy
+
+            self.assertEqual(wire.requests, [])
+
+    def test_callback_time_recv_window_mutation_is_rejected_before_signing(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            transport_holder = {}
+
+            def quota_gate(*_args):
+                transport_holder["transport"].recv_window_ms = 6000
+
+            intent_id, sender, request = self._sender_and_request(
+                runtime,
+                wire,
+                quota_gate=quota_gate,
+                recv_window_ms=5000,
+            )
+            transport = sender._ProductionBybitOrderSender__transport
+            transport_holder["transport"] = transport
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "receive-window authority changed before signing",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after recv-window mutation"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+                transport.recv_window_ms = 5000
+
+            self.assertEqual(wire.requests, [])
+
+    def test_hostile_timestamp_subclass_is_rejected_without_callbacks(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            _HostileTimestamp.comparison_calls = 0
+            intent_id, sender, request = self._sender_and_request(
+                runtime,
+                wire,
+                clock_millis=lambda: _HostileTimestamp(1_700_000_000_000),
+            )
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "clock_millis must return an exact non-negative integer",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after hostile timestamp"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+
+            self.assertEqual(_HostileTimestamp.comparison_calls, 0)
             self.assertEqual(wire.requests, [])
 
     def test_post_sign_callback_authority_mutation_is_rechecked_before_wire(self) -> None:

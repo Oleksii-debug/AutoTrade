@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AutoTrade Host API
-  version: 5.0.0
+  version: 6.0.0
   description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
 servers:
   - url: https://localhost
@@ -66,7 +66,7 @@ paths:
           name: after
           required: false
           schema:
-            type: string
+            $ref: ../jsonschema/common.schema.json#/$defs/Sequence
       responses:
         "200":
           description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot

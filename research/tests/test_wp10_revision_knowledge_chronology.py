@@ -33,6 +33,7 @@ def _event(
     result = {
         "event_id": EVENT_ID,
         "instrument_version": "instrument:AAA:v1",
+        "adapter_version": "research-fixture@1",
         "kind": kind,
         "source_event_at": _iso(source_at),
         "available_at": _iso(available_at),
@@ -103,6 +104,19 @@ class RevisionKnowledgeChronologyTests(unittest.TestCase):
                         [lower, higher],
                         BASE + timedelta(minutes=5),
                     )
+
+    def test_revision_cannot_change_adapter_build(self):
+        lower = _event(1, available_minutes=1, ingested_minutes=3)
+        higher = _event(2, available_minutes=2, ingested_minutes=4)
+        higher["adapter_version"] = "research-fixture@2"
+        with self.assertRaisesRegex(HistoricalConflict, "changed source identity metadata"):
+            causal_market_event_history([lower, higher], BASE + timedelta(minutes=5))
+
+    def test_adapter_build_must_be_canonical(self):
+        row = _event(1, available_minutes=1, ingested_minutes=3)
+        row["adapter_version"] = " research-fixture@1 "
+        with self.assertRaisesRegex(HistoricalDataError, "adapter_version must be"):
+            causal_market_event_history([row], BASE + timedelta(minutes=4))
 
     def test_revision_may_have_a_later_provider_source_sequence(self):
         lower = _event(1, available_minutes=1, ingested_minutes=3, source_sequence=10)

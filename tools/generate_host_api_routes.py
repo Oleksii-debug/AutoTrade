@@ -111,7 +111,7 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
                         "nested OpenAPI parameter content appeared outside schema"
                     )
                 schema_match = re.fullmatch(
-                    r"            ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
+                    r"            (\$ref|[A-Za-z_][A-Za-z0-9_]*):\s*(\S+)\s*",
                     line,
                 )
                 if schema_match is None:

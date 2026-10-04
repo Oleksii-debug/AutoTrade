@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
@@ -47,6 +48,7 @@ _MARKET_EVENT_CANONICAL_FIELDS = frozenset(
     {
         "event_id",
         "instrument_version",
+        "adapter_version",
         "kind",
         "source_event_at",
         "available_at",
@@ -60,6 +62,7 @@ _MARKET_EVENT_CANONICAL_FIELDS = frozenset(
     }
 )
 _MARKET_EVENT_REQUIRED_FIELDS = _MARKET_EVENT_CANONICAL_FIELDS - {"source_sequence"}
+_ADAPTER_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,127}\Z")
 _EVIDENCE_REF_CANONICAL_FIELDS = frozenset(
     {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
 )
@@ -333,6 +336,9 @@ def causal_market_event_history(
             )
         event_id = _uuid(event.get("event_id"), "event_id")
         instrument_version = _text(event.get("instrument_version"), "instrument_version")
+        adapter_version = event.get("adapter_version")
+        if type(adapter_version) is not str or _ADAPTER_VERSION.fullmatch(adapter_version) is None:
+            raise HistoricalDataError("adapter_version must be a canonical bounded ASCII build token")
         event_kind = _text(event.get("kind"), "kind")
         if event_kind not in _MARKET_EVENT_KINDS:
             raise HistoricalDataError("market event kind is not canonical")
@@ -401,6 +407,7 @@ def causal_market_event_history(
                 source_at != other_source_at
                 or instrument_version != other_instrument_version
                 or event_kind != other_kind
+                or adapter_version != _other_event["adapter_version"]
             ):
                 raise HistoricalConflict("event revision changed source identity metadata")
             if revision > other_revision and available < other_available:

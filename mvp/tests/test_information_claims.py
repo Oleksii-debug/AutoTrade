@@ -15,7 +15,7 @@ from mvp.autotrade_mvp.information_claims import (
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def doc(source, revision, passage, *, available=0, ingested=None, locator="p1", kind="NEWS"):
+def doc(source, revision, passage, *, available=0, ingested=None, published=0, locator="p1", kind="NEWS"):
     available_at = BASE + timedelta(hours=available)
     ingested_at = available_at if ingested is None else BASE + timedelta(hours=ingested)
     return SourceDocument.create(
@@ -24,7 +24,7 @@ def doc(source, revision, passage, *, available=0, ingested=None, locator="p1", 
         source_kind=kind,
         title="title",
         passage=passage,
-        published_at=BASE,
+        published_at=BASE + timedelta(hours=published),
         available_at=available_at,
         ingested_at=ingested_at,
         rights_basis="quotation-and-hash-only",
@@ -240,7 +240,7 @@ class InformationClaimTests(unittest.TestCase):
             value="10",
         )
         revised = store.build_claim(
-            doc("corp", "r2", "revised guidance", available=2),
+            doc("corp", "r2", "revised guidance", available=2, published=2),
             subject="X",
             predicate="guidance",
             value="8",
@@ -464,7 +464,7 @@ class InformationClaimTests(unittest.TestCase):
             value="10",
         )
         revised = store.build_claim(
-            doc("corp", "r2", "revised", available=2),
+            doc("corp", "r2", "revised", available=2, published=2),
             subject="X",
             predicate="guidance",
             value="8",

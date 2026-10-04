@@ -200,6 +200,7 @@ async function exercisePortfolioPagingAndSort(page) {
     sort.dispatchEvent(new Event("change", {bubbles: true}));
     document.querySelector("#refresh-state").click();
   });
+  await page.waitForFunction(() => document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
   await page.waitForFunction(() =>
     document.querySelector("#portfolio-body").textContent.includes("895.696") &&

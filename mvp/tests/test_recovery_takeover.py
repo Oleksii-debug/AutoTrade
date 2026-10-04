@@ -184,6 +184,28 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "Host is not ready"):
             self.controller.validate_sender("host-b", 2)
 
+    def test_same_host_restart_takeover_advances_epoch_without_owner_rename(self):
+        result = self._takeover(new_owner_id="host-a")
+
+        self.assertEqual(
+            (result.source_owner.owner_id, result.source_owner.epoch),
+            ("host-a", 1),
+        )
+        self.assertEqual(
+            (result.target_owner.owner_id, result.target_owner.epoch),
+            ("host-a", 2),
+        )
+        self.assertEqual(self.controller.owner, result.target_owner)
+        self.assertEqual(
+            [(owner.owner_id, owner.epoch) for owner in self.controller.durable_owner_chain()],
+            [("host-a", 1), ("host-a", 2)],
+        )
+        self.assertEqual(self.controller.state, HostState.RECOVERING)
+        self.assertFalse(self.controller.provider_reconciled)
+        self._assert_old_credential_revoked()
+        with self.assertRaisesRegex(PermissionError, "Host is not ready"):
+            self.controller.validate_sender("host-a", 2)
+
     def test_crash_after_started_event_blocks_old_sender_and_resumes(self):
         with patch(
             "mvp.autotrade_mvp.recovery_takeover.revoke_trade_credential_with_receipt",

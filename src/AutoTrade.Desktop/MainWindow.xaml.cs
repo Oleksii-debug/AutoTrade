@@ -156,7 +156,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            System.Windows.Input.IInputElement? focusedElement =
+            System.Windows.IInputElement? focusedElement =
                 System.Windows.Input.Keyboard.FocusedElement;
             RefreshStatusButton.IsEnabled = true;
             if (restoreKeyboardFocus && IsLoaded && (
@@ -402,7 +402,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            System.Windows.Input.IInputElement? focusedElement =
+            System.Windows.IInputElement? focusedElement =
                 System.Windows.Input.Keyboard.FocusedElement;
             BlockNewExposureButton.IsEnabled = true;
             if (restoreKeyboardFocus && IsLoaded && (

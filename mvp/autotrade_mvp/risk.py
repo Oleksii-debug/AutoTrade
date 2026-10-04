@@ -467,6 +467,8 @@ class LiquidationHeadroomEvidence:
         expires = _utc(self.expires_at, name="liquidation evidence expires_at")
         if expires <= observed:
             raise ValueError("liquidation evidence expires_at must follow observed_at")
+        if type(self.artifact_id) is not str:
+            raise ValueError("liquidation evidence artifact_id must be a UUID")
         try:
             artifact_id = str(UUID(self.artifact_id))
         except (ValueError, TypeError, AttributeError) as error:

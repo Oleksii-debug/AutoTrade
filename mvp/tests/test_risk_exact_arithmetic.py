@@ -397,6 +397,35 @@ class RiskExactArithmeticTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_liquidation_evidence_rejects_artifact_id_subclass_before_uuid_dispatch(self):
+        touched = []
+
+        class HostileText(str):
+            def replace(self, *args, **kwargs):
+                touched.append("replace")
+                raise AssertionError("hostile artifact UUID normalization")
+
+        hostile = HostileText("00000000-0000-0000-0000-000000000001")
+        with self.assertRaisesRegex(
+            ValueError,
+            "liquidation evidence artifact_id must be a UUID",
+        ):
+            LiquidationHeadroomEvidence(
+                headroom=Decimal("1"),
+                state_version=7,
+                provider_id="BYBIT",
+                account_id="acct",
+                environment="PAPER",
+                margin_mode="CROSS",
+                risk_tier_version="v1",
+                observed_at=datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 10, 3, 20, 1, tzinfo=timezone.utc),
+                artifact_id=hostile,
+                sha256="sha256:" + "0" * 64,
+            )
+
+        self.assertEqual(touched, [])
+
     def test_builtin_fixed_offset_timezone_remains_supported(self):
         point = datetime(
             2026,

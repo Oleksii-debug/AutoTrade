@@ -97,6 +97,9 @@ class RecoveryIssuedDispatcher:
         "__store",
         "__store_snapshot",
         "__sender_check",
+        "__sender_check_code",
+        "__journal_snapshot_reader",
+        "__journal_snapshot_reader_code",
         "__owner",
         "__environment",
         "__account_id",
@@ -134,12 +137,15 @@ class RecoveryIssuedDispatcher:
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
+        sender_function = _CANONICAL_VALIDATE_SENDER
+        snapshot_reader = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
         self.__recovery = recovery
         self.__store = store
-        self.__store_snapshot = _trusted_journal_authority_snapshot(store)
-        self.__sender_check = _CANONICAL_VALIDATE_SENDER.__get__(
-            recovery, RecoveryController
-        )
+        self.__store_snapshot = snapshot_reader(store)
+        self.__sender_check = sender_function.__get__(recovery, RecoveryController)
+        self.__sender_check_code = _CANONICAL_VALIDATE_SENDER_CODE
+        self.__journal_snapshot_reader = snapshot_reader
+        self.__journal_snapshot_reader_code = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE
         self.__owner = owner
         self.__environment = normalized_environment
         self.__account_id = normalized_account
@@ -188,12 +194,24 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
-        _require_executable_authority()
+
+        # Do not dynamically dispatch through module helper aliases here. This
+        # method is the post-composition issuance boundary, so it validates and
+        # invokes only the exact executable authorities retained by this object.
+        sender_function = self.__sender_check.__func__
         if self.__sender_check.__self__ is not self.__recovery:
             raise PermissionError("bound recovery sender authority changed")
-        if self.__sender_check.__func__ is not _CANONICAL_VALIDATE_SENDER:
-            raise PermissionError("bound recovery sender validator changed")
-        if _trusted_journal_authority_snapshot(self.__store) != self.__store_snapshot:
+        if RecoveryController.validate_sender is not sender_function:
+            raise PermissionError("recovery sender validator authority changed")
+        if sender_function.__code__ is not self.__sender_check_code:
+            raise PermissionError("recovery sender validator code changed")
+
+        snapshot_reader = self.__journal_snapshot_reader
+        if _canonical_journal_authority_snapshot is not snapshot_reader:
+            raise PermissionError("journal snapshot authority changed")
+        if snapshot_reader.__code__ is not self.__journal_snapshot_reader_code:
+            raise PermissionError("journal snapshot authority code changed")
+        if snapshot_reader(self.__store) != self.__store_snapshot:
             raise PermissionError("submission journal generation changed")
         if self.__dispatcher.store is not self.__store:
             raise PermissionError("guarded dispatcher journal authority changed")

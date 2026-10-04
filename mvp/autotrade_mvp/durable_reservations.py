@@ -151,6 +151,42 @@ def reservation_snapshot_digest(snapshot: ReservationSnapshot) -> str:
     return payload_digest(_snapshot_payload(snapshot))
 
 
+def _canonical_sha256(value: object, *, name: str) -> str:
+    digest = _text(value, name=name)
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(ch not in "0123456789abcdef" for ch in digest[7:])
+    ):
+        raise ReservationConflict(f"{name} must be canonical SHA-256")
+    return digest
+
+
+def _filled_resolution_evidence(request: Mapping[str, object]) -> str:
+    """Bind reservation FILLED authority to one exact durable OMS fill cut."""
+
+    event_id = _text(request.get("order_fill_event_id"), name="order_fill_event_id")
+    try:
+        canonical_event_id = str(UUID(event_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ReservationConflict("order_fill_event_id must be a canonical UUID") from error
+    if canonical_event_id != event_id:
+        raise ReservationConflict("order_fill_event_id must be a canonical UUID")
+    snapshot_digest = _canonical_sha256(
+        request.get("order_fill_snapshot_digest"),
+        name="order_fill_snapshot_digest",
+    )
+    mutation_hash = _canonical_sha256(
+        request.get("order_fill_mutation_hash"),
+        name="order_fill_mutation_hash",
+    )
+    return (
+        f"journal:order-fill:{canonical_event_id}"
+        f"@snapshot:{snapshot_digest}"
+        f"@mutation:{mutation_hash}"
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -601,6 +637,12 @@ class DurableReservationBook:
                 request["reservation_id"],
                 request["usage"],
             )
+        if operation == "CONSUME_AND_MARK_FILLED":
+            return book.consume_and_mark_filled(
+                request["reservation_id"],
+                request["usage"],
+                resolution_evidence=_filled_resolution_evidence(request),
+            )
         if operation == "RESTORE_CONSUMPTION":
             return book.restore_consumption(
                 request["reservation_id"],
@@ -798,6 +840,144 @@ class DurableReservationBook:
                 self.environment,
                 self.account_id,
                 "financial-fill-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def prepare_consume_and_mark_filled_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        usage: Mapping[str, object],
+        order_fill_event_id: str,
+        order_fill_snapshot_digest: str,
+        order_fill_mutation_hash: str,
+        committed_at: str,
+        expected_snapshot_digest: str | None = None,
+    ) -> PreparedReservationMutation:
+        """Prepare one journal-native consume + FILLED transition.
+
+        FILLED authority is derived from the exact prepared durable OMS
+        RECORD_FILL event, its post-fill snapshot digest and mutation hash.  A
+        historical command that already committed only CONSUME is replayed as
+        that historical cut; this method never rewrites legacy reservation
+        history merely because the current OMS projection is terminal.
+        """
+
+        key = _text(idempotency_key, name="idempotency_key")
+        legacy_request = {
+            "reservation_id": _text(reservation_id, name="reservation_id"),
+            "usage": _amount_map(usage, allow_zero=False),
+        }
+        request = {
+            **legacy_request,
+            "order_fill_event_id": _text(
+                order_fill_event_id,
+                name="order_fill_event_id",
+            ),
+            "order_fill_snapshot_digest": _canonical_sha256(
+                order_fill_snapshot_digest,
+                name="order_fill_snapshot_digest",
+            ),
+            "order_fill_mutation_hash": _canonical_sha256(
+                order_fill_mutation_hash,
+                name="order_fill_mutation_hash",
+            ),
+        }
+        # Validate the composed evidence string before any candidate mutation.
+        _filled_resolution_evidence(request)
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        existing = idempotency.get(key)
+        if existing is not None:
+            matching = [
+                event
+                for event in events
+                if isinstance(event.get("payload"), dict)
+                and event["payload"].get("idempotency_key") == key
+            ]
+            if len(matching) != 1:
+                raise ReservationConflict(
+                    "committed reservation fill mutation identity is ambiguous"
+                )
+            stored_payload = matching[0]["payload"]
+            stored_operation = stored_payload.get("operation")
+            if (
+                stored_operation == "CONSUME"
+                and existing[0] == payload_digest(legacy_request)
+            ):
+                replay_request = legacy_request
+            elif (
+                stored_operation == "CONSUME_AND_MARK_FILLED"
+                and existing[0] == payload_digest(request)
+            ):
+                replay_request = request
+            else:
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            snapshot = candidate.get(legacy_request["reservation_id"])
+            snapshot_value = _snapshot_payload(snapshot)
+            if snapshot_value != existing[1]:
+                raise ReservationConflict(
+                    "committed reservation fill snapshot does not match replayed state"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=replay_request,
+                aggregate_version=int(matching[0]["aggregate_version"]),
+                already_committed=True,
+            )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(legacy_request["reservation_id"])
+            if reservation_snapshot_digest(current_snapshot) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after provider fill plan derivation"
+                )
+
+        snapshot = self._apply(candidate, "CONSUME_AND_MARK_FILLED", request)
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "CONSUME_AND_MARK_FILLED",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "financial-fill-terminal-reservation-event",
                 _text(event_key, name="event_key"),
             ),
             "event_type": _EVENT_TYPE,

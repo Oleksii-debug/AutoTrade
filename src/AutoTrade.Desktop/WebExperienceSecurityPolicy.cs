@@ -52,6 +52,7 @@ public sealed class WebExperienceSecurityPolicy
     /// origins must remain credential-free.
     /// </summary>
     public bool AllowsSessionHeaderForwarding(
+        string method,
         Uri target,
         Uri topLevelDocument)
     {
@@ -63,18 +64,26 @@ public sealed class WebExperienceSecurityPolicy
         }
 
         string path = target.AbsolutePath;
-        if (string.Equals(path, StatePath, StringComparison.Ordinal)
-            || string.Equals(path, CommandPath, StringComparison.Ordinal))
+        if (string.Equals(path, StatePath, StringComparison.Ordinal))
         {
-            return string.IsNullOrEmpty(target.Query);
+            return string.Equals(method, "GET", StringComparison.Ordinal)
+                && string.IsNullOrEmpty(target.Query);
+        }
+
+        if (string.Equals(path, CommandPath, StringComparison.Ordinal))
+        {
+            return string.Equals(method, "POST", StringComparison.Ordinal)
+                && string.IsNullOrEmpty(target.Query);
         }
 
         if (string.Equals(path, EventPath, StringComparison.Ordinal))
         {
-            return HasCanonicalEventQuery(target.Query);
+            return string.Equals(method, "GET", StringComparison.Ordinal)
+                && HasCanonicalEventQuery(target.Query);
         }
 
-        if (!string.IsNullOrEmpty(target.Query)
+        if (!string.Equals(method, "GET", StringComparison.Ordinal)
+            || !string.IsNullOrEmpty(target.Query)
             || !path.StartsWith(CanonicalOperationPrefix, StringComparison.Ordinal))
         {
             return false;
@@ -150,6 +159,13 @@ public sealed class WebExperienceSecurityPolicy
     /// Release-mode embedded content must not expose browser developer tools.
     /// </summary>
     public bool AllowsDeveloperTools => false;
+
+    /// <summary>
+    /// Service workers are forbidden in the trusted financial web surface.
+    /// A background same-origin worker must not gain interception authority over
+    /// authenticated Host API traffic or outlive the visible trusted document.
+    /// </summary>
+    public bool AllowsServiceWorkers => false;
 
     /// <summary>
     /// Downloads are not an authority-bearing path for the embedded product UI.

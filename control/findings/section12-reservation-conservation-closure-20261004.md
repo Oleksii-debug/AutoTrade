@@ -2,6 +2,7 @@
 
 Date: 2026-10-04
 Current-main source base: `cc0b7fa5cee4597dc8039f0b0a5fd622e8b12a29`
+Implementation readback before this finding update: `1301ca962b4d8165bd2bdcdd988710fb0ef42002`
 
 Current main already contains the canonical reservation authority, exact restart binding and atomic provider-free fill/financial consumption. This candidate carries the current-main reservation-bust lineage into the Section 12 closure lane without claiming provider/PAPER/LIVE qualification.
 
@@ -29,19 +30,23 @@ For a partial fill, the durable reservation event remains `CONSUME`: exact evide
 For an OMS post-fill snapshot whose state is `FILLED`, the same atomic provider-fill command uses journal-native `CONSUME_AND_MARK_FILLED`. That transition:
 - consumes the exact fill usage;
 - zeros every remaining reservation resource only because the exact OMS cut is terminal `FILLED`;
-- derives reservation terminal evidence from the OMS fill event id, OMS post-snapshot digest and OMS mutation hash;
+- derives reservation terminal evidence from the OMS fill event id, OMS payload hash, OMS post-snapshot digest and OMS mutation hash;
+- binds the exact fill identity (provider, client order id, fill id and provider execution id) into the durable reservation request;
 - commits the OMS event, reservation event, economics, optional settlement and provider-fill binding in the same JournalStore command/event batch;
-- preserves historical exact retry for older commands that durably recorded only reservation `CONSUME` rather than rewriting legacy journal history.
+- preserves historical exact retry for older commands that durably recorded only reservation `CONSUME` rather than rewriting legacy journal history; the fallback is accepted only through the canonical legacy `prepare_consume_mutation()` path resolving `already_committed=True` with its exact historical request/snapshot authority.
 
 Durable reservation replay does not trust the stored terminal evidence string alone. For `CONSUME_AND_MARK_FILLED`, replay resolves the referenced immutable OMS event from JournalStore and verifies:
 - exact event id/type/aggregate type;
-- stored OMS payload hash;
-- account/environment scope;
+- stored OMS payload hash against both the event and reservation binding;
+- provider/account/environment scope;
 - `RECORD_FILL` operation;
-- terminal OMS snapshot state `FILLED`;
+- exact client order, fill and provider-execution identity;
+- terminal OMS snapshot state `FILLED` with exact zero `open_quantity`;
 - OMS request hash;
 - the exact OMS post-snapshot digest named by the reservation event; and
 - the exact OMS mutation hash named by the reservation event.
+
+A negative durable-boundary falsifier also proves that a terminal reservation envelope with only fabricated OMS identifiers/hashes cannot survive reservation replay when the referenced OMS event is absent. A separate compatibility falsifier proves a historical `CONSUME` component remains historical `CONSUME` under the new terminal prepare path.
 
 The end-to-end falsifiers cover both a one-fill terminal order and a two-fill order. The first partial fill must keep the reservation `WORKING` and admission-visible; only the second fill that makes the OMS terminal may atomically mark the reservation `FILLED`. Restart and exact retry preserve the same terminal reservation cut without duplicate economic or reservation mutation.
 

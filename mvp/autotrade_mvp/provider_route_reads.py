@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 import re
 from types import MappingProxyType
+import weakref
 from typing import Mapping
 
 from .capabilities import CapabilityError
@@ -27,6 +28,8 @@ from .provider_core import (
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
+    _require_authenticated_read_query_binding_authority,
+    _require_provider_response_observation_authority,
 )
 from .provider_qualification_authority import ProviderQualificationError
 from .provider_qualification_current_scope import ProviderQualificationCurrentScope
@@ -243,7 +246,7 @@ def _qualified_read_rule(
     )
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class QualifiedProviderReadQueryBinding:
     query_binding: AuthenticatedReadQueryBinding
     qualification_id: str
@@ -337,9 +340,11 @@ class QualifiedProviderReadQueryBinding:
         object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(self, "adapter_code_sha", adapter_code_sha)
         object.__setattr__(self, "packaged_artifact_digest", packaged_artifact_digest)
+        _register_qualified_provider_read_binding_authority(self)
 
     @property
     def query_digest(self) -> str:
+        _require_qualified_provider_read_binding_authority(self)
         material = {
             "base_query_digest": self.query_binding.query_digest,
             "qualification_id": self.qualification_id,
@@ -357,7 +362,7 @@ class QualifiedProviderReadQueryBinding:
         return "sha256:" + sha256(canonical_json(material).encode("utf-8")).hexdigest()
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class QualifiedProviderResponseObservation:
     observation: ProviderResponseObservation
     query_binding: QualifiedProviderReadQueryBinding
@@ -382,9 +387,11 @@ class QualifiedProviderResponseObservation:
             raise ProviderRouteReadError("response does not belong to qualified read query")
         object.__setattr__(self, "observation", observation)
         object.__setattr__(self, "query_binding", query_binding)
+        _register_qualified_provider_response_authority(self)
 
     @property
     def evidence_ref(self) -> str:
+        _require_qualified_provider_response_authority(self)
         material = {
             "neutral_evidence_ref": self.observation.evidence_ref,
             "qualified_query_digest": self.query_binding.query_digest,
@@ -401,39 +408,183 @@ class QualifiedProviderResponseObservation:
 
     @property
     def qualification_id(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.qualification_id
 
     @property
     def route_semantics_digest(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.route_semantics_digest
 
     @property
     def endpoint_rule_digest(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.endpoint_rule_digest
 
     @property
     def qualified_route_rule_digest(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.qualified_route_rule_digest
 
     @property
     def data_entitlement(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.data_entitlement
 
     @property
     def parser_identity(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.query_binding.parser_identity
 
     @property
     def provider_id(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.observation.provider_id
 
     @property
     def account_id(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.observation.account_id
 
     @property
     def environment(self) -> str:
+        _require_qualified_provider_response_authority(self)
         return self.observation.environment
+
+
+def _install_qualified_provider_read_authority():
+    """Keep Q/rule provenance outside caller-writable frozen dataclass state."""
+
+    query_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    response_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+
+    def prune(states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]]) -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register_query(value: object) -> None:
+        if type(value) is not QualifiedProviderReadQueryBinding:
+            raise ProviderRouteReadError(
+                "qualified read construction authority requires exact binding"
+            )
+        _require_authenticated_read_query_binding_authority(value.query_binding)
+        prune(query_states)
+        object_id = id(value)
+        current = query_states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderRouteReadError(
+                "qualified read construction authority identity collision"
+            )
+        query_states[object_id] = (
+            weakref.ref(value),
+            (
+                value.query_binding, value.qualification_id, value.route_semantics_digest,
+                value.endpoint_rule_digest, value.qualified_route_rule_digest,
+                value.data_entitlement, value.accepted_success_statuses,
+                value.parser_identity, value.authority_journal_sequence_cut,
+                value.provider_environment, value.adapter_code_sha,
+                value.packaged_artifact_digest,
+            ),
+        )
+
+    def require_query(value: object) -> None:
+        if type(value) is not QualifiedProviderReadQueryBinding:
+            raise ProviderRouteReadError(
+                "qualified read construction authority requires exact binding"
+            )
+        prune(query_states)
+        state = query_states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderRouteReadError(
+                "qualified read construction authority is unavailable"
+            )
+        (
+            query_binding, qualification_id, route_semantics_digest,
+            endpoint_rule_digest, qualified_route_rule_digest, data_entitlement,
+            accepted_success_statuses, parser_identity, authority_journal_sequence_cut,
+            provider_environment, adapter_code_sha, packaged_artifact_digest,
+        ) = state[1]
+        if value.query_binding is not query_binding:
+            raise ProviderRouteReadError(
+                "qualified read binding changed after route authority preparation"
+            )
+        _require_authenticated_read_query_binding_authority(value.query_binding)
+        string_pairs = (
+            (value.qualification_id, qualification_id),
+            (value.route_semantics_digest, route_semantics_digest),
+            (value.endpoint_rule_digest, endpoint_rule_digest),
+            (value.qualified_route_rule_digest, qualified_route_rule_digest),
+            (value.data_entitlement, data_entitlement),
+            (value.parser_identity, parser_identity),
+            (value.provider_environment, provider_environment),
+            (value.adapter_code_sha, adapter_code_sha),
+            (value.packaged_artifact_digest, packaged_artifact_digest),
+        )
+        if any(type(current) is not str or current != expected for current, expected in string_pairs):
+            raise ProviderRouteReadError(
+                "qualified read binding changed after route authority preparation"
+            )
+        if value.accepted_success_statuses is not accepted_success_statuses:
+            raise ProviderRouteReadError(
+                "qualified read binding changed after route authority preparation"
+            )
+        if (
+            type(value.authority_journal_sequence_cut) is not int
+            or value.authority_journal_sequence_cut != authority_journal_sequence_cut
+        ):
+            raise ProviderRouteReadError(
+                "qualified read binding changed after route authority preparation"
+            )
+
+    def register_response(value: object) -> None:
+        if type(value) is not QualifiedProviderResponseObservation:
+            raise ProviderRouteReadError(
+                "qualified response construction authority requires exact observation"
+            )
+        require_query(value.query_binding)
+        _require_provider_response_observation_authority(value.observation)
+        prune(response_states)
+        object_id = id(value)
+        current = response_states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderRouteReadError(
+                "qualified response construction authority identity collision"
+            )
+        response_states[object_id] = (
+            weakref.ref(value),
+            (value.observation, value.query_binding),
+        )
+
+    def require_response(value: object) -> None:
+        if type(value) is not QualifiedProviderResponseObservation:
+            raise ProviderRouteReadError(
+                "qualified response construction authority requires exact observation"
+            )
+        prune(response_states)
+        state = response_states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderRouteReadError(
+                "qualified response construction authority is unavailable"
+            )
+        observation, query_binding = state[1]
+        if value.observation is not observation or value.query_binding is not query_binding:
+            raise ProviderRouteReadError(
+                "qualified response changed after exact-byte observation"
+            )
+        require_query(value.query_binding)
+        _require_provider_response_observation_authority(value.observation)
+
+    return register_query, require_query, register_response, require_response
+
+
+(
+    _register_qualified_provider_read_binding_authority,
+    _require_qualified_provider_read_binding_authority,
+    _register_qualified_provider_response_authority,
+    _require_qualified_provider_response_authority,
+) = _install_qualified_provider_read_authority()
+del _install_qualified_provider_read_authority
 
 
 def prepare_qualified_provider_read(
@@ -547,6 +698,7 @@ def observe_qualified_provider_json_response(
 ) -> QualifiedProviderResponseObservation:
     if type(query_binding) is not QualifiedProviderReadQueryBinding:
         raise TypeError("query_binding must be exact QualifiedProviderReadQueryBinding")
+    _require_qualified_provider_read_binding_authority(query_binding)
     if type(http_status) is not int or http_status not in query_binding.accepted_success_statuses:
         raise ProviderRouteReadError(
             "provider response status is outside qualified endpoint contract"

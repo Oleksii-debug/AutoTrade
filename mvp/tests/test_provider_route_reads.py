@@ -7,7 +7,11 @@ from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_core import Surface
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    Surface,
+    observe_authenticated_json_response,
+)
 from mvp.autotrade_mvp.provider_route_reads import (
     ProviderRouteReadError,
     QualifiedProviderReadQueryBinding,
@@ -350,6 +354,64 @@ class ProviderRouteReadTests(unittest.TestCase):
                     response_bytes=b'{"retCode":0}',
                     observed_at=NOW + timedelta(seconds=1),
                 )
+
+    def test_neutral_read_binding_mutation_cannot_relabel_exact_response(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            qualified = self.prepare(route, capabilities, qualifications)
+            neutral = qualified.query_binding
+            object.__setattr__(neutral, "endpoint", "/v5/order/realtime")
+            object.__setattr__(neutral, "permission_scope", "ORDER.READ")
+            object.__setattr__(neutral, "query_digest", "sha256:" + "0" * 64)
+            with self.assertRaisesRegex(ProviderCoreError, "binding changed after preparation"):
+                observe_authenticated_json_response(
+                    query_binding=neutral,
+                    http_status=200,
+                    response_bytes=b'{"retCode":0}',
+                    observed_at=NOW + timedelta(seconds=1),
+                )
+
+    def test_qualified_read_mutation_cannot_relabel_q_or_widen_success_status(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            object.__setattr__(
+                binding,
+                "qualification_id",
+                "provider-qualification:sha256:" + "0" * 64,
+            )
+            object.__setattr__(binding, "accepted_success_statuses", (201,))
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "binding changed after route authority preparation",
+            ):
+                observe_qualified_provider_json_response(
+                    query_binding=binding,
+                    http_status=201,
+                    response_bytes=b'{"retCode":0}',
+                    observed_at=NOW + timedelta(seconds=1),
+                )
+
+    def test_qualified_response_mutation_cannot_relabel_exact_observation(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            response = observe_qualified_provider_json_response(
+                query_binding=binding,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"equity":"10.25"}}',
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            object.__setattr__(
+                response.observation,
+                "evidence_ref",
+                "provider-read:sha256:" + "0" * 64,
+            )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider response changed after exact-byte observation",
+            ):
+                _ = response.evidence_ref
 
     def test_q_registry_and_capability_registry_must_share_exact_store_instance(self):
         with TemporaryDirectory() as directory:

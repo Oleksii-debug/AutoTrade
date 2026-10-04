@@ -136,13 +136,83 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         result = assess_reconvergence(
             base_paths=["old.py", "other.py"],
             changes=changes,
-            max_deletions=1,
-            max_deleted_fraction=0.1,
+            max_deletions=2,
+            max_deleted_fraction=0.6,
             protected_sentinels=frozenset(),
         )
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 1)
+        self.assertEqual(result.destructive_change_fraction, 0.5)
+
+    def test_mass_rename_away_is_counted_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(
+                status="R100",
+                previous_path=path,
+                path=f"moved/{path}",
+            )
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 60)
+        self.assertEqual(result.destructive_change_fraction, 0.6)
+        self.assertIn("mass destructive base-tree change", result.reasons[0])
+
+    def test_mass_type_change_is_counted_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(status="T", path=path)
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 60)
+        self.assertIn("mass destructive base-tree change", result.reasons[0])
+
+    def test_mass_copy_is_not_misclassified_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(
+                status="C100",
+                previous_path=path,
+                path=f"copies/{path}",
+            )
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 0)
 
     def test_parser_rejects_malformed_records(self):
         with self.assertRaises(ValueError):
@@ -558,6 +628,66 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 2)
         self.assertIn("head is not descended from exact base revision", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_mass_rename_away(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-rename@example.invalid")
+            git("config", "user.name", "Guard Rename")
+            for index in range(100):
+                (root / f"path-{index}.txt").write_text(
+                    f"{index}\n",
+                    encoding="utf-8",
+                )
+            git("add", ".")
+            git("commit", "-m", "full base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / "moved").mkdir()
+            for index in range(60):
+                git(
+                    "mv",
+                    f"path-{index}.txt",
+                    f"moved/path-{index}.txt",
+                )
+            git("commit", "-m", "mass rename candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("mass destructive base-tree change", completed.stdout)
+        self.assertIn("deletions=0", completed.stdout)
+        self.assertIn("destructive_changes=60", completed.stdout)
 
     def test_public_module_entrypoint_blocks_sparse_mass_deletion(self):
         repository_root = Path(__file__).resolve().parents[2]

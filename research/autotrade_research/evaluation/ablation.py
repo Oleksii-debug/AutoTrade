@@ -2342,7 +2342,10 @@ def evaluate_qualified_incremental_value(
         # ExperienceMemory population and registered scientific protocol; it does
         # not load candidate-authored outcome utility/cost artifacts.
         try:
-            trusted_population = authority.resolve_population(selected_input)
+            trusted_population = AblationQualificationAuthority.resolve_population(
+                authority,
+                selected_input,
+            )
         except (ProtocolViolation, KeyError, TypeError, ValueError):
             return _qualified_inconclusive(
                 target_component=target,

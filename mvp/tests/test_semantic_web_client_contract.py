@@ -1035,5 +1035,22 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
 
 
+    def test_selection_restore_reveals_the_bookmarked_page_before_retargeting(self):
+        js = APP.read_text(encoding="utf-8")
+        reveal = js[js.index("function revealBookmarkedTablePage"):js.index("function restoreTableSelection")]
+        self.assertIn("const anchorIndex = matching.indexOf(anchorRow);", reveal)
+        self.assertIn("const focusIndex = matching.indexOf(focusRow);", reveal)
+        self.assertIn("const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("if (anchorPage !== focusPage) return;", reveal)
+        self.assertIn("view.page = anchorPage;", reveal)
+        self.assertIn("applyTableFilter(tool, {announce: false});", reveal)
+        preserve = js[js.index("function preserveTableSelection"):js.index("function appendProjectionRow")]
+        self.assertLess(
+            preserve.index("revealBookmarkedTablePage(body, bookmark);"),
+            preserve.index("restoreTableSelection(body, bookmark);"),
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

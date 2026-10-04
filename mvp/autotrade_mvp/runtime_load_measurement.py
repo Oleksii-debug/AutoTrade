@@ -254,8 +254,9 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
 
     def is_first_party(function: FunctionType) -> bool:
         module = function.__module__
-        return module == "mvp.autotrade_mvp" or module.startswith(
-            "mvp.autotrade_mvp."
+        return type(module) is str and (
+            module == "mvp.autotrade_mvp"
+            or module.startswith("mvp.autotrade_mvp.")
         )
 
     def snapshot_function(value: object) -> FunctionType | None:
@@ -276,7 +277,7 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
             )
         return target
 
-    def capture(value: object) -> None:
+    def capture(value: object, *, external_depth: int) -> None:
         target = snapshot_function(value)
         if target is None or id(target) in expanded_functions:
             return
@@ -305,10 +306,24 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                         seen_members.add(member_key)
                         member = getattr(dependency, member_name)
                         module_members.append((dependency, member_name, member))
-                        snapshot_function(member)
+                        member_target = snapshot_function(member)
+                        if member_target is not None:
+                            if is_first_party(member_target):
+                                capture(member_target, external_depth=external_depth)
+                            elif external_depth > 0:
+                                capture(
+                                    member_target,
+                                    external_depth=external_depth - 1,
+                                )
                 dependency_target = snapshot_function(dependency)
-                if dependency_target is not None and is_first_party(dependency_target):
-                    capture(dependency_target)
+                if dependency_target is not None:
+                    if is_first_party(dependency_target):
+                        capture(dependency_target, external_depth=external_depth)
+                    elif external_depth > 0:
+                        capture(
+                            dependency_target,
+                            external_depth=external_depth - 1,
+                        )
                 continue
             if dependency_name in builtins_namespace:
                 binding_key = (id(builtins_namespace), dependency_name)
@@ -322,7 +337,15 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                             dependency,
                         )
                     )
-                    snapshot_function(dependency)
+                    dependency_target = snapshot_function(dependency)
+                    if dependency_target is not None:
+                        if is_first_party(dependency_target):
+                            capture(dependency_target, external_depth=external_depth)
+                        elif external_depth > 0:
+                            capture(
+                                dependency_target,
+                                external_depth=external_depth - 1,
+                            )
         for cell in target.__closure__ or ():
             try:
                 expected_value = cell.cell_contents
@@ -331,11 +354,17 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                 continue
             closure_bindings.append((cell, True, expected_value))
             dependency_target = snapshot_function(expected_value)
-            if dependency_target is not None and is_first_party(dependency_target):
-                capture(dependency_target)
+            if dependency_target is not None:
+                if is_first_party(dependency_target):
+                    capture(dependency_target, external_depth=external_depth)
+                elif external_depth > 0:
+                    capture(
+                        dependency_target,
+                        external_depth=external_depth - 1,
+                    )
 
     for value in values:
-        capture(value)
+        capture(value, external_depth=1)
     return (
         tuple(function_states),
         tuple(global_bindings),

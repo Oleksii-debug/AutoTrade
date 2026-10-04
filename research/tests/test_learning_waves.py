@@ -78,6 +78,8 @@ def population(
     causal_cut: str,
     available_at: datetime,
     observations: tuple[str, ...],
+    candidate_hash: str | None = None,
+    protocol_hash: str | None = None,
 ) -> PopulationCoverageManifest:
     ids = tuple(sorted(observations))
     episode_digests = tuple(
@@ -93,8 +95,8 @@ def population(
     )
     cutoff = available_at.astimezone(timezone.utc).isoformat()
     body = {
-        "candidate_hash": digest("candidate"),
-        "frozen_protocol_hash": digest("protocol"),
+        "candidate_hash": candidate_hash or digest("candidate"),
+        "frozen_protocol_hash": protocol_hash or digest("protocol"),
         "input_snapshot_hash": causal_cut,
         "causal_cutoff": cutoff,
         "permission_classes": ("research",),
@@ -162,6 +164,7 @@ def approval(
     candidate_id="candidate-0001",
     artifact_hash=None,
     valid_until=None,
+    protocol_hash=None,
 ) -> CandidateApproval:
     return CandidateApproval.create(
         candidate_id=candidate_id,
@@ -173,7 +176,7 @@ def approval(
         risk_passed=risk,
         authority_scope_id="paper-scope",
         protocol_id="protocol-v1",
-        protocol_hash=digest("protocol"),
+        protocol_hash=protocol_hash or digest("protocol"),
         evaluation_id="evaluation-v1",
         evaluation_result_hash=digest(
             f"evaluation:{status}:{retention}:{risk}:{candidate_id}"
@@ -464,6 +467,68 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 validation_opened_at=BASE + timedelta(minutes=17),
             )
 
+    def test_training_population_must_bind_exact_candidate_artifact(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+            candidate_hash=digest("other-candidate"),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+        )
+        with self.assertRaisesRegex(ValueError, "exact candidate artifact"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
+                change_summary="Correct observed errors without changing hard risk",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
+    def test_training_and_validation_must_bind_one_frozen_protocol(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+            protocol_hash=digest("different-protocol"),
+        )
+        with self.assertRaisesRegex(ValueError, "one frozen protocol"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
+                change_summary="Correct observed errors without changing hard risk",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
     def test_training_population_must_bind_paused_causal_cut(self):
         p, snap, decision = paused_decision()
         training = population(
@@ -740,6 +805,13 @@ class CandidateResolutionTests(unittest.TestCase):
         self.assertEqual(result.action, "REJECTED")
         self.assertIn("LEARNING_WAVE.RISK_GATE_FAILED", result.reasons)
         self.assertNotIn("LEARNING_WAVE.EVALUATION_INCONCLUSIVE", result.reasons)
+
+    def test_approval_must_bind_learning_wave_frozen_protocol(self):
+        with self.assertRaisesRegex(ValueError, "frozen protocol"):
+            resolve(
+                candidate_wave(),
+                approval(protocol_hash=digest("different-protocol")),
+            )
 
     def test_approval_must_bind_exact_candidate_identity(self):
         with self.assertRaisesRegex(ValueError, "candidate identity"):

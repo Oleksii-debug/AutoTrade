@@ -62,20 +62,24 @@ def _trusted_journal_authority_snapshot(store: JournalStore):
 
 
 def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
+    # Reject executable subclasses before invoking string normalization, but
+    # preserve the existing built-in string normalization contract.
     if type(environment) is not str:
         raise TypeError("environment must be exact text")
-    if environment not in _CANONICAL_ENVIRONMENTS:
+    normalized_environment = environment.strip().upper()
+    if normalized_environment not in _CANONICAL_ENVIRONMENTS:
         raise ValueError(
-            "environment must be canonical REPLAY, SIMULATION, PAPER, or LIVE"
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
     if type(account_id) is not str:
         raise TypeError("account_id must be exact text")
-    if not account_id or account_id != account_id.strip():
-        raise ValueError("account_id must be canonical non-empty text")
+    normalized_account = account_id.strip()
+    if not normalized_account:
+        raise ValueError("account_id is required")
     return (
-        environment,
-        account_id,
-        f"{environment}:{account_id}",
+        normalized_environment,
+        normalized_account,
+        f"{normalized_environment}:{normalized_account}",
     )
 
 

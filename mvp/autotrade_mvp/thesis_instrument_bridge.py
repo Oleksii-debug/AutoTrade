@@ -21,8 +21,10 @@ from .thesis_implementation import (
 def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"instrument {name} must be exact text")
-    if not value:
-        raise ThesisImplementationError(f"instrument {name} is required")
+    if not value or value != value.strip():
+        raise ThesisImplementationError(
+            f"instrument {name} must be canonical non-empty text"
+        )
     return value
 
 

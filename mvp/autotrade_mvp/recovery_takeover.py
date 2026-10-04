@@ -1014,10 +1014,14 @@ def execute_durable_takeover(
             )
 
     # Phase 3: old credential is durably inactive; now reacquire the same sender
-    # gate, rescan ambiguity, and atomically advance durable sender authority.
+    # gate, rescan ambiguity, and advance durable sender authority only if the
+    # complete validation interval still ends on the exact JournalStore cut.
     with takeover_authority_window(
         store, owner_scope=owner_scope
     ) as lease:
+        owner_validation_journal_sequence = JournalStore.current_journal_sequence(
+            store
+        )
         pending = _pending_for_scope(
             store, owner_scope=owner_scope
         )
@@ -1090,7 +1094,17 @@ def execute_durable_takeover(
 
         durable_owner = controller._latest_durable_owner()
         if durable_owner == source:
-            controller._append_durable_owner(target)
+            try:
+                controller._append_durable_owner(
+                    target,
+                    expected_journal_sequence=(
+                        owner_validation_journal_sequence
+                    ),
+                )
+            except ValueError as error:
+                raise DurableTakeoverError(
+                    "journal changed during takeover owner validation"
+                ) from error
             durable_owner = controller._latest_durable_owner()
         if durable_owner != target:
             raise DurableTakeoverError(

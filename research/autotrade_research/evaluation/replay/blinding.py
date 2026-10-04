@@ -191,8 +191,9 @@ def _label_prefix(namespace: str) -> str:
 
 
 def _sort_key(*, shuffle_key: str, experiment_id: str, namespace: str, raw: str) -> bytes:
-    material = "\x1f".join((shuffle_key, experiment_id, namespace, raw)).encode("utf-8")
-    return sha256(material).digest()
+    key = bytes.fromhex(shuffle_key.removeprefix("sha256:"))
+    message = "\x1f".join((experiment_id, namespace, raw)).encode("utf-8")
+    return hmac.new(key, message, sha256).digest()
 
 
 def _contains_identity(text: str, raw: str) -> bool:

@@ -500,9 +500,12 @@ class ScientificRegistry:
                 )
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
-        if not isinstance(payload, dict):
-            raise TypeError("protocol payload must be an object")
-        missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload))
+        if type(payload) is not dict:
+            raise TypeError("protocol payload must be an exact object")
+        payload_keys = tuple(payload.keys())
+        if any(type(key) is not str for key in payload_keys):
+            raise ProtocolViolation("protocol payload keys must be exact text")
+        missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload_keys))
         if missing:
             raise ProtocolViolation("missing required protocol fields: " + ", ".join(missing))
         empty = sorted(

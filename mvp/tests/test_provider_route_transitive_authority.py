@@ -43,6 +43,25 @@ class ProviderRouteTransitiveAuthorityTests(unittest.TestCase):
         if calls:
             raise AssertionError(f"retargeted executable was invoked: {calls!r}")
 
+    def test_composed_c_q_barrier_cannot_retarget_time_parser_after_composition(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            combined = self._compose(journal, capabilities, qualifications, route)
+            original = provider_route_dispatch._point
+            calls = []
+
+            def forged(_value):
+                calls.append("forged")
+                raise AssertionError("forged barrier time parser executed")
+
+            provider_route_dispatch._point = forged
+            try:
+                self._assert_retarget_rejected_without_call(combined, calls)
+            finally:
+                provider_route_dispatch._point = original
+
     def test_composed_c_q_barrier_cannot_retarget_journal_cut_helper_after_composition(self):
         """Pin transitive barrier executables, not only the outer composer."""
 

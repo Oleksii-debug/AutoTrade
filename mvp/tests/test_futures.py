@@ -726,6 +726,40 @@ class FuturesLifecycleTests(unittest.TestCase):
                 physical_delivery_authorized=True,
             )
 
+    def test_lifecycle_gate_rejects_contract_subclasses_before_field_access(self):
+        class HostileContract(FuturesContract):
+            def __getattribute__(self, name):
+                raise AssertionError("hostile contract attribute access executed")
+
+        hostile = object.__new__(HostileContract)
+        with self.assertRaisesRegex(FuturesError, "exact FuturesContract"):
+            lifecycle_gate(hostile, utc(29, 12))
+
+    def test_post_construction_contract_mutation_cannot_reopen_physical_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        object.__setattr__(contract, "settlement_method", "CASH")
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            lifecycle_gate(contract, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            require_open_for_new_exposure(contract, utc(29, 12))
+
+    def test_post_construction_instrument_mutation_cannot_reopen_physical_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        self.assertIsNotNone(contract.canonical_instrument)
+        object.__setattr__(
+            contract.canonical_instrument,
+            "settlement_method",
+            "CASH",
+        )
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches canonical InstrumentVersion"
+        ):
+            lifecycle_gate(contract, utc(29, 12))
+
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(
             FuturesError, "delivery_cutoff cannot be after last_trade_at"

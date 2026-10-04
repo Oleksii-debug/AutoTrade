@@ -384,6 +384,7 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
             reconstitution_required is not False
             or runtime_evidence_sha256 is not None
             or evidence_path.exists()
+            or evidence_path.is_symlink()
         ):
             raise BackupIntegrityError(
                 "Restore runtime checkpoint absence claim is inconsistent"
@@ -1137,7 +1138,10 @@ def create_backup(
         # existing reconciliation/fencing gate is completed.
         runtime_checkpoint_evidence = "ABSENT"
         runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state.parent)
-        if runtime_checkpoint_source.exists():
+        if (
+            runtime_checkpoint_source.exists()
+            or runtime_checkpoint_source.is_symlink()
+        ):
             evidence_relative = Path(*PurePosixPath(
                 _RUNTIME_CHECKPOINT_EVIDENCE_PATH
             ).parts)

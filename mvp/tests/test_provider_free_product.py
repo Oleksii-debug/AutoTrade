@@ -469,6 +469,16 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
         self.assertIn('one-time local secret', message)
         self.assertIn(launch_url, message)
 
+    def test_browser_open_failure_has_explicit_manual_pairing_fallback(self):
+        runtime_source = (
+            ROOT / 'mvp' / 'autotrade_mvp' / 'product_runtime.py'
+        ).read_text(encoding='utf-8')
+        self.assertIn('if not webbrowser.open(launch_url):', runtime_source)
+        self.assertIn(
+            'print(_launch_message(launch_url, no_browser=True), flush=True)',
+            runtime_source,
+        )
+
     def test_launcher_message_rejects_missing_pairing_material(self):
         with self.assertRaisesRegex(ValueError, 'pairing material'):
             _launch_message('http://127.0.0.1:8765/', no_browser=False)

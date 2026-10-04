@@ -4953,6 +4953,7 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Binance authenticated-read signer authority changed"
             )
+        require_direct_dependencies()
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (
@@ -5028,6 +5029,7 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Bybit authenticated-read signer authority changed"
             )
+        require_direct_dependencies()
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (
@@ -5107,6 +5109,7 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Kraken authenticated-read signer authority changed"
             )
+        require_direct_dependencies()
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (

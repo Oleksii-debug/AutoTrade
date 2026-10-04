@@ -9,13 +9,19 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp import production_host
+from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.financial_send_authority import (
+    FinanciallyBoundBybitOrderSender,
+    build_financial_send_authority_issuer,
+)
 from mvp.autotrade_mvp.production_bybit import (
     ProductionBybitOrderSender,
+    _build_production_bybit_order_sender,
     build_production_bybit_order_sender,
 )
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
@@ -105,7 +111,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         capability_snapshot_id: str = "capability-1",
         wire_client=None,
     ) -> ProductionBybitOrderSender:
-        return build_production_bybit_order_sender(
+        return _build_production_bybit_order_sender(
             runtime,
             provider_environment=provider_environment,
             capability_snapshot_id=capability_snapshot_id,
@@ -116,6 +122,53 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             clock_utc=lambda: _NOW,
             wire_client=wire_client,
         )
+
+    def test_raw_sender_direct_construction_is_not_a_product_surface(self) -> None:
+        with self.assertRaisesRegex(
+            PermissionError,
+            "requires internal financial composition",
+        ):
+            ProductionBybitOrderSender(runtime=object(), transport=object())
+
+    def test_public_builder_returns_only_financially_bound_sender(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            service = AuthorityService(runtime.journal)
+            issuer = build_financial_send_authority_issuer(service, runtime)
+            sender = build_production_bybit_order_sender(
+                runtime,
+                financial_issuer=issuer,
+                provider_environment="TESTNET",
+                capability_snapshot_id="capability-1",
+                capability_registry=CapabilityRegistry(),
+                credential_handle=self._handle(),
+                session_token="session-1",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: _NOW,
+            )
+
+            self.assertIs(type(sender), FinanciallyBoundBybitOrderSender)
+            lower = sender._FinanciallyBoundBybitOrderSender__sender
+            self.assertIs(type(lower), ProductionBybitOrderSender)
+
+    def test_public_builder_rejects_noncanonical_financial_issuer_before_raw_build(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            with self.assertRaisesRegex(
+                TypeError,
+                "financial_issuer must be exact",
+            ):
+                build_production_bybit_order_sender(
+                    runtime,
+                    financial_issuer=object(),
+                    provider_environment="TESTNET",
+                    capability_snapshot_id="capability-1",
+                    capability_registry=CapabilityRegistry(),
+                    credential_handle=self._handle(),
+                    session_token="session-1",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: _NOW,
+                )
 
     def test_builder_uses_exact_host_security_boundary_and_financial_scope(self) -> None:
         with TemporaryDirectory() as root:

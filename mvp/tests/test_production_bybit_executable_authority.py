@@ -9,7 +9,7 @@ from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
+from mvp.autotrade_mvp.production_bybit import _build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_transport import BybitV5HttpTransport
@@ -116,7 +116,7 @@ class ProductionBybitExecutableAuthorityTests(unittest.TestCase):
         )
 
     def _sender(self, runtime, *, wire=None):
-        return build_production_bybit_order_sender(
+        return _build_production_bybit_order_sender(
             runtime,
             provider_environment="TESTNET",
             capability_snapshot_id="capability-1",

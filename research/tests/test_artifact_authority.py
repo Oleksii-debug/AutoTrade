@@ -5,6 +5,7 @@ import unittest
 from autotrade_research.artifacts import (
     ArtifactStore as PackageArtifactStore,
     CANONICAL_ARTIFACT_STORE_MODULE,
+    trusted_authenticated_reader,
 )
 from autotrade_research.artifacts.store import ArtifactStore as CanonicalArtifactStore
 
@@ -44,8 +45,36 @@ class ArtifactAuthorityTests(unittest.TestCase):
         self.assertIs(PackageArtifactStore, CanonicalArtifactStore)
         self.assertEqual(
             CANONICAL_ARTIFACT_STORE_MODULE,
-            "autotrade_research.artifacts.store",
+            "autotrade_runtime.artifacts.store",
         )
+
+    def test_trusted_root_rejects_text_subclass_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile trusted-root normalization")
+
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("hostile trusted-root path conversion")
+
+        with self.assertRaisesRegex(TypeError, "exact string or Path"):
+            trusted_authenticated_reader(HostileText("/not-authoritative"))
+        self.assertEqual(touched, [])
+
+    def test_trusted_root_rejects_path_subclass_before_fspath_dispatch(self):
+        touched: list[str] = []
+
+        class HostilePath(type(Path())):
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("hostile trusted-root path conversion")
+
+        with self.assertRaisesRegex(TypeError, "exact string or Path"):
+            trusted_authenticated_reader(HostilePath("/not-authoritative"))
+        self.assertEqual(touched, [])
 
     def test_production_code_cannot_reintroduce_legacy_content_store_authority(self):
         offenders = []

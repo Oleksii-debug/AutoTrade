@@ -1187,6 +1187,64 @@ class ProviderOriginJournalTests(unittest.TestCase):
             )
             self.assertEqual(events[-1]["event_type"], "AuthenticatedReadObserved")
 
+    def test_retained_recovery_authenticates_artifact_before_observed_commit(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
+                network_policy_identity="sha256:" + "8" * 64,
+                recorded_at=NOW,
+            )
+            original_append = JournalStore.append_event
+
+            def fail_observed(store, envelope):
+                if envelope.get("event_type") == "AuthenticatedReadObserved":
+                    raise RuntimeError("simulated crash before Observed commit")
+                return original_append(store, envelope)
+
+            with patch.object(JournalStore, "append_event", new=fail_observed):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    self._record(origin, attempt_id, binding)
+
+            events = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared", "AuthenticatedReadRetained"],
+            )
+            retained = events[-1]
+            manifest = origin._response_store.load_manifest(
+                retained["payload"]["response_artifact_id"]
+            )
+            object_path = origin._response_store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            object_path.unlink()
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "retained provider response artifact is unavailable",
+            ):
+                restarted.recover_response_binding(attempt_id, binding)
+
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        restarted._store,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared", "AuthenticatedReadRetained"],
+            )
+
     def test_second_conflicting_response_cannot_replace_first(self):
         with TemporaryDirectory() as directory:
             _fixture, journal, *_rest, binding = self._route_fixture(directory)

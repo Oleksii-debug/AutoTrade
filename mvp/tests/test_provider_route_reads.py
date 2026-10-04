@@ -16,8 +16,10 @@ from mvp.autotrade_mvp.provider_route_reads import (
     prepare_qualified_provider_read,
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
+from mvp.tests.provider_qualification_test_support import (
+    ExactQualificationProjectionHarness,
+)
 from mvp.tests.test_durable_capabilities import verified
-from mvp.tests.test_provider_qualification_authority import _ProjectionOnlyRegistry
 from mvp.tests.test_provider_route_dispatch import successor_spot_q
 from mvp.tests.test_provider_selection import (
     NOW,
@@ -40,12 +42,19 @@ class ProviderRouteReadTests(unittest.TestCase):
             )
         )
         evidence_root = Path(directory) / "evidence"
-        qualifications = _ProjectionOnlyRegistry(
+        harness = ExactQualificationProjectionHarness().start()
+        self.addCleanup(harness.stop)
+        qualifications = harness.registry(
             journal,
             evidence_store=ArtifactStore(evidence_root),
             evidence_root=evidence_root,
         )
         q1, receipt1, protocol1 = accepted_spot_q(ordinal=50)
+        harness.register(
+            protocol_key=protocol1.key,
+            record=q1,
+            receipt=receipt1,
+        )
         qualifications._append_accepted(
             protocol_key=protocol1.key,
             record=q1,
@@ -60,7 +69,7 @@ class ProviderRouteReadTests(unittest.TestCase):
         )
         self.assertEqual(selection.status, "SELECTED_UNAMBIGUOUS")
         self.assertIsNotNone(selection.selected)
-        return journal, capabilities, qualifications, selection.selected, q1
+        return journal, capabilities, qualifications, selection.selected, q1, harness
 
     def prepare(self, route, capabilities, qualifications, *, at=NOW):
         return prepare_qualified_provider_read(
@@ -76,7 +85,7 @@ class ProviderRouteReadTests(unittest.TestCase):
 
     def test_prepared_read_binds_exact_current_q_c_and_rule_identity(self):
         with TemporaryDirectory() as directory:
-            _journal, capabilities, qualifications, route, q1 = self.setup_route(directory)
+            _journal, capabilities, qualifications, route, q1, _harness = self.setup_route(directory)
             binding = self.prepare(route, capabilities, qualifications)
             self.assertEqual(binding.qualification_id, q1.qualification_id)
             self.assertEqual(
@@ -89,7 +98,7 @@ class ProviderRouteReadTests(unittest.TestCase):
 
     def test_qualified_read_and_response_constructors_are_sealed(self):
         with TemporaryDirectory() as directory:
-            _journal, capabilities, qualifications, route, _q1 = self.setup_route(directory)
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
             binding = self.prepare(route, capabilities, qualifications)
             with self.assertRaisesRegex(ProviderRouteReadError, "canonical route authority"):
                 QualifiedProviderReadQueryBinding(
@@ -115,11 +124,16 @@ class ProviderRouteReadTests(unittest.TestCase):
 
     def test_response_retains_q1_if_q2_supersedes_after_request_was_sent(self):
         with TemporaryDirectory() as directory:
-            _journal, capabilities, qualifications, route, q1 = self.setup_route(directory)
+            _journal, capabilities, qualifications, route, q1, harness = self.setup_route(directory)
             binding = self.prepare(route, capabilities, qualifications)
             q2, receipt2, protocol2 = successor_spot_q(
                 old_qualification_id=q1.qualification_id,
                 ordinal=51,
+            )
+            harness.register(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
             )
             qualifications._append_accepted(
                 protocol_key=protocol2.key,
@@ -154,7 +168,7 @@ class ProviderRouteReadTests(unittest.TestCase):
 
     def test_new_current_capability_invalidates_old_selected_route_for_new_read(self):
         with TemporaryDirectory() as directory:
-            _journal, capabilities, qualifications, route, _q1 = self.setup_route(directory)
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
             capabilities.add(
                 verified(
                     "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -173,8 +187,8 @@ class ProviderRouteReadTests(unittest.TestCase):
 
     def test_q_registry_and_capability_registry_must_share_exact_store_instance(self):
         with TemporaryDirectory() as directory:
-            journal, capabilities, qualifications, route, _q1 = self.setup_route(directory)
-            other = _ProjectionOnlyRegistry(
+            journal, capabilities, qualifications, route, _q1, harness = self.setup_route(directory)
+            other = harness.registry(
                 JournalStore(Path(directory) / "journal.sqlite3"),
                 evidence_store=qualifications.evidence_store,
                 evidence_root=qualifications.evidence_root,

@@ -7,6 +7,9 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.durable_provider_qualification import (
+    DurableProviderQualificationRegistry,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_qualification_authority import (
     _derive_accepted_provider_qualification,
@@ -24,6 +27,9 @@ from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
     SignedQualificationAttestation,
+)
+from mvp.tests.provider_qualification_test_support import (
+    ExactQualificationProjectionHarness,
 )
 from mvp.tests.test_durable_capabilities import verified
 from mvp.tests.test_provider_qualification_authority import (
@@ -154,12 +160,19 @@ class ProviderSelectionTests(unittest.TestCase):
         )
         evidence_root = Path(directory) / "evidence"
         evidence = ArtifactStore(evidence_root)
-        qualifications = _ProjectionOnlyRegistry(
+        harness = ExactQualificationProjectionHarness().start()
+        self.addCleanup(harness.stop)
+        qualifications = harness.registry(
             journal,
             evidence_store=evidence,
             evidence_root=evidence_root,
         )
         record, receipt, protocol = accepted_spot_q(unsupported=unsupported)
+        harness.register(
+            protocol_key=protocol.key,
+            record=record,
+            receipt=receipt,
+        )
         qualifications._append_accepted(
             protocol_key=protocol.key,
             record=record,
@@ -280,7 +293,7 @@ class ProviderSelectionTests(unittest.TestCase):
     def test_different_journal_store_instances_are_not_one_decision_authority(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)
-            other = _ProjectionOnlyRegistry(
+            other = DurableProviderQualificationRegistry(
                 JournalStore(Path(directory) / "journal.sqlite3"),
                 evidence_store=qualifications.evidence_store,
                 evidence_root=qualifications.evidence_root,
@@ -292,6 +305,26 @@ class ProviderSelectionTests(unittest.TestCase):
                     at=NOW,
                     capability_registry=capabilities,
                     qualification_registry=other,
+                )
+
+    def test_projection_subclass_is_not_production_q_authority(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            projection_subclass = _ProjectionOnlyRegistry(
+                capabilities.store,
+                evidence_store=qualifications.evidence_store,
+                evidence_root=qualifications.evidence_root,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "qualification_registry must be exact DurableProviderQualificationRegistry",
+            ):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=projection_subclass,
                 )
 
     def test_adapter_sha_is_exact_lowercase_40_hex(self):

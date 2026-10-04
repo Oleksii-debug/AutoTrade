@@ -76,3 +76,10 @@ gap at the provider-neutral lifecycle boundary. It does not by itself qualify a
 provider's metadata issuance or grant PAPER/LIVE authority.
 
 Exact-head CI remains required. Queued or pending workflow state is not PASS.
+
+
+Nested time authority is also fail-closed on this lineage. Lifecycle datetimes on
+both the contract and its bound version must retain exact UTC `datetime`
+values with `timezone.utc`; an exact `datetime` carrying caller-controlled
+`tzinfo` is rejected before equality/conversion can dispatch a timezone
+callback. Dedicated regressions cover both contract and bound-version mutation.

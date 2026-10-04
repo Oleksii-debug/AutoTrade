@@ -250,14 +250,46 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_event_cursor_advances_only_after_required_event_processing(self):
         js = APP.read_text(encoding="utf-8")
         refresh_index = js.index("await refreshOperation(operationId)")
-        cursor_index = js.index("state.cursor = cursor", refresh_index)
-        version_index = js.index("state.version = version", refresh_index)
-        self.assertGreater(cursor_index, refresh_index)
-        self.assertGreater(version_index, refresh_index)
+        render_index = js.index("renderHostEvent(event, cursor, version)", refresh_index)
+        cursor_index = js.index("state.cursor = cursor", render_index)
+        version_index = js.index("state.version = version", render_index)
+        self.assertGreater(render_index, refresh_index)
+        self.assertGreater(cursor_index, render_index)
+        self.assertGreater(version_index, render_index)
         self.assertIn(
             "the next poll retries\n        // the same cursor instead of silently acknowledging",
             js,
         )
+
+    def test_host_event_retry_is_cursor_idempotent_and_conflicting_reuse_fails_closed(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[
+            js.index("function renderHostEvent"):
+            js.index("function resetOperationsForScope")
+        ]
+        self.assertIn("candidate.dataset.hostEventCursor === cursorText", render)
+        self.assertIn("matchingRows.length > 1", render)
+        self.assertIn(
+            "received host-event history contains a duplicate cursor",
+            render,
+        )
+        self.assertIn(
+            "host event cursor was reused with conflicting rendered content",
+            render,
+        )
+        self.assertIn('row.dataset.selectionKey !== "event:" + cursorText', render)
+        self.assertEqual(render.count('body.prepend(row)'), 1)
+
+        announce = js[
+            js.index("function announce(message"):
+            js.index("function invalidateSnapshotAuthority")
+        ]
+        self.assertIn("historyKey = null", announce)
+        self.assertIn("item.dataset.notificationKey === normalizedHistoryKey", announce)
+        self.assertIn("item.dataset.notificationKey = normalizedHistoryKey", announce)
+
+        poll = js[js.index("async function pollEvents()"):js.index("function newCommandPayload")]
+        self.assertIn('"event:" + cursor.toString()', poll)
 
     def test_snapshot_counters_cannot_silently_regress(self):
         js = APP.read_text(encoding="utf-8")
@@ -1010,6 +1042,10 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("filterableRows(body).filter((row) => !row.hidden)", js)
         self.assertIn('cell.textContent.replace(/\\s+/g, " ").trim()', js)
+        self.assertIn("function tabSeparatedTableHeaderText(tool)", js)
+        self.assertIn('table.querySelectorAll("thead th")', js)
+        self.assertIn("[header, ...rowPayload]", js)
+        self.assertIn("Column headings included.", js)
         self.assertIn("await navigator.clipboard.writeText(payload)", js)
         self.assertIn("Clipboard access is unavailable. Use normal text selection and copy.", js)
         self.assertIn("Clipboard copy was not permitted. Use normal text selection and copy.", js)

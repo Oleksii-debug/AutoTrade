@@ -130,7 +130,12 @@ async function exercisePortfolioTableTools(page) {
   await page.waitForFunction(() =>
     (document.querySelector("#polite-status")?.textContent || "").includes(
       "visible portfolio rows copied."));
-  assert.match(await page.evaluate(() => navigator.clipboard.readText()), /895\.696/);
+  const copiedPortfolio = await page.evaluate(() => navigator.clipboard.readText());
+  assert.match(
+    copiedPortfolio,
+    /^Field\tHost evidence\n/,
+    "copied portfolio page is self-describing with column headings");
+  assert.match(copiedPortfolio, /895\.696/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");

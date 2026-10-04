@@ -933,6 +933,15 @@
       .join("\t");
   }
 
+  function tabSeparatedTableHeaderText(tool) {
+    const body = byId(tool.bodyId);
+    const table = body ? body.closest("table") : null;
+    if (!table) return "";
+    return [...table.querySelectorAll("thead th")]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join("\t");
+  }
+
   async function copyVisibleTableRows(tool) {
     const rows = visibleTableRows(tool);
     if (rows.length === 0) {
@@ -947,10 +956,13 @@
       queuePoliteAnnouncement(message);
       return;
     }
-    const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
+    const rowPayload = rows.map((row) => tabSeparatedRowText(row));
+    const header = tabSeparatedTableHeaderText(tool);
+    const payload = (header === "" ? rowPayload : [header, ...rowPayload]).join("\n");
     try {
       await navigator.clipboard.writeText(payload);
-      const message = String(rows.length) + " visible " + tool.label + " rows copied.";
+      const message = String(rows.length) + " visible " + tool.label + " rows copied." +
+        (header === "" ? "" : " Column headings included.");
       text(tool.statusId, message);
       queuePoliteAnnouncement(message);
     } catch {
@@ -1021,9 +1033,15 @@
     history.appendChild(item);
   }
 
-  function announce(message, urgent = false) {
+  function announce(message, urgent = false, historyKey = null) {
     if (!message) return;
     const history = byId("notification-history");
+    const normalizedHistoryKey = historyKey === null ? null : String(historyKey);
+    if (history && normalizedHistoryKey !== null &&
+        [...history.children].some(
+          (item) => item.dataset.notificationKey === normalizedHistoryKey)) {
+      return;
+    }
     if (history && history.children.length === 1 &&
         history.firstElementChild.textContent.startsWith("No material")) {
       history.replaceChildren();
@@ -1031,6 +1049,9 @@
     if (history) {
       const item = document.createElement("li");
       item.textContent = message;
+      if (normalizedHistoryKey !== null) {
+        item.dataset.notificationKey = normalizedHistoryKey;
+      }
       history.prepend(item);
       while (history.children.length > 50) {
         history.lastElementChild.remove();
@@ -1171,29 +1192,52 @@
       event.kind ?? event.event_type,
       "event.kind");
     const payload = event.payload === undefined ? {} : event.payload;
+    const cursorText = cursor.toString();
+    const stateVersionText = stateVersion.toString();
+    const payloadText = projectionText(payload);
 
     if (body.children.length === 1 &&
         body.firstElementChild.dataset.hostEventCursor === undefined) {
       body.replaceChildren();
     }
 
-    const row = document.createElement("tr");
-    row.dataset.hostEventCursor = cursor.toString();
-    row.dataset.filterableRow = "true";
-    row.dataset.tableHostOrder = cursor.toString();
-    row.dataset.selectionKey = "event:" + cursor.toString();
-    row.dataset.selectionExact = "true";
-    const rowHeader = document.createElement("th");
-    rowHeader.scope = "row";
-    row.appendChild(rowHeader);
-    for (let index = 1; index < 4; index += 1) {
-      row.appendChild(document.createElement("td"));
+    const matchingRows = [...body.querySelectorAll("tr")].filter(
+      (candidate) => candidate.dataset.hostEventCursor === cursorText);
+    if (matchingRows.length > 1) {
+      throw new Error("received host-event history contains a duplicate cursor");
     }
-    row.children[0].textContent = cursor.toString();
-    row.children[1].textContent = stateVersion.toString();
-    row.children[2].textContent = kind;
-    row.children[3].textContent = projectionText(payload);
-    body.prepend(row);
+    let row = matchingRows.length === 1 ? matchingRows[0] : null;
+    const expectedCells = [cursorText, stateVersionText, kind, payloadText];
+    if (row !== null) {
+      const renderedCells = [...row.cells].map((cell) => cell.textContent);
+      if (
+        row.dataset.tableHostOrder !== cursorText ||
+        row.dataset.selectionKey !== "event:" + cursorText ||
+        row.dataset.selectionExact !== "true" ||
+        renderedCells.length !== expectedCells.length ||
+        renderedCells.some((value, index) => value !== expectedCells[index])
+      ) {
+        throw new Error("host event cursor was reused with conflicting rendered content");
+      }
+    } else {
+      row = document.createElement("tr");
+      row.dataset.hostEventCursor = cursorText;
+      row.dataset.filterableRow = "true";
+      row.dataset.tableHostOrder = cursorText;
+      row.dataset.selectionKey = "event:" + cursorText;
+      row.dataset.selectionExact = "true";
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) {
+        row.appendChild(document.createElement("td"));
+      }
+      row.children[0].textContent = cursorText;
+      row.children[1].textContent = stateVersionText;
+      row.children[2].textContent = kind;
+      row.children[3].textContent = payloadText;
+      body.prepend(row);
+    }
 
     const retained = filterableRows(body)
       .filter((candidate) => candidate.dataset.hostEventCursor !== undefined)
@@ -1415,7 +1459,10 @@
           await refreshOperation(operationId);
         }
         if (MATERIAL_EVENTS.has(kind)) {
-          announce(eventMessage(event), URGENT_EVENTS.has(kind));
+          announce(
+            eventMessage(event),
+            URGENT_EVENTS.has(kind),
+            "event:" + cursor.toString());
         }
         renderHostEvent(event, cursor, version);
         // Commit the local event position only after every required side effect

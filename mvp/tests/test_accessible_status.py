@@ -185,6 +185,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "net_pnl": "0",
                 "total_fees": "0",
                 "turnover": "0",
+                "max_drawdown": "0",
                 "trade_count": 0,
                 "reconciled": True,
                 "journal_sequence": "7",
@@ -226,6 +227,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "net_pnl": None,
                 "total_fees": "1",
                 "turnover": "100",
+                "max_drawdown": "0.1",
                 "trade_count": 1,
                 "reconciled": True,
                 "journal_sequence": "8",
@@ -237,6 +239,50 @@ class AccessibleStatusTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("Economic report validation: unavailable", text)
+
+    def test_canonical_economic_report_requires_nonnegative_max_drawdown(self):
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "9",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        base_report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": "1000",
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "trade_count": 0,
+            "reconciled": True,
+            "journal_sequence": "9",
+        }
+
+        for max_drawdown in (None, "-1"):
+            with self.subTest(max_drawdown=max_drawdown):
+                report = dict(base_report)
+                if max_drawdown is not None:
+                    report["max_drawdown"] = max_drawdown
+                text = format_accessible_status(status, report)
+                self.assertIn("Maximum drawdown: Unavailable", text)
+                self.assertIn("Economic reconciliation: not confirmed", text)
+                self.assertIn(
+                    "Economic report validation: unavailable; malformed or incomplete canonical state",
+                    text,
+                )
 
     def test_canonical_economic_report_must_match_status_journal_cut(self):
         text = format_accessible_status(

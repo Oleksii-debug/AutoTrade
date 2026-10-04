@@ -146,9 +146,10 @@ def _canonical_economic_report_is_readable(
     try:
         total_fees = parse_canonical_decimal_text(report.get("total_fees"))
         turnover = parse_canonical_decimal_text(report.get("turnover"))
+        max_drawdown = parse_canonical_decimal_text(report.get("max_drawdown"))
     except ExactDecimalError:
         return False
-    if total_fees < 0 or turnover < 0:
+    if total_fees < 0 or turnover < 0 or max_drawdown < 0:
         return False
 
     fill_count = _canonical_fill_count(

@@ -4,17 +4,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Condition, Event, Thread
 import unittest
+from unittest.mock import Mock
 
 from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery_dispatch import build_recovery_issued_dispatcher
 
 
 class _FenceStub:
     def __init__(self) -> None:
         self.released = False
+
+    def release(self) -> None:
+        self.released = True
 
 
 class ProductionFinancialHostTests(unittest.TestCase):
@@ -39,9 +44,9 @@ class ProductionFinancialHostTests(unittest.TestCase):
             config=config,
             journal=journal,
             application=object(),
-            server=object(),
+            server=Mock(),
             instance_fence=_FenceStub(),
-            admission_gate=object(),
+            admission_gate=Mock(),
             issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
 
@@ -228,6 +233,56 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(outcome_box[0].status, "SENT")
             self.assertTrue(closer_acquired.is_set())
             self.assertEqual(host._serve_state, "CLOSING")
+
+    def test_listener_failure_observes_recovery_revoked_before_host_cleanup(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            recovery = runtime.recovery_controller
+            recovery.state = HostState.READY
+            recovery.provider_reconciled = True
+            recovery.reason_codes.clear()
+            retained = build_recovery_issued_dispatcher(
+                recovery,
+                host.journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            observed = {}
+            wire_calls = []
+
+            def transport_send(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"status": "accepted"}
+
+            def fail_listener():
+                observed["owner"] = recovery.owner
+                observed["state"] = recovery.state
+                outcome = retained.dispatch(
+                    attempt_id="retained-during-listener-close",
+                    intent_id="intent-retained-close",
+                    intent_hash="sha256:" + "d" * 64,
+                    provider="BYBIT",
+                    request={"symbol": "BTCUSDT"},
+                    now="2026-10-04T04:30:00Z",
+                    authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                    transport_send=transport_send,
+                    final_barrier_clock=lambda: "2026-10-04T04:30:00Z",
+                )
+                observed["dispatch"] = outcome
+                raise RuntimeError("listener close failed")
+
+            host.server.server_close.side_effect = fail_listener
+
+            with self.assertRaisesRegex(RuntimeError, "listener close failed"):
+                runtime.close()
+
+            self.assertIsNone(observed["owner"])
+            self.assertIs(observed["state"], HostState.STOPPED)
+            self.assertEqual(observed["dispatch"].status, "BLOCKED")
+            self.assertEqual(wire_calls, [])
+            self.assertFalse(host._instance_fence.released)
 
     def test_released_host_fence_blocks_financial_composition(self):
         with TemporaryDirectory() as directory:

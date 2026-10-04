@@ -21,6 +21,8 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
+
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_api import EventGap, command_result_payload, operation_result_payload
 from .persistence import JournalStore
@@ -367,9 +369,25 @@ class AuthenticatedHostApplication:
         payload = dict(projected)
         if set(payload) != _SNAPSHOT_FIELDS:
             raise ValueError("UiSnapshot fields do not match the canonical contract")
-        for field in ("state_version", "event_cursor", "account_id", "environment"):
-            if str(payload[field]) != str(durable[field]):
-                raise ValueError(f"UiSnapshot {field} does not match durable host truth")
+        for field in ("state_version", "event_cursor"):
+            value = payload[field]
+            if (
+                not is_valid_common_scalar("Sequence", value)
+                or value != durable[field]
+            ):
+                raise ValueError(
+                    f"UiSnapshot {field} does not match canonical durable host truth"
+                )
+        if payload["account_id"] != durable["account_id"]:
+            raise ValueError("UiSnapshot account_id does not match durable host truth")
+        environment = payload["environment"]
+        if (
+            not is_valid_common_scalar("Environment", environment)
+            or environment != durable["environment"]
+        ):
+            raise ValueError(
+                "UiSnapshot environment does not match canonical durable host truth"
+            )
         if payload["host_id"] != self.host_id:
             raise ValueError("UiSnapshot host_id does not match the configured host")
         for field in (
@@ -571,6 +589,8 @@ class AuthenticatedHostApplication:
                 if set(query) - {"after"} or len(query.get("after", ["0"])) != 1:
                     return _error(400, "INVALID_EVENT_CURSOR")
                 after = query.get("after", ["0"])[0]
+                if not is_valid_common_scalar("Sequence", after):
+                    return _error(400, "INVALID_EVENT_CURSOR")
                 events = tuple(
                     self._event_payload(event)
                     for event in self.store.events_after(after)

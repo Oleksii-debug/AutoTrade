@@ -7,13 +7,123 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
-from control.tools.reconvergence_integrity import Change, assess_reconvergence
+from control.tools.reconvergence_integrity import (
+    Change,
+    assess_reconvergence,
+    parse_name_status,
+    parse_trusted_scope_approval,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+class HostileText(str):
+    def __new__(cls, value: str, calls: list[str]):
+        instance = super().__new__(cls, value)
+        instance.calls = calls
+        return instance
+
+    def _called(self, name: str):
+        self.calls.append(name)
+        raise AssertionError(f"hostile text callback executed: {name}")
+
+    def __hash__(self):
+        return self._called("__hash__")
+
+    def strip(self, *args, **kwargs):
+        return self._called("strip")
+
+    def startswith(self, *args, **kwargs):
+        return self._called("startswith")
+
+    def splitlines(self, *args, **kwargs):
+        return self._called("splitlines")
+
+    def rstrip(self, *args, **kwargs):
+        return self._called("rstrip")
+
+    def removeprefix(self, *args, **kwargs):
+        return self._called("removeprefix")
+
+    def casefold(self, *args, **kwargs):
+        return self._called("casefold")
+
+
+class DerivedChange(Change):
+    pass
+
+
 class ReconvergenceSecurityRegressionTests(unittest.TestCase):
+
+    def test_hostile_base_path_is_rejected_before_hash_or_path_dispatch(self):
+        calls: list[str] = []
+        hostile = HostileText("owned/change.py", calls)
+
+        with self.assertRaisesRegex(ValueError, "exact text"):
+            assess_reconvergence(base_paths=[hostile], changes=[])
+
+        self.assertEqual(calls, [])
+
+    def test_hostile_change_status_is_rejected_before_hash_or_comparison_dispatch(self):
+        calls: list[str] = []
+        hostile_status = HostileText("M", calls)
+
+        with self.assertRaisesRegex(ValueError, "exact text"):
+            assess_reconvergence(
+                base_paths=["owned/change.py"],
+                changes=[Change(status=hostile_status, path="owned/change.py")],
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_change_subclass_is_rejected_before_candidate_fields_are_consumed(self):
+        with self.assertRaisesRegex(TypeError, "exact Change"):
+            assess_reconvergence(
+                base_paths=["owned/change.py"],
+                changes=[DerivedChange(status="M", path="owned/change.py")],
+            )
+
+    def test_hostile_name_status_record_is_rejected_before_string_dispatch(self):
+        calls: list[str] = []
+        hostile = HostileText("M\towned/change.py", calls)
+
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            parse_name_status([hostile])
+
+        self.assertEqual(calls, [])
+
+    def test_hostile_scope_approval_body_is_ignored_before_string_dispatch(self):
+        calls: list[str] = []
+        hostile = HostileText(
+            "AUTOTRADE_RECONVERGENCE_SCOPE_V1\n"
+            + "head: "
+            + ("a" * 40)
+            + "\npath: .github/workflows/verify.yml",
+            calls,
+        )
+
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                hostile,
+                expected_head_sha="a" * 40,
+            )
+        )
+        self.assertEqual(calls, [])
+
+    def test_hostile_allowed_scope_is_rejected_before_registry_normalization(self):
+        calls: list[str] = []
+        hostile = HostileText("owned/change.py", calls)
+
+        with self.assertRaisesRegex(TypeError, "exact strings"):
+            assess_reconvergence(
+                base_paths=["owned/change.py"],
+                changes=[Change(status="M", path="owned/change.py")],
+                allowed_scopes=[hostile],
+            )
+
+        self.assertEqual(calls, [])
+
     def test_mass_rename_away_counts_as_base_tree_disappearance(self):
         base = [f"path-{index:03d}.txt" for index in range(100)]
         changes = [

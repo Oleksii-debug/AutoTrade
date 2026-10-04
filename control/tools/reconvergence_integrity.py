@@ -161,8 +161,8 @@ class IntegrityAssessment:
 
 
 def _validate_changed_path(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be non-empty text")
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be non-empty exact text")
     if (
         value.startswith("/")
         or "\\" in value
@@ -189,16 +189,16 @@ def parse_trusted_scope_approval(
     fail closed with ``ValueError``.
     """
 
-    if not isinstance(body, str):
+    if type(body) is not str:
         return None
     lines = body.splitlines()
-    if not lines or lines[0].strip() != TRUSTED_SCOPE_APPROVAL_MARKER:
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
         return None
-    if not _SHA40.fullmatch(expected_head_sha):
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
         raise ValueError("expected approval head must be a lowercase 40-hex SHA")
     if len(lines) < 2 or not lines[1].startswith("head: "):
         raise ValueError("trusted scope approval requires one exact head line")
-    approved_head = lines[1].removeprefix("head: ").strip()
+    approved_head = lines[1].removeprefix("head: ")
     if not _SHA40.fullmatch(approved_head):
         raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
     if approved_head != expected_head_sha:
@@ -211,7 +211,7 @@ def parse_trusted_scope_approval(
         if not line.startswith("path: "):
             raise ValueError("trusted scope approval permits only path lines after head")
         path = _validate_changed_path(
-            line.removeprefix("path: ").strip(),
+            line.removeprefix("path: "),
             name="approved scope path",
         )
         paths.append(path)
@@ -223,10 +223,10 @@ def parse_trusted_scope_approval(
 
 
 def _validated_change(change: Change) -> Change:
-    if not isinstance(change, Change):
-        raise TypeError("changes must contain Change values")
-    if not isinstance(change.status, str):
-        raise ValueError("Git name-status must be text")
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    if type(change.status) is not str:
+        raise ValueError("Git name-status must be exact text")
 
     if change.status in _SIMPLE_STATUS:
         if change.previous_path is not None:
@@ -249,6 +249,10 @@ def _validated_change(change: Change) -> Change:
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
+        if type(raw) is not str:
+            raise TypeError("Git name-status records must be exact text")
+        if "\x00" in raw:
+            raise ValueError("Git name-status record contains NUL")
         line = raw.rstrip("\n")
         if not line:
             continue
@@ -285,7 +289,12 @@ def assess_reconvergence(
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _validate_changed_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
@@ -295,6 +304,8 @@ def assess_reconvergence(
 
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:
+        if any(type(scope) is not str for scope in allowed_scopes):
+            raise TypeError("allowed scopes must contain exact strings")
         normalized_scopes = _normalized_scopes(allowed_scopes)
 
     def exactly_authorized(path: str) -> bool:

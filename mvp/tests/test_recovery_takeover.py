@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
     SnapshotConsistencyEvidence,
@@ -128,10 +128,10 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
         )
         self.assertEqual(self.controller.state, HostState.READY)
 
-    def _takeover(self, controller=None):
+    def _takeover(self, controller=None, *, new_owner_id="host-b"):
         return execute_durable_takeover(
             self.controller if controller is None else controller,
-            new_owner_id="host-b",
+            new_owner_id=new_owner_id,
             vault=self.vault,
             handle=self.handle,
             execution_identity="windows-user-1",
@@ -177,6 +177,10 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
             [(owner.owner_id, owner.epoch) for owner in self.controller.durable_owner_chain()],
             [("host-a", 1), ("host-b", 2)],
         )
+        # A valid completed transition may release the process-shared gate, but
+        # the successor still cannot send until its own reconciliation is READY.
+        with sender_authority_window(self.store, owner_scope="PAPER:paper-1"):
+            pass
         with self.assertRaisesRegex(PermissionError, "Host is not ready"):
             self.controller.validate_sender("host-b", 2)
 
@@ -329,6 +333,139 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
                 self.handle,
                 execution_identity="windows-user-1",
                 account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "secret-v1",
+        )
+
+    def test_legacy_boolean_transfer_cannot_bypass_issued_takeover(self):
+        with self.assertRaisesRegex(PermissionError, "independently issued takeover evidence"):
+            self.controller.transfer_owner(
+                new_owner_id="host-b",
+                old_sender_fenced=True,
+                reconciled=True,
+            )
+        self.assertEqual(self.controller.owner.owner_id, "host-a")
+        self.assertEqual(self.controller.owner.epoch, 1)
+        self.assertEqual(self._takeover_events(), [])
+
+    def test_competing_target_cannot_hijack_pending_takeover(self):
+        with patch(
+            "mvp.autotrade_mvp.recovery_takeover.revoke_trade_credential_with_receipt",
+            side_effect=RuntimeError("stop after started"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._takeover(new_owner_id="host-b")
+
+        with self.assertRaisesRegex(DurableTakeoverError, "target_owner_id"):
+            self._takeover(new_owner_id="host-c")
+        self.assertEqual(
+            [event["event_type"] for event in self._takeover_events()],
+            ["RecoveryTakeoverStarted"],
+        )
+        self.assertEqual(self.controller._latest_durable_owner().owner_id, "host-a")
+
+    def test_forged_completion_without_named_owner_commit_does_not_reopen_sender_gate(self):
+        with patch(
+            "mvp.autotrade_mvp.recovery_takeover.revoke_trade_credential_with_receipt",
+            side_effect=RuntimeError("stop after started"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._takeover()
+
+        started = self._takeover_events()[0]
+        started_payload = started["payload"]
+        receipt_id = "credential-transition/sha256:" + "0" * 64
+        evidence_payload = {
+            "takeover_id": started_payload["takeover_id"],
+            "owner_scope": started_payload["owner_scope"],
+            "source_owner_id": started_payload["source_owner_id"],
+            "source_owner_epoch": started_payload["source_owner_epoch"],
+            "target_owner_id": started_payload["target_owner_id"],
+            "target_owner_epoch": started_payload["target_owner_epoch"],
+            "credential_transition_receipt_id": receipt_id,
+        }
+        evidence = {
+            "event_id": "forged-takeover-evidence",
+            "event_type": "RecoveryTakeoverEvidenceIssued",
+            "aggregate_type": "recovery_takeover",
+            "aggregate_id": started["aggregate_id"],
+            "aggregate_version": "2",
+            "payload": evidence_payload,
+            "payload_hash": payload_digest(evidence_payload),
+            "committed_at": "2026-10-04T00:33:00Z",
+        }
+        self.store.append_event(evidence)
+        completion_payload = {
+            "takeover_id": started_payload["takeover_id"],
+            "owner_scope": started_payload["owner_scope"],
+            "source_owner_id": started_payload["source_owner_id"],
+            "source_owner_epoch": started_payload["source_owner_epoch"],
+            "target_owner_id": started_payload["target_owner_id"],
+            "target_owner_epoch": started_payload["target_owner_epoch"],
+            "takeover_evidence_event_id": evidence["event_id"],
+            "credential_transition_receipt_id": receipt_id,
+            "recovery_owner_event_id": "missing-owner-event",
+            "recovery_owner_payload_hash": "sha256:" + "0" * 64,
+            "recovery_owner_journal_sequence": 999999,
+        }
+        completion = {
+            "event_id": "forged-takeover-completion",
+            "event_type": "RecoveryTakeoverOwnerCommitted",
+            "aggregate_type": "recovery_takeover",
+            "aggregate_id": started["aggregate_id"],
+            "aggregate_version": "3",
+            "payload": completion_payload,
+            "payload_hash": payload_digest(completion_payload),
+            "committed_at": "2026-10-04T00:33:01Z",
+        }
+        self.store.append_event(completion)
+
+        with self.assertRaisesRegex(SenderAuthorityError, "target owner event is missing"):
+            with sender_authority_window(self.store, owner_scope="PAPER:paper-1"):
+                self.fail("forged completion must never reopen sender authority")
+        self.assertEqual(self.controller._latest_durable_owner().owner_id, "host-a")
+
+    def test_missing_reconciliation_fails_before_durable_takeover_or_revoke(self):
+        root = Path(self.directory.name)
+        store = JournalStore(root / "unreconciled.sqlite3")
+        controller = RecoveryController(
+            owner_store=store,
+            owner_scope="PAPER:paper-2",
+        )
+        controller.start("host-a")
+        vault = ProtectedCredentialVault(
+            root / "unreconciled-credentials.json",
+            protector=DeterministicProtector(),
+        )
+        handle = vault.register(
+            handle_id="unreconciled-trade",
+            owner_identity="windows-user-2",
+            account_id="paper-2",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="secret-v1",
+        )
+
+        with self.assertRaisesRegex(PermissionError, "No current reconciliation checkpoint"):
+            execute_durable_takeover(
+                controller,
+                new_owner_id="host-b",
+                vault=vault,
+                handle=handle,
+                execution_identity="windows-user-2",
+                reconciliation_id="missing",
+                provider_id="SIMULATED",
+            )
+        self.assertEqual(store.load_events_by_aggregate_type("recovery_takeover"), [])
+        self.assertEqual(
+            vault.resolve(
+                handle,
+                execution_identity="windows-user-2",
+                account_id="paper-2",
                 provider="SIMULATED",
                 environment="PAPER",
                 purpose="TRADE",

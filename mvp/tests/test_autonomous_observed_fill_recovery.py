@@ -87,6 +87,10 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 status = get_status(directory)
                 self.assertEqual(status["status"], "needs_recovery")
                 self.assertTrue(status["retained_fill_observed"])
+                self.assertEqual(
+                    status["recovery_disposition"],
+                    "RETAINED_FILL_RECOVERY",
+                )
                 self.assertEqual(store.current_journal_sequence(), cut)
 
                 with patch.object(
@@ -160,6 +164,17 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                     Path(directory) / "journal.sqlite3"
                 )
                 before = store.current_journal_sequence()
+
+                from mvp.autotrade_mvp.cli import get_status
+
+                zero_status = get_status(directory)
+                self.assertEqual(
+                    zero_status["recovery_disposition"],
+                    "ZERO_WIRE_COMPLETION",
+                )
+                self.assertEqual(
+                    store.current_journal_sequence(), before
+                )
                 with patch.object(
                     SimulatedProvider,
                     "transport_send",
@@ -346,6 +361,17 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 Path(directory) / "journal.sqlite3"
             )
             before = store.current_journal_sequence()
+
+            from mvp.autotrade_mvp.cli import get_status
+
+            unresolved_status = get_status(directory)
+            self.assertEqual(
+                unresolved_status["recovery_disposition"],
+                "RECONCILIATION_REQUIRED",
+            )
+            self.assertEqual(
+                store.current_journal_sequence(), before
+            )
             with patch.object(
                 SimulatedProvider,
                 "transport_send",
@@ -566,7 +592,6 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 str(refreshed.position(session.INSTRUMENT)), "0"
             )
 
-
     def test_zero_wire_writer_race_before_checkpoint_cannot_adopt_newer_cut(self):
         original_event = session._loop_event
 
@@ -604,6 +629,11 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
             )
             position_before = economics.position(session.INSTRUMENT)
             transaction_count_before = len(economics.transactions)
+            checkpoint_count_before = len(
+                store.load_events_by_aggregate_type(
+                    "account_reconciliation"
+                )
+            )
             original_record = session.record_reconciliation_checkpoint
             injected = False
 
@@ -650,6 +680,14 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 len(refreshed.transactions),
                 transaction_count_before + 1,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "account_reconciliation"
+                    )
+                ),
+                checkpoint_count_before,
             )
             completed_four = [
                 event
@@ -699,6 +737,11 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 environment=session.ENVIRONMENT,
             )
             position_before = economics.position(session.INSTRUMENT)
+            checkpoint_count_before = len(
+                store.load_events_by_aggregate_type(
+                    "account_reconciliation"
+                )
+            )
             original_loop_event = session._loop_event
             injected = False
 
@@ -757,18 +800,14 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 refreshed.position(session.INSTRUMENT),
                 position_before,
             )
-            checkpoints = [
-                event
-                for event in store.load_events_by_aggregate_type(
-                    "account_reconciliation"
-                )
-                if event["aggregate_id"].endswith(
-                    ":4:after"
-                )
-                or event["payload"].get("observed_at")
-                == "2026-10-03T00:00:03Z"
-            ]
-            self.assertTrue(checkpoints)
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "account_reconciliation"
+                    )
+                ),
+                checkpoint_count_before + 1,
+            )
             completed_four = [
                 event
                 for event in store.load_events_by_aggregate_type(

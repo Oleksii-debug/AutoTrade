@@ -39,7 +39,11 @@ from .reconciliation import (
     SnapshotConsistencyEvidence,
     reconcile_account,
 )
-from .reconciliation_journal import reconciliation_payload, record_reconciliation_checkpoint
+from .reconciliation_journal import (
+    load_latest_reconciliation_checkpoint,
+    reconciliation_payload,
+    record_reconciliation_checkpoint,
+)
 from .risk import RiskContext, RiskIntent, RiskPolicy
 from .simulated_provider import SimulatedProvider
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
@@ -1659,6 +1663,29 @@ def _autonomous_reconciliation(
     )
     if not result.complete or result.blocks_new_risk:
         raise ValueError("complete simulated economics did not reconcile")
+    expected_checkpoint_payload = reconciliation_payload(
+        result,
+        observed_at=timestamp,
+    )
+    expected_checkpoint_payload["checkpoint_owner"] = {
+        "host_id": "local-simulation",
+        "owner_epoch": "1",
+    }
+    existing_checkpoint = load_latest_reconciliation_checkpoint(
+        store,
+        reconciliation_id=key,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+    )
+    if (
+        existing_checkpoint is not None
+        and existing_checkpoint.get("payload")
+        != expected_checkpoint_payload
+    ):
+        raise ValueError(
+            "existing autonomous reconciliation checkpoint conflicts"
+        )
     checkpoint = record_reconciliation_checkpoint(
         store,
         reconciliation_id=key,
@@ -1732,8 +1759,6 @@ def _recover_autonomous_zero_wire_completion(
     # a zero-wire episode. A prior exact after-checkpoint is the only additional
     # event that may already exist when a response/crash happened after
     # reconciliation but before AutonomousEpisodeCompleted.
-    from .reconciliation_journal import load_latest_reconciliation_checkpoint
-
     existing_after = load_latest_reconciliation_checkpoint(
         store,
         reconciliation_id=f"{key}:after",

@@ -346,6 +346,20 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "effective_available": "50",
                 },
             )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "does not match expected journal cut",
+            ):
+                authority_module._canonical_settlement_capital_adjustment(
+                    deepcopy(capital),
+                    provider_available={"CASH:USD": "1000"},
+                    required_resources=("CASH:USD",),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    risk_journal_sequence=risk_event["journal_sequence"],
+                    expected_journal_sequence=capital["journal_sequence"] + 1,
+                )
             reservation_event = [
                 event
                 for event in store.load_events(

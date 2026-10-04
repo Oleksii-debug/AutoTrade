@@ -790,6 +790,7 @@ def _canonical_settlement_capital_adjustment(
     account_id: str,
     environment: str,
     risk_journal_sequence: int | None = None,
+    expected_journal_sequence: int | None = None,
 ) -> tuple[dict[str, object], dict[str, Decimal]]:
     if not isinstance(value, Mapping):
         raise AuthorityConflict("settlement capital adjustment is malformed")
@@ -811,6 +812,17 @@ def _canonical_settlement_capital_adjustment(
     journal_sequence = value.get("journal_sequence")
     if type(journal_sequence) is not int or journal_sequence < 0:
         raise AuthorityConflict("settlement capital journal cut is invalid")
+    if (
+        expected_journal_sequence is not None
+        and (
+            type(expected_journal_sequence) is not int
+            or expected_journal_sequence < 0
+            or journal_sequence != expected_journal_sequence
+        )
+    ):
+        raise AuthorityConflict(
+            "settlement capital cut does not match expected journal cut"
+        )
     if (
         risk_journal_sequence is not None
         and journal_sequence >= risk_journal_sequence
@@ -3070,6 +3082,7 @@ class AuthorityService:
                     account_id=record.account_id,
                     environment=record.environment,
                     risk_journal_sequence=risk_journal_sequence,
+                    expected_journal_sequence=journal_sequence_cut,
                 )
             )
             reservation_expected_available = dict(reservation_expected_available)

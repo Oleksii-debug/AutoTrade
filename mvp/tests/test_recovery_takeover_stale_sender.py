@@ -5,10 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.dispatch import (
-    GuardedDispatcher,
-    submission_attempt_aggregate_id,
-)
+from mvp.autotrade_mvp.dispatch import submission_attempt_aggregate_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
@@ -17,6 +14,7 @@ from mvp.autotrade_mvp.reconciliation import (
 )
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery_dispatch import RecoveryBoundDispatcher
 from mvp.autotrade_mvp.recovery_takeover import execute_durable_takeover
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
@@ -75,7 +73,7 @@ def _reconciliation():
 
 
 class CompletedTakeoverStaleSenderTests(unittest.TestCase):
-    def test_completed_takeover_reopens_gate_but_old_shared_journal_sender_emits_zero_bytes(self):
+    def test_completed_takeover_invalidates_construction_bound_old_sender(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = JournalStore(root / "journal.sqlite3")
@@ -99,6 +97,19 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
                 environment="PAPER",
             )
             self.assertEqual(checkpoint["event_type"], "AccountReconciled")
+
+            # Bind while host-a is the current durable READY sender.  The object
+            # intentionally cannot rebind itself when takeover advances epoch.
+            stale_dispatcher = RecoveryBoundDispatcher(
+                controller,
+                store,
+                environment="PAPER",
+                account_id="paper-1",
+            )
+            self.assertEqual(
+                (stale_dispatcher.owner_id, stale_dispatcher.owner_epoch),
+                ("host-a", 1),
+            )
 
             vault = ProtectedCredentialVault(
                 root / "credentials.json",
@@ -127,13 +138,6 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
                 ("host-b", 2),
             )
 
-            stale_dispatcher = GuardedDispatcher(
-                store,
-                environment="PAPER",
-                account_id="paper-1",
-                owner_token="host-a",
-                owner_epoch=1,
-            )
             wire_calls: list[str] = []
 
             def transport(client_order_id, _request, final_guard):
@@ -150,11 +154,10 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
                 now="2026-10-04T00:32:00Z",
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
-                sender_check=controller.validate_sender,
             )
 
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertIn("Sender fence mismatch", outcome.reason)
+            self.assertIn("sender_fence_rejected", outcome.reason)
             self.assertEqual(wire_calls, [])
             aggregate_id = submission_attempt_aggregate_id(
                 environment="PAPER",

@@ -783,6 +783,26 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 ):
                     source_revision()
 
+    def test_duplicate_installed_bundle_source_sha_fails_closed_before_git(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'bundle-manifest.json').write_text(
+                '{"source_sha":"' + ('a' * 40) + '","source_sha":"' + ('b' * 40) + '"}',
+                encoding='utf-8',
+            )
+            with patch(
+                'mvp.autotrade_mvp.product_runtime.ROOT',
+                root,
+            ), patch(
+                'mvp.autotrade_mvp.product_runtime.subprocess.check_output',
+                side_effect=AssertionError('Git must not mask ambiguous bundle identity'),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    'not strict JSON',
+                ):
+                    source_revision()
+
     def test_invalid_installed_bundle_source_revision_fails_closed_before_git(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

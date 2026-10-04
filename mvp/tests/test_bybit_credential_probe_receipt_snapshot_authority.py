@@ -101,7 +101,7 @@ class BybitCredentialProbeReceiptSnapshotAuthorityTests(unittest.TestCase):
         object.__setattr__(
             evidence,
             "classification",
-            BybitCredentialNonAcceptance.ACCEPTED,
+            BybitCredentialNonAcceptance.STILL_ACCEPTED,
         )
 
         with self.assertRaisesRegex(ProviderCoreError, "mutated after receipt issuance"):

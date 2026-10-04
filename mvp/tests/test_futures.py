@@ -685,6 +685,43 @@ class FuturesLifecycleTests(unittest.TestCase):
         self.assertEqual(first.cause_event_id, retry.cause_event_id)
         self.assertIn("sha256:", first.transaction_id)
 
+    def test_lifecycle_gate_rejects_unbound_self_authored_contract(self):
+        unbound = FuturesContract(
+            instrument="caller-authored-future",
+            payoff="LINEAR",
+            multiplier=Decimal("10"),
+            quote_currency="USD",
+            settlement_currency="USD",
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            expiry=utc(30, 21),
+            settlement_method="CASH",
+        )
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            lifecycle_gate(unbound, utc(29, 11))
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            require_open_for_new_exposure(unbound, utc(29, 11))
+
+    def test_caller_cannot_remove_canonical_instrument_after_construction(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        object.__setattr__(contract, "canonical_instrument", None)
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            lifecycle_gate(contract, utc(29, 11))
+        with self.assertRaisesRegex(
+            FuturesError,
+            "requires exact canonical InstrumentVersion",
+        ):
+            require_open_for_new_exposure(contract, utc(29, 11))
+
     def test_physical_delivery_cutoff_is_hard_fail_closed_boundary(self):
         contract = self._linear_contract(settlement_method="PHYSICAL")
         self.assertEqual(lifecycle_gate(contract, utc(29, 11)), "OPEN")

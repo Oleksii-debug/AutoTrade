@@ -1367,6 +1367,52 @@ def _durable_risk_intent_payload(value: object) -> dict[str, object]:
     return payload
 
 
+def _validate_confirmation_financial_binding(
+    *,
+    confirmation: Confirmation,
+    authority_policy_version: int,
+    durable_risk_intent: object,
+    authoritative_risk_snapshot: Mapping[str, object],
+    reservation_requirements,
+) -> None:
+    """Recompute a persisted confirmation binding from durable evidence."""
+
+    if confirmation.financial_binding_hash is None:
+        return
+    risk_intent_payload = _durable_risk_intent_payload(
+        durable_risk_intent
+    )
+    risk_intent = RiskIntent.create(
+        symbol=risk_intent_payload["symbol"],
+        side=risk_intent_payload["side"],
+        quantity=risk_intent_payload["quantity"],
+        price=risk_intent_payload["price"],
+        expected_state_version=risk_intent_payload[
+            "expected_state_version"
+        ],
+        reduce_only=risk_intent_payload["reduce_only"],
+        action=risk_intent_payload["action"],
+        instrument_type=risk_intent_payload["instrument_type"],
+    )
+    fingerprint = authoritative_risk_snapshot.get(
+        "risk_policy_fingerprint"
+    )
+    if not isinstance(fingerprint, str):
+        raise AuthorityConflict(
+            "durable confirmed admission lacks risk policy fingerprint"
+        )
+    expected = _financial_confirmation_binding_hash(
+        authority_policy_version=authority_policy_version,
+        risk_intent=risk_intent,
+        risk_policy_fingerprint=fingerprint,
+        reservation_requirements=reservation_requirements,
+    )
+    if confirmation.financial_binding_hash != expected:
+        raise AuthorityConflict(
+            "durable confirmed admission financial binding is inconsistent"
+        )
+
+
 def _risk_snapshot_value(value):
     if isinstance(value, Decimal):
         return _canonical_decimal_text(value)
@@ -2605,6 +2651,19 @@ class AuthorityService:
             raise AuthorityConflict(
                 "historical risk reservation requirements are malformed"
             )
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if confirmation is None:
+                raise AuthorityConflict(
+                    "historical confirmed admission references missing confirmation"
+                )
+            _validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                authority_policy_version=policy.version,
+                durable_risk_intent=durable_risk_intent,
+                authoritative_risk_snapshot=authoritative_snapshot,
+                reservation_requirements=risk_requirements,
+            )
 
         reservation_request = None
         availability_evidence = risk_payload.get(
@@ -2740,6 +2799,15 @@ class AuthorityService:
             "risk_reducing": record.risk_reducing,
             "journal_sequence_cut": journal_sequence_cut,
         }
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if (
+                confirmation is not None
+                and confirmation.financial_binding_hash is not None
+            ):
+                request["financial_confirmation_binding_hash"] = (
+                    confirmation.financial_binding_hash
+                )
         if historical_arithmetic_policy_id is not None:
             request["risk_arithmetic_policy_id"] = (
                 historical_arithmetic_policy_id
@@ -2987,6 +3055,23 @@ class AuthorityService:
         ):
             raise AuthorityConflict(
                 "risk decision reservation delta does not match durable reservation"
+            )
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if confirmation is None:
+                raise AuthorityConflict(
+                    "durable confirmed admission references missing confirmation"
+                )
+            if authoritative_snapshot is None:
+                raise AuthorityConflict(
+                    "durable confirmed admission lacks authoritative risk snapshot"
+                )
+            _validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                authority_policy_version=policy.version,
+                durable_risk_intent=durable_risk_intent,
+                authoritative_risk_snapshot=authoritative_snapshot,
+                reservation_requirements=risk_requirements,
             )
 
         availability_evidence = risk_payload.get(
@@ -5230,6 +5315,10 @@ class AuthorityService:
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
+        if financial_confirmation_binding_hash is not None:
+            request["financial_confirmation_binding_hash"] = (
+                financial_confirmation_binding_hash
+            )
         if journal_sequence_cut is not None:
             request["journal_sequence_cut"] = journal_sequence_cut
         if allocation_binding is not None:

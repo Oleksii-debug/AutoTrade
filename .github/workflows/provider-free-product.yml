@@ -83,12 +83,21 @@ jobs:
         working-directory: tests/Product
       - run: npx playwright install chromium
         working-directory: tests/Product
-      - name: Test the packaged isolated Python and frozen product with keyboard
+      - name: Extract the actual archive and exercise Desktop file preflight
         shell: pwsh
         run: |
-          $env:AUTOTRADE_PYTHON = (Resolve-Path artifacts/candidate-work/payload/runtime/python/python.exe).Path
-          $env:AUTOTRADE_PRODUCT_ROOT = (Resolve-Path artifacts/candidate-work/payload/product).Path
+          Expand-Archive -LiteralPath artifacts/AutoTrade-ZERO-win-x64.zip -DestinationPath 'artifacts/installed candidate with spaces'
+          dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload' --exercise
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test the extracted isolated Python and frozen product with keyboard
+        shell: pwsh
+        run: |
+          $env:AUTOTRADE_PYTHON = (Resolve-Path 'artifacts/installed candidate with spaces/payload/runtime/python/python.exe').Path
+          $env:AUTOTRADE_PRODUCT_ROOT = (Resolve-Path 'artifacts/installed candidate with spaces/payload/product').Path
           node tests/Product/provider-free-browser.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "embedded isolated Python + packaged source + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
       - uses: actions/upload-artifact@v4
         with:

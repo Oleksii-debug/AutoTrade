@@ -125,7 +125,7 @@ async function command(page, action, index) {
   assert.equal(await page.locator("#urgent-status").getAttribute("role"), "alert");
   await stop();
 
-  const crash = spawnSync(python, ["-c", `
+  const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
 from pathlib import Path
 import mvp.autotrade_mvp.simulation_session as s

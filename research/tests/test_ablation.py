@@ -1548,6 +1548,11 @@ class AblationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "after causal cutoff"):
                 pre_outcome_authority.resolve(cases, outcome_refs=refs)
 
+            with self.assertRaisesRegex(ValueError, "exactly match selected pairs"):
+                authority.resolve(cases, outcome_refs=refs[:-1])
+            with self.assertRaisesRegex(ValueError, "duplicate canonical"):
+                authority.resolve(cases, outcome_refs=refs + refs[:1])
+
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
             diagnostic = evaluate_qualified_incremental_value(
                 "agent",

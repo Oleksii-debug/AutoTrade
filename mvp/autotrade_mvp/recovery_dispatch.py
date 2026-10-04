@@ -27,13 +27,16 @@ from .dispatch import (
     TransportSend,
     _canonical_journal_authority_snapshot,
 )
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_latest_reconciliation_checkpoint_for_scope
 from .recovery import HostState, OwnerFence, RecoveryController
 
 
 _ISSUANCE_TOKEN = object()
 _CANONICAL_VALIDATE_SENDER = RecoveryController.validate_sender
+_CANONICAL_RECOVER_DURABLE_UNCERTAINTY = (
+    RecoveryController.recover_durable_submission_uncertainty
+)
 _CANONICAL_LOAD_LATEST_RECONCILIATION = load_latest_reconciliation_checkpoint_for_scope
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
@@ -176,7 +179,12 @@ class RecoveryIssuedDispatcher:
                 "production sender requires a current durable reconciliation checkpoint"
             )
         payload = checkpoint.get("payload")
-        if not isinstance(payload, dict):
+        if (
+            checkpoint.get("event_type") != "AccountReconciled"
+            or checkpoint.get("aggregate_type") != "account_reconciliation"
+            or not isinstance(payload, dict)
+            or payload_digest(payload) != checkpoint.get("payload_hash")
+        ):
             raise PermissionError("durable reconciliation payload is invalid")
         checkpoint_owner = payload.get("checkpoint_owner")
         if (
@@ -237,6 +245,15 @@ class RecoveryIssuedDispatcher:
         self._require_issued_authority()
 
         def canonical_sender_check(owner_id: str, owner_epoch: int) -> None:
+            # Rehydrate same-process and restart-visible ambiguity from the
+            # canonical submission journal while the shared sender gate is held.
+            # A previous SubmissionSending/SubmissionUnknown must invalidate
+            # READY before another attempt can cross the irreversible barrier.
+            _CANONICAL_RECOVER_DURABLE_UNCERTAINTY(
+                self.__recovery,
+                environment=self.__environment,
+                account_id=self.__account_id,
+            )
             self.__sender_check(owner_id, owner_epoch)
             self._require_durable_reconciliation_authority(provider)
 

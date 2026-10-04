@@ -766,6 +766,8 @@ class CompositeReplayCheckpoint:
         protocol = self.protocol_ref.strip()
         if protocol != self.protocol_ref:
             raise ReplayError("protocol_ref must be canonical text")
+        if type(self.schema_version) is not str:
+            raise TypeError("composite replay checkpoint schema_version must be exact text")
         if self.schema_version != "4.0.0":
             raise ReplayError("unsupported composite replay checkpoint schema")
         object.__setattr__(self, "runtime_components", components)

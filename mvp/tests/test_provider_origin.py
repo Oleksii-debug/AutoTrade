@@ -971,10 +971,8 @@ class ProviderOriginJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             _fixture, journal, *_rest, binding = self._route_fixture(directory)
             origin = self._origin(journal, directory)
-            attempt_id = origin.prepare(
+            attempt_id = origin.prepare_direct(
                 binding,
-                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
-                network_policy_identity="sha256:" + "3" * 64,
                 recorded_at=NOW,
             )
             with self.assertRaisesRegex(ProviderOriginError, "incomplete"):

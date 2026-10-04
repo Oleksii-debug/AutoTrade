@@ -2156,6 +2156,7 @@ def _recover_autonomous_observed_fill(
             ),
         ),
         committed_at=timestamp,
+        expected_journal_sequence=proof_cut,
     )
     if (
         economic.cash("USD"),

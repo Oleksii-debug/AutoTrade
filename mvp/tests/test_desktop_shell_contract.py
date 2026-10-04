@@ -313,5 +313,15 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         )
 
 
+    def test_owned_runtime_drains_redirected_child_pipes_without_unbounded_capture(self):
+        code = (ROOT / "src" / "AutoTrade.Desktop" / "OwnedProviderFreeRuntime.cs").read_text(encoding="utf-8")
+        self.assertIn("DrainRedirectedPipeAsync", code)
+        self.assertIn("Task stdoutDrain = Task.CompletedTask;", code)
+        self.assertIn("Task stderrDrain = DrainRedirectedPipeAsync(process.StandardError);", code)
+        self.assertIn("stdoutDrain = DrainRedirectedPipeAsync(process.StandardOutput);", code)
+        self.assertIn("await Task.WhenAll(_stdoutDrain, _stderrDrain);", code)
+        self.assertNotIn("ReadToEndAsync", code)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,10 +26,11 @@ import hmac
 import json
 import os
 from threading import Lock
+import weakref
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -56,8 +57,11 @@ from .provider_core import (
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
+    _require_authenticated_read_query_binding_authority,
+    _require_provider_response_observation_authority,
 )
-from .windows_secrets import PersistentCredentialHandle
+from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
+from .security import SecurityBoundary
 from .provider_response_limits import (
     DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -4667,3 +4671,740 @@ class BinanceSpotAuthenticatedReadTransport:
                 response_bytes=wire_response.body,
                 observed_at=observed_at,
             )
+
+
+def _install_authenticated_read_execution_receipt_authority():
+    """Bind direct provider-read evidence to the exact observation object.
+
+    The registrar and direct-send primitive never become module attributes.
+    Only the three canonical authenticated-read transports receive methods that
+    close over them. Normal/injected transport observations remain useful for
+    simulation and parser tests, but cannot be promoted to provider-origin
+    evidence.
+    """
+
+    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+
+    direct_client_type = UrllibJsonWireClient
+    direct_client_init = UrllibJsonWireClient.__init__
+    direct_client_send = UrllibJsonWireClient.send
+    direct_request_type = AuthenticatedReadHttpRequest
+    direct_response_type = AuthenticatedReadWireResponse
+    canonical_observe = observe_authenticated_json_response
+    direct_request_factory = Request
+    direct_build_opener = build_opener
+    direct_proxy_handler = ProxyHandler
+    direct_redirect_handler = _NoRedirectHandler
+    direct_response_limiter = require_provider_response_bytes
+    direct_parse_qsl = parse_qsl
+    direct_urlsplit = urlsplit
+    direct_payload_digest = payload_digest
+    direct_sha256 = sha256
+    canonical_binance_policies = dict(BINANCE_SPOT_ENDPOINT_POLICIES)
+    canonical_bybit_policies = dict(BYBIT_V5_ENDPOINT_POLICIES)
+    canonical_kraken_policies = dict(KRAKEN_SPOT_ENDPOINT_POLICIES)
+    binance_read_sign = BinanceSpotAuthenticatedReadSigner.sign
+    bybit_read_sign = BybitV5AuthenticatedReadSigner.sign
+    kraken_read_sign = KrakenSpotAuthenticatedReadSigner.sign
+    kraken_credential_parse = KrakenSpotCredential.__dict__["parse"].__func__
+    binance_read_sign_code = binance_read_sign.__code__
+    bybit_read_sign_code = bybit_read_sign.__code__
+    kraken_read_sign_code = kraken_read_sign.__code__
+    kraken_credential_parse_code = kraken_credential_parse.__code__
+    bybit_credential_parse = BybitV5Credential.__dict__["parse"].__func__
+    binance_credential_parse = BinanceSpotCredential.__dict__["parse"].__func__
+    bybit_credential_parse_code = bybit_credential_parse.__code__
+    binance_credential_parse_code = binance_credential_parse.__code__
+    security_lease_for_execution = SecurityBoundary.lease_for_execution
+    security_validate_session = SecurityBoundary.validate_session
+    vault_lease = ProtectedCredentialVault.lease
+    security_lease_code = security_lease_for_execution.__code__
+    security_validate_session_code = security_validate_session.__code__
+    vault_lease_code = vault_lease.__code__
+    direct_client_init_code = direct_client_init.__code__
+    direct_client_send_code = direct_client_send.__code__
+    canonical_observe_code = canonical_observe.__code__
+    direct_build_opener_code = direct_build_opener.__code__
+    direct_response_limiter_code = direct_response_limiter.__code__
+    direct_redirect_code = direct_redirect_handler.redirect_request.__code__
+
+    def require_canonical_secret_authority(transport: object) -> None:
+        resolver = getattr(transport, "secret_resolver", None)
+        if type(resolver) is not SecurityBoundary:
+            raise ProviderTransportError(
+                "provider-origin receipt requires exact SecurityBoundary credential authority"
+            )
+        vault = getattr(resolver, "_credential_vault", None)
+        if type(vault) is not ProtectedCredentialVault:
+            raise ProviderTransportError(
+                "provider-origin receipt requires exact ProtectedCredentialVault authority"
+            )
+        if (
+            SecurityBoundary.lease_for_execution is not security_lease_for_execution
+            or SecurityBoundary.validate_session is not security_validate_session
+            or ProtectedCredentialVault.lease is not vault_lease
+            or security_lease_for_execution.__code__ is not security_lease_code
+            or security_validate_session.__code__ is not security_validate_session_code
+            or vault_lease.__code__ is not vault_lease_code
+        ):
+            raise ProviderTransportError(
+                "provider-origin credential authority implementation changed"
+            )
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def require_direct_dependencies() -> None:
+        if (
+            UrllibJsonWireClient is not direct_client_type
+            or UrllibJsonWireClient.__init__ is not direct_client_init
+            or UrllibJsonWireClient.send is not direct_client_send
+            or AuthenticatedReadHttpRequest is not direct_request_type
+            or AuthenticatedReadWireResponse is not direct_response_type
+            or observe_authenticated_json_response is not canonical_observe
+            or Request is not direct_request_factory
+            or build_opener is not direct_build_opener
+            or ProxyHandler is not direct_proxy_handler
+            or _NoRedirectHandler is not direct_redirect_handler
+            or require_provider_response_bytes is not direct_response_limiter
+            or parse_qsl is not direct_parse_qsl
+            or urlsplit is not direct_urlsplit
+            or payload_digest is not direct_payload_digest
+            or sha256 is not direct_sha256
+            or direct_client_init.__code__ is not direct_client_init_code
+            or direct_client_send.__code__ is not direct_client_send_code
+            or canonical_observe.__code__ is not canonical_observe_code
+            or direct_build_opener.__code__ is not direct_build_opener_code
+            or direct_response_limiter.__code__ is not direct_response_limiter_code
+            or _NoRedirectHandler.redirect_request.__code__ is not direct_redirect_code
+        ):
+            raise ProviderTransportError(
+                "authenticated-read direct transport dependency authority changed"
+            )
+
+    def register(
+        observation: ProviderResponseObservation,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        terminal_authority: object,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+        transport_identity: str,
+        network_policy_identity: str,
+    ) -> None:
+        if type(observation) is not ProviderResponseObservation:
+            raise ProviderTransportError(
+                "direct authenticated-read observation is not canonical"
+            )
+        _require_provider_response_observation_authority(observation)
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if observation.query_binding is not query_binding:
+            raise ProviderTransportError(
+                "direct authenticated-read observation changed query identity"
+            )
+        if terminal_authority is None:
+            raise ProviderTransportError(
+                "direct authenticated-read terminal authority is unavailable"
+            )
+        if type(http_status) is not int or observation.http_status != http_status:
+            raise ProviderTransportError(
+                "direct authenticated-read HTTP status changed after observation"
+            )
+        if type(response_bytes) is not bytes:
+            raise ProviderTransportError(
+                "direct authenticated-read response bytes are not exact bytes"
+            )
+        if observation.response_sha256 != "sha256:" + direct_sha256(response_bytes).hexdigest():
+            raise ProviderTransportError(
+                "direct authenticated-read response digest mismatch"
+            )
+        if type(observed_at) is not datetime or observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ProviderTransportError(
+                "direct authenticated-read observed_at is invalid"
+            )
+        if (
+            type(transport_identity) is not str
+            or not transport_identity
+            or transport_identity != transport_identity.strip()
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read transport identity is invalid"
+            )
+        if (
+            type(network_policy_identity) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", network_policy_identity) is None
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read network policy identity is invalid"
+            )
+        prune()
+        object_id = id(observation)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportError(
+                "direct authenticated-read receipt identity collision"
+            )
+        def clear_receipt(value_ref, *, receipt_id=object_id) -> None:
+            current_state = states.get(receipt_id)
+            if current_state is not None and current_state[0] is value_ref:
+                states.pop(receipt_id, None)
+
+        states[object_id] = (
+            weakref.ref(observation, clear_receipt),
+            (
+                query_binding,
+                terminal_authority,
+                http_status,
+                response_bytes,
+                observed_at.astimezone(timezone.utc),
+                observation.response_sha256,
+                transport_identity,
+                network_policy_identity,
+            ),
+        )
+
+    def require(
+        observation: ProviderResponseObservation,
+    ) -> Mapping[str, object]:
+        if type(observation) is not ProviderResponseObservation:
+            raise ProviderTransportError(
+                "authenticated-read execution receipt requires exact observation"
+            )
+        _require_provider_response_observation_authority(observation)
+        prune()
+        state = states.get(id(observation))
+        if state is None or state[0]() is not observation:
+            raise ProviderTransportError(
+                "authenticated-read observation lacks canonical direct-wire execution receipt"
+            )
+        (
+            query_binding,
+            terminal_authority,
+            http_status,
+            response_bytes,
+            observed_at,
+            response_sha256,
+            transport_identity,
+            network_policy_identity,
+        ) = state[1]
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if observation.query_binding is not query_binding:
+            raise ProviderTransportError(
+                "authenticated-read receipt query identity changed"
+            )
+        if (
+            type(http_status) is not int
+            or observation.http_status != http_status
+            or type(response_bytes) is not bytes
+            or observation.response_sha256 != response_sha256
+            or response_sha256 != "sha256:" + direct_sha256(response_bytes).hexdigest()
+            or observation.observed_at
+            != observed_at.isoformat().replace("+00:00", "Z")
+        ):
+            raise ProviderTransportError(
+                "authenticated-read execution receipt changed after direct wire"
+            )
+        return MappingProxyType(
+            {
+                "query_binding": query_binding,
+                "terminal_authority": terminal_authority,
+                "http_status": http_status,
+                "response_bytes": response_bytes,
+                "observed_at": observed_at,
+                "response_sha256": response_sha256,
+                "transport_identity": transport_identity,
+                "network_policy_identity": network_policy_identity,
+            }
+        )
+
+    def direct_network_policy_identity(
+        policy: ProviderEndpointPolicy,
+        *,
+        provider_environment: str | None = None,
+    ) -> str:
+        material = {
+            "provider_id": policy.provider_id,
+            "environment": policy.environment,
+            "base_url": policy.base_url,
+            "allowed_hosts": sorted(policy.allowed_hosts),
+            "timeout_seconds": policy.timeout_seconds,
+        }
+        if provider_environment is not None:
+            material["provider_environment"] = provider_environment
+        return direct_payload_digest(material)
+
+    def require_direct_request_scope(
+        request: AuthenticatedReadHttpRequest,
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> None:
+        parsed = direct_urlsplit(request.url)
+        expected = direct_urlsplit(policy.base_url + query_binding.endpoint)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected.hostname
+            or parsed.port not in (None, 443)
+            or parsed.path != expected.path
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read signed request escaped exact provider policy"
+            )
+
+    def require_signed_query_scope(
+        request: AuthenticatedReadHttpRequest,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> None:
+        if request.method == "GET":
+            encoded = direct_urlsplit(request.url).query
+        else:
+            if type(request.body) is not bytes:
+                raise ProviderTransportError(
+                    "direct authenticated-read request body is not exact bytes"
+                )
+            try:
+                encoded = request.body.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise ProviderTransportError(
+                    "direct authenticated-read form body is not ASCII"
+                ) from error
+        try:
+            pairs = direct_parse_qsl(
+                encoded,
+                keep_blank_values=True,
+                strict_parsing=False,
+            )
+        except ValueError as error:
+            raise ProviderTransportError(
+                "direct authenticated-read signed query is invalid"
+            ) from error
+        for key, expected_value in query_binding.query.items():
+            values = [value for observed_key, value in pairs if observed_key == key]
+            if values != [expected_value]:
+                raise ProviderTransportError(
+                    "direct authenticated-read signed query changed exact prepared parameter "
+                    + key
+                )
+
+    def direct_execute_observe(
+        *,
+        request: AuthenticatedReadHttpRequest,
+        query_binding: AuthenticatedReadQueryBinding,
+        success_statuses: frozenset[int],
+        final_guard: Callable[[], object],
+        clock_utc: ClockUtc,
+        transport_identity: str,
+        network_policy_identity: str,
+    ) -> ProviderResponseObservation:
+        if type(request) is not direct_request_type:
+            raise ProviderTransportError(
+                "direct authenticated-read request is not canonical"
+            )
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise ProviderTransportError(
+                "direct authenticated-read query binding is not canonical"
+            )
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if (
+            type(success_statuses) is not frozenset
+            or not success_statuses
+            or any(type(value) is not int or not 100 <= value <= 599 for value in success_statuses)
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read success statuses are invalid"
+            )
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+
+        require_direct_dependencies()
+        client = direct_client_type()
+        if type(client) is not direct_client_type:
+            raise ProviderTransportError(
+                "direct authenticated-read transport construction is not canonical"
+            )
+
+        # This is the terminal authority barrier. No caller-supplied network
+        # client executes after it: the next side effect is the pinned direct
+        # UrllibJsonWireClient.send implementation.
+        terminal_authority = final_guard()
+        wire_response = direct_client_send(client, request)
+        if type(wire_response) is not direct_response_type:
+            raise ProviderTransportError(
+                "direct authenticated-read transport lost exact HTTP response"
+            )
+        if wire_response.http_status not in success_statuses:
+            raise ProviderTransportError(
+                "direct authenticated provider read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+            )
+        observed_at = clock_utc()
+        if (
+            type(observed_at) is not datetime
+            or observed_at.tzinfo is None
+            or observed_at.utcoffset() is None
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read clock must return timezone-aware datetime"
+            )
+        observed_at = observed_at.astimezone(timezone.utc)
+        observation = canonical_observe(
+            query_binding=query_binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=observed_at,
+        )
+        register(
+            observation,
+            query_binding=query_binding,
+            terminal_authority=terminal_authority,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=observed_at,
+            transport_identity=transport_identity,
+            network_policy_identity=network_policy_identity,
+        )
+        return observation
+
+    def binance_execute_with_receipt(
+        self: BinanceSpotAuthenticatedReadTransport,
+        query_binding: AuthenticatedReadQueryBinding,
+        *,
+        final_guard: Callable[[], object],
+    ) -> ProviderResponseObservation:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        if type(self) is not BinanceSpotAuthenticatedReadTransport:
+            raise ProviderTransportError(
+                "direct Binance authenticated-read transport type changed"
+            )
+        canonical_policy = canonical_binance_policies.get(self.policy.environment)
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Binance authenticated-read network policy is not canonical"
+            )
+        current_binance_parse = BinanceSpotCredential.__dict__.get("parse")
+        current_binance_parse_func = (
+            current_binance_parse.__func__
+            if isinstance(current_binance_parse, classmethod)
+            else None
+        )
+        if (
+            BinanceSpotAuthenticatedReadSigner.sign is not binance_read_sign
+            or binance_read_sign.__code__ is not binance_read_sign_code
+            or current_binance_parse_func is not binance_credential_parse
+            or binance_credential_parse.__code__ is not binance_credential_parse_code
+        ):
+            raise ProviderTransportError(
+                "direct Binance authenticated-read signer authority changed"
+            )
+        require_direct_dependencies()
+        require_canonical_secret_authority(self)
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+        if (
+            query_binding.provider_id != self.policy.provider_id
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read query scope mismatch"
+            )
+        rule = _binance_authenticated_read_rule(query_binding)
+        if self.quota_gate is not None:
+            self.quota_gate(
+                self.policy.provider_id,
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+        self._require_current_capability(query_binding, rule)
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider=self.policy.provider_id,
+            environment=self.policy.environment,
+            purpose="READ",
+        ) as credential_plaintext:
+            try:
+                signed = binance_read_sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
+            self._require_current_capability(query_binding, rule)
+            require_direct_request_scope(
+                signed,
+                policy=canonical_policy,
+                query_binding=query_binding,
+            )
+            require_signed_query_scope(
+                signed,
+                query_binding=query_binding,
+            )
+            return direct_execute_observe(
+                request=signed,
+                query_binding=query_binding,
+                success_statuses=rule.success_statuses,
+                final_guard=final_guard,
+                clock_utc=self.clock_utc,
+                transport_identity=(
+                    type(self).__module__
+                    + "."
+                    + type(self).__qualname__
+                    + ":direct-receipt-v1"
+                ),
+                network_policy_identity=direct_network_policy_identity(
+                    canonical_policy,
+                ),
+            )
+
+    def bybit_execute_with_receipt(
+        self: BybitV5AuthenticatedReadTransport,
+        query_binding: AuthenticatedReadQueryBinding,
+        *,
+        final_guard: Callable[[], object],
+    ) -> ProviderResponseObservation:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        if type(self) is not BybitV5AuthenticatedReadTransport:
+            raise ProviderTransportError(
+                "direct Bybit authenticated-read transport type changed"
+            )
+        canonical_policy = canonical_bybit_policies.get(self.provider_environment)
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Bybit authenticated-read network policy is not canonical"
+            )
+        current_bybit_parse = BybitV5Credential.__dict__.get("parse")
+        current_bybit_parse_func = (
+            current_bybit_parse.__func__
+            if isinstance(current_bybit_parse, classmethod)
+            else None
+        )
+        if (
+            BybitV5AuthenticatedReadSigner.sign is not bybit_read_sign
+            or bybit_read_sign.__code__ is not bybit_read_sign_code
+            or current_bybit_parse_func is not bybit_credential_parse
+            or bybit_credential_parse.__code__ is not bybit_credential_parse_code
+        ):
+            raise ProviderTransportError(
+                "direct Bybit authenticated-read signer authority changed"
+            )
+        require_direct_dependencies()
+        require_canonical_secret_authority(self)
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+        if (
+            query_binding.provider_id != "BYBIT"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "Bybit authenticated-read query scope mismatch"
+            )
+        rule = _bybit_authenticated_read_rule(query_binding)
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "BYBIT",
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+        self._require_current_capability(query_binding, rule)
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="BYBIT",
+            environment=self.policy.environment,
+            purpose="READ",
+            provider_environment=self.provider_environment,
+        ) as credential_plaintext:
+            try:
+                signed = bybit_read_sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    timestamp_ms=self.clock_millis(),
+                    recv_window_ms=self.recv_window_ms,
+                )
+            finally:
+                credential_plaintext = None
+            self._require_current_capability(query_binding, rule)
+            require_direct_request_scope(
+                signed,
+                policy=canonical_policy,
+                query_binding=query_binding,
+            )
+            require_signed_query_scope(
+                signed,
+                query_binding=query_binding,
+            )
+            return direct_execute_observe(
+                request=signed,
+                query_binding=query_binding,
+                success_statuses=rule.success_statuses,
+                final_guard=final_guard,
+                clock_utc=self.clock_utc,
+                transport_identity=(
+                    type(self).__module__
+                    + "."
+                    + type(self).__qualname__
+                    + ":direct-receipt-v1"
+                ),
+                network_policy_identity=direct_network_policy_identity(
+                    canonical_policy,
+                    provider_environment=self.provider_environment,
+                ),
+            )
+
+    def kraken_execute_with_receipt(
+        self: KrakenSpotAuthenticatedReadTransport,
+        query_binding: AuthenticatedReadQueryBinding,
+        *,
+        final_guard: Callable[[], object],
+    ) -> ProviderResponseObservation:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        if type(self) is not KrakenSpotAuthenticatedReadTransport:
+            raise ProviderTransportError(
+                "direct Kraken authenticated-read transport type changed"
+            )
+        canonical_policy = canonical_kraken_policies.get("LIVE")
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Kraken authenticated-read network policy is not canonical"
+            )
+        current_kraken_parse = KrakenSpotCredential.__dict__.get("parse")
+        current_kraken_parse_func = (
+            current_kraken_parse.__func__
+            if isinstance(current_kraken_parse, classmethod)
+            else None
+        )
+        if (
+            KrakenSpotAuthenticatedReadSigner.sign is not kraken_read_sign
+            or kraken_read_sign.__code__ is not kraken_read_sign_code
+            or current_kraken_parse_func is not kraken_credential_parse
+            or kraken_credential_parse.__code__ is not kraken_credential_parse_code
+        ):
+            raise ProviderTransportError(
+                "direct Kraken authenticated-read signer authority changed"
+            )
+        require_direct_dependencies()
+        require_canonical_secret_authority(self)
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+        if (
+            query_binding.provider_id != "KRAKEN"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != "LIVE"
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read query scope mismatch"
+            )
+        rule = _kraken_spot_authenticated_read_rule(query_binding)
+        if self.quota_gate is not None:
+            self.quota_gate("KRAKEN", self.account_id, "LIVE", "AUTHENTICATED_READ")
+        self._require_current_capability(query_binding, rule)
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="KRAKEN",
+            environment="LIVE",
+            purpose="READ",
+        ) as credential_plaintext:
+            provider_api_key = None
+            try:
+                provider_api_key = kraken_credential_parse(
+                    KrakenSpotCredential,
+                    credential_plaintext,
+                ).api_key
+                nonce_domain = self.nonce_allocator.for_provider_api_key(
+                    provider_api_key
+                )
+                provider_api_key = None
+                with nonce_domain.serialized_send():
+                    nonce = nonce_domain.allocate()
+                    signed = kraken_read_sign(
+                        policy=self.policy,
+                        query_binding=query_binding,
+                        credential_plaintext=credential_plaintext,
+                        nonce=nonce,
+                    )
+                    self._require_current_capability(query_binding, rule)
+                    require_direct_request_scope(
+                        signed,
+                        policy=canonical_policy,
+                        query_binding=query_binding,
+                    )
+                    require_signed_query_scope(
+                        signed,
+                        query_binding=query_binding,
+                    )
+                    return direct_execute_observe(
+                        request=signed,
+                        query_binding=query_binding,
+                        success_statuses=rule.success_statuses,
+                        final_guard=final_guard,
+                        clock_utc=self.clock_utc,
+                        transport_identity=(
+                            type(self).__module__
+                            + "."
+                            + type(self).__qualname__
+                            + ":direct-receipt-v1"
+                        ),
+                        network_policy_identity=direct_network_policy_identity(
+                            canonical_policy,
+                        ),
+                    )
+            finally:
+                provider_api_key = None
+                credential_plaintext = None
+
+    return (
+        require,
+        kraken_execute_with_receipt,
+        bybit_execute_with_receipt,
+        binance_execute_with_receipt,
+    )
+
+
+(
+    require_authenticated_read_execution_receipt,
+    _kraken_execute_with_receipt,
+    _bybit_execute_with_receipt,
+    _binance_execute_with_receipt,
+) = _install_authenticated_read_execution_receipt_authority()
+
+KrakenSpotAuthenticatedReadTransport.execute_with_receipt = _kraken_execute_with_receipt
+BybitV5AuthenticatedReadTransport.execute_with_receipt = _bybit_execute_with_receipt
+BinanceSpotAuthenticatedReadTransport.execute_with_receipt = _binance_execute_with_receipt
+
+del _install_authenticated_read_execution_receipt_authority
+del _kraken_execute_with_receipt
+del _bybit_execute_with_receipt
+del _binance_execute_with_receipt

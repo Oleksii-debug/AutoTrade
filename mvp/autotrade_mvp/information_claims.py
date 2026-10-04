@@ -854,8 +854,7 @@ def build_information_event(
 ) -> dict[str, object]:
     """Build a canonical InformationEvent v1.0.0 without granting authority."""
 
-    if not isinstance(document, SourceDocument):
-        raise ValueError("document must be a SourceDocument")
+    document = _reseal_source_document(document)
     canonical_information_id = _canonical_uuid(information_id, name="information_id")
     canonical_revision = _text(revision, name="revision")
     if re.fullmatch(r"0|[1-9][0-9]*", canonical_revision) is None:
@@ -868,7 +867,7 @@ def build_information_event(
         name="extraction_version",
     )
 
-    claim_values = tuple(claims)
+    claim_values = tuple(_reseal_information_claim(claim) for claim in claims)
     if len({claim.claim_id for claim in claim_values if isinstance(claim, InformationClaim)}) != len(claim_values):
         raise ValueError("claims must have unique identities")
 

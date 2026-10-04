@@ -355,6 +355,58 @@ def _execution_receipt_ref(
         ).encode("utf-8")
     ).hexdigest()
 
+
+def _require_durable_execution_receipt(
+    *,
+    attempt_id: str,
+    prepared: Mapping[str, object],
+    prepared_payload: Mapping[str, object],
+    retained_payload: Mapping[str, object],
+    snapshot: Mapping[str, object],
+) -> None:
+    origin_kind = retained_payload.get("origin_kind")
+    receipt_ref = retained_payload.get("transport_execution_receipt_ref")
+    terminal_cut = retained_payload.get("terminal_authority_journal_sequence_cut")
+    if origin_kind == _TEST_INJECTED_ORIGIN_KIND:
+        if receipt_ref is not None or terminal_cut is not None:
+            raise ProviderOriginError(
+                "TEST_INJECTED durable response cannot carry provider execution receipt"
+            )
+        return
+    if origin_kind != _PROVIDER_ORIGIN_KIND:
+        raise ProviderOriginError(
+            "durable response origin classification is invalid"
+        )
+    prepared_sequence = prepared.get("journal_sequence")
+    if (
+        type(receipt_ref) is not str
+        or _EXECUTION_RECEIPT_REF_RE.fullmatch(receipt_ref) is None
+        or type(terminal_cut) is not int
+        or terminal_cut < 1
+        or type(prepared_sequence) is not int
+        or prepared_sequence < 1
+        or terminal_cut < prepared_sequence
+    ):
+        raise ProviderOriginError(
+            "PROVIDER_ORIGIN durable response lacks valid terminal execution receipt"
+        )
+    expected = _execution_receipt_ref(
+        attempt_id=attempt_id,
+        qualified_query_digest=snapshot["qualified_query_digest"],
+        qualification_id=snapshot["qualification_id"],
+        qualified_route_rule_digest=snapshot["qualified_route_rule_digest"],
+        transport_identity=prepared_payload["transport_identity"],
+        network_policy_identity=prepared_payload["network_policy_identity"],
+        http_status=retained_payload["http_status"],
+        response_sha256=retained_payload["response_sha256"],
+        observed_at=retained_payload["observed_at"],
+        terminal_authority_journal_sequence_cut=terminal_cut,
+    )
+    if receipt_ref != expected:
+        raise ProviderOriginError(
+            "PROVIDER_ORIGIN durable execution receipt digest mismatch"
+        )
+
 def _origin_ref(
     *,
     origin_kind: str,
@@ -854,6 +906,27 @@ class ProviderOriginJournal:
         prepared_subject_digest = _exact_text(
             prepared.get("payload_hash"), name="prepared_subject_digest"
         )
+        transport_execution_receipt_ref = None
+        terminal_authority_journal_sequence_cut = None
+        if provider_receipt is not None:
+            terminal = provider_receipt.get("terminal_authority")
+            terminal_authority_journal_sequence_cut = (
+                terminal.authority_journal_sequence_cut
+            )
+            transport_execution_receipt_ref = _execution_receipt_ref(
+                attempt_id=attempt,
+                qualified_query_digest=snapshot["qualified_query_digest"],
+                qualification_id=snapshot["qualification_id"],
+                qualified_route_rule_digest=snapshot["qualified_route_rule_digest"],
+                transport_identity=prepared_payload["transport_identity"],
+                network_policy_identity=prepared_payload["network_policy_identity"],
+                http_status=http_status,
+                response_sha256=response_digest,
+                observed_at=observed_text,
+                terminal_authority_journal_sequence_cut=(
+                    terminal_authority_journal_sequence_cut
+                ),
+            )
         metadata = {
             "evidence_kind": evidence_kind,
             "attempt_id": attempt,
@@ -865,6 +938,10 @@ class ProviderOriginJournal:
             "data_entitlement": snapshot["data_entitlement"],
             "parser_identity": snapshot["parser_identity"],
             "provider_environment": snapshot["provider_environment"],
+            "transport_execution_receipt_ref": transport_execution_receipt_ref,
+            "terminal_authority_journal_sequence_cut": (
+                terminal_authority_journal_sequence_cut
+            ),
         }
         try:
             manifest = ArtifactStore.publish_bytes(
@@ -906,6 +983,10 @@ class ProviderOriginJournal:
             "response_sha256": response_digest,
             "response_artifact_id": artifact_id,
             "observed_at": observed_text,
+            "transport_execution_receipt_ref": transport_execution_receipt_ref,
+            "terminal_authority_journal_sequence_cut": (
+                terminal_authority_journal_sequence_cut
+            ),
         }
         retained_id = attempt + ":retained"
         JournalStore.append_event(
@@ -976,6 +1057,13 @@ class ProviderOriginJournal:
             )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event is not bound to exact Prepared event")
+        _require_durable_execution_receipt(
+            attempt_id=attempt,
+            prepared=prepared,
+            prepared_payload=prepared_payload,
+            retained_payload=retained_payload,
+            snapshot=snapshot,
+        )
         observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
         JournalStore.append_event(
             self._require_store(),
@@ -1040,6 +1128,13 @@ class ProviderOriginJournal:
             )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event differs from exact Prepared response")
+        _require_durable_execution_receipt(
+            attempt_id=attempt,
+            prepared=prepared,
+            prepared_payload=prepared_payload,
+            retained_payload=retained_payload,
+            snapshot=snapshot,
+        )
         expected_subject_digest = _exact_text(
             prepared.get("payload_hash"), name="prepared_subject_digest"
         )
@@ -1093,6 +1188,12 @@ class ProviderOriginJournal:
             response_artifact_id=artifact_id,
             observed_at=observed_text,
             journal_sequence=journal_sequence,
+            transport_execution_receipt_ref=retained_payload.get(
+                "transport_execution_receipt_ref"
+            ),
+            terminal_authority_journal_sequence_cut=retained_payload.get(
+                "terminal_authority_journal_sequence_cut"
+            ),
         )
         return AuthenticatedReadResponseBinding(
             attempt_id=attempt,
@@ -1111,6 +1212,12 @@ class ProviderOriginJournal:
             parser_identity=snapshot["parser_identity"],
             transport_identity=prepared_payload["transport_identity"],
             network_policy_identity=prepared_payload["network_policy_identity"],
+            transport_execution_receipt_ref=retained_payload.get(
+                "transport_execution_receipt_ref"
+            ),
+            terminal_authority_journal_sequence_cut=retained_payload.get(
+                "terminal_authority_journal_sequence_cut"
+            ),
             http_status=status,
             observed_at=observed_text,
             response_sha256=response_digest,

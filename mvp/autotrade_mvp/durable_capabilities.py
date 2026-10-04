@@ -1,8 +1,8 @@
 """Durable capability history with fail-closed restart admission.
 
-Capability derivation remains owned by capabilities.py.  This adapter persists
+Capability derivation remains owned by capabilities.py. This adapter persists
 already-derived immutable snapshots in the canonical JournalStore so historical
-causal queries survive restart.  A persisted VERIFIED snapshot is deliberately
+causal queries survive restart. A persisted VERIFIED snapshot is deliberately
 *not* sufficient for new financial admission after process restart: the current
 process must add a freshly derived snapshot before require_verified() succeeds.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
+
 from .capabilities import (
     CapabilityError,
     CapabilityRegistry,
@@ -142,13 +143,48 @@ class DurableCapabilityRegistry:
         self.store = store
         self._session_verified: dict[str, CapabilitySnapshot] = {}
 
+    def _resolved_cut(self, requested: int | None) -> int:
+        if requested is not None and (
+            type(requested) is not int or requested < 0
+        ):
+            raise ValueError(
+                "journal_sequence_cut must be a non-negative exact integer or None"
+            )
+        cut = self.store.whole_store_state_cut()
+        if type(cut) is not dict:
+            raise CapabilityError("whole-store journal cut is non-canonical")
+        observed = cut.get("journal_sequence")
+        if type(observed) is not int or observed < 0:
+            raise CapabilityError("whole-store journal cut lacks canonical sequence")
+        if requested is None:
+            return observed
+        if requested > observed:
+            raise CapabilityError("requested capability journal cut is in the future")
+        return requested
+
     def _history_with_versions(
         self,
+        *,
+        journal_sequence_cut: int | None = None,
     ) -> tuple[CapabilityRegistry, dict[str, int]]:
+        resolved_cut = self._resolved_cut(journal_sequence_cut)
         registry = CapabilityRegistry()
         events = self.store.load_events_by_aggregate_type(_AGGREGATE_TYPE)
         seen_versions: dict[str, int] = {}
+        previous_sequence = 0
         for event in events:
+            if type(event) is not dict:
+                raise CapabilityError("capability journal event is not canonical")
+            sequence = event.get("journal_sequence")
+            if type(sequence) is not int or sequence < 1:
+                raise CapabilityError("capability event lacks global journal sequence")
+            if sequence > resolved_cut:
+                continue
+            if sequence <= previous_sequence:
+                raise CapabilityError(
+                    "capability journal sequence is not strictly increasing"
+                )
+            previous_sequence = sequence
             if event["aggregate_type"] != _AGGREGATE_TYPE:
                 raise CapabilityError("capability event uses wrong aggregate type")
             if event["event_type"] not in {_EVENT_TYPE_V1, _EVENT_TYPE}:
@@ -171,15 +207,19 @@ class DurableCapabilityRegistry:
             registry.add(snapshot)
         return registry, seen_versions
 
-    def _history(self) -> CapabilityRegistry:
-        registry, _versions = self._history_with_versions()
+    def _history(
+        self,
+        *,
+        journal_sequence_cut: int | None = None,
+    ) -> CapabilityRegistry:
+        registry, _versions = self._history_with_versions(
+            journal_sequence_cut=journal_sequence_cut
+        )
         return registry
 
     def add(self, snapshot: CapabilitySnapshot) -> bool:
         if type(snapshot) is not CapabilitySnapshot:
             raise TypeError("snapshot must be exact CapabilitySnapshot")
-        # Rebuild durable truth first so stale writers cannot append after a
-        # newer refresh for the same identity.
         registry, seen_versions = self._history_with_versions()
         aggregate_id = _identity_id(snapshot)
         try:
@@ -206,7 +246,6 @@ class DurableCapabilityRegistry:
                 self._session_verified[snapshot.snapshot_id] = snapshot
             return False
 
-        # Canonical in-memory registry owns ordering/content semantics.
         registry.add(snapshot)
         version = seen_versions.get(aggregate_id, 0) + 1
         payload = _payload(snapshot)
@@ -223,7 +262,6 @@ class DurableCapabilityRegistry:
         try:
             result = self.store.append_event(envelope)
         except ValueError as error:
-            # A concurrent refresh won. Re-read and accept only exact replay.
             current = self._history()
             try:
                 persisted = current.latest(
@@ -259,10 +297,16 @@ class DurableCapabilityRegistry:
         return result.inserted
 
     def latest(self, **kwargs) -> CapabilitySnapshot:
-        return self._history().latest(**kwargs)
+        journal_sequence_cut = kwargs.pop("journal_sequence_cut", None)
+        return self._history(
+            journal_sequence_cut=journal_sequence_cut
+        ).latest(**kwargs)
 
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
-        snapshot = self._history().latest(**kwargs)
+        journal_sequence_cut = kwargs.pop("journal_sequence_cut", None)
+        snapshot = self._history(
+            journal_sequence_cut=journal_sequence_cut
+        ).latest(**kwargs)
         point = _instant(kwargs["at"], "at")
         if type(snapshot) is not CapabilitySnapshot:
             raise CapabilityError("capability snapshot is not canonical")

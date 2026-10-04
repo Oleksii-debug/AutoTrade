@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import (
+    HostLifetimeGuardedDispatcher,
     HostLifetimeProviderSecretResolver,
     build_production_financial_host,
 )
@@ -79,6 +80,10 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(runtime.recovery_controller.state, HostState.RECOVERING)
             self.assertTrue(runtime.provider_secret_resolver.accepting)
             self.assertEqual(runtime.provider_secret_resolver.active_leases, 0)
+            self.assertIsInstance(runtime.dispatcher, HostLifetimeGuardedDispatcher)
+            self.assertEqual(runtime.dispatcher.owner, runtime.owner)
+            self.assertTrue(runtime.dispatcher.accepting)
+            self.assertEqual(runtime.dispatcher.active_dispatches, 0)
             events = host.journal.load_events("recovery_owner", "PAPER:account-1")
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["owner_id"], "host-a")
@@ -130,11 +135,16 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 )
 
             order: list[str] = []
+            original_dispatcher_drain = runtime.dispatcher.stop_and_drain
             original_drain = runtime.provider_secret_resolver.stop_and_drain
             original_stop = runtime.recovery_controller.stop
             host._admission_gate.stop_and_drain = Mock(  # type: ignore[method-assign]
                 side_effect=lambda: order.append("commands")
             )
+
+            def drain_dispatcher() -> None:
+                order.append("dispatcher")
+                original_dispatcher_drain()
 
             def drain_provider() -> None:
                 order.append("provider")
@@ -144,6 +154,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 order.append("recovery")
                 original_stop()
 
+            runtime.dispatcher.stop_and_drain = drain_dispatcher  # type: ignore[method-assign]
             runtime.provider_secret_resolver.stop_and_drain = drain_provider  # type: ignore[method-assign]
             runtime.recovery_controller.stop = stop_recovery  # type: ignore[method-assign]
             host.close = Mock(
@@ -156,7 +167,10 @@ class ProductionFinancialHostTests(unittest.TestCase):
 
             runtime.close()
 
-            self.assertEqual(order, ["commands", "provider", "recovery", "host"])
+            self.assertEqual(
+                order,
+                ["commands", "dispatcher", "provider", "recovery", "host"],
+            )
             self.assertFalse(runtime.provider_secret_resolver.accepting)
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
             self.assertIsNone(runtime.recovery_controller.owner)
@@ -271,6 +285,56 @@ class ProductionFinancialHostTests(unittest.TestCase):
             host.close.assert_called_once_with()
             self.assertTrue(fence_release_reached.is_set())
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
+
+    def test_dispatcher_binds_sender_check_to_recovery_owner(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+
+            runtime.dispatcher._dispatcher.dispatch = Mock(return_value="sent")
+            self.assertEqual(runtime.dispatcher.dispatch(probe="value"), "sent")
+            kwargs = runtime.dispatcher._dispatcher.dispatch.call_args.kwargs
+            sender_check = kwargs.pop("sender_check")
+            self.assertIs(sender_check.__self__, runtime.recovery_controller)
+            self.assertIs(
+                sender_check.__func__,
+                runtime.recovery_controller.validate_sender.__func__,
+            )
+            self.assertEqual(kwargs, {"probe": "value"})
+
+            with self.assertRaisesRegex(TypeError, "construction-bound"):
+                runtime.dispatcher.dispatch(
+                    sender_check=lambda *_args: None,
+                    probe="value",
+                )
+
+    def test_closed_dispatcher_rejects_new_provider_send(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+            runtime.dispatcher.stop_and_drain()
+            with self.assertRaisesRegex(PermissionError, "dispatch is closed"):
+                runtime.dispatcher.dispatch(probe="value")
 
     def test_resolver_binds_host_scope_and_trade_purpose(self) -> None:
         boundary = _LeaseBoundary()

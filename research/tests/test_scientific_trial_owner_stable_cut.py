@@ -40,6 +40,8 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
                 nonlocal caller_mutation_was_rejected
                 with self.assertRaises(AttributeError):
                     first.path = second.path
+                with self.assertRaises(AttributeError):
+                    first._path = second.path
                 caller_mutation_was_rejected = True
                 self.assertEqual(first.path, original_path)
                 self.assertEqual(authority.path, original_path)

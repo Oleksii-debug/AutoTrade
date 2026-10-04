@@ -327,6 +327,11 @@ class ScientificRegistry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"path", "_path"} and "_path" in vars(self):
+            raise AttributeError("ScientificRegistry backing path is immutable")
+        object.__setattr__(self, name, value)
+
     @property
     def path(self) -> Path:
         """Frozen backing path selected at construction."""

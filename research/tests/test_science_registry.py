@@ -104,6 +104,8 @@ class ScientificRegistryTests(unittest.TestCase):
 
             with self.assertRaises(AttributeError):
                 store.path = root / "second.sqlite3"
+            with self.assertRaises(AttributeError):
+                store._path = root / "second.sqlite3"
 
             self.assertEqual(store.path, original)
             self.assertFalse((root / "second.sqlite3").exists())

@@ -3956,14 +3956,9 @@ def commit_provider_fill_bust_with_economic_reversal(
                 "fill bust intent does not match admitted reservation"
             )
         for resource, amount in reservation_usage.items():
-            if (
-                resource not in snapshot.original
-                or amount > snapshot.original[resource]
-                or resource not in snapshot.consumed
-                or amount > snapshot.consumed[resource]
-            ):
+            if resource not in snapshot.original or amount > snapshot.original[resource]:
                 raise AccountingConflict(
-                    "fill bust usage is not present in consumed reservation capacity"
+                    "fill bust usage exceeds the admitted reservation envelope"
                 )
 
         source_transaction_id = _text(

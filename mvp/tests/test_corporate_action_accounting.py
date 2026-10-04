@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.corporate_action_accounting import (
@@ -16,7 +17,7 @@ from mvp.autotrade_mvp.corporate_action_evidence import (
 )
 from mvp.autotrade_mvp.corporate_actions import CorporateActionBook, EquityState
 from mvp.autotrade_mvp.instruments import InstrumentRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -160,6 +161,48 @@ def evidence_store(store):
 
 
 class AtomicCorporateActionFinancialTests(unittest.TestCase):
+    def test_financial_collaborator_subclasses_are_rejected_before_dispatch(self):
+        calls = []
+
+        class HostileEconomicBook(DurableProviderEconomicBook):
+            def __getattribute__(self, name):
+                calls.append(("economic", name))
+                raise AssertionError("economic subclass dispatched")
+
+        class HostileCorporateBook(CorporateActionBook):
+            def __getattribute__(self, name):
+                calls.append(("corporate", name))
+                raise AssertionError("corporate subclass dispatched")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action())
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact DurableProviderEconomicBook",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=object.__new__(HostileEconomicBook),
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+            self.assertEqual(calls, [])
+
+            economics = economic_book(store)
+            with self.assertRaisesRegex(TypeError, "exact CorporateActionBook"):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=object.__new__(HostileCorporateBook),
+                    accepted=accepted,
+                )
+            self.assertEqual(calls, [])
+
     def test_sealed_dividend_source_and_economics_commit_together(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -219,12 +262,14 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             durable_evidence = evidence_store(store)
             economics = economic_book(store)
             accepted = resolve_action(sealed_action())
-            original = store.commit_command
+            original = JournalStore.commit_command
 
-            def fail(**kwargs):
-                raise RuntimeError("injected atomic corporate action failure")
+            def fail(selected_store, **kwargs):
+                if kwargs.get("actor") == "corporate-action-financial-integration":
+                    raise RuntimeError("injected atomic corporate action failure")
+                return original(selected_store, **kwargs)
 
-            store.commit_command = fail
+            JournalStore.commit_command = fail
             try:
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     commit_authoritative_corporate_action(
@@ -235,11 +280,12 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                         accepted=accepted,
                     )
             finally:
-                store.commit_command = original
+                JournalStore.commit_command = original
 
             reopened = JournalStore(path)
             self.assertEqual(
-                reopened.load_events(
+                JournalStore.load_events(
+                    reopened,
                     "corporate_action_evidence",
                     evidence_store(reopened).aggregate_id,
                 ),
@@ -574,6 +620,167 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(len(economics.transactions), 1)
+
+    def test_journal_advance_after_entitlement_proof_fails_closed(self):
+        from mvp.autotrade_mvp import corporate_action_accounting as accounting_module
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action())
+            original = accounting_module._canonical_entitlement_position_proof
+            injected = False
+
+            def prove_then_advance(*args, **kwargs):
+                nonlocal injected
+                proof = original(*args, **kwargs)
+                if not injected:
+                    injected = True
+                    store.append_event(
+                        {
+                            "event_id": "cas-interference-1",
+                            "event_type": "QualificationInterference",
+                            "aggregate_type": "qualification_interference",
+                            "aggregate_id": "qualification-interference:1",
+                            "aggregate_version": "1",
+                            "committed_at": accepted.observed_at,
+                            "payload": {"kind": "UNRELATED_JOURNAL_ADVANCE"},
+                            "payload_hash": payload_digest(
+                                {"kind": "UNRELATED_JOURNAL_ADVANCE"}
+                            ),
+                        }
+                    )
+                return proof
+
+            accounting_module._canonical_entitlement_position_proof = prove_then_advance
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed after financial evidence validation",
+                ):
+                    commit_authoritative_corporate_action(
+                        store=store,
+                        evidence_store=durable_evidence,
+                        economic_book=economics,
+                        corporate_book=pure_book(),
+                        accepted=accepted,
+                    )
+            finally:
+                accounting_module._canonical_entitlement_position_proof = original
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            economics.refresh()
+            self.assertEqual(len(economics.transactions), 1)
+
+            retry = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=accepted,
+            )
+            self.assertTrue(retry.inserted)
+            self.assertEqual(len(economics.transactions), 2)
+
+    def test_post_planning_journal_shadow_fails_before_financial_mutation(self):
+        from mvp.autotrade_mvp import corporate_action_accounting as accounting_module
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action())
+            original = accounting_module._economic_transactions
+            injected = False
+
+            def plan_then_shadow(*args, **kwargs):
+                nonlocal injected
+                transactions = original(*args, **kwargs)
+                if not injected:
+                    injected = True
+                    store.commit_command = lambda **_kwargs: (
+                        "forged-command",
+                        True,
+                        {},
+                    )
+                return transactions
+
+            accounting_module._economic_transactions = plan_then_shadow
+            try:
+                with self.assertRaisesRegex(TypeError, "shadowed"):
+                    commit_authoritative_corporate_action(
+                        store=store,
+                        evidence_store=durable_evidence,
+                        economic_book=economics,
+                        corporate_book=pure_book(),
+                        accepted=accepted,
+                    )
+            finally:
+                accounting_module._economic_transactions = original
+                if "commit_command" in store.__dict__:
+                    del store.commit_command
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            economics.refresh()
+            self.assertEqual(len(economics.transactions), 1)
+
+    def test_exact_retry_ignores_later_unrelated_journal_tail(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            accepted = resolve_action(sealed_action())
+            first = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=evidence_store(store),
+                economic_book=economic_book(store),
+                corporate_book=pure_book(),
+                accepted=accepted,
+            )
+            self.assertTrue(first.inserted)
+
+            payload = {"kind": "POST_COMMIT_UNRELATED_ADVANCE"}
+            store.append_event(
+                {
+                    "event_id": "post-commit-interference-1",
+                    "event_type": "QualificationInterference",
+                    "aggregate_type": "qualification_interference",
+                    "aggregate_id": "qualification-interference:2",
+                    "aggregate_version": "1",
+                    "committed_at": accepted.observed_at,
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+
+            reopened = JournalStore(path)
+            economics = economic_book(reopened)
+            retry = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=accepted,
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(len(economics.transactions), 2)
+
 
 
 

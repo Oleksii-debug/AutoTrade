@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from typing import Iterable
+from threading import RLock
+import weakref
 
 from .exact_decimal import (
     ExactDecimalError,
@@ -533,6 +535,49 @@ class EconomicBook:
         )
 
 
+def _scoped_economic_owner_operations():
+    owners = {}
+    lock = RLock()
+
+    def bind(value, environment, account_id, book):
+        with lock:
+            for key, (reference, *_rest) in tuple(owners.items()):
+                if reference() is None:
+                    owners.pop(key)
+            current = owners.get(id(value))
+            if current is not None and current[0]() is value:
+                raise AccountingConflict("immutable scoped-book owner is already initialized")
+            owners[id(value)] = (weakref.ref(value), environment, account_id, book)
+
+    def require(value):
+        if type(value) is not ScopedEconomicBook:
+            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
+        with lock:
+            owner = owners.get(id(value))
+            if owner is None or owner[0]() is not value:
+                raise AccountingConflict("immutable scoped-book owner is unavailable")
+            _reference, environment, account_id, book = owner
+        state = object.__getattribute__(value, "__dict__")
+        current_book = state.get("_book")
+        if type(current_book) is not EconomicBook:
+            raise TypeError("ScopedEconomicBook must own an exact EconomicBook")
+        if (
+            type(state.get("environment")) is not str
+            or type(state.get("account_id")) is not str
+            or state["environment"] != environment
+            or state["account_id"] != account_id
+            or current_book is not book
+        ):
+            raise AccountingConflict("immutable scoped-book owner changed")
+        return environment, account_id, book
+
+    return bind, require
+
+
+_bind_scoped_economic_book_owner, _require_scoped_economic_book_owner = _scoped_economic_owner_operations()
+del _scoped_economic_owner_operations
+
+
 class ScopedEconomicBook:
     """Account/environment-bound facade over the canonical EconomicBook."""
 
@@ -548,9 +593,13 @@ class ScopedEconomicBook:
         normalized_environment = _name(environment, field="environment").upper()
         if normalized_environment not in self._ENVIRONMENTS:
             raise ValueError("unsupported environment")
+        normalized_account = _name(account_id, field="account_id")
+        book = EconomicBook(transactions)
+        if type(self) is ScopedEconomicBook:
+            _bind_scoped_economic_book_owner(self, normalized_environment, normalized_account, book)
         self.environment = normalized_environment
-        self.account_id = _name(account_id, field="account_id")
-        self._book = EconomicBook(transactions)
+        self.account_id = normalized_account
+        self._book = book
 
     @property
     def transactions(self) -> tuple[JournalTransaction, ...]:

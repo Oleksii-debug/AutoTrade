@@ -302,7 +302,8 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, stop)
     print(_launch_message(launch_url, no_browser=args.no_browser), flush=True)
     if not args.no_browser:
-        webbrowser.open(launch_url)
+        if not webbrowser.open(launch_url):
+            print(_launch_message(launch_url, no_browser=True), flush=True)
     try:
         runtime.serve_forever()
     finally:

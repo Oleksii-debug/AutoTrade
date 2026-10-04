@@ -7,10 +7,12 @@ from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthorityError,
+    FinanciallyBoundBybitOrderSender,
     build_financial_send_authority_issuer,
 )
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_route_dispatch import (
@@ -18,7 +20,11 @@ from mvp.autotrade_mvp.provider_route_dispatch import (
     bind_selected_provider_route_submission_scope,
     compose_selected_provider_route_authority,
 )
+from mvp.autotrade_mvp.provider_route_financial_binding import (
+    build_selected_bybit_transport_authority_inputs,
+)
 from mvp.autotrade_mvp.security import SecurityBoundary
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.test_provider_route_dispatch import (
     ProviderRouteDispatchTests,
     successor_spot_q,
@@ -219,6 +225,61 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
             )
             self.assertTrue(issuer.provider_route_bound)
             self.assertIs(issuer.runtime, runtime)
+
+    def test_selected_route_reaches_public_bybit_product_builder_without_new_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            transport_inputs = build_selected_bybit_transport_authority_inputs(route)
+            sender = build_production_bybit_order_sender(
+                runtime,
+                financial_issuer=issuer,
+                **transport_inputs,
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="cred-route-bybit",
+                    account_id="paper-account",
+                    provider="BYBIT",
+                    environment="PAPER",
+                    provider_environment=route.candidate.provider_environment,
+                    purpose="TRADE",
+                    generation=1,
+                ),
+                session_token="route-session",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: NOW,
+            )
+            self.assertIs(type(sender), FinanciallyBoundBybitOrderSender)
+            lower = sender._FinanciallyBoundBybitOrderSender__sender
+            transport = lower._ProductionBybitOrderSender__transport
+            self.assertEqual(
+                transport.capability_snapshot_id,
+                route.capability_snapshot_id,
+            )
+            self.assertEqual(
+                transport.provider_environment,
+                route.candidate.provider_environment,
+            )
+            self.assertIs(
+                transport.capability_registry.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id=route.candidate.entity_id,
+                    environment="PAPER",
+                    provider_environment=route.candidate.provider_environment,
+                    instrument_version=route.capability.instrument_version,
+                    at=NOW,
+                ),
+                route.capability,
+            )
 
     def test_partial_provider_route_binding_is_rejected(self):
         with TemporaryDirectory() as directory:

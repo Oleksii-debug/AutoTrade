@@ -2,7 +2,8 @@
 
 The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
-binds every changed path to those scopes. A candidate must descend from the exact
+binds every changed path to those scopes. Destructive base-tree accounting covers
+not only direct deletions but also rename-away and Git object-type replacement. The resulting candidate tree must also remain case-insensitively unique for Windows-safe checkout. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
 cannot be deleted, renamed away or changed to another Git object type. A PR that
 deletes both a material absolute number and a material fraction of the base tree
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 from typing import Iterable, Sequence
 
@@ -49,19 +51,16 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
-# These two files execute the reconvergence trust decision itself.  Unlike
-# descriptive sentinels, an ordinary content modification can change what the
-# guard permits while leaving the path and Git object type intact.  Such a
-# modification therefore requires independently supplied *exact-path* mutation
-# authority.  A directory scope is intentionally insufficient.
+# Only the executable reconvergence authorities require external exact-path
+# authorization for ordinary content replacement. Descriptive/control sentinels
+# retain unconditional delete/rename-away/type-change protection without making
+# every routine metadata edit require a bootstrap bypass.
 PROTECTED_MUTATION_ROOTS = frozenset(
     {
         ".github/workflows/reconvergence-integrity.yml",
         "control/tools/reconvergence_integrity.py",
     }
 )
-
-_SIMPLE_CHANGE_STATUSES = frozenset({"A", "M", "D", "T"})
 
 
 @dataclass(frozen=True)
@@ -71,6 +70,47 @@ class Change:
     previous_path: str | None = None
 
 
+_NAME_STATUS_RE = re.compile(
+    r"^(?:A|M|D|T|R(?:100|[0-9]{1,2})|C(?:100|[0-9]{1,2}))$"
+)
+
+
+def _validated_repo_path(value: str, *, name: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be a non-empty exact string")
+    if any(character in value for character in ("\x00", "\n", "\r", "\t")):
+        raise ValueError(f"{name} contains a forbidden control character")
+    if value.startswith("/") or "\\" in value:
+        raise ValueError(f"{name} must be a canonical repository-relative path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"{name} must be a canonical repository-relative path")
+    return value
+
+
+def _validated_change(change: Change) -> Change:
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    if type(change.status) is not str or _NAME_STATUS_RE.fullmatch(change.status) is None:
+        raise ValueError(f"Unsupported Git name-status code: {change.status!r}")
+    kind = change.status[:1]
+    path = _validated_repo_path(change.path, name="changed path")
+    if kind in {"R", "C"}:
+        if change.previous_path is None:
+            raise ValueError(f"{kind} change is missing its source path")
+        previous = _validated_repo_path(
+            change.previous_path,
+            name="changed source path",
+        )
+    else:
+        if change.previous_path is not None:
+            raise ValueError(
+                f"{change.status} change must not carry a previous_path"
+            )
+        previous = None
+    return Change(status=change.status, path=path, previous_path=previous)
+
+
 @dataclass(frozen=True)
 class IntegrityAssessment:
     allowed: bool
@@ -78,63 +118,21 @@ class IntegrityAssessment:
     base_path_count: int
     deletion_count: int
     deletion_fraction: float
+    destructive_change_count: int
+    destructive_change_fraction: float
     protected_deletions: tuple[str, ...]
     protected_violations: tuple[str, ...]
     scope_violations: tuple[str, ...]
     reasons: tuple[str, ...]
 
 
-def _canonical_change_path(value: object, *, field: str) -> str:
-    if type(value) is not str or not value or "\x00" in value:
-        raise ValueError(f"{field} must be a non-empty NUL-free Git path")
-    if value.startswith("/") or value.endswith("/"):
-        raise ValueError(f"{field} must be repository-relative")
-    parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise ValueError(f"{field} is not a canonical repository-relative path")
-    return value
-
-
-def _validated_change(change: object) -> Change:
-    if type(change) is not Change:
-        raise TypeError("changes must contain exact Change values")
-    status = change.status
-    if type(status) is not str or not status:
-        raise ValueError("Git name-status token is invalid")
-
-    path = _canonical_change_path(change.path, field="changed path")
-    kind = status[:1]
-    previous_path = change.previous_path
-
-    if status in _SIMPLE_CHANGE_STATUSES:
-        if previous_path is not None:
-            raise ValueError("non-rename Git change cannot carry previous_path")
-        return Change(status=status, path=path)
-
-    if kind in {"R", "C"}:
-        score = status[1:]
-        if (
-            not score
-            or any(character < "0" or character > "9" for character in score)
-            or int(score) > 100
-        ):
-            raise ValueError(f"unsupported Git similarity status: {status!r}")
-        previous = _canonical_change_path(
-            previous_path,
-            field="previous changed path",
-        )
-        return Change(status=status, previous_path=previous, path=path)
-
-    # U/X/B and every unknown status are fail-closed.  In particular, an
-    # unmerged index is not a candidate tree that this guard may authorize.
-    raise ValueError(f"unsupported Git name-status token: {status!r}")
-
-
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
+    """Parse line-oriented Git name-status data and validate every record."""
+
     changes: list[Change] = []
     for raw in lines:
         if type(raw) is not str:
-            raise TypeError("Git name-status records must be exact strings")
+            raise TypeError("name-status lines must be exact strings")
         line = raw.rstrip("\n")
         if not line:
             continue
@@ -144,7 +142,7 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            candidate = Change(
+            change = Change(
                 status=status,
                 previous_path=parts[1],
                 path=parts[2],
@@ -152,8 +150,53 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            candidate = Change(status=status, path=parts[1])
-        changes.append(_validated_change(candidate))
+            change = Change(status=status, path=parts[1])
+        changes.append(_validated_change(change))
+    return tuple(changes)
+
+
+def parse_name_status_z(raw: bytes) -> tuple[Change, ...]:
+    """Parse NUL-delimited git diff --name-status -z output.
+
+    NUL framing avoids Git's quoted-path ambiguity. Repository paths must still
+    be canonical UTF-8 and pass the same validator used for synthetic/library
+    Change inputs.
+    """
+
+    if type(raw) is not bytes:
+        raise TypeError("NUL-delimited name-status input must be exact bytes")
+    if not raw:
+        return ()
+    if not raw.endswith(b"\x00"):
+        raise ValueError("Malformed NUL-delimited name-status stream")
+    tokens = raw[:-1].split(b"\x00")
+    changes: list[Change] = []
+    index = 0
+    while index < len(tokens):
+        try:
+            status = tokens[index].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ValueError("Git name-status code must be ASCII") from error
+        kind = status[:1]
+        field_count = 3 if kind in {"R", "C"} else 2
+        if index + field_count > len(tokens):
+            raise ValueError("Malformed NUL-delimited name-status record")
+        try:
+            if kind in {"R", "C"}:
+                previous = tokens[index + 1].decode("utf-8")
+                path = tokens[index + 2].decode("utf-8")
+                change = Change(
+                    status=status,
+                    previous_path=previous,
+                    path=path,
+                )
+            else:
+                path = tokens[index + 1].decode("utf-8")
+                change = Change(status=status, path=path)
+        except UnicodeDecodeError as error:
+            raise ValueError("Git paths must be canonical UTF-8") from error
+        changes.append(_validated_change(change))
+        index += field_count
     return tuple(changes)
 
 
@@ -172,16 +215,99 @@ def assess_reconvergence(
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _validated_repo_path(path, name="base path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
+    base_set = frozenset(normalized_base)
 
     validated_changes = tuple(_validated_change(change) for change in changes)
+    mutating_sources: dict[str, str] = {}
+    for change in validated_changes:
+        kind = change.status[:1]
+        source = change.previous_path if kind in {"R", "C"} else change.path
+        if kind in {"M", "D", "T", "R", "C"} and source not in base_set:
+            raise ValueError(
+                f"{change.status} change source is absent from the base tree: "
+                f"{source}"
+            )
+        if kind in {"M", "D", "T", "R"}:
+            if source is None:
+                raise ValueError("mutating change source path identity is missing")
+            previous_status = mutating_sources.get(source)
+            if previous_status is not None:
+                raise ValueError(
+                    "base path has multiple mutating Git changes: "
+                    f"{source} ({previous_status}, {change.status})"
+                )
+            mutating_sources[source] = change.status
+        if kind == "A" and change.path in base_set:
+            raise ValueError(
+                f"added path already exists in the base tree: {change.path}"
+            )
+
+    removed_base_paths = {
+        change.previous_path if change.status[:1] == "R" else change.path
+        for change in validated_changes
+        if change.status[:1] in {"D", "R"}
+    }
+    incoming_destinations: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind not in {"A", "R", "C"}:
+            continue
+        if change.path in incoming_destinations:
+            raise ValueError(
+                "multiple Git changes target the same candidate path: "
+                + change.path
+            )
+        incoming_destinations.add(change.path)
+        if change.path in base_set and change.path not in removed_base_paths:
+            raise ValueError(
+                "candidate destination already exists in base tree without "
+                f"removal: {change.path}"
+            )
+
+    candidate_paths = set(base_set)
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "D":
+            candidate_paths.discard(change.path)
+        elif kind == "R":
+            if change.previous_path is None:
+                raise ValueError("rename source path identity is missing")
+            candidate_paths.discard(change.previous_path)
+    for change in validated_changes:
+        if change.status[:1] in {"A", "R", "C"}:
+            candidate_paths.add(change.path)
+
+    casefold_groups: dict[str, list[str]] = {}
+    for path in sorted(candidate_paths):
+        casefold_groups.setdefault(path.casefold(), []).append(path)
+    casefold_collisions = tuple(
+        tuple(paths)
+        for paths in casefold_groups.values()
+        if len(paths) > 1
+    )
+    if casefold_collisions:
+        rendered = "; ".join(
+            " <> ".join(paths)
+            for paths in casefold_collisions
+        )
+        raise ValueError(
+            "candidate tree contains case-insensitive path collision(s): "
+            + rendered
+        )
 
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:
         normalized_scopes = _normalized_scopes(allowed_scopes)
+    exact_trust_root_authorizations = frozenset(normalized_scopes or ())
 
     deleted = tuple(
         sorted(
@@ -194,6 +320,20 @@ def assess_reconvergence(
     )
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
+    destructive_base_paths = tuple(
+        sorted(
+            {
+                (
+                    change.previous_path
+                    if change.status[:1] == "R"
+                    else change.path
+                )
+                for change in validated_changes
+                if change.status[:1] in {"D", "R", "T"}
+            }
+        )
+    )
+    destructive_fraction = len(destructive_base_paths) / base_count
 
     protected_damage: set[str] = set(protected)
     for change in validated_changes:
@@ -208,26 +348,14 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
-
-        # Ordinary content replacement of the executable trust roots is itself
-        # authority-bearing.  Only an independently supplied exact-path scope
-        # may admit it; path_covers(directory, file) is deliberately not enough.
         if (
             change.status == "M"
             and change.path in PROTECTED_MUTATION_ROOTS
-            and (
-                normalized_scopes is None
-                or change.path not in normalized_scopes
-            )
+            and change.path not in exact_trust_root_authorizations
         ):
             protected_damage.add(
-                f"{change.path} (unauthorized modification)"
+                f"{change.path} (content change without exact authorization)"
             )
-
-        # A rename/copy *into* an executable trust-root path can replace the
-        # authority just as surely as M.  Preserve the older unconditional
-        # protection for destructive rename/type/delete and fail this form
-        # closed as well.
         if (
             kind in {"R", "C"}
             and change.path in PROTECTED_MUTATION_ROOTS
@@ -235,7 +363,6 @@ def assess_reconvergence(
             protected_damage.add(
                 f"{change.path} ({'rename' if kind == 'R' else 'copy'} target)"
             )
-
     protected_violations = tuple(sorted(protected_damage))
 
     scope_damage: set[str] = set()
@@ -271,11 +398,21 @@ def assess_reconvergence(
             "changed paths outside declared mutation scope: "
             + ", ".join(scope_violations)
         )
-    if len(deleted) >= max_deletions and fraction >= max_deleted_fraction:
-        reasons.append(
-            "mass base-tree deletion: "
-            f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
-        )
+    if (
+        len(destructive_base_paths) >= max_deletions
+        and destructive_fraction >= max_deleted_fraction
+    ):
+        if len(destructive_base_paths) == len(deleted):
+            reasons.append(
+                "mass base-tree deletion: "
+                f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
+            )
+        else:
+            reasons.append(
+                "mass destructive base-tree change: "
+                f"{len(destructive_base_paths)}/{base_count} paths "
+                f"({destructive_fraction:.1%}); direct deletions={len(deleted)}"
+            )
 
     return IntegrityAssessment(
         allowed=not reasons,
@@ -283,6 +420,8 @@ def assess_reconvergence(
         base_path_count=base_count,
         deletion_count=len(deleted),
         deletion_fraction=fraction,
+        destructive_change_count=len(destructive_base_paths),
+        destructive_change_fraction=destructive_fraction,
         protected_deletions=protected,
         protected_violations=protected_violations,
         scope_violations=scope_violations,
@@ -290,19 +429,54 @@ def assess_reconvergence(
     )
 
 
-def _git_lines(
+def _git_paths_z(
     *args: str,
     cwd: str | Path | None = None,
 ) -> tuple[str, ...]:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", *args, "-z"],
         cwd=cwd,
         check=True,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return tuple(completed.stdout.splitlines())
+    raw = completed.stdout
+    if not raw:
+        return ()
+    if not raw.endswith(b"\x00"):
+        raise ValueError("Malformed NUL-delimited Git path stream")
+    result: list[str] = []
+    for token in raw[:-1].split(b"\x00"):
+        try:
+            path = token.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Git paths must be canonical UTF-8") from error
+        result.append(_validated_repo_path(path, name="Git path"))
+    return tuple(result)
+
+
+def _git_name_status(
+    base: str,
+    head: str,
+    *,
+    cwd: str | Path | None = None,
+) -> tuple[Change, ...]:
+    completed = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "--find-renames",
+            "-z",
+            base,
+            head,
+        ],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return parse_name_status_z(completed.stdout)
 
 
 def _git_is_ancestor(
@@ -348,17 +522,8 @@ def assess_git_revisions(
     """
 
     base_is_ancestor = _git_is_ancestor(base, head, cwd=cwd)
-    base_paths = _git_lines("ls-tree", "-r", "--name-only", base, cwd=cwd)
-    changes = parse_name_status(
-        _git_lines(
-            "diff",
-            "--name-status",
-            "--find-renames",
-            base,
-            head,
-            cwd=cwd,
-        )
-    )
+    base_paths = _git_paths_z("ls-tree", "-r", "--name-only", base, cwd=cwd)
+    changes = _git_name_status(base, head, cwd=cwd)
     return assess_reconvergence(
         base_paths=base_paths,
         changes=changes,
@@ -378,6 +543,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-deletions", type=int, default=50)
     parser.add_argument("--max-deleted-fraction", type=float, default=0.35)
     parser.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "Optional Git repository/worktree to assess while executing the "
+            "trusted guard module from a separate repository root."
+        ),
+    )
+    parser.add_argument(
         "--allowed-scope",
         action="append",
         default=None,
@@ -396,6 +569,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=allowed_scopes,
+        cwd=args.repo,
     )
     print(
         "Reconvergence tree guard: "
@@ -403,6 +577,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"base_paths={assessment.base_path_count} "
         f"deletions={assessment.deletion_count} "
         f"deleted_fraction={assessment.deletion_fraction:.3f} "
+        f"destructive_changes={assessment.destructive_change_count} "
+        f"destructive_fraction={assessment.destructive_change_fraction:.3f} "
         f"protected_violations={len(assessment.protected_violations)} "
         f"scope_violations={len(assessment.scope_violations)}"
     )

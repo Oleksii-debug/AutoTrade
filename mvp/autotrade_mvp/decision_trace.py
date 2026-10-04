@@ -213,7 +213,10 @@ class DecisionTraceStore:
     """Durable JSONL trace store with idempotent append and hash-chain verification."""
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        # Freeze the selected backing location at composition time.  A later
+        # process-wide CWD change must not retarget either the JSONL authority
+        # or its sibling ResourceLock to a different directory.
+        self.path = Path(os.path.abspath(os.fspath(path)))
 
     def _load(self) -> list[dict[str, Any]]:
         if not self.path.exists():

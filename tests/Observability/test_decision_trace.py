@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -29,6 +30,32 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
 
 
 class DecisionTraceEvidenceTests(unittest.TestCase):
+    def test_relative_backing_path_is_frozen_across_cwd_change(self):
+        original_cwd = os.getcwd()
+        try:
+            with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:
+                source_root = Path(source_directory)
+                other_root = Path(other_directory)
+                os.chdir(source_root)
+                store = DecisionTraceStore(Path("nested") / "decision-traces.jsonl")
+                expected_path = source_root / "nested" / "decision-traces.jsonl"
+
+                os.chdir(other_root)
+                self.assertTrue(store.append(evidence_trace("decision-cwd-frozen")))
+
+                self.assertEqual(store.path, expected_path)
+                self.assertTrue(expected_path.exists())
+                self.assertFalse(
+                    (other_root / "nested" / "decision-traces.jsonl").exists()
+                )
+                self.assertTrue(store.verify())
+                self.assertEqual(
+                    [item["trace_id"] for item in store.records()],
+                    ["decision-cwd-frozen"],
+                )
+        finally:
+            os.chdir(original_cwd)
+
     def test_append_waits_for_shared_cross_process_writer_lock(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

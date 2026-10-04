@@ -103,6 +103,10 @@ public partial class MainWindow : Window
                 e.Cancel = !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
                     || !policy.AllowsTopLevelNavigation(target);
             };
+            // The product UI has no frame workflow. Block child-frame navigation so
+            // credential-bearing Host API requests can only originate from the trusted
+            // top-level document rather than an embedded frame.
+            core.FrameNavigationStarting += (_, e) => e.Cancel = true;
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
@@ -122,11 +126,12 @@ public partial class MainWindow : Window
             core.AddWebResourceRequestedFilter(
                 new Uri(_ownedRuntime.Origin, "api/v1/*").AbsoluteUri,
                 CoreWebView2WebResourceContext.All,
-                CoreWebView2WebResourceRequestSourceKinds.All);
+                CoreWebView2WebResourceRequestSourceKinds.Document);
             core.WebResourceRequested += (_, e) =>
             {
                 bool admitted =
-                    Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out Uri? target)
+                    e.RequestedSourceKind == CoreWebView2WebResourceRequestSourceKinds.Document
+                    && Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out Uri? target)
                     && policy.AllowsSessionHeaderForwarding(
                         e.Request.Method,
                         target,

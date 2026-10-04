@@ -67,8 +67,14 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("CoreWebView2BrowsingDataKinds.ServiceWorkers", code)
         self.assertIn("core.AddWebResourceRequestedFilter(", code)
         self.assertIn("CoreWebView2WebResourceContext.All", code)
-        self.assertIn("CoreWebView2WebResourceRequestSourceKinds.All", code)
+        self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+        self.assertNotIn("CoreWebView2WebResourceRequestSourceKinds.All", code)
+        self.assertIn("core.FrameNavigationStarting += (_, e) => e.Cancel = true;", code)
         self.assertIn("core.WebResourceRequested += (_, e) =>", code)
+        self.assertIn(
+            "e.RequestedSourceKind == CoreWebView2WebResourceRequestSourceKinds.Document",
+            code,
+        )
         self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
         self.assertIn("e.Request.Method,", code)
         self.assertIn('"AutoTrade-Session " + _ownedRuntime.SessionToken', code)

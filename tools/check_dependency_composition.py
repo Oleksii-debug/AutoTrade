@@ -15,9 +15,17 @@ import tomllib
 import xml.etree.ElementTree as ET
 
 if __package__:
-    from .dotnet_lock import dotnet_lock_content_blockers
+    from .dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_lock_content_blockers,
+        dotnet_project_package_references,
+    )
 else:
-    from dotnet_lock import dotnet_lock_content_blockers
+    from dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_lock_content_blockers,
+        dotnet_project_package_references,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -247,17 +255,13 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
         blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{sdk.get('rollForward')}")
 
     package_projects: list[Path] = []
+    blockers.extend(dotnet_imported_package_reference_blockers(root))
     for project in sorted((root / "src").rglob("*.csproj")):
-        tree = ET.parse(project)
-        package_nodes = tree.findall(".//PackageReference")
-        if package_nodes:
+        package_references = dotnet_project_package_references(project)
+        if package_references:
             package_projects.append(project)
-        for node in package_nodes:
-            name = node.attrib.get("Include") or node.attrib.get("Update") or ""
-            value = node.attrib.get("Version")
-            if value is None:
-                version_node = node.find("Version")
-                value = version_node.text.strip() if version_node is not None and version_node.text else None
+        for raw_name, value in package_references:
+            name = raw_name or ""
             identity = f"{name}@{value}"
             if not name or not value or not EXACT_NUGET.fullmatch(value):
                 blockers.append(f"NON_EXACT_NUGET_REFERENCE:{project.relative_to(root)}:{identity}")

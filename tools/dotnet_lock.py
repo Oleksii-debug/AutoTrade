@@ -26,20 +26,78 @@ def _strict_json(text: str):
     )
 
 
+def _xml_local_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ''
+    return tag.rsplit('}', 1)[-1]
+
+
+def _xml_elements(tree: ET.ElementTree, local_name: str):
+    return tuple(
+        node for node in tree.iter()
+        if _xml_local_name(node.tag) == local_name
+    )
+
+
+def dotnet_project_package_references(project: Path) -> list[tuple[str | None, str | None]]:
+    """Read effective-in-file PackageReference declarations namespace-agnostically."""
+    tree = ET.parse(project)
+    references: list[tuple[str | None, str | None]] = []
+    for node in _xml_elements(tree, 'PackageReference'):
+        name = node.attrib.get('Include') or node.attrib.get('Update')
+        version = node.attrib.get('Version')
+        if version is None:
+            child = next(
+                (item for item in node if _xml_local_name(item.tag) == 'Version'),
+                None,
+            )
+            version = (
+                child.text.strip()
+                if child is not None and child.text
+                else None
+            )
+        references.append((name, version))
+    return references
+
+
+def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
+    """Reject release dependency declarations hidden in imported MSBuild files.
+
+    Static release provenance currently binds PackageReference declarations that
+    live in src/*.csproj.  A PackageReference injected by a root/source .props or
+    .targets file would otherwise bypass project discovery and the lock gate.
+    Fail closed until evaluated MSBuild dependency discovery is authoritative.
+    """
+    candidates: set[Path] = set()
+    for pattern in ('*.props', '*.targets'):
+        candidates.update(root.glob(pattern))
+        source_root = root / 'src'
+        if source_root.is_dir():
+            candidates.update(source_root.rglob(pattern))
+
+    blockers: list[str] = []
+    for path in sorted(candidates):
+        relative = path.relative_to(root).as_posix()
+        try:
+            tree = ET.parse(path)
+        except (OSError, ET.ParseError):
+            blockers.append(f'DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:{relative}')
+            continue
+        if _xml_elements(tree, 'PackageReference'):
+            blockers.append(
+                f'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:{relative}'
+            )
+    return blockers
+
+
 def _package_references(project: Path) -> dict[str, str]:
     """Return canonical direct PackageReference identities for one project.
 
     This mirrors the repository's existing Include/Update + Version handling but
     additionally rejects duplicate identities and case-insensitive ambiguity.
     """
-    tree = ET.parse(project)
     refs: dict[str, tuple[str, str]] = {}
-    for node in tree.findall('.//PackageReference'):
-        name = node.attrib.get('Include') or node.attrib.get('Update')
-        version = node.attrib.get('Version')
-        if version is None:
-            child = node.find('Version')
-            version = child.text.strip() if child is not None and child.text else None
+    for name, version in dotnet_project_package_references(project):
         if not name or not version:
             raise ValueError('PackageReference must have canonical name and exact version')
         folded = name.casefold()

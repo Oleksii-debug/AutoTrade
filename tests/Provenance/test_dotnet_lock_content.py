@@ -6,7 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tools.dotnet_lock import dotnet_lock_content_blockers, dotnet_locked_dependency_graph
+from tools.dotnet_lock import (
+    dotnet_imported_package_reference_blockers,
+    dotnet_lock_content_blockers,
+    dotnet_locked_dependency_graph,
+)
 
 
 GOOD_HASH = base64.b64encode(bytes(range(64))).decode('ascii')
@@ -611,6 +615,66 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                     )
                     for item in blockers
                 )
+            )
+
+
+    def test_namespaced_project_package_reference_cannot_bypass_lock_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+                '<ItemGroup><PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertEqual(
+                blockers,
+                ['DOTNET_PROJECT_LOCK_MISSING:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
+            )
+
+    def test_root_props_package_reference_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="1.2.3" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:Directory.Build.props'],
+            )
+
+    def test_namespaced_src_props_package_reference_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'src' / 'Build' / 'Dependencies.props'
+            props.parent.mkdir(parents=True)
+            props.write_text(
+                '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+                '<ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="1.2.3" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:src/Build/Dependencies.props'],
+            )
+
+    def test_malformed_root_props_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Directory.Build.props').write_text(
+                '<Project><ItemGroup>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:Directory.Build.props'],
             )
 
 

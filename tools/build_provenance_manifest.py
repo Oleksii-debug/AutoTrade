@@ -12,9 +12,17 @@ import sys
 import xml.etree.ElementTree as ET
 
 if __package__:
-    from .dotnet_lock import dotnet_locked_dependency_graph
+    from .dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_locked_dependency_graph,
+        dotnet_project_package_references,
+    )
 else:
-    from dotnet_lock import dotnet_locked_dependency_graph
+    from dotnet_lock import (
+        dotnet_imported_package_reference_blockers,
+        dotnet_locked_dependency_graph,
+        dotnet_project_package_references,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -310,13 +318,7 @@ def python_dev_dependencies() -> list[dict[str, object]]:
 def dotnet_package_dependencies() -> list[dict[str, str]]:
     packages: set[tuple[str, str]] = set()
     for project in sorted((ROOT / "src").rglob("*.csproj")):
-        tree = ET.parse(project)
-        for node in tree.findall(".//PackageReference"):
-            name = node.attrib.get("Include") or node.attrib.get("Update")
-            version = node.attrib.get("Version")
-            if version is None:
-                child = node.find("Version")
-                version = child.text.strip() if child is not None and child.text else None
+        for name, version in dotnet_project_package_references(project):
             if not name or not version:
                 raise ValueError(
                     f"PackageReference must have exact Include/Version in {project.relative_to(ROOT)}"
@@ -335,8 +337,7 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
 def dotnet_package_projects() -> list[Path]:
     projects: list[Path] = []
     for project in sorted((ROOT / "src").rglob("*.csproj")):
-        tree = ET.parse(project)
-        if tree.findall(".//PackageReference"):
+        if dotnet_project_package_references(project):
             projects.append(project)
     return projects
 
@@ -425,6 +426,14 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     dotnet_projects = dotnet_package_projects()
+    imported_dotnet_blockers = dotnet_imported_package_reference_blockers(ROOT)
+    for detail in imported_dotnet_blockers:
+        blockers.append(
+            {
+                "code": "DOTNET_PACKAGE_REFERENCE_DISCOVERY_INCOMPLETE",
+                "detail": detail,
+            }
+        )
     try:
         dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
     except ValueError as error:

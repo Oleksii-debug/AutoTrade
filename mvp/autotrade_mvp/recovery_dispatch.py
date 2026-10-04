@@ -28,7 +28,7 @@ from .dispatch import (
     _canonical_journal_authority_snapshot,
 )
 from .persistence import JournalStore
-from .recovery import OwnerFence, RecoveryController
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 _ISSUANCE_TOKEN = object()
@@ -37,6 +37,7 @@ _CANONICAL_VALIDATE_SENDER_CODE = RecoveryController.validate_sender.__code__
 _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT = _canonical_journal_authority_snapshot
 _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE = _canonical_journal_authority_snapshot.__code__
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_TAKEOVER_SOURCE_ATTR = "_autotrade_takeover_source_owner"
 
 
 def _require_executable_authority() -> None:
@@ -81,6 +82,83 @@ def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
         normalized_account,
         f"{normalized_environment}:{normalized_account}",
     )
+
+
+def _takeover_source_owner(recovery: RecoveryController) -> OwnerFence | None:
+    state = vars(recovery)
+    source = state.get(_TAKEOVER_SOURCE_ATTR)
+    if source is None:
+        return None
+    if type(source) is not OwnerFence:
+        raise PermissionError("takeover source owner authority changed")
+    if type(source.owner_id) is not str or not source.owner_id:
+        raise PermissionError("takeover source owner identity is invalid")
+    if type(source.epoch) is not int or source.epoch < 1:
+        raise PermissionError("takeover source owner epoch is invalid")
+    return source
+
+
+def mark_recovery_takeover_source(
+    recovery: RecoveryController,
+    source: OwnerFence,
+) -> OwnerFence:
+    """Mark an attached durable restart owner as takeover-only authority.
+
+    The marker lives on the exact controller already bound to the canonical
+    journal.  It does not create another recovery state machine; it only prevents
+    the recovery-issued sender seam from reissuing the pre-takeover generation.
+    """
+
+    if type(recovery) is not RecoveryController:
+        raise TypeError("recovery must be exact RecoveryController")
+    if type(source) is not OwnerFence:
+        raise TypeError("source must be exact OwnerFence")
+    if recovery.owner is not source and recovery.owner != source:
+        raise PermissionError("takeover source is not the attached recovery owner")
+    chain = recovery.durable_owner_chain()
+    if not chain or chain[-1] != source:
+        raise PermissionError("takeover source is not the current durable owner")
+    existing = _takeover_source_owner(recovery)
+    if existing is not None and existing != source:
+        raise PermissionError("takeover source owner marker already belongs elsewhere")
+    vars(recovery)[_TAKEOVER_SOURCE_ATTR] = source
+    recovery.provider_reconciled = False
+    recovery.reason_codes.add("takeover_source_only")
+    recovery.reason_codes.add("startup_reconciliation_required")
+    recovery.state = HostState.RECOVERING
+    return source
+
+
+def activate_recovery_takeover_target(
+    recovery: RecoveryController,
+    *,
+    source: OwnerFence,
+    target: OwnerFence,
+) -> OwnerFence:
+    """Release takeover-only fencing only after exact durable N -> N+1 advance."""
+
+    if type(recovery) is not RecoveryController:
+        raise TypeError("recovery must be exact RecoveryController")
+    if type(source) is not OwnerFence or type(target) is not OwnerFence:
+        raise TypeError("source and target must be exact OwnerFence values")
+    marked_source = _takeover_source_owner(recovery)
+    if marked_source is None:
+        raise PermissionError("recovery controller is not attached takeover-only")
+    if marked_source != source:
+        raise PermissionError("durable takeover source does not match attached source")
+    if target.epoch != source.epoch + 1:
+        raise PermissionError("durable takeover target is not the next owner generation")
+    if recovery.owner != target:
+        raise PermissionError("recovery controller is not bound to takeover target")
+    chain = recovery.durable_owner_chain()
+    if not chain or chain[-1] != target:
+        raise PermissionError("takeover target is not the current durable owner")
+    vars(recovery).pop(_TAKEOVER_SOURCE_ATTR, None)
+    recovery.provider_reconciled = False
+    recovery.reason_codes.discard("takeover_source_only")
+    recovery.reason_codes.add("startup_reconciliation_required")
+    recovery.state = HostState.RECOVERING
+    return target
 
 
 class RecoveryIssuedDispatcher:
@@ -137,6 +215,11 @@ class RecoveryIssuedDispatcher:
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
+        source = _takeover_source_owner(recovery)
+        if source is not None and owner == source:
+            raise PermissionError(
+                "takeover source owner cannot receive recovery-issued sender authority"
+            )
         sender_function = _CANONICAL_VALIDATE_SENDER
         snapshot_reader = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
         self.__recovery = recovery
@@ -194,6 +277,11 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
+        source = _takeover_source_owner(self.__recovery)
+        if source is not None and self.__owner == source:
+            raise PermissionError(
+                "takeover source owner cannot retain recovery-issued sender authority"
+            )
 
         # Do not dynamically dispatch through module helper aliases here. This
         # method is the post-composition issuance boundary, so it validates and
@@ -277,11 +365,9 @@ def build_recovery_issued_dispatcher(
     """Mint one dispatcher from the exact current durable recovery owner.
 
     Issuance is allowed while the host is RECOVERING so product bootstrap can
-    finish before reconciliation. That does not grant send authority: the bound
-    ``validate_sender`` is re-executed inside the GuardedDispatcher final sender
-    gate and requires the same durable owner to be current and the controller to
-    be READY before ``SubmissionSending`` can be persisted or provider bytes can
-    be emitted.
+    finish before reconciliation. A controller attached to a pre-existing
+    durable source owner is an exception: it is takeover-only and may not mint
+    a sender until exact durable N -> N+1 takeover activation clears that fence.
     """
 
     if type(recovery) is not RecoveryController:
@@ -311,6 +397,11 @@ def build_recovery_issued_dispatcher(
         raise PermissionError("recovery owner identity is not canonical exact text")
     if type(owner.epoch) is not int or owner.epoch < 1:
         raise PermissionError("recovery owner epoch is not a positive exact integer")
+    source = _takeover_source_owner(recovery)
+    if source is not None and owner == source:
+        raise PermissionError(
+            "takeover source owner cannot receive recovery-issued sender authority"
+        )
     durable_chain = recovery.durable_owner_chain()
     if not durable_chain or durable_chain[-1] != owner:
         raise PermissionError("recovery owner is not the current durable owner")

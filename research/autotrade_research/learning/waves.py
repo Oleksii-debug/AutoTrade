@@ -243,6 +243,7 @@ class PauseDecision:
     policy_hash: str
     champion_artifact_hash: str
     source_cut_hash: str
+    paused_at: datetime
     should_pause: bool
     reasons: tuple[str, ...]
     decision_hash: str
@@ -259,6 +260,7 @@ class PauseDecision:
             "source_cut_hash",
             _digest(self.source_cut_hash, name="source_cut_hash"),
         )
+        object.__setattr__(self, "paused_at", _time(self.paused_at, name="paused_at"))
         if type(self.should_pause) is not bool:
             raise TypeError("should_pause must be boolean")
         if type(self.reasons) is not tuple or any(type(item) is not str for item in self.reasons):
@@ -324,6 +326,7 @@ def evaluate_pause(
         policy_hash=policy.policy_hash,
         champion_artifact_hash=snapshot.champion_artifact_hash,
         source_cut_hash=snapshot.source_cut_hash,
+        paused_at=snapshot.observed_at,
         should_pause=bool(reasons),
         reasons=tuple(reasons),
         decision_hash=_hash_payload(payload),
@@ -378,7 +381,9 @@ class CandidateWave:
     candidate_created_at: datetime
     pause_decision_hash: str
     paused_source_cut_hash: str
+    paused_at: datetime
     error_analysis_hash: str
+    error_analysis_at: datetime
     change_summary: str
     training_population: EvidencePopulation
     validation_population: EvidencePopulation
@@ -425,11 +430,21 @@ class CandidateWave:
             name="paused_source_cut_hash",
         )
         object.__setattr__(self, "paused_source_cut_hash", paused_cut)
+        paused_at = _time(self.paused_at, name="paused_at")
+        if created < paused_at:
+            raise ValueError("candidate cannot be created before the learning-wave pause")
+        object.__setattr__(self, "paused_at", paused_at)
         object.__setattr__(
             self,
             "error_analysis_hash",
             _digest(self.error_analysis_hash, name="error_analysis_hash"),
         )
+        analysis_at = _time(self.error_analysis_at, name="error_analysis_at")
+        if analysis_at < paused_at:
+            raise ValueError("error analysis cannot precede the learning-wave pause")
+        if analysis_at > created:
+            raise ValueError("candidate cannot be created before error analysis completes")
+        object.__setattr__(self, "error_analysis_at", analysis_at)
         object.__setattr__(
             self,
             "change_summary",
@@ -469,6 +484,7 @@ class CandidateWave:
         candidate_artifact_hash: str,
         candidate_created_at: datetime,
         error_analysis_hash: str,
+        error_analysis_at: datetime,
         change_summary: str,
         training_population: EvidencePopulation,
         validation_population: EvidencePopulation,
@@ -495,7 +511,9 @@ class CandidateWave:
             candidate_created_at=candidate_created_at,
             pause_decision_hash=pause.decision_hash,
             paused_source_cut_hash=pause.source_cut_hash,
+            paused_at=pause.paused_at,
             error_analysis_hash=error_analysis_hash,
+            error_analysis_at=error_analysis_at,
             change_summary=change_summary,
             training_population=training_population,
             validation_population=validation_population,
@@ -586,22 +604,23 @@ def resolve_candidate(
         raise ValueError("evaluation does not bind this candidate artifact")
 
     reasons: list[str] = []
-    if evaluation.evaluation_status == "INCONCLUSIVE":
+    if not evaluation.science_gate_passed:
+        reasons.append("LEARNING_WAVE.SCIENCE_GATE_FAILED")
+    if not evaluation.retention_gate_passed:
+        reasons.append("LEARNING_WAVE.RETENTION_GATE_FAILED")
+    if not evaluation.risk_gate_passed:
+        reasons.append("LEARNING_WAVE.RISK_GATE_FAILED")
+
+    if evaluation.evaluation_status == "FAIL":
+        action = "REJECTED"
+        reasons.insert(0, "LEARNING_WAVE.EVALUATION_FAILED")
+    elif reasons:
+        action = "REJECTED"
+    elif evaluation.evaluation_status == "INCONCLUSIVE":
         action = "CONTINUE_VALIDATION"
         reasons.append("LEARNING_WAVE.EVALUATION_INCONCLUSIVE")
-    elif evaluation.evaluation_status == "FAIL":
-        action = "REJECTED"
-        reasons.append("LEARNING_WAVE.EVALUATION_FAILED")
     else:
-        if not evaluation.science_gate_passed:
-            reasons.append("LEARNING_WAVE.SCIENCE_GATE_FAILED")
-        if not evaluation.retention_gate_passed:
-            reasons.append("LEARNING_WAVE.RETENTION_GATE_FAILED")
-        if not evaluation.risk_gate_passed:
-            reasons.append("LEARNING_WAVE.RISK_GATE_FAILED")
-        if reasons:
-            action = "REJECTED"
-        elif wave.promotion_mode == "AUTO":
+        if wave.promotion_mode == "AUTO":
             action = "ELIGIBLE_AUTO_PROMOTION"
             reasons.append("LEARNING_WAVE.ALL_GATES_PASS_AUTO_POLICY")
         else:
@@ -614,7 +633,9 @@ def resolve_candidate(
         "candidate_id": wave.candidate_id,
         "candidate_artifact_hash": wave.candidate_artifact_hash,
         "pause_decision_hash": wave.pause_decision_hash,
+        "paused_at": wave.paused_at.isoformat(),
         "error_analysis_hash": wave.error_analysis_hash,
+        "error_analysis_at": wave.error_analysis_at.isoformat(),
         "change_summary": wave.change_summary,
         "training_population_root": wave.training_population.root_hash,
         "validation_population_root": wave.validation_population.root_hash,

@@ -118,6 +118,7 @@ def _issued(
     ordinal: int,
     campaign_version: int = 1,
     completed_at: str = "2026-10-04T05:00:00Z",
+    signed_at: str = "2026-10-04T05:01:00Z",
     valid_until: str = "2026-10-05T05:00:00Z",
     supersedes: str | None = None,
     route_parser: str = "BYBIT_ORDER_V5_JSON_V1",
@@ -164,7 +165,7 @@ def _issued(
         harness_version="1.0.0",
         started_at="2026-10-04T04:59:00Z",
         completed_at=completed_at,
-        signed_at="2026-10-04T05:01:00Z",
+        signed_at=signed_at,
         result="PASS",
         release_artifact_id=release_artifact_id,
         release_artifact_sha256=release_digest,
@@ -429,6 +430,59 @@ class ProviderQualificationAuthorityTests(unittest.TestCase):
                 "journal cut is in the future",
             ):
                 registry.history_cut(journal_sequence_cut=1)
+
+    def test_latest_cut_does_not_retroactively_apply_future_supersession(self):
+        q1, r1, p1 = _issued(
+            ordinal=12,
+            campaign_version=1,
+            completed_at="2026-10-04T05:00:00Z",
+            signed_at="2026-10-04T05:01:00Z",
+            valid_until="2026-10-05T05:00:00Z",
+        )
+        q2, r2, p2 = _issued(
+            ordinal=13,
+            campaign_version=2,
+            completed_at="2026-10-04T06:00:00Z",
+            signed_at="2026-10-04T06:01:00Z",
+            valid_until="2026-10-05T06:00:00Z",
+            supersedes=q1.qualification_id,
+            route_parser="BYBIT_ORDER_V5_JSON_V2",
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = _ProjectionOnlyRegistry(
+                JournalStore(root / "journal.db"),
+                evidence_store=ArtifactStore(root / "evidence"),
+                evidence_root=root / "evidence",
+            )
+            registry._append_accepted(protocol_key=p1.key, record=q1, receipt=r1)
+            registry._append_accepted(protocol_key=p2.key, record=q2, receipt=r2)
+            registry._append_supersession(
+                old_id=q1.qualification_id,
+                new_id=q2.qualification_id,
+            )
+
+            before_successor_signature = registry.current(
+                scope=_current_scope(q1),
+                at=datetime(2026, 10, 4, 5, 30, tzinfo=timezone.utc),
+            )
+            after_successor_signature = registry.current(
+                scope=_current_scope(q1),
+                at=datetime(2026, 10, 4, 6, 30, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(
+                before_successor_signature.qualification_id,
+                q1.qualification_id,
+            )
+            self.assertEqual(
+                after_successor_signature.qualification_id,
+                q2.qualification_id,
+            )
+            self.assertEqual(
+                before_successor_signature.journal_sequence_cut,
+                after_successor_signature.journal_sequence_cut,
+            )
 
     def test_signed_supersession_changes_current_q_and_preserves_historical_cut(self):
         q1, r1, p1 = _issued(ordinal=8, campaign_version=1)

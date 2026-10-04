@@ -288,8 +288,10 @@ class JournalBackedHostCommandStore:
         expected_raw = self._required_text(command, "expected_state_version")
         if "payload" not in command or not isinstance(command["payload"], dict):
             raise ValueError("payload must be an object")
-        if not expected_raw.isdigit():
-            raise ValueError("expected_state_version must be a sequence")
+        if not is_valid_common_scalar("Sequence", expected_raw):
+            raise ValueError(
+                "expected_state_version must be a canonical Sequence"
+            )
         request_origin = self._request_origin_provider()
         if not isinstance(request_origin, str) or not request_origin.strip():
             raise PermissionError("Current request origin is unavailable")

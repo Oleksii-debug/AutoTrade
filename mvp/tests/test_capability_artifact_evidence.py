@@ -100,6 +100,7 @@ def _publish(
     source: str,
     *,
     account_id="paper-account",
+    provider_environment="PAPER",
 ) -> dict[str, object]:
     artifact_id = str(uuid4())
     observed_at = "2026-09-24T15:59:00Z"
@@ -132,7 +133,7 @@ def _publish(
             "account_id": account_id,
             "entity_id": "entity-1",
             "environment": "PAPER",
-            "provider_environment": "PAPER",
+            "provider_environment": provider_environment,
             "instrument_version": "instrument-v1",
             "observed_at": observed_at,
             "issuer_ref": _issuer_ref(source),
@@ -367,6 +368,20 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 evidence_verifier=_verifier(directory, store, issuers=False),
             )
             self.assertEqual(snapshot.status, "CONFLICTED")
+
+    def test_wrong_provider_environment_artifact_is_conflicted(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+            refs["API"] = _publish(store, "API", provider_environment="OTHER-DOMAIN")
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
+                evidence_verifier=_verifier(directory, store),
+            )
+            self.assertEqual(snapshot.status, "CONFLICTED")
+            self.assertNotIn("API", snapshot.sources)
 
     def test_exact_immutable_artifacts_verify_only_inside_claim_window(self):
         with TemporaryDirectory() as directory:

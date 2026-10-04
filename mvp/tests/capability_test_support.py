@@ -25,6 +25,7 @@ def fresh_test_admission(snapshot: CapabilitySnapshot) -> CapabilitySnapshot:
         account_id=snapshot.account_id,
         entity_id=snapshot.entity_id,
         environment=snapshot.environment,
+        provider_environment=snapshot.provider_environment,
         instrument_version=snapshot.instrument_version,
         observed_at=snapshot.observed_at,
         expires_at=snapshot.expires_at,

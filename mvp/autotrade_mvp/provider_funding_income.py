@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import re
+from types import MappingProxyType
 import weakref
 
 from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
@@ -359,7 +360,7 @@ def _parse_bybit_funding_income_rows(
             "provider response observed_at must be canonical UTC text"
         ) from error
 
-    if type(payload) is not dict:
+    if type(payload) not in {dict, MappingProxyType}:
         raise ProviderFundingIncomeError("Bybit transaction-log payload must be an object")
     if type(query) is not dict:
         raise ProviderFundingIncomeError("qualified funding query must be an exact object")
@@ -373,8 +374,8 @@ def _parse_bybit_funding_income_rows(
         raise ProviderFundingIncomeError("Bybit transaction-log response is not successful")
     result = payload.get("result")
     if (
-        type(result) is not dict
-        or type(result.get("list")) is not list
+        type(result) not in {dict, MappingProxyType}
+        or type(result.get("list")) not in {list, tuple}
         or type(result.get("nextPageCursor")) is not str
     ):
         raise ProviderFundingIncomeError("Bybit transaction-log result shape is invalid")
@@ -423,7 +424,7 @@ def _parse_bybit_funding_income_rows(
     rows: list[_ParsedBybitFundingIncomeRow] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(result["list"]):
-        if type(item) is not dict:
+        if type(item) not in {dict, MappingProxyType}:
             raise ProviderFundingIncomeError(
                 f"Bybit transaction-log row {index} must be an object"
             )

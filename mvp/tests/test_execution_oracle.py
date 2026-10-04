@@ -271,6 +271,60 @@ class ExecutionOracleTests(unittest.TestCase):
                         result=result,
                     )
 
+    def test_oracle_rejects_status_quantity_contradictions(self):
+        o, q, m = order(), observation(), model()
+        full = simulate_execution(o, q, m)
+        self.assertEqual(full.status, "FILLED")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(full, status="NO_FILL"),
+            )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(full, status="PARTIAL"),
+            )
+
+        partial_order = order(quantity="20")
+        partial_observation = observation(available_volume="20")
+        partial = simulate_execution(partial_order, partial_observation, m)
+        self.assertEqual(partial.status, "PARTIAL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=partial_order,
+                observation=partial_observation,
+                model=m,
+                result=replace(partial, status="FILLED"),
+            )
+
+        no_fill_order = order(order_type="LIMIT", limit_price="90")
+        no_fill = simulate_execution(no_fill_order, q, m)
+        self.assertEqual(no_fill.filled_quantity, Decimal("0"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "zero fill cannot claim FILLED or PARTIAL status",
+        ):
+            assert_conservative_execution(
+                order=no_fill_order,
+                observation=q,
+                model=m,
+                result=replace(no_fill, status="FILLED"),
+            )
+
     def test_oracle_rejects_quantity_above_participation_capacity(self):
         o = order(quantity="20")
         q = observation(available_volume="20")

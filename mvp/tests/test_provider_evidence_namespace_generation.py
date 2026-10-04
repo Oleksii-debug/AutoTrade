@@ -53,6 +53,23 @@ class ProviderEvidenceGenerationComparisonTests(unittest.TestCase):
                 [private_pins, publication_pins],
             )
 
+    def test_publication_bound_reader_does_not_reconstruct_artifact_store(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            publication_store = ArtifactStore(root)
+            with patch.object(
+                ArtifactStore,
+                "__init__",
+                side_effect=AssertionError(
+                    "trusted reader must not reconstruct publication store"
+                ),
+            ):
+                reader = trusted_authenticated_reader(
+                    root,
+                    publication_store=publication_store,
+                )
+            self.assertTrue(callable(reader))
+
 
 @unittest.skipIf(
     sys.platform == "win32",
@@ -90,6 +107,28 @@ class ProviderEvidenceNamespaceGenerationTests(unittest.TestCase):
                     )
             finally:
                 self._restore_manifest_namespace(configured, retained)
+
+    def test_missing_child_namespace_fails_without_recreation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            publication_store = ArtifactStore(root)
+            configured = root / "manifests"
+            retained = root / "manifests.retained-test"
+            configured.rename(retained)
+            try:
+                with self.assertRaises(ArtifactIntegrityError):
+                    trusted_authenticated_reader(
+                        root,
+                        publication_store=publication_store,
+                    )
+                self.assertFalse(
+                    configured.exists(),
+                    "fail-closed bind must not recreate a missing child namespace",
+                )
+            finally:
+                if configured.exists():
+                    configured.rmdir()
+                retained.rename(configured)
 
     def test_durable_oms_fails_closed_before_binding_replaced_child_generation(self):
         with TemporaryDirectory() as directory:

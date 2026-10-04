@@ -565,22 +565,128 @@ class ProviderOriginJournal:
         )
         return attempt_id
 
+    def prepare_direct(
+        self,
+        query_binding: QualifiedProviderReadQueryBinding,
+        *,
+        recorded_at: datetime,
+    ) -> str:
+        """Persist Prepared under the canonical direct-network identity only."""
+
+        return self.prepare(
+            query_binding,
+            transport_identity=direct_authenticated_read_transport_identity(),
+            network_policy_identity=direct_authenticated_read_network_policy_identity(),
+            recorded_at=recorded_at,
+        )
+
+    def record_direct_provider_origin_observation(
+        self,
+        attempt_id: str,
+        query_binding: QualifiedProviderReadQueryBinding,
+        *,
+        provider_observation: object,
+    ) -> AuthenticatedReadResponseBinding:
+        return self._record_provider_origin(
+            attempt_id,
+            query_binding,
+            provider_observation=provider_observation,
+        )
+
     def _record_provider_origin(
         self,
         attempt_id: str,
         query_binding: QualifiedProviderReadQueryBinding,
         *,
-        http_status: int,
-        response_bytes: bytes,
-        observed_at: datetime,
+        http_status: int | None = None,
+        response_bytes: bytes | None = None,
+        observed_at: datetime | None = None,
+        provider_observation: object | None = None,
         _origin_token: object | None = None,
     ) -> AuthenticatedReadResponseBinding:
-        if _origin_token is not _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN:
-            raise ProviderOriginError(
-                "provider-origin response lacks canonical transport execution receipt"
-            )
         attempt = _exact_text(attempt_id, name="attempt_id")
         snapshot = _qualified_query_snapshot(query_binding)
+
+        if provider_observation is None:
+            if _origin_token is not _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN:
+                raise ProviderOriginError(
+                    "provider-origin response lacks canonical transport execution receipt"
+                )
+            if (
+                type(http_status) is not int
+                or type(response_bytes) is not bytes
+                or type(observed_at) is not datetime
+            ):
+                raise ProviderOriginError(
+                    "test-injected provider response material is incomplete"
+                )
+            execution_class = _TEST_EXECUTION_CLASS
+            wire_request_sha256 = "sha256:" + sha256(
+                (
+                    "TEST_INJECTED|"
+                    + attempt
+                    + "|"
+                    + snapshot["qualified_query_digest"]
+                ).encode("utf-8")
+            ).hexdigest()
+            terminal_cut = snapshot["authority_journal_sequence_cut"]
+            terminal_verified_at = _utc_text(
+                observed_at,
+                name="terminal_authority_verified_at",
+            )
+        else:
+            if (
+                _origin_token is not None
+                or http_status is not None
+                or response_bytes is not None
+                or observed_at is not None
+            ):
+                raise ProviderOriginError(
+                    "direct provider observation cannot be mixed with caller response material"
+                )
+            try:
+                receipt, direct_raw = provider_observation_direct_execution_material(
+                    provider_observation
+                )
+                receipt_snapshot = (
+                    direct_authenticated_read_execution_receipt_snapshot(receipt)
+                )
+                terminal_snapshot = (
+                    terminal_qualified_provider_read_authority_snapshot(
+                        receipt_snapshot["terminal_authority"]
+                    )
+                )
+            except (ProviderTransportError, ProviderRouteReadError) as error:
+                raise ProviderOriginError(
+                    "provider observation lacks canonical direct wire authority"
+                ) from error
+            if getattr(provider_observation, "query_binding", None) is not query_binding.query_binding:
+                raise ProviderOriginError(
+                    "direct provider observation belongs to another exact read query"
+                )
+            if (
+                terminal_snapshot["qualified_query_digest"]
+                != snapshot["qualified_query_digest"]
+                or terminal_snapshot["capability_snapshot_id"]
+                != snapshot["base_query"]["capability_snapshot_id"]
+                or terminal_snapshot["qualification_id"]
+                != snapshot["qualification_id"]
+            ):
+                raise ProviderOriginError(
+                    "terminal C/Q proof differs from exact qualified provider read"
+                )
+            http_status = getattr(provider_observation, "http_status", None)
+            response_bytes = direct_raw
+            observed_value = getattr(provider_observation, "observed_at", None)
+            observed_at = _parse_utc_text(
+                observed_value,
+                name="direct provider observed_at",
+            )
+            execution_class = _DIRECT_EXECUTION_CLASS
+            wire_request_sha256 = receipt_snapshot["request_sha256"]
+            terminal_cut = terminal_snapshot["journal_sequence_cut"]
+            terminal_verified_at = terminal_snapshot["verified_at"]
+
         if type(http_status) is not int or http_status not in query_binding.accepted_success_statuses:
             raise ProviderOriginError("provider response status is outside qualified endpoint contract")
         try:
@@ -591,6 +697,14 @@ class ProviderOriginJournal:
         except (TypeError, ValueError) as error:
             raise ProviderOriginError("provider response exceeds exact byte budget") from error
         observed_text = _utc_text(observed_at, name="observed_at")
+        if _SHA256_RE.fullmatch(wire_request_sha256) is None:
+            raise ProviderOriginError("wire request digest is non-canonical")
+        if type(terminal_cut) is not int or terminal_cut < 0:
+            raise ProviderOriginError("terminal provider-read authority cut is invalid")
+        _parse_utc_text(
+            terminal_verified_at,
+            name="terminal_authority_verified_at",
+        )
         store = self._require_store()
         events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
         if len(events) != 1:
@@ -607,6 +721,24 @@ class ProviderOriginJournal:
         )
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable Prepared query differs from exact qualified binding")
+        if execution_class == _DIRECT_EXECUTION_CLASS:
+            try:
+                direct_receipt_snapshot = (
+                    direct_authenticated_read_execution_receipt_snapshot(receipt)
+                )
+            except ProviderTransportError as error:
+                raise ProviderOriginError(
+                    "direct provider receipt lost execution authority"
+                ) from error
+            if (
+                prepared_payload.get("transport_identity")
+                != direct_receipt_snapshot["transport_identity"]
+                or prepared_payload.get("network_policy_identity")
+                != direct_receipt_snapshot["network_policy_identity"]
+            ):
+                raise ProviderOriginError(
+                    "durable Prepared network authority differs from direct wire receipt"
+                )
         if _parse_utc_text(observed_text, name="observed_at") < _parse_utc_text(
             prepared.get("committed_at"), name="prepared committed_at"
         ):
@@ -632,6 +764,10 @@ class ProviderOriginJournal:
             "data_entitlement": snapshot["data_entitlement"],
             "parser_identity": snapshot["parser_identity"],
             "provider_environment": snapshot["provider_environment"],
+            "execution_class": execution_class,
+            "wire_request_sha256": wire_request_sha256,
+            "terminal_authority_journal_sequence_cut": terminal_cut,
+            "terminal_authority_verified_at": terminal_verified_at,
         }
         try:
             manifest = ArtifactStore.publish_bytes(
@@ -673,6 +809,10 @@ class ProviderOriginJournal:
             "response_sha256": response_digest,
             "response_artifact_id": artifact_id,
             "observed_at": observed_text,
+            "execution_class": execution_class,
+            "wire_request_sha256": wire_request_sha256,
+            "terminal_authority_journal_sequence_cut": terminal_cut,
+            "terminal_authority_verified_at": terminal_verified_at,
         }
         retained_id = attempt + ":retained"
         JournalStore.append_event(

@@ -245,6 +245,25 @@ def _parse_receipt(value: object) -> CredentialTransitionReceipt:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt shape is invalid"
         )
+
+    # Authenticate the retained bytes before interpreting their semantic fields.
+    # Otherwise a tamper that also makes a field combination semantically invalid
+    # (for example sequence > 1 with no predecessor) is misclassified before the
+    # content-derived receipt id is checked and can obscure the integrity failure.
+    claimed_id = value.get("receipt_id")
+    subject = dict(value)
+    subject.pop("receipt_id")
+    try:
+        expected_id = _receipt_id_from_subject(subject)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise CredentialTransitionReceiptError(
+            "stored credential transition receipt content identity is invalid"
+        ) from error
+    if claimed_id != expected_id:
+        raise CredentialTransitionReceiptError(
+            "stored credential transition receipt content identity is invalid"
+        )
+
     try:
         return CredentialTransitionReceipt(**value)
     except (TypeError, ValueError, CredentialTransitionReceiptError) as error:

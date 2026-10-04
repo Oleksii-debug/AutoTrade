@@ -3,10 +3,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.accounting import AccountingConflict
+from mvp.autotrade_mvp.accounting import AccountingConflict, JournalTransaction
 from mvp.autotrade_mvp import _provider_activity_accounting_impl as accounting_impl
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     ProviderFillFinancialPlan,
@@ -20,6 +21,7 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 from mvp.autotrade_mvp.reservations import ReservationConflict
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 PROVIDER = "SIMULATED"
@@ -387,6 +389,82 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     settlement_obligations=(),
                 )
             self.assertEqual(HostileProjectedFill.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
+
+    def test_correction_barrier_rejects_polymorphic_transaction_before_field_access(self):
+        class HostileTransaction(JournalTransaction):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile correction transaction field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            _orders, economics, _reservations = books(store)
+            evidence_root = root / "settlement-evidence"
+            settlement = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_root=evidence_root,
+                evidence_artifact_store=ArtifactStore(evidence_root),
+            )
+            hostile = object.__new__(HostileTransaction)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "reversal must be an exact JournalTransaction",
+            ):
+                accounting_impl.commit_economic_correction_with_settlement_replacement(
+                    economics,
+                    settlement,
+                    command_id="hostile-correction-transaction",
+                    idempotency_key="hostile-correction-transaction",
+                    reversal=hostile,
+                    replacement=None,
+                    settlement_obligations=(),
+                )
+            self.assertEqual(HostileTransaction.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
+
+    def test_correction_binding_helper_rejects_polymorphic_transaction_first(self):
+        class HostileTransaction(JournalTransaction):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile correction binding transaction read")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, reservations = books(store)
+            projected, provider = evidence()
+            hostile = object.__new__(HostileTransaction)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "replacement must be an exact JournalTransaction",
+            ):
+                accounting_impl._prepare_provider_fill_correction_binding(
+                    economics,
+                    reservations,
+                    reservation_id="reservation-never-read",
+                    original_projected_fill=projected,
+                    original_provider_fill=provider,
+                    corrected_projected_fill=projected,
+                    corrected_provider_fill=provider,
+                    replacement=hostile,
+                    asset_family="CASH_EQUITY",
+                    committed_at=WHEN,
+                )
+            self.assertEqual(HostileTransaction.field_reads, 0)
             self.assertEqual(economics.transactions, ())
 
     def test_atomic_barrier_rejects_polymorphic_prepared_binding_before_field_access(self):

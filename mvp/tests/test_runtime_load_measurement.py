@@ -332,6 +332,109 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                 event_types,
             )
 
+    def test_operation_cannot_replace_canonical_json_serializer(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-json-dumps-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            original = json_module.dumps
+
+            def operation():
+                _append(store, expected)
+                json_module.dumps = lambda *_args, **_kwargs: "{}"
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement transitive authority changed during financial "
+                        "operation: canonical_json.json.dumps",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                json_module.dumps = original
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
+    def test_operation_cannot_mutate_canonical_json_serializer_code_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-json-dumps-code-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            serializer = json_module.dumps
+            original_code = serializer.__code__
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError("forged json.dumps executed")
+
+            self.assertEqual(serializer.__code__.co_freevars, forged.__code__.co_freevars)
+            try:
+                def operation():
+                    _append(store, expected)
+                    serializer.__code__ = forged.__code__
+
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement executable authority changed during financial operation: "
+                        "canonical_json.json.dumps",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                serializer.__code__ = original_code
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
     def test_operation_cannot_replace_plan_digest_binding(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

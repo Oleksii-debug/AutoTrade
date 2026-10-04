@@ -1882,7 +1882,70 @@ ProviderOriginJournal.load_response_binding = _bind_provider_origin_response_loa
 del _bind_provider_origin_response_load
 del _register_provider_origin_response_binding_authority
 
-def execute_direct_provider_origin_read(
+
+def _install_direct_provider_origin_record_authority():
+    record_impl = ProviderOriginJournal._record_provider_origin
+    direct_record_token = object()
+
+    def guarded_record(
+        self,
+        attempt_id,
+        query_binding,
+        *,
+        http_status=None,
+        response_bytes=None,
+        observed_at=None,
+        provider_observation=None,
+        _origin_token=None,
+    ):
+        if provider_observation is not None:
+            if _origin_token is not direct_record_token:
+                raise ProviderOriginError(
+                    "direct provider origin requires canonical execute authority"
+                )
+            return record_impl(
+                self,
+                attempt_id,
+                query_binding,
+                provider_observation=provider_observation,
+            )
+        return record_impl(
+            self,
+            attempt_id,
+            query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            provider_observation=None,
+            _origin_token=_origin_token,
+        )
+
+    def record_from_execute(
+        origin,
+        attempt_id,
+        query_binding,
+        *,
+        provider_observation,
+    ):
+        return guarded_record(
+            origin,
+            attempt_id,
+            query_binding,
+            provider_observation=provider_observation,
+            _origin_token=direct_record_token,
+        )
+
+    return guarded_record, record_from_execute
+
+
+(
+    ProviderOriginJournal._record_provider_origin,
+    _record_direct_provider_origin_from_execute,
+) = _install_direct_provider_origin_record_authority()
+del _install_direct_provider_origin_record_authority
+
+
+def _execute_direct_provider_origin_read_impl(
     *,
     origin: ProviderOriginJournal,
     route: object,
@@ -1890,6 +1953,7 @@ def execute_direct_provider_origin_read(
     qualification_registry: object,
     query_binding: QualifiedProviderReadQueryBinding,
     transport: object,
+    _record_direct_provider_origin,
 ) -> AuthenticatedReadResponseBinding:
     """Execute one qualified read through the canonical direct provider wire.
 
@@ -1999,11 +2063,44 @@ def execute_direct_provider_origin_read(
         base,
         terminal_authority_factory=terminal_authority_factory,
     )
-    return origin.record_direct_provider_origin_observation(
+    return _record_direct_provider_origin(
+        origin,
         attempt_id,
         query_binding,
         provider_observation=provider_observation,
     )
+
+
+def _bind_execute_direct_provider_origin_read(execute_impl, record_direct):
+    def execute_direct_provider_origin_read(
+        *,
+        origin: ProviderOriginJournal,
+        route: object,
+        capability_registry: object,
+        qualification_registry: object,
+        query_binding: QualifiedProviderReadQueryBinding,
+        transport: object,
+    ) -> AuthenticatedReadResponseBinding:
+        return execute_impl(
+            origin=origin,
+            route=route,
+            capability_registry=capability_registry,
+            qualification_registry=qualification_registry,
+            query_binding=query_binding,
+            transport=transport,
+            _record_direct_provider_origin=record_direct,
+        )
+
+    return execute_direct_provider_origin_read
+
+
+execute_direct_provider_origin_read = _bind_execute_direct_provider_origin_read(
+    _execute_direct_provider_origin_read_impl,
+    _record_direct_provider_origin_from_execute,
+)
+del _bind_execute_direct_provider_origin_read
+del _execute_direct_provider_origin_read_impl
+del _record_direct_provider_origin_from_execute
 
 def observe_provider_origin_json_response(
     *,

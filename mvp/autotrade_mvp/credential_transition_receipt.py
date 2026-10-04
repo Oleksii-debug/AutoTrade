@@ -255,7 +255,7 @@ def _parse_receipt(value: object) -> CredentialTransitionReceipt:
     subject.pop("receipt_id")
     try:
         expected_id = _receipt_id_from_subject(subject)
-    except (TypeError, ValueError, OverflowError) as error:
+    except (TypeError, ValueError, OverflowError, UnicodeError) as error:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt content identity is invalid"
         ) from error

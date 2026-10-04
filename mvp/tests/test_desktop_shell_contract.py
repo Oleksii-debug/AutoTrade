@@ -56,6 +56,37 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("Authorization", text)
         self.assertNotIn("AutoTrade-Session", text)
 
+    def test_webview_owner_token_is_not_stored_as_broad_api_cookie(self):
+        code = CODE.read_text(encoding="utf-8")
+        runtime = (ROOT / "src" / "AutoTrade.Desktop" / "OwnedProviderFreeRuntime.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public string SessionToken => _session.Token;", runtime)
+        self.assertNotIn("public string CookieToken =>", runtime)
+        self.assertIn("core.CookieManager.DeleteAllCookies();", code)
+        self.assertIn("CoreWebView2BrowsingDataKinds.ServiceWorkers", code)
+        self.assertIn("core.AddWebResourceRequestedFilter(", code)
+        self.assertIn("CoreWebView2WebResourceContext.All", code)
+        self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+        self.assertNotIn("CoreWebView2WebResourceRequestSourceKinds.All", code)
+        self.assertIn("core.FrameNavigationStarting += (_, e) => e.Cancel = true;", code)
+        self.assertIn("core.WebResourceRequested += (_, e) =>", code)
+        self.assertIn(
+            "e.RequestedSourceKind == CoreWebView2WebResourceRequestSourceKinds.Document",
+            code,
+        )
+        self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
+        self.assertIn("e.Request.Method,", code)
+        self.assertIn('"AutoTrade-Session " + _ownedRuntime.SessionToken', code)
+        self.assertIn(
+            'e.Request.Headers.SetHeader("X-AutoTrade-Actor", "local-owner");',
+            code,
+        )
+        self.assertIn('e.Request.Headers.RemoveHeader("Authorization");', code)
+        self.assertIn('e.Request.Headers.RemoveHeader("X-AutoTrade-Actor");', code)
+        self.assertNotIn('CreateCookie("AutoTradeSession"', code)
+        self.assertNotIn("AddOrUpdateCookie", code)
+
     def test_openapi_distinguishes_ephemeral_owned_desktop_pairing(self):
         text = OPENAPI.read_text(encoding="utf-8")
         session = text.split("  /api/v1/session:", 1)[1].split(

@@ -103,15 +103,52 @@ public partial class MainWindow : Window
                 e.Cancel = !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
                     || !policy.AllowsTopLevelNavigation(target);
             };
+            // The product UI has no frame workflow. Block child-frame navigation so
+            // credential-bearing Host API requests can only originate from the trusted
+            // top-level document rather than an embedded frame.
+            core.FrameNavigationStarting += (_, e) => e.Cancel = true;
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.ServerCertificateErrorDetected += (_, e) => e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
-            CoreWebView2Cookie cookie = core.CookieManager.CreateCookie("AutoTradeSession",
-                _ownedRuntime.CookieToken, "127.0.0.1", "/api/v1");
-            cookie.IsHttpOnly = true;
-            cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
-            core.CookieManager.AddOrUpdateCookie(cookie);
+
+            // This is a dedicated profile. Remove credentials/service workers left by
+            // an earlier build before any trusted document is loaded. The current
+            // session token remains owned by the WPF process rather than WebView state.
+            core.CookieManager.DeleteAllCookies();
+            await core.Profile.ClearBrowsingDataAsync(
+                CoreWebView2BrowsingDataKinds.ServiceWorkers);
+
+            // Credential transport is exact method + route authority. WebView's network
+            // stack may add cookies after request interception, so do not install an
+            // AutoTrade session cookie at all. Instead attach the canonical header
+            // session only to requests admitted by the shared security policy.
+            core.AddWebResourceRequestedFilter(
+                new Uri(_ownedRuntime.Origin, "api/v1/*").AbsoluteUri,
+                CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.Document);
+            core.WebResourceRequested += (_, e) =>
+            {
+                bool admitted =
+                    e.RequestedSourceKind == CoreWebView2WebResourceRequestSourceKinds.Document
+                    && Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out Uri? target)
+                    && policy.AllowsSessionHeaderForwarding(
+                        e.Request.Method,
+                        target,
+                        _ownedRuntime.Origin);
+                if (admitted)
+                {
+                    e.Request.Headers.SetHeader(
+                        "Authorization",
+                        "AutoTrade-Session " + _ownedRuntime.SessionToken);
+                    e.Request.Headers.SetHeader("X-AutoTrade-Actor", "local-owner");
+                }
+                else
+                {
+                    e.Request.Headers.RemoveHeader("Authorization");
+                    e.Request.Headers.RemoveHeader("X-AutoTrade-Actor");
+                }
+            };
             core.Navigate(_ownedRuntime.Origin.AbsoluteUri);
             ProductWebView.Visibility = Visibility.Visible;
             FocusWebButton.IsEnabled = true;

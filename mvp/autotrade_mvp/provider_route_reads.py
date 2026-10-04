@@ -566,7 +566,7 @@ def _install_qualified_provider_read_authority():
 del _install_qualified_provider_read_authority
 
 
-def prepare_qualified_provider_read(
+def _prepare_qualified_provider_read_impl(
     route: SelectedProviderRoute,
     capability_registry: DurableCapabilityRegistry,
     qualification_registry: DurableProviderQualificationRegistry,
@@ -576,6 +576,7 @@ def prepare_qualified_provider_read(
     query: Mapping[str, str] | None,
     at: datetime,
     permission_scope: str = "ORDER.READ",
+    _register_authority,
 ) -> QualifiedProviderReadQueryBinding:
     if type(route) is not SelectedProviderRoute:
         raise TypeError("route must be exact SelectedProviderRoute")
@@ -669,16 +670,17 @@ def prepare_qualified_provider_read(
     binding = object.__new__(QualifiedProviderReadQueryBinding)
     for field_name, field_value in material.items():
         object.__setattr__(binding, field_name, field_value)
-    _register_qualified_provider_read_binding_authority(binding)
+    _register_authority(binding)
     return binding
 
 
-def observe_qualified_provider_json_response(
+def _observe_qualified_provider_json_response_impl(
     *,
     query_binding: QualifiedProviderReadQueryBinding,
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    _register_authority,
 ) -> QualifiedProviderResponseObservation:
     if type(query_binding) is not QualifiedProviderReadQueryBinding:
         raise TypeError("query_binding must be exact QualifiedProviderReadQueryBinding")
@@ -696,5 +698,62 @@ def observe_qualified_provider_json_response(
     qualified = object.__new__(QualifiedProviderResponseObservation)
     object.__setattr__(qualified, "observation", observation)
     object.__setattr__(qualified, "query_binding", query_binding)
-    _register_qualified_provider_response_authority(qualified)
+    _register_authority(qualified)
     return qualified
+
+def _bind_qualified_provider_read_minting(
+    register_query,
+    register_response,
+):
+    def prepare_qualified_provider_read(
+        route: SelectedProviderRoute,
+        capability_registry: DurableCapabilityRegistry,
+        qualification_registry: DurableProviderQualificationRegistry,
+        *,
+        surface: Surface,
+        endpoint: str,
+        query: Mapping[str, str] | None,
+        at: datetime,
+        permission_scope: str = "ORDER.READ",
+    ) -> QualifiedProviderReadQueryBinding:
+        return _prepare_qualified_provider_read_impl(
+            route,
+            capability_registry,
+            qualification_registry,
+            surface=surface,
+            endpoint=endpoint,
+            query=query,
+            at=at,
+            permission_scope=permission_scope,
+            _register_authority=register_query,
+        )
+
+    def observe_qualified_provider_json_response(
+        *,
+        query_binding: QualifiedProviderReadQueryBinding,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+    ) -> QualifiedProviderResponseObservation:
+        return _observe_qualified_provider_json_response_impl(
+            query_binding=query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            _register_authority=register_response,
+        )
+
+    return prepare_qualified_provider_read, observe_qualified_provider_json_response
+
+
+(
+    prepare_qualified_provider_read,
+    observe_qualified_provider_json_response,
+) = _bind_qualified_provider_read_minting(
+    _register_qualified_provider_read_binding_authority,
+    _register_qualified_provider_response_authority,
+)
+del _bind_qualified_provider_read_minting
+del _register_qualified_provider_read_binding_authority
+del _register_qualified_provider_response_authority
+

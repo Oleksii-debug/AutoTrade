@@ -360,9 +360,33 @@ class ProviderRouteReadTests(unittest.TestCase):
     def test_module_tokens_are_not_provider_read_minting_authority(self):
         self.assertFalse(hasattr(provider_core_module, "_PREPARED_READ_TOKEN"))
         self.assertFalse(hasattr(provider_core_module, "_OBSERVED_RESPONSE_TOKEN"))
+        self.assertFalse(
+            hasattr(
+                provider_core_module,
+                "_register_authenticated_read_query_binding_authority",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                provider_core_module,
+                "_register_provider_response_observation_authority",
+            )
+        )
         import mvp.autotrade_mvp.provider_route_reads as read_module
         self.assertFalse(hasattr(read_module, "_QUERY_TOKEN"))
         self.assertFalse(hasattr(read_module, "_RESPONSE_TOKEN"))
+        self.assertFalse(
+            hasattr(
+                read_module,
+                "_register_qualified_provider_read_binding_authority",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                read_module,
+                "_register_qualified_provider_response_authority",
+            )
+        )
 
     def test_object_new_forged_read_bindings_have_no_construction_authority(self):
         forged = object.__new__(QualifiedProviderReadQueryBinding)

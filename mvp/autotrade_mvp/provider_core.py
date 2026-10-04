@@ -261,7 +261,7 @@ class AuthenticatedReadQueryBinding:
             raise ProviderCoreError("provider-read provenance environment mismatch")
 
 
-def prepare_authenticated_read_query(
+def _prepare_authenticated_read_query_impl(
     *,
     capability: CapabilitySnapshot,
     surface: Surface,
@@ -269,6 +269,7 @@ def prepare_authenticated_read_query(
     query: Mapping[str, str] | None,
     at: datetime,
     permission_scope: str = "ORDER.READ",
+    _register_authority,
 ) -> AuthenticatedReadQueryBinding:
     """Prepare one authenticated query from canonical capability identity.
 
@@ -341,7 +342,7 @@ def prepare_authenticated_read_query(
         "query_digest",
         "sha256:" + sha256(encoded).hexdigest(),
     )
-    _register_authenticated_read_query_binding_authority(binding)
+    _register_authority(binding)
     return binding
 
 
@@ -520,12 +521,13 @@ def _install_authenticated_provider_read_authority():
 del _install_authenticated_provider_read_authority
 
 
-def observe_authenticated_json_response(
+def _observe_authenticated_json_response_impl(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    _register_authority,
 ) -> ProviderResponseObservation:
     if type(query_binding) is not AuthenticatedReadQueryBinding:
         raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
@@ -567,10 +569,63 @@ def observe_authenticated_json_response(
     object.__setattr__(observation, "response_sha256", response_digest)
     object.__setattr__(observation, "evidence_ref", evidence_ref)
     object.__setattr__(observation, "payload", payload)
-    _register_provider_response_observation_authority(observation)
+    _register_authority(observation)
     return observation
 
 
+
+
+def _bind_authenticated_provider_read_minting(
+    register_query,
+    register_response,
+):
+    def prepare_authenticated_read_query(
+        *,
+        capability: CapabilitySnapshot,
+        surface: Surface,
+        endpoint: str,
+        query: Mapping[str, str] | None,
+        at: datetime,
+        permission_scope: str = "ORDER.READ",
+    ) -> AuthenticatedReadQueryBinding:
+        return _prepare_authenticated_read_query_impl(
+            capability=capability,
+            surface=surface,
+            endpoint=endpoint,
+            query=query,
+            at=at,
+            permission_scope=permission_scope,
+            _register_authority=register_query,
+        )
+
+    def observe_authenticated_json_response(
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+    ) -> ProviderResponseObservation:
+        return _observe_authenticated_json_response_impl(
+            query_binding=query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            _register_authority=register_response,
+        )
+
+    return prepare_authenticated_read_query, observe_authenticated_json_response
+
+
+(
+    prepare_authenticated_read_query,
+    observe_authenticated_json_response,
+) = _bind_authenticated_provider_read_minting(
+    _register_authenticated_read_query_binding_authority,
+    _register_provider_response_observation_authority,
+)
+del _bind_authenticated_provider_read_minting
+del _register_authenticated_read_query_binding_authority
+del _register_provider_response_observation_authority
 
 
 def _thaw_json(value: object) -> object:

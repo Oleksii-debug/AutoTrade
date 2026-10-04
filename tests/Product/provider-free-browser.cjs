@@ -90,6 +90,10 @@ async function command(page, action, index) {
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled
     && !document.querySelector("#submit-command").disabled
     && document.querySelector("#freshness").textContent.includes("host=CURRENT"));
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "refresh-state",
+    action + " refresh completion focus");
   await page.keyboard.press("Shift+Tab");
   assert.equal(
     await page.evaluate(() => document.activeElement.id),
@@ -104,12 +108,67 @@ async function command(page, action, index) {
     await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("895.696"));
 }
 
+async function exercisePortfolioTableTools(page) {
+  stage = "portfolio keyboard tools";
+  await tabTo(page, "portfolio-filter");
+  await page.keyboard.type("895.696");
+  await page.waitForFunction(() => {
+    const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
+    const rows = [...document.querySelectorAll('#portfolio-body tr[data-filterable-row="true"]')];
+    return status.includes("match the current filter") && rows.some(row => !row.hidden);
+  });
+  await page.waitForFunction(() =>
+    (document.querySelector("#polite-status")?.textContent || "").includes(
+      "rows match the current filter."));
+  assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-copy");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "visible portfolio rows copied."));
+  await page.waitForFunction(() =>
+    (document.querySelector("#polite-status")?.textContent || "").includes(
+      "visible portfolio rows copied."));
+  assert.match(await page.evaluate(() => navigator.clipboard.readText()), /895\.696/);
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
+  await page.keyboard.press("Control+A");
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").endsWith(" rows shown."));
+}
+
+async function exerciseHostOutageFailClosed(page) {
+  stage = "host outage keyboard refresh";
+  await tabTo(page, "refresh-state");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => {
+    const refresh = document.querySelector("#refresh-state");
+    const submit = document.querySelector("#submit-command");
+    const freshness = document.querySelector("#freshness")?.textContent || "";
+    const urgent = document.querySelector("#urgent-status")?.textContent || "";
+    return refresh && !refresh.disabled && submit && submit.disabled
+      && /unavailable|stale/i.test(freshness)
+      && /failed|unavailable|stale/i.test(urgent);
+  });
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "refresh-state",
+    "failed keyboard refresh focus");
+  assert.match(await page.locator("#freshness").innerText(), /unavailable|stale/i);
+  assert.match(await page.locator("#urgent-status").innerText(), /failed|unavailable|stale/i);
+}
+
 (async () => {
   browser = await chromium.launch({
     ...(process.env.AUTOTRADE_BROWSER_PATH ? {executablePath: process.env.AUTOTRADE_BROWSER_PATH} : {}),
     args: ["--no-sandbox"],
   });
-  const page = await browser.newPage();
+  const context = await browser.newContext({
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const page = await context.newPage();
   observedPage = page;
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -124,6 +183,7 @@ async function command(page, action, index) {
   assert.equal(await page.locator("#polite-status").getAttribute("role"), "status");
   assert.equal(await page.locator("#urgent-status").getAttribute("role"), "alert");
   await stop();
+  await exerciseHostOutageFailClosed(page);
 
   const crash = spawnSync(python, ["-B", "-c", `
 import os,sys
@@ -145,6 +205,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   assert.match(await page.locator("#portfolio-body").innerText(), /PARTIALLY_FILLED/);
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
+  await exercisePortfolioTableTools(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);
   await command(page, "BACKUP_SIMULATION", 4);

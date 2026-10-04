@@ -209,19 +209,39 @@ class RecoveryController:
         self._recover_scoped_submission_uncertainty_from_owner_scope()
         return durable
 
-    def activate_takeover_target_recovery(self) -> OwnerFence:
-        """Release source-only fencing after a proven N->N+1 durable takeover."""
+    def activate_takeover_target_recovery(
+        self,
+        *,
+        source_owner: OwnerFence,
+        target_owner: OwnerFence,
+    ) -> OwnerFence:
+        """Release source-only fencing after an exact durable N->N+1 takeover.
 
-        source = self._takeover_source_owner
-        if source is None:
+        Attachment may happen before or after the takeover protocol already
+        committed its target owner because a process can crash between durable
+        phases. Validate the issued source/target pair against the complete
+        durable owner chain instead of assuming startup observed the source.
+        """
+
+        attached = self._takeover_source_owner
+        if attached is None:
             raise RuntimeError("Controller is not attached for takeover")
-        if self.owner is None:
-            raise RuntimeError("Takeover target owner is missing")
-        self._require_current_durable_owner()
-        if self.owner == source:
-            raise PermissionError("Durable takeover has not advanced the source owner")
-        if self.owner.epoch != source.epoch + 1:
+        if type(source_owner) is not OwnerFence or type(target_owner) is not OwnerFence:
+            raise TypeError("takeover owners must be exact OwnerFence values")
+        if target_owner.owner_id == source_owner.owner_id:
+            raise PermissionError("Durable takeover target must differ from source owner")
+        if target_owner.epoch != source_owner.epoch + 1:
             raise PermissionError("Durable takeover owner epoch is not the next generation")
+        if attached not in {source_owner, target_owner}:
+            raise PermissionError("Attached durable owner is not part of takeover transition")
+        if self.owner != target_owner:
+            raise PermissionError("Recovery controller is not bound to takeover target owner")
+        self._require_current_durable_owner()
+        chain = self.durable_owner_chain()
+        if len(chain) < 2 or chain[-2:] != (source_owner, target_owner):
+            raise PermissionError(
+                "Durable owner chain does not contain the exact takeover transition"
+            )
         self._takeover_source_owner = None
         self.provider_reconciled = False
         self.reason_codes.discard("takeover_source_only")

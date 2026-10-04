@@ -241,6 +241,52 @@ class RuntimeLoadMeasurementPlanInstanceAuthorityTests(unittest.TestCase):
 
             self._assert_no_latency_measurement(store)
 
+    def test_python313_frame_locals_cannot_disable_post_callback_plan_guard(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-frame-locals", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="frame-locals-verifier-bypass",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+
+            def operation():
+                measurement_frame = _measurement_frame()
+                loaded_expected = measurement_frame.f_locals["expected"]
+                object.__setattr__(
+                    loaded_expected,
+                    "event_type",
+                    "CallbackForgedFinancialEvent",
+                )
+                # Python 3.13 FrameLocalsProxy writes through to optimized locals.
+                # Attempt the exact bypass: replace both the verifier and its
+                # expected-event snapshot after mutating the loaded durable plan.
+                measurement_frame.f_locals["require_operation_authority"] = lambda: None
+                measurement_frame.f_locals["expected_event_state_snapshots"] = tuple()
+                _append(store, loaded_expected)
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                    side_effect=(900, 1_000),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    "durable plan event instance state changed during financial operation: event_type",
+                ),
+            ):
+                measure_declared_financial_operation(
+                    store,
+                    _spec(),
+                    plan_id=plan.plan_id,
+                    event_id=expected.event_id,
+                    operation=operation,
+                )
+
+            self._assert_no_latency_measurement(store)
+
 
 if __name__ == "__main__":
     unittest.main()

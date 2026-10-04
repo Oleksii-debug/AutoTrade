@@ -761,13 +761,6 @@ class ScientificRegistry:
             if protocol_row is None:
                 raise KeyError(protocol)
             protocol_payload = _registered_protocol_payload(protocol_row)
-            if con.execute(
-                "SELECT 1 FROM trials WHERE protocol_id=? LIMIT 1",
-                (protocol,),
-            ).fetchone() is not None:
-                raise ProtocolViolation(
-                    "locked holdout must be preregistered before the first trial"
-                )
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],
                 "forward_period",
@@ -779,21 +772,6 @@ class ScientificRegistry:
                 "role": "LOCKED_FORWARD",
             }
             identity_hash, identity_json = _holdout_identity(identity)
-            holdout_row = con.execute(
-                "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
-                (identity_hash,),
-            ).fetchone()
-            if holdout_row is None:
-                con.execute(
-                    "INSERT INTO holdouts("
-                    "holdout_identity_hash,identity_json,created_at"
-                    ") VALUES(?,?,?)",
-                    (identity_hash, identity_json, created),
-                )
-            elif holdout_row["identity_json"] != identity_json:
-                raise ProtocolConflict(
-                    "holdout identity hash was reused inconsistently"
-                )
             existing = con.execute(
                 "SELECT * FROM protocol_locked_holdouts WHERE protocol_id=?",
                 (protocol,),
@@ -812,6 +790,33 @@ class ScientificRegistry:
                     con,
                     protocol_id=protocol,
                     protocol_payload=protocol_payload,
+                )
+
+            # Only the first binding is time-sensitive.  Once the exact binding
+            # exists, an idempotent restart may re-resolve it after trials; a
+            # legacy protocol with outcomes but no prior binding may not mint one.
+            if con.execute(
+                "SELECT 1 FROM trials WHERE protocol_id=? LIMIT 1",
+                (protocol,),
+            ).fetchone() is not None:
+                raise ProtocolViolation(
+                    "locked holdout must be preregistered before the first trial"
+                )
+
+            holdout_row = con.execute(
+                "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
+                (identity_hash,),
+            ).fetchone()
+            if holdout_row is None:
+                con.execute(
+                    "INSERT INTO holdouts("
+                    "holdout_identity_hash,identity_json,created_at"
+                    ") VALUES(?,?,?)",
+                    (identity_hash, identity_json, created),
+                )
+            elif holdout_row["identity_json"] != identity_json:
+                raise ProtocolConflict(
+                    "holdout identity hash was reused inconsistently"
                 )
             binding_hash = _locked_holdout_binding_hash(
                 protocol_id=protocol,

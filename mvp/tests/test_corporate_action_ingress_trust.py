@@ -85,6 +85,14 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
                 source_sequence=0,
             )
 
+    def test_event_payload_is_detached_and_immutable_after_acceptance(self):
+        payload = {"per_share": "1", "currency": "USD"}
+        event = self._event(payload=payload)
+        payload["per_share"] = "999"
+        self.assertEqual(event.payload["per_share"], "1")
+        with self.assertRaises(TypeError):
+            event.payload["per_share"] = "2"
+
     def test_integer_subclasses_are_rejected_before_comparison_dispatch(self):
         class HostileInt(int):
             def __lt__(self, other):
@@ -137,6 +145,34 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
                 daily_rate="0",
                 marked_value="0",
                 days=HostileInt(1),
+            )
+
+    def test_transition_revalidates_nested_financial_values(self):
+        base_state = self._state()
+
+        class StateSubclass(EquityState):
+            pass
+
+        derived_state = StateSubclass(**vars(base_state))
+        with self.assertRaisesRegex(TypeError, "transition before"):
+            Transition(
+                event_id="event-1",
+                before=derived_state,
+                after=base_state,
+                economic_pnl=Decimal("0"),
+                reason="test",
+            )
+
+        class DecimalSubclass(Decimal):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "economic_pnl"):
+            Transition(
+                event_id="event-1",
+                before=base_state,
+                after=base_state,
+                economic_pnl=DecimalSubclass("0"),
+                reason="test",
             )
 
     def test_checkpoint_rejects_polymorphic_or_mutable_nested_authority(self):

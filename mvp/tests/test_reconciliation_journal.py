@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -39,6 +40,8 @@ def snapshot(*, provider_id="TEST_PROVIDER", account_id="test-account", environm
 
 def fill(*, provider_id="TEST_PROVIDER", account_id="test-account", environment="PAPER"):
     return ProviderFillEvidence.create(
+               side="BUY",
+               evidence_refs=("test:normalized-fill",),
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
@@ -193,6 +196,7 @@ class ReconciliationJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             wrong_scope_fill = ProviderFillEvidence.create(
+                                   evidence_refs=("test:normalized-fill",),
                 provider_id="OTHER_PROVIDER",
                 account_id="test-account",
                 environment="PAPER",
@@ -262,7 +266,7 @@ class ReconciliationJournalTests(unittest.TestCase):
             self.assertEqual(first["event_id"], second["event_id"])
             self.assertEqual(
                 first["payload"]["cash_differences"]["USD"],
-                "-0.50",
+                "-0.5",
             )
             self.assertEqual(
                 first["payload"]["resource_availability"],
@@ -1282,6 +1286,44 @@ class ReconciliationJournalTests(unittest.TestCase):
                 account_id="test-account",
                 environment="PAPER",
             )
+
+
+    def test_availability_max_age_rejects_decimal_subclass_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal.is_finite dispatched")
+
+            def __lt__(self, other):
+                raise AssertionError("hostile Decimal comparison dispatched")
+
+            def __gt__(self, other):
+                raise AssertionError("hostile Decimal comparison dispatched")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="decimal-subclass-freshness",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "max_age_seconds must be an exact built-in Decimal",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds=HostileDecimal("60"),
+                )
 
 
 if __name__ == "__main__":

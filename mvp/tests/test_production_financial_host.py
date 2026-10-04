@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Condition, Event, Thread
@@ -10,11 +11,27 @@ from mvp.autotrade_mvp.production_financial_host import compose_financial_author
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 from mvp.autotrade_mvp.recovery_dispatch import build_recovery_issued_dispatcher
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 class _FenceStub:
     def __init__(self) -> None:
         self.released = False
+
+
+class _SecurityBoundaryStub:
+    def __init__(self) -> None:
+        self.calls = []
+
+    @contextmanager
+    def lease_for_execution(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        yield "secret"
+
+
+class _ApplicationStub:
+    def __init__(self, security_boundary=None) -> None:
+        self.security_boundary = security_boundary or _SecurityBoundaryStub()
 
 
 class ProductionFinancialHostTests(unittest.TestCase):
@@ -41,6 +58,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
         host._lifecycle_condition = Condition()
         host._serve_state = "IDLE"
         host._instance_fence = _FenceStub()
+        host.application = _ApplicationStub()
         return host
 
     def test_fresh_host_mints_epoch_one_but_remains_recovering_and_cannot_send(self):
@@ -153,6 +171,107 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertIn("sender_fence_rejected:PermissionError", outcome.reason)
             self.assertEqual(wire_calls, [])
+
+    def test_recovering_host_cannot_resolve_trade_secret(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            boundary = host.application.security_boundary
+            handle = PersistentCredentialHandle(
+                handle_id="cred-1",
+                account_id="acct",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+                generation=1,
+            )
+
+            with self.assertRaisesRegex(PermissionError, "not ready"):
+                with runtime.lease_provider_trade_secret(
+                    "session-1",
+                    origin=runtime.config.public_origin,
+                    handle=handle,
+                    execution_identity=runtime.recovery_controller.owner.owner_id,
+                    provider="BYBIT",
+                    provider_environment="TESTNET",
+                ):
+                    self.fail("RECOVERING host resolved TRADE plaintext")
+            self.assertEqual(boundary.calls, [])
+
+    def test_trade_secret_lease_pins_host_account_environment_and_purpose(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            recovery = runtime.recovery_controller
+            recovery.state = HostState.READY
+            recovery.provider_reconciled = True
+            recovery.reason_codes.clear()
+            boundary = host.application.security_boundary
+            handle = PersistentCredentialHandle(
+                handle_id="cred-1",
+                account_id="acct",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+                generation=1,
+            )
+
+            with runtime.lease_provider_trade_secret(
+                "session-1",
+                origin=runtime.config.public_origin,
+                handle=handle,
+                execution_identity=recovery.owner.owner_id,
+                provider="BYBIT",
+                provider_environment="TESTNET",
+            ) as plaintext:
+                self.assertEqual(plaintext, "secret")
+
+            self.assertEqual(len(boundary.calls), 1)
+            _, kwargs = boundary.calls[0]
+            self.assertEqual(kwargs["account_id"], "acct")
+            self.assertEqual(kwargs["environment"], "PAPER")
+            self.assertEqual(kwargs["purpose"], "TRADE")
+            self.assertEqual(kwargs["provider"], "BYBIT")
+            self.assertEqual(kwargs["execution_identity"], "host-a")
+
+    def test_security_boundary_retarget_fails_before_credential_use(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            recovery = runtime.recovery_controller
+            recovery.state = HostState.READY
+            recovery.provider_reconciled = True
+            recovery.reason_codes.clear()
+            original = host.application.security_boundary
+            replacement = _SecurityBoundaryStub()
+            host.application.security_boundary = replacement
+            handle = PersistentCredentialHandle(
+                handle_id="cred-1",
+                account_id="acct",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+                generation=1,
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "security authority changed",
+            ):
+                with runtime.lease_provider_trade_secret(
+                    "session-1",
+                    origin=runtime.config.public_origin,
+                    handle=handle,
+                    execution_identity=recovery.owner.owner_id,
+                    provider="BYBIT",
+                    provider_environment="TESTNET",
+                ):
+                    self.fail("retargeted security authority was used")
+            self.assertEqual(original.calls, [])
+            self.assertEqual(replacement.calls, [])
 
     def test_host_closing_blocks_before_financial_dispatch_side_effects(self):
         with TemporaryDirectory() as directory:

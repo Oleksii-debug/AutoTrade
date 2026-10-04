@@ -9,7 +9,7 @@ wire I/O; a new read must resolve current authority again.
 """
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -42,8 +42,6 @@ from .provider_transport import (
 )
 
 
-_QUERY_TOKEN = object()
-_RESPONSE_TOKEN = object()
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -246,6 +244,80 @@ def _qualified_read_rule(
     )
 
 
+def _validate_qualified_provider_read_material(
+    *,
+    query_binding: AuthenticatedReadQueryBinding,
+    qualification_id: str,
+    route_semantics_digest: str,
+    endpoint_rule_digest: str,
+    qualified_route_rule_digest: str,
+    data_entitlement: str,
+    accepted_success_statuses: tuple[int, ...],
+    parser_identity: str,
+    authority_journal_sequence_cut: int,
+    provider_environment: str,
+    adapter_code_sha: str,
+    packaged_artifact_digest: str,
+) -> None:
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
+    _require_authenticated_read_query_binding_authority(query_binding)
+    if type(qualification_id) is not str or _QID_RE.fullmatch(qualification_id) is None:
+        raise ProviderRouteReadError("qualification_id is not canonical")
+    if type(route_semantics_digest) is not str or _SHA_RE.fullmatch(route_semantics_digest) is None:
+        raise ProviderRouteReadError("route_semantics_digest is not canonical")
+    if type(endpoint_rule_digest) is not str or _SHA_RE.fullmatch(endpoint_rule_digest) is None:
+        raise ProviderRouteReadError("endpoint_rule_digest is not canonical")
+    if (
+        type(qualified_route_rule_digest) is not str
+        or _SHA_RE.fullmatch(qualified_route_rule_digest) is None
+    ):
+        raise ProviderRouteReadError("qualified_route_rule_digest is not canonical")
+    if (
+        type(data_entitlement) is not str
+        or not data_entitlement
+        or data_entitlement != data_entitlement.strip()
+    ):
+        raise ProviderRouteReadError("data_entitlement must be canonical text")
+    if (
+        type(accepted_success_statuses) is not tuple
+        or not accepted_success_statuses
+        or tuple(sorted(set(accepted_success_statuses))) != accepted_success_statuses
+        or any(
+            type(status) is not int or status < 200 or status > 299
+            for status in accepted_success_statuses
+        )
+    ):
+        raise ProviderRouteReadError(
+            "accepted_success_statuses must be sorted unique exact 2xx integers"
+        )
+    if (
+        type(parser_identity) is not str
+        or not parser_identity
+        or parser_identity != parser_identity.strip()
+    ):
+        raise ProviderRouteReadError("parser_identity must be canonical text")
+    if (
+        type(authority_journal_sequence_cut) is not int
+        or authority_journal_sequence_cut < 0
+    ):
+        raise ProviderRouteReadError(
+            "authority journal cut must be a non-negative exact integer"
+        )
+    if type(provider_environment) is not str or not provider_environment:
+        raise ProviderRouteReadError("provider_environment is required")
+    if (
+        type(adapter_code_sha) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", adapter_code_sha) is None
+    ):
+        raise ProviderRouteReadError("adapter_code_sha is not canonical")
+    if (
+        type(packaged_artifact_digest) is not str
+        or _SHA_RE.fullmatch(packaged_artifact_digest) is None
+    ):
+        raise ProviderRouteReadError("packaged_artifact_digest is not canonical")
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class QualifiedProviderReadQueryBinding:
     query_binding: AuthenticatedReadQueryBinding
@@ -260,87 +332,11 @@ class QualifiedProviderReadQueryBinding:
     provider_environment: str
     adapter_code_sha: str
     packaged_artifact_digest: str
-    _factory_token: InitVar[object | None]
 
-    def __init__(
-        self,
-        *,
-        query_binding: AuthenticatedReadQueryBinding,
-        qualification_id: str,
-        route_semantics_digest: str,
-        endpoint_rule_digest: str,
-        qualified_route_rule_digest: str,
-        data_entitlement: str,
-        accepted_success_statuses: tuple[int, ...],
-        parser_identity: str,
-        authority_journal_sequence_cut: int,
-        provider_environment: str,
-        adapter_code_sha: str,
-        packaged_artifact_digest: str,
-        _factory_token: object | None = None,
-    ) -> None:
-        if _factory_token is not _QUERY_TOKEN:
-            raise ProviderRouteReadError(
-                "qualified provider-read bindings must come from canonical route authority"
-            )
-        if type(query_binding) is not AuthenticatedReadQueryBinding:
-            raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
-        if type(qualification_id) is not str or _QID_RE.fullmatch(qualification_id) is None:
-            raise ProviderRouteReadError("qualification_id is not canonical")
-        if type(route_semantics_digest) is not str or _SHA_RE.fullmatch(route_semantics_digest) is None:
-            raise ProviderRouteReadError("route_semantics_digest is not canonical")
-        if (
-            type(endpoint_rule_digest) is not str
-            or _SHA_RE.fullmatch(endpoint_rule_digest) is None
-        ):
-            raise ProviderRouteReadError("endpoint_rule_digest is not canonical")
-        if (
-            type(qualified_route_rule_digest) is not str
-            or _SHA_RE.fullmatch(qualified_route_rule_digest) is None
-        ):
-            raise ProviderRouteReadError("qualified_route_rule_digest is not canonical")
-        if (
-            type(data_entitlement) is not str
-            or not data_entitlement
-            or data_entitlement != data_entitlement.strip()
-        ):
-            raise ProviderRouteReadError("data_entitlement must be canonical text")
-        if (
-            type(accepted_success_statuses) is not tuple
-            or not accepted_success_statuses
-            or tuple(sorted(set(accepted_success_statuses))) != accepted_success_statuses
-            or any(type(status) is not int or status < 200 or status > 299 for status in accepted_success_statuses)
-        ):
-            raise ProviderRouteReadError(
-                "accepted_success_statuses must be sorted unique exact 2xx integers"
-            )
-        if (
-            type(parser_identity) is not str
-            or not parser_identity
-            or parser_identity != parser_identity.strip()
-        ):
-            raise ProviderRouteReadError("parser_identity must be canonical text")
-        if type(authority_journal_sequence_cut) is not int or authority_journal_sequence_cut < 0:
-            raise ProviderRouteReadError("authority journal cut must be a non-negative exact integer")
-        if type(provider_environment) is not str or not provider_environment:
-            raise ProviderRouteReadError("provider_environment is required")
-        if type(adapter_code_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", adapter_code_sha) is None:
-            raise ProviderRouteReadError("adapter_code_sha is not canonical")
-        if type(packaged_artifact_digest) is not str or _SHA_RE.fullmatch(packaged_artifact_digest) is None:
-            raise ProviderRouteReadError("packaged_artifact_digest is not canonical")
-        object.__setattr__(self, "query_binding", query_binding)
-        object.__setattr__(self, "qualification_id", qualification_id)
-        object.__setattr__(self, "route_semantics_digest", route_semantics_digest)
-        object.__setattr__(self, "endpoint_rule_digest", endpoint_rule_digest)
-        object.__setattr__(self, "qualified_route_rule_digest", qualified_route_rule_digest)
-        object.__setattr__(self, "data_entitlement", data_entitlement)
-        object.__setattr__(self, "accepted_success_statuses", accepted_success_statuses)
-        object.__setattr__(self, "parser_identity", parser_identity)
-        object.__setattr__(self, "authority_journal_sequence_cut", authority_journal_sequence_cut)
-        object.__setattr__(self, "provider_environment", provider_environment)
-        object.__setattr__(self, "adapter_code_sha", adapter_code_sha)
-        object.__setattr__(self, "packaged_artifact_digest", packaged_artifact_digest)
-        _register_qualified_provider_read_binding_authority(self)
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderRouteReadError(
+            "qualified provider-read bindings must come from canonical route authority"
+        )
 
     @property
     def query_digest(self) -> str:
@@ -366,28 +362,11 @@ class QualifiedProviderReadQueryBinding:
 class QualifiedProviderResponseObservation:
     observation: ProviderResponseObservation
     query_binding: QualifiedProviderReadQueryBinding
-    _factory_token: InitVar[object | None]
 
-    def __init__(
-        self,
-        *,
-        observation: ProviderResponseObservation,
-        query_binding: QualifiedProviderReadQueryBinding,
-        _factory_token: object | None = None,
-    ) -> None:
-        if _factory_token is not _RESPONSE_TOKEN:
-            raise ProviderRouteReadError(
-                "qualified provider responses must come from exact observed bytes"
-            )
-        if type(observation) is not ProviderResponseObservation:
-            raise TypeError("observation must be exact ProviderResponseObservation")
-        if type(query_binding) is not QualifiedProviderReadQueryBinding:
-            raise TypeError("query_binding must be exact QualifiedProviderReadQueryBinding")
-        if observation.query_binding != query_binding.query_binding:
-            raise ProviderRouteReadError("response does not belong to qualified read query")
-        object.__setattr__(self, "observation", observation)
-        object.__setattr__(self, "query_binding", query_binding)
-        _register_qualified_provider_response_authority(self)
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderRouteReadError(
+            "qualified provider responses must come from exact observed bytes"
+        )
 
     @property
     def evidence_ref(self) -> str:
@@ -672,21 +651,26 @@ def prepare_qualified_provider_read(
         surface=base.surface,
         permission_scope=base.permission_scope,
     )
-    return QualifiedProviderReadQueryBinding(
-        query_binding=base,
-        qualification_id=route.qualification_id,
-        route_semantics_digest=route_semantics_digest,
-        endpoint_rule_digest=endpoint_rule_digest,
-        qualified_route_rule_digest=qualified_route_rule_digest,
-        data_entitlement=data_entitlement,
-        accepted_success_statuses=accepted_success_statuses,
-        parser_identity=parser_identity,
-        authority_journal_sequence_cut=cut,
-        provider_environment=candidate.provider_environment,
-        adapter_code_sha=candidate.adapter_code_sha,
-        packaged_artifact_digest=candidate.packaged_artifact_digest,
-        _factory_token=_QUERY_TOKEN,
-    )
+    material = {
+        "query_binding": base,
+        "qualification_id": route.qualification_id,
+        "route_semantics_digest": route_semantics_digest,
+        "endpoint_rule_digest": endpoint_rule_digest,
+        "qualified_route_rule_digest": qualified_route_rule_digest,
+        "data_entitlement": data_entitlement,
+        "accepted_success_statuses": accepted_success_statuses,
+        "parser_identity": parser_identity,
+        "authority_journal_sequence_cut": cut,
+        "provider_environment": candidate.provider_environment,
+        "adapter_code_sha": candidate.adapter_code_sha,
+        "packaged_artifact_digest": candidate.packaged_artifact_digest,
+    }
+    _validate_qualified_provider_read_material(**material)
+    binding = object.__new__(QualifiedProviderReadQueryBinding)
+    for field_name, field_value in material.items():
+        object.__setattr__(binding, field_name, field_value)
+    _register_qualified_provider_read_binding_authority(binding)
+    return binding
 
 
 def observe_qualified_provider_json_response(
@@ -709,8 +693,8 @@ def observe_qualified_provider_json_response(
         response_bytes=response_bytes,
         observed_at=observed_at,
     )
-    return QualifiedProviderResponseObservation(
-        observation=observation,
-        query_binding=query_binding,
-        _factory_token=_RESPONSE_TOKEN,
-    )
+    qualified = object.__new__(QualifiedProviderResponseObservation)
+    object.__setattr__(qualified, "observation", observation)
+    object.__setattr__(qualified, "query_binding", query_binding)
+    _register_qualified_provider_response_authority(qualified)
+    return qualified

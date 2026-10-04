@@ -7,6 +7,8 @@ from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
+import mvp.autotrade_mvp.provider_core as provider_core_module
+
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -354,6 +356,26 @@ class ProviderRouteReadTests(unittest.TestCase):
                     response_bytes=b'{"retCode":0}',
                     observed_at=NOW + timedelta(seconds=1),
                 )
+
+    def test_module_tokens_are_not_provider_read_minting_authority(self):
+        self.assertFalse(hasattr(provider_core_module, "_PREPARED_READ_TOKEN"))
+        self.assertFalse(hasattr(provider_core_module, "_OBSERVED_RESPONSE_TOKEN"))
+        import mvp.autotrade_mvp.provider_route_reads as read_module
+        self.assertFalse(hasattr(read_module, "_QUERY_TOKEN"))
+        self.assertFalse(hasattr(read_module, "_RESPONSE_TOKEN"))
+
+    def test_object_new_forged_read_bindings_have_no_construction_authority(self):
+        forged = object.__new__(QualifiedProviderReadQueryBinding)
+        object.__setattr__(
+            forged,
+            "qualification_id",
+            "provider-qualification:sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "construction authority is unavailable",
+        ):
+            _ = forged.query_digest
 
     def test_neutral_read_binding_mutation_cannot_relabel_exact_response(self):
         with TemporaryDirectory() as directory:

@@ -3,20 +3,24 @@ from decimal import Decimal
 
 import pytest
 
-from mvp.autotrade_mvp.allocation import AllocationResult, AllocationTarget
+from mvp.autotrade_mvp.allocation import (
+    AllocationResult,
+    AllocationTarget,
+    EvidenceBoundObjectiveAllocationResult,
+    ObjectiveAllocationResult,
+)
 from mvp.autotrade_mvp.portfolio_correlation import (
     CorrelationConcentrationError,
     CorrelationConcentrationPolicy,
     CorrelationEvidence,
     assess_correlation_concentration,
-    require_correlation_safe_allocation,
+    require_correlation_safe_proposal,
 )
-
 
 NOW = "2026-10-04T12:00:00Z"
 
 
-def _allocation(**notionals: str) -> AllocationResult:
+def _proposal(**notionals: str):
     targets = tuple(
         AllocationTarget(
             symbol=symbol,
@@ -26,9 +30,9 @@ def _allocation(**notionals: str) -> AllocationResult:
         )
         for symbol, notional in notionals.items()
     )
-    gross = sum((abs(target.notional) for target in targets), Decimal("0"))
-    net = abs(sum((target.notional for target in targets), Decimal("0")))
-    return AllocationResult(
+    gross = sum((abs(item.notional) for item in targets), Decimal("0"))
+    net = abs(sum((item.notional for item in targets), Decimal("0")))
+    allocation = AllocationResult(
         status="ALLOCATED",
         scale=Decimal("1"),
         targets=targets,
@@ -39,276 +43,281 @@ def _allocation(**notionals: str) -> AllocationResult:
         cash_required=gross,
         reason="test",
     )
-
-
-def _e(
-    left: str,
-    right: str,
-    correlation: str,
-    *,
-    start="2026-10-04T11:00:00Z",
-    end="2026-10-04T13:00:00Z",
-):
-    return CorrelationEvidence(
-        left_symbol=left,
-        right_symbol=right,
-        correlation=Decimal(correlation),
-        observed_at=start,
-        valid_until=end,
-        source_ref="evidence:" + ":".join(sorted((left, right))),
+    objective = ObjectiveAllocationResult(
+        allocation=allocation,
+        selected_symbols=tuple(notionals),
+        expected_net_utility=Decimal("0"),
+        objective_version="test:v1",
+        reason="test",
+    )
+    return EvidenceBoundObjectiveAllocationResult(
+        objective=objective,
+        decision_digest="a" * 64,
+        policy_config_digest="b" * 64,
+        objective_search_config_digest="c" * 64,
+        evidence_refs=(),
+        environment="SIMULATION",
+        policy_version="policy:1",
+        decision_time=NOW,
+        provider_id="SIMULATED",
+        account_id="acct:1",
+        instrument_versions=tuple((s, f"instrument:{s}:1") for s in notionals),
+        capability_snapshot_ids=tuple((s, f"capability:{s}:1") for s in notionals),
+        account_snapshot_id="snapshot:1",
+        reconciliation_run_id="reconciliation:1",
+        account_state_version=1,
+        reservation_state_version=1,
+        reservation_state_digest="d" * 64,
+        base_currency="USD",
     )
 
 
-def _policy(cap="100", threshold="0.8"):
+def _e(left, right, lower, upper=None, *, observed="2026-10-04T11:00:00Z", valid_until="2026-10-04T13:00:00Z", environment="SIMULATION", suffix=""):
+    upper = lower if upper is None else upper
+    pair = ":".join(sorted((left, right)))
+    return CorrelationEvidence.create(
+        evidence_id=f"correlation:{pair}{suffix}",
+        environment=environment,
+        left_symbol=left,
+        right_symbol=right,
+        correlation_lower=Decimal(lower),
+        correlation_upper=Decimal(upper),
+        observed_at=observed,
+        valid_until=valid_until,
+        sample_start="2026-09-01T00:00:00Z",
+        sample_end="2026-10-04T10:00:00Z",
+        estimator_id="pearson-shrinkage:v1",
+        uncertainty_method="bootstrap-interval:v1",
+        source_ref=f"artifact:{pair}:sha256:test",
+    )
+
+
+def _policy(cap="100", threshold="0.8", currency="USD"):
     return CorrelationConcentrationPolicy(
+        policy_id="portfolio-policy:1",
+        reporting_currency=currency,
         max_correlated_gross_notional=Decimal(cap),
         reinforcing_threshold=Decimal(threshold),
     )
 
 
-def test_same_direction_positive_correlation_clusters_and_fails_cap():
-    assessment = assess_correlation_concentration(
-        _allocation(A="60", B="50"),
-        (_e("A", "B", "0.9"),),
+def _assess(proposal, evidence, policy=None):
+    return assess_correlation_concentration(
+        proposal,
+        evidence,
+        {item.evidence_id: item for item in evidence},
+        _policy() if policy is None else policy,
+    )
+
+
+def test_same_direction_uses_interval_upper_bound_and_fails_cap():
+    result = _assess(
+        _proposal(A="60", B="50"),
+        (_e("A", "B", "0.2", "0.9"),),
         _policy(cap="100"),
-        decision_time=NOW,
     )
-    assert assessment.status == "FAIL"
-    assert assessment.components[0].symbols == ("A", "B")
-    assert assessment.components[0].gross_notional == Decimal("110")
-    assert assessment.economic_edge_status == "NOT_ESTABLISHED"
-    assert assessment.grants_trading_authority is False
+    assert result.status == "FAIL"
+    assert result.components[0].symbols == ("A", "B")
+    assert result.components[0].gross_notional == Decimal("110")
+    assert result.economic_edge_status == "NOT_ESTABLISHED"
+    assert result.evidence_authority_status == "RESOLVER_NOT_FINANCIAL_AUTHORITY"
+    assert result.grants_trading_authority is False
 
 
-def test_positive_correlation_opposite_positions_do_not_reinforce():
-    assessment = assess_correlation_concentration(
-        _allocation(A="60", B="-50"),
-        (_e("A", "B", "0.95"),),
-        _policy(cap="70"),
-        decision_time=NOW,
-    )
-    assert assessment.status == "PASS"
-    assert {component.symbols for component in assessment.components} == {("A",), ("B",)}
-
-
-def test_negative_correlation_opposite_positions_do_reinforce():
-    assessment = assess_correlation_concentration(
-        _allocation(A="60", B="-50"),
-        (_e("A", "B", "-0.95"),),
+def test_opposite_direction_uses_negated_interval_lower_bound():
+    result = _assess(
+        _proposal(A="60", B="-50"),
+        (_e("A", "B", "-0.9", "0.2"),),
         _policy(cap="100"),
-        decision_time=NOW,
     )
-    assert assessment.status == "FAIL"
-    assert assessment.components[0].symbols == ("A", "B")
+    assert result.status == "FAIL"
+    assert result.components[0].symbols == ("A", "B")
 
 
-def test_negative_correlation_same_direction_positions_do_not_reinforce():
-    assessment = assess_correlation_concentration(
-        _allocation(A="60", B="50"),
-        (_e("A", "B", "-0.95"),),
+def test_sign_specific_nonreinforcing_relationships_remain_separate():
+    positive_opposite = _assess(
+        _proposal(A="60", B="-50"),
+        (_e("A", "B", "0.8", "0.95"),),
         _policy(cap="70"),
-        decision_time=NOW,
     )
-    assert assessment.status == "PASS"
+    negative_same = _assess(
+        _proposal(A="60", B="50"),
+        (_e("A", "B", "-0.95", "-0.8"),),
+        _policy(cap="70"),
+    )
+    assert positive_opposite.status == "PASS"
+    assert negative_same.status == "PASS"
 
 
-def test_pairwise_coverage_is_fail_closed():
-    assessment = assess_correlation_concentration(
-        _allocation(A="10", B="10", C="10"),
-        (_e("A", "B", "0.1"), _e("A", "C", "0.1")),
-        _policy(),
-        decision_time=NOW,
-    )
-    assert assessment.status == "INCONCLUSIVE"
-    assert assessment.missing_pairs == (("B", "C"),)
+def test_interval_spanning_both_signs_is_conservative_for_both_directions():
+    evidence = (_e("A", "B", "-0.9", "0.9"),)
+    assert _assess(_proposal(A="60", B="50"), evidence, _policy(cap="100")).status == "FAIL"
+    assert _assess(_proposal(A="60", B="-50"), evidence, _policy(cap="100")).status == "FAIL"
+
+
+def test_pair_coverage_is_fail_closed_and_non_authorizing():
+    proposal = _proposal(A="10", B="10", C="10")
+    evidence = (_e("A", "B", "0.1"), _e("A", "C", "0.1"))
+    result = _assess(proposal, evidence)
+    assert result.status == "INCONCLUSIVE"
+    assert result.missing_pairs == (("B", "C"),)
     with pytest.raises(CorrelationConcentrationError, match="inconclusive"):
-        require_correlation_safe_allocation(
-            _allocation(A="10", B="10", C="10"),
-            (_e("A", "B", "0.1"), _e("A", "C", "0.1")),
-            _policy(),
-            decision_time=NOW,
+        require_correlation_safe_proposal(
+            proposal, evidence, {item.evidence_id: item for item in evidence}, _policy()
         )
 
 
-def test_future_or_expired_evidence_is_inconclusive():
-    future = assess_correlation_concentration(
-        _allocation(A="10", B="10"),
-        (
-            _e(
-                "A",
-                "B",
-                "0.9",
-                start="2026-10-04T12:01:00Z",
-                end="2026-10-04T13:00:00Z",
-            ),
-        ),
-        _policy(),
-        decision_time=NOW,
+def test_future_and_expired_evidence_are_inconclusive():
+    future = _e("A", "B", "0.8", "0.9", observed="2026-10-04T12:01:00Z")
+    expired = _e(
+        "A", "B", "0.8", "0.9",
+        observed="2026-10-04T10:00:00Z", valid_until="2026-10-04T11:59:59Z",
     )
-    expired = assess_correlation_concentration(
-        _allocation(A="10", B="10"),
-        (
-            _e(
-                "A",
-                "B",
-                "0.9",
-                start="2026-10-04T10:00:00Z",
-                end="2026-10-04T11:59:59Z",
-            ),
-        ),
-        _policy(),
-        decision_time=NOW,
-    )
-    assert future.status == "INCONCLUSIVE"
-    assert expired.status == "INCONCLUSIVE"
-    assert future.stale_pairs == (("A", "B"),)
-    assert expired.stale_pairs == (("A", "B"),)
+    assert _assess(_proposal(A="10", B="10"), (future,)).stale_pairs == (("A", "B"),)
+    assert _assess(_proposal(A="10", B="10"), (expired,)).status == "INCONCLUSIVE"
 
 
-def test_transitive_reinforcement_forms_one_conservative_component():
-    assessment = assess_correlation_concentration(
-        _allocation(A="40", B="35", C="30"),
+def test_reinforcement_clusters_transitively_and_conservatively():
+    result = _assess(
+        _proposal(A="40", B="35", C="30"),
         (
-            _e("A", "B", "0.9"),
-            _e("A", "C", "0.1"),
-            _e("B", "C", "0.9"),
+            _e("A", "B", "0.7", "0.9"),
+            _e("A", "C", "0.0", "0.2"),
+            _e("B", "C", "0.7", "0.9"),
         ),
         _policy(cap="100"),
-        decision_time=NOW,
     )
-    assert assessment.status == "FAIL"
-    assert assessment.components[0].symbols == ("A", "B", "C")
-    assert assessment.components[0].gross_notional == Decimal("105")
+    assert result.status == "FAIL"
+    assert result.components[0].symbols == ("A", "B", "C")
+    assert result.components[0].gross_notional == Decimal("105")
 
 
-def test_duplicate_pair_is_rejected_even_if_values_match():
+def test_duplicate_pair_and_unknown_symbol_are_rejected():
     with pytest.raises(ValueError, match="duplicate"):
-        assess_correlation_concentration(
-            _allocation(A="10", B="10"),
-            (_e("A", "B", "0.5"), _e("B", "A", "0.5")),
-            _policy(),
-            decision_time=NOW,
+        _assess(
+            _proposal(A="10", B="10"),
+            (_e("A", "B", "0.4", suffix=":1"), _e("B", "A", "0.4", suffix=":2")),
         )
-
-
-def test_unknown_symbol_evidence_is_rejected():
     with pytest.raises(ValueError, match="outside the allocation"):
-        assess_correlation_concentration(
-            _allocation(A="10", B="10"),
-            (_e("A", "C", "0.5"),),
-            _policy(),
-            decision_time=NOW,
-        )
+        _assess(_proposal(A="10", B="10"), (_e("A", "C", "0.4"),))
 
 
-def test_floats_are_not_admitted_at_financial_boundary():
+def test_policy_has_no_hidden_threshold_and_rejects_float_money():
     with pytest.raises(TypeError):
-        CorrelationEvidence(
-            left_symbol="A",
-            right_symbol="B",
-            correlation=0.9,
-            observed_at="2026-10-04T11:00:00Z",
-            valid_until="2026-10-04T13:00:00Z",
-            source_ref="evidence",
+        CorrelationConcentrationPolicy(
+            policy_id="p", reporting_currency="USD",
+            max_correlated_gross_notional=100.0, reinforcing_threshold=Decimal("0.8")
         )
     with pytest.raises(TypeError):
-        CorrelationConcentrationPolicy(max_correlated_gross_notional=100.0)
-
-
-def test_post_construction_mutation_is_revalidated_at_use():
-    evidence = _e("A", "B", "0.9")
-    object.__setattr__(evidence, "correlation", Decimal("2"))
-    with pytest.raises(ValueError, match="between -1 and 1"):
-        assess_correlation_concentration(
-            _allocation(A="10", B="10"),
-            (evidence,),
-            _policy(),
-            decision_time=NOW,
+        CorrelationConcentrationPolicy(
+            policy_id="p", reporting_currency="USD",
+            max_correlated_gross_notional=Decimal("100")
         )
 
 
-def test_subclass_evidence_is_rejected_before_use():
+def test_invalid_uncertainty_interval_and_future_sample_are_rejected():
+    with pytest.raises(ValueError, match="correlation interval"):
+        _e("A", "B", "0.9", "0.8")
+    with pytest.raises(ValueError, match="correlation interval"):
+        _e("A", "B", "-1.1", "0.8")
+    with pytest.raises(ValueError, match="sample_end"):
+        CorrelationEvidence.create(
+            evidence_id="e", environment="SIMULATION", left_symbol="A", right_symbol="B",
+            correlation_lower=Decimal("0"), correlation_upper=Decimal("0.1"),
+            observed_at="2026-10-04T11:00:00Z", valid_until="2026-10-04T13:00:00Z",
+            sample_start="2026-10-04T10:00:00Z", sample_end="2026-10-04T12:00:00Z",
+            estimator_id="e", uncertainty_method="u", source_ref="s",
+        )
+
+
+def test_post_construction_mutation_and_subclass_fail_content_boundary():
+    item = _e("A", "B", "0.7", "0.9")
+    object.__setattr__(item, "correlation_upper", Decimal("0.8"))
+    with pytest.raises(ValueError, match="digest"):
+        _assess(_proposal(A="10", B="10"), (item,))
+
     class Forged(CorrelationEvidence):
         pass
 
-    forged = Forged(
-        left_symbol="A",
-        right_symbol="B",
-        correlation=Decimal("0.9"),
-        observed_at="2026-10-04T11:00:00Z",
-        valid_until="2026-10-04T13:00:00Z",
-        source_ref="forged",
-    )
+    base = _e("A", "B", "0.7", "0.9")
+    forged = Forged(**base.__dict__)
     with pytest.raises(TypeError, match="exact CorrelationEvidence"):
+        _assess(_proposal(A="10", B="10"), (forged,))
+
+
+def test_resolver_is_required_and_content_must_match():
+    proposal = _proposal(A="10", B="10")
+    supplied = _e("A", "B", "0.1", "0.2")
+    with pytest.raises(ValueError, match="cannot be resolved authoritatively"):
+        assess_correlation_concentration(proposal, (supplied,), {}, _policy())
+    replacement = _e("A", "B", "0.8", "0.9")
+    object.__setattr__(replacement, "evidence_id", supplied.evidence_id)
+    with pytest.raises(ValueError):
         assess_correlation_concentration(
-            _allocation(A="10", B="10"),
-            (forged,),
-            _policy(),
-            decision_time=NOW,
+            proposal, (supplied,), {supplied.evidence_id: replacement}, _policy()
         )
 
 
-def test_digest_is_order_independent_for_pair_evidence():
-    allocation = _allocation(A="10", B="20", C="30")
-    first = assess_correlation_concentration(
-        allocation,
-        (_e("A", "B", "0.2"), _e("A", "C", "0.3"), _e("B", "C", "0.4")),
-        _policy(),
-        decision_time=NOW,
+def test_environment_and_reporting_currency_must_match_proposal():
+    with pytest.raises(ValueError, match="environment mismatch"):
+        _assess(_proposal(A="10", B="10"), (_e("A", "B", "0.1", environment="PAPER"),))
+    with pytest.raises(ValueError, match="reporting_currency"):
+        _assess(_proposal(A="10", B="10"), (_e("A", "B", "0.1"),), _policy(currency="EUR"))
+
+
+def test_assessment_digest_is_pair_order_independent():
+    proposal = _proposal(A="10", B="20", C="30")
+    evidence = (
+        _e("A", "B", "0.1", "0.2"),
+        _e("A", "C", "0.2", "0.3"),
+        _e("B", "C", "0.3", "0.4"),
     )
-    second = assess_correlation_concentration(
-        allocation,
-        (_e("B", "C", "0.4"), _e("C", "A", "0.3"), _e("B", "A", "0.2")),
-        _policy(),
-        decision_time=NOW,
-    )
-    assert first.assessment_digest == second.assessment_digest
+    assert _assess(proposal, evidence).assessment_digest == _assess(proposal, tuple(reversed(evidence))).assessment_digest
 
 
-def test_single_exposure_needs_no_fabricated_pair_evidence():
-    allocation = _allocation(A="40")
-    assessment = assess_correlation_concentration(
-        allocation,
-        (),
-        _policy(cap="50"),
-        decision_time=NOW,
-    )
-    assert assessment.status == "PASS"
-    assert require_correlation_safe_allocation(
-        allocation,
-        (),
-        _policy(cap="50"),
-        decision_time=NOW,
-    ) is allocation
+def test_single_exposure_needs_no_pair_evidence_but_still_obeys_cap():
+    proposal = _proposal(A="40")
+    assert _assess(proposal, (), _policy(cap="50")).status == "PASS"
+    assert require_correlation_safe_proposal(proposal, (), {}, _policy(cap="50")) is proposal
+    assert _assess(_proposal(A="60"), (), _policy(cap="50")).status == "FAIL"
 
 
-def test_single_exposure_still_respects_component_cap():
-    assessment = assess_correlation_concentration(
-        _allocation(A="60"),
-        (),
-        _policy(cap="50"),
-        decision_time=NOW,
-    )
-    assert assessment.status == "FAIL"
-
-
-def test_mutated_allocation_status_and_totals_cannot_pass_guard():
-    valid = _allocation(A="40", B="-20")
+def test_forged_allocation_status_totals_and_target_direction_fail_closed():
+    proposal = _proposal(A="40", B="-20")
+    allocation = proposal.objective.allocation
     for changed, message in (
-        (replace(valid, status="REJECTED"), "allocated portfolio"),
-        (replace(valid, gross_notional=Decimal("1")), "aggregate notionals"),
-        (replace(valid, net_notional=Decimal("1")), "aggregate notionals"),
+        (replace(allocation, status="REJECTED"), "allocated portfolio"),
+        (replace(allocation, gross_notional=Decimal("1")), "aggregate notionals"),
+        (replace(allocation, net_notional=Decimal("1")), "aggregate notionals"),
     ):
+        forged = replace(proposal, objective=replace(proposal.objective, allocation=changed))
         with pytest.raises(ValueError, match=message):
-            require_correlation_safe_allocation(
-                changed, (_e("A", "B", "0.2"),), _policy(), decision_time=NOW,
-            )
-
-
-def test_forged_target_direction_cannot_change_correlation_clustering():
-    valid = _allocation(A="60", B="-50")
-    forged = replace(valid, targets=(valid.targets[0], replace(valid.targets[1], quantity=Decimal("1"))))
+            _assess(forged, (_e("A", "B", "0.2"),))
+    bad_target = replace(allocation.targets[1], quantity=Decimal("1"))
+    forged = replace(
+        proposal,
+        objective=replace(
+            proposal.objective,
+            allocation=replace(allocation, targets=(allocation.targets[0], bad_target)),
+        ),
+    )
     with pytest.raises(ValueError, match="direction disagree"):
-        require_correlation_safe_allocation(
-            forged, (_e("A", "B", "-0.95"),), _policy(cap="100"), decision_time=NOW,
-        )
+        _assess(forged, (_e("A", "B", "-0.95"),))
+
+
+def test_result_class_attribute_dispatch_is_not_used_for_financial_fields():
+    proposal = _proposal(A="40")
+    result_type = type(proposal)
+    touched = []
+
+    def forged_getattribute(self, name):
+        touched.append(name)
+        raise AssertionError("forged result attribute dispatch executed")
+
+    result_type.__getattribute__ = forged_getattribute
+    try:
+        result = assess_correlation_concentration(proposal, (), {}, _policy(cap="50"))
+    finally:
+        del result_type.__getattribute__
+    assert result.status == "PASS"
+    assert touched == []

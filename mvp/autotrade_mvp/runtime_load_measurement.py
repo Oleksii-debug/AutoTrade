@@ -401,6 +401,7 @@ def measure_declared_financial_operation(
     tuple_for = tuple
     sorted_for = sorted
     getattr_for = getattr
+    module_type = ModuleType
     str_for = str
     object_getattribute = object.__getattribute__
     missing = object()
@@ -711,6 +712,15 @@ def measure_declared_financial_operation(
                     f"financial operation: {dependency_name}"
                 )
         for module, member_name, expected_member in graph_module_members:
+            # A module object can have __class__ reassigned to a ModuleType
+            # subclass with caller-defined __getattribute__.  Never dispatch
+            # getattr on a post-callback module until its exact builtin module
+            # class is re-established.
+            if type_for(module) is not module_type:
+                raise error_type(
+                    "measurement transitive module dependency class changed during "
+                    "financial operation"
+                )
             if getattr_for(module, member_name, missing) is not expected_member:
                 raise error_type(
                     "measurement transitive module dependency changed during financial "

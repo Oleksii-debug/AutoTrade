@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter_ns
-from types import FunctionType
+from types import FunctionType, ModuleType
 from typing import Callable, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
@@ -33,6 +33,7 @@ from .persistence import (
 from .runtime_load_evidence import JournalConservationEvidence
 from .runtime_load_measurement import (
     DurableFinancialLatencySample,
+    _capture_operation_dependency_graph,
     evaluate_monotonic_declared_runtime_budget,
     load_declared_financial_latency_samples,
 )
@@ -532,66 +533,354 @@ def measure_declared_research_interference(
     financial_plan_digest_value = plan.financial_plan_digest
     measurement_id = _research_sample_event_id(plan_id_value, expected_sample_id)
 
+    # Freeze every authority used after caller-controlled research code. Research
+    # pressure is intentionally arbitrary same-process work, so the evidence issuer
+    # must reject both direct rebinding and same-object executable/state mutation.
+    type_for = type
+    dict_type = dict
+    int_type = int
+    tuple_for = tuple
+    sorted_for = sorted
+    getattr_for = getattr
+    object_getattribute = object.__getattribute__
+    module_type = ModuleType
+    str_for = str
+    missing = object()
+    error_type = RuntimeLoadResearchMeasurementError
     clock = perf_counter_ns
     store_type = JournalStore
     get_event = JournalStore.get_event
     current_sequence = JournalStore.current_journal_sequence
     append_event = JournalStore.append_event
-    get_event_state = _function_state(get_event)
-    current_sequence_state = _function_state(current_sequence)
-    append_event_state = _function_state(append_event)
+    decode_sample = _decode_sample
+    payload_digest_for = payload_digest
+    datetime_type = datetime
+    timezone_type = timezone
+    plan_type = DeclaredResearchInterferencePlan
+    sample_type = DurableResearchInterferenceSample
+    sample_init = DurableResearchInterferenceSample.__init__
+    plan_digest_getter = DeclaredResearchInterferencePlan.digest.fget
+    sample_event_type = _RESEARCH_SAMPLE_EVENT_TYPE
+    sample_aggregate_type = _RESEARCH_SAMPLE_AGGREGATE_TYPE
+    sample_schema_version = _RESEARCH_SAMPLE_SCHEMA_VERSION
     module_namespace = globals()
 
-    def require_post_callback_authority() -> None:
-        if module_namespace.get("perf_counter_ns") is not clock:
-            raise RuntimeLoadResearchMeasurementError(
-                "research measurement clock authority changed during callback"
-            )
-        if module_namespace.get("JournalStore") is not store_type:
-            raise RuntimeLoadResearchMeasurementError(
-                "research measurement JournalStore authority changed during callback"
-            )
-        if (
-            JournalStore.get_event is not get_event
-            or JournalStore.current_journal_sequence is not current_sequence
-            or JournalStore.append_event is not append_event
-        ):
-            raise RuntimeLoadResearchMeasurementError(
-                "research measurement JournalStore method authority changed during callback"
-            )
-        _require_function_state(get_event_state, label="JournalStore.get_event")
-        _require_function_state(
-            current_sequence_state,
-            label="JournalStore.current_journal_sequence",
+    module_bindings = (
+        ("perf_counter_ns", clock),
+        ("RuntimeLoadResearchMeasurementError", error_type),
+        ("JournalStore", store_type),
+        ("_decode_sample", decode_sample),
+        ("payload_digest", payload_digest_for),
+        ("datetime", datetime_type),
+        ("timezone", timezone_type),
+        ("DeclaredResearchInterferencePlan", plan_type),
+        ("DurableResearchInterferenceSample", sample_type),
+        ("_RESEARCH_SAMPLE_EVENT_TYPE", sample_event_type),
+        ("_RESEARCH_SAMPLE_AGGREGATE_TYPE", sample_aggregate_type),
+        ("_RESEARCH_SAMPLE_SCHEMA_VERSION", sample_schema_version),
+    )
+    protected_functions = tuple(
+        (
+            name,
+            function,
+            function.__code__,
+            function.__defaults__,
+            function.__kwdefaults__,
+            None
+            if function.__kwdefaults__ is None
+            else tuple(sorted_for(function.__kwdefaults__.items())),
         )
-        _require_function_state(append_event_state, label="JournalStore.append_event")
+        for name, function in (
+            ("JournalStore.get_event", get_event),
+            ("JournalStore.current_journal_sequence", current_sequence),
+            ("JournalStore.append_event", append_event),
+            ("_decode_sample", decode_sample),
+            ("payload_digest", payload_digest_for),
+            ("DeclaredResearchInterferencePlan.digest", plan_digest_getter),
+            ("DurableResearchInterferenceSample.__init__", sample_init),
+        )
+    )
+    journal_dependency_names = (
+        "__getattribute__",
+        "_connect",
+        "_require_text",
+        "_decode_event_row",
+        "_aggregate_version_value",
+        "_journal_sequence_value",
+    )
+    journal_dependencies = tuple(
+        (name, getattr_for(store_type, name)) for name in journal_dependency_names
+    )
+    journal_schema_version = store_type.SCHEMA_VERSION
+    dependency_graph = _capture_operation_dependency_graph(
+        tuple(function for _name, function, *_state in protected_functions)
+        + tuple(value for _name, value in journal_dependencies)
+    )
+    protected_domain_classes = tuple(
+        (
+            label,
+            class_type,
+            tuple_for(class_type.__dict__),
+            tuple_for(class_type.__dict__.items()),
+            tuple_for(
+                (
+                    name,
+                    value,
+                    value.__code__,
+                    value.__defaults__,
+                    value.__kwdefaults__,
+                    None
+                    if value.__kwdefaults__ is None
+                    else tuple_for(sorted_for(value.__kwdefaults__.items())),
+                )
+                for name, value in class_type.__dict__.items()
+                if type_for(value) is FunctionType
+            ),
+        )
+        for label, class_type in (
+            ("DeclaredResearchInterferencePlan", plan_type),
+            ("DurableResearchInterferenceSample", sample_type),
+        )
+    )
+
+    store_state = object_getattribute(store, "__dict__")
+    if type_for(store_state) is not dict_type:
+        raise error_type("research measurement JournalStore instance state is non-canonical")
+    store_state_snapshot = tuple_for(store_state.items())
+    store_state_names = tuple_for(store_state)
+    stored_identity = store_state.get("_store_identity")
+    identity_type = type_for(store_identity)
+    if type_for(stored_identity) is not identity_type:
+        raise error_type("research measurement stored JournalStore identity is non-canonical")
+    selected_identity_state = object_getattribute(store_identity, "__dict__")
+    stored_identity_state = object_getattribute(stored_identity, "__dict__")
+    if (
+        type_for(selected_identity_state) is not dict_type
+        or type_for(stored_identity_state) is not dict_type
+    ):
+        raise error_type("research measurement JournalStore identity state is non-canonical")
+    selected_identity_snapshot = tuple_for(selected_identity_state.items())
+    stored_identity_snapshot = tuple_for(stored_identity_state.items())
+    identity_state_names = tuple_for(selected_identity_state)
+    if tuple_for(stored_identity_state) != identity_state_names:
+        raise error_type("research measurement stored JournalStore identity shape conflicts")
+    identity_class_member_names = tuple_for(identity_type.__dict__)
+    identity_class_members = tuple_for(identity_type.__dict__.items())
+    identity_class_executables = tuple_for(
+        (
+            name,
+            value,
+            value.__code__,
+            value.__defaults__,
+            value.__kwdefaults__,
+            None
+            if value.__kwdefaults__ is None
+            else tuple_for(sorted_for(value.__kwdefaults__.items())),
+        )
+        for name, value in identity_class_members
+        if type_for(value) is FunctionType
+    )
+    plan_state = object_getattribute(plan, "__dict__")
+    if type_for(plan_state) is not dict_type:
+        raise error_type("research measurement plan instance state is non-canonical")
+    plan_state_snapshot = tuple_for(plan_state.items())
+    plan_state_names = tuple_for(plan_state)
+
+    def require_post_callback_authority() -> None:
+        for label, class_type, member_names, members, class_executables in protected_domain_classes:
+            current_namespace = class_type.__dict__
+            if tuple_for(current_namespace) != member_names:
+                raise error_type(
+                    f"research measurement {label} class shape changed during callback"
+                )
+            for name, expected_value in members:
+                if current_namespace.get(name, missing) is not expected_value:
+                    raise error_type(
+                        "research measurement class authority changed during callback: "
+                        f"{label}.{name}"
+                    )
+            for name, function, code, defaults, kwdefaults, kwdefault_items in class_executables:
+                if (
+                    function.__code__ is not code
+                    or function.__defaults__ is not defaults
+                    or function.__kwdefaults__ is not kwdefaults
+                    or (
+                        kwdefaults is not None
+                        and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
+                    )
+                ):
+                    raise error_type(
+                        "research measurement class executable authority changed during callback: "
+                        f"{label}.{name}"
+                    )
+
+        if type_for(store) is not store_type:
+            raise error_type("research measurement JournalStore class changed during callback")
+        current_store_state = object_getattribute(store, "__dict__")
+        if type_for(current_store_state) is not dict_type:
+            raise error_type("research measurement JournalStore state became non-canonical")
+        if tuple_for(current_store_state) != store_state_names:
+            raise error_type("research measurement JournalStore state shape changed during callback")
+        for name, expected_value in store_state_snapshot:
+            if current_store_state.get(name, missing) is not expected_value:
+                raise error_type(
+                    "research measurement JournalStore instance state changed during callback: "
+                    f"{name}"
+                )
+
+        current_plan_state = object_getattribute(plan, "__dict__")
+        if type_for(current_plan_state) is not dict_type or tuple_for(current_plan_state) != plan_state_names:
+            raise error_type("research measurement plan instance state shape changed during callback")
+        for name, expected_value in plan_state_snapshot:
+            if current_plan_state.get(name, missing) is not expected_value:
+                raise error_type(
+                    "research measurement plan instance state changed during callback: "
+                    f"{name}"
+                )
+
+        for value, snapshot, label in (
+            (store_identity, selected_identity_snapshot, "selected JournalStore identity"),
+            (stored_identity, stored_identity_snapshot, "stored JournalStore identity"),
+        ):
+            if type_for(value) is not identity_type:
+                raise error_type(f"research measurement {label} class changed during callback")
+            current_identity_state = object_getattribute(value, "__dict__")
+            if type_for(current_identity_state) is not dict_type:
+                raise error_type(f"research measurement {label} state became non-canonical")
+            if tuple_for(current_identity_state) != identity_state_names:
+                raise error_type(f"research measurement {label} state shape changed during callback")
+            for name, expected_value in snapshot:
+                if current_identity_state.get(name, missing) is not expected_value:
+                    raise error_type(
+                        f"research measurement {label} state changed during callback: {name}"
+                    )
+        if tuple_for(identity_type.__dict__) != identity_class_member_names:
+            raise error_type("research measurement JournalStore identity class shape changed during callback")
+        for name, expected_value in identity_class_members:
+            if identity_type.__dict__.get(name, missing) is not expected_value:
+                raise error_type(
+                    "research measurement JournalStore identity class authority changed during callback: "
+                    f"{name}"
+                )
+        for name, function, code, defaults, kwdefaults, kwdefault_items in identity_class_executables:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "research measurement JournalStore identity executable authority changed during callback: "
+                    f"{name}"
+                )
+
+        for name, expected_value in module_bindings:
+            if module_namespace.get(name, missing) is not expected_value:
+                raise error_type(
+                    f"research measurement authority changed during callback: {name}"
+                )
+        if (
+            store_type.get_event is not get_event
+            or store_type.current_journal_sequence is not current_sequence
+            or store_type.append_event is not append_event
+            or plan_type.digest.fget is not plan_digest_getter
+            or sample_type.__init__ is not sample_init
+        ):
+            raise error_type("research measurement class authority changed during callback")
+        for name, expected_dependency in journal_dependencies:
+            if getattr_for(store_type, name, missing) is not expected_dependency:
+                raise error_type(
+                    "research measurement JournalStore dependency changed during callback: "
+                    f"{name}"
+                )
+        if store_type.SCHEMA_VERSION is not journal_schema_version:
+            raise error_type("research measurement JournalStore schema authority changed during callback")
+        for name, function, code, defaults, kwdefaults, kwdefault_items in protected_functions:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "research measurement executable authority changed during callback: "
+                    f"{name}"
+                )
+
+        graph_functions, graph_globals, graph_builtins, graph_module_members, graph_closures = dependency_graph
+        for function, code, defaults, kwdefaults, kwdefault_items in graph_functions:
+            if (
+                function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or (
+                    kwdefaults is not None
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
+                )
+            ):
+                raise error_type(
+                    "research measurement transitive executable authority changed during callback: "
+                    f"{function.__module__}.{function.__qualname__}"
+                )
+        for namespace, dependency_name, expected_dependency in graph_globals:
+            if namespace.get(dependency_name, missing) is not expected_dependency:
+                raise error_type(
+                    "research measurement transitive global authority changed during callback: "
+                    f"{dependency_name}"
+                )
+        for namespace, dependency_name, expected_dependency in graph_builtins:
+            if namespace.get(dependency_name, missing) is not expected_dependency:
+                raise error_type(
+                    "research measurement transitive builtin authority changed during callback: "
+                    f"{dependency_name}"
+                )
+        for module, member_name, expected_member in graph_module_members:
+            if type_for(module) is not module_type:
+                raise error_type(
+                    "research measurement transitive module class changed during callback"
+                )
+            if getattr_for(module, member_name, missing) is not expected_member:
+                raise error_type(
+                    "research measurement transitive module authority changed during callback: "
+                    f"{module.__name__}.{member_name}"
+                )
+        for cell, had_value, expected_value in graph_closures:
+            try:
+                current_value = cell.cell_contents
+            except ValueError:
+                if had_value:
+                    raise error_type("research measurement closure authority changed during callback")
+                continue
+            if not had_value or current_value is not expected_value:
+                raise error_type("research measurement closure authority changed during callback")
 
     with journal_store_authority_scope(store, store_identity):
         if get_event(store, measurement_id) is not None:
-            raise RuntimeLoadResearchMeasurementError(
-                "research interference sample was already measured"
-            )
+            raise error_type("research interference sample was already measured")
         pre_sequence = current_sequence(store)
         start_ns = clock()
         result = operation()
         require_post_callback_authority()
         end_ns = clock()
         if (
-            type(start_ns) is not int
-            or type(end_ns) is not int
+            type_for(start_ns) is not int_type
+            or type_for(end_ns) is not int_type
             or start_ns < 0
             or end_ns < start_ns
         ):
-            raise RuntimeLoadResearchMeasurementError(
-                "system monotonic clock produced an invalid research interval"
-            )
+            raise error_type("system monotonic clock produced an invalid research interval")
+        require_post_callback_authority()
         if current_sequence(store) != pre_sequence:
-            raise RuntimeLoadResearchMeasurementError(
-                "research pressure operation mutated the qualification JournalStore"
-            )
+            raise error_type("research pressure operation mutated the qualification JournalStore")
         interference_us = (end_ns - start_ns + 999) // 1_000
         payload = {
-            "schema_version": _RESEARCH_SAMPLE_SCHEMA_VERSION,
+            "schema_version": sample_schema_version,
             "plan_id": plan_id_value,
             "plan_digest": plan_digest_value,
             "spec_digest": spec_digest_value,
@@ -604,27 +893,27 @@ def measure_declared_research_interference(
             "monotonic_end_ns": end_ns,
             "interference_us": interference_us,
         }
+        require_post_callback_authority()
         append_event(
             store,
             {
                 "event_id": measurement_id,
-                "event_type": _RESEARCH_SAMPLE_EVENT_TYPE,
-                "aggregate_type": _RESEARCH_SAMPLE_AGGREGATE_TYPE,
+                "event_type": sample_event_type,
+                "aggregate_type": sample_aggregate_type,
                 "aggregate_id": plan_id_value,
-                "aggregate_version": str(expected_index + 1),
+                "aggregate_version": str_for(expected_index + 1),
                 "payload": payload,
-                "payload_hash": payload_digest(payload),
-                "committed_at": datetime.now(timezone.utc)
+                "payload_hash": payload_digest_for(payload),
+                "committed_at": datetime_type.now(timezone_type.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
             },
         )
         event = get_event(store, measurement_id)
         if event is None:
-            raise RuntimeLoadResearchMeasurementError(
-                "durable research interference measurement disappeared"
-            )
-        sample = _decode_sample(
+            raise error_type("durable research interference measurement disappeared")
+        require_post_callback_authority()
+        sample = decode_sample(
             event=event,
             plan=plan,
             expected_index=expected_index,

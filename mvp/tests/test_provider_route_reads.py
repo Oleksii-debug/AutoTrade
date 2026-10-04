@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,7 @@ import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+from mvp.autotrade_mvp.capabilities import EvidenceVerification, derive_capability_snapshot
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 import mvp.autotrade_mvp.provider_core as provider_core_module
@@ -25,10 +27,11 @@ from mvp.autotrade_mvp.provider_route_reads import (
     terminal_qualified_provider_read_authority_snapshot,
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.tests.provider_qualification_test_support import (
     ExactQualificationProjectionHarness,
 )
-from mvp.tests.test_durable_capabilities import verified
+from mvp.tests.test_durable_capabilities import claim, verified
 from mvp.tests.test_provider_route_dispatch import successor_spot_q
 from mvp.tests.test_provider_selection import (
     NOW,
@@ -36,6 +39,36 @@ from mvp.tests.test_provider_selection import (
     candidate,
     request as route_request,
 )
+
+
+def verified_read_capability(
+    snapshot_id: str,
+    observed_at,
+    *,
+    permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}),
+    data_entitlements=frozenset({"QUOTE", "BALANCES"}),
+):
+    claims = tuple(
+        replace(
+            claim(
+                source,
+                observed_at=observed_at,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            ),
+            permission_scopes=permission_scopes,
+            data_entitlements=data_entitlements,
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=claims,
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
+    )
 
 
 class ProviderRouteReadTests(unittest.TestCase):
@@ -112,6 +145,34 @@ class ProviderRouteReadTests(unittest.TestCase):
             self.assertEqual(binding.accepted_success_statuses, (200,))
             self.assertEqual(binding.parser_identity, "BYBIT_ORDER_V5_JSON_V1")
             self.assertEqual(len(binding.query_digest), 71)
+
+    def test_durable_c_permission_must_authorize_exact_qualified_read(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(
+                directory,
+                permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE"}),
+                data_entitlements=frozenset({"QUOTE", "BALANCES"}),
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "durable capability does not authorize exact provider-read permission",
+            ):
+                self.prepare(route, capabilities, qualifications)
+
+    def test_durable_c_entitlement_must_authorize_exact_qualified_read(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(
+                directory,
+                permission_scopes=frozenset(
+                    {"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}
+                ),
+                data_entitlements=frozenset({"QUOTE"}),
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "durable capability does not authorize exact provider-read data entitlement",
+            ):
+                self.prepare(route, capabilities, qualifications)
 
     def test_terminal_authority_revalidates_exact_current_c_q_and_rule(self):
         with TemporaryDirectory() as directory:

@@ -1,9 +1,9 @@
 """Provider-origin funding-income facts from qualified Bybit transaction logs.
 
-This module is deliberately *not* a funding booking authority.  It projects one
+This module is deliberately *not* a funding booking authority. It projects one
 narrow independently authoritative fact from the shared WP-18 provider-origin
 boundary: provider-reported funding cash movement and provider transaction
-identity.  Funding rate, mark/index valuation, canonical position/cut and
+identity. Funding rate, mark/index valuation, canonical position/cut and
 instrument convention remain separate authorities and must be composed by
 WP-29 before PAPER/LIVE accounting can mutate.
 """
@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import re
+import weakref
 
 from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .persistence import canonical_json
@@ -74,9 +75,9 @@ def _transaction_time(value: object) -> datetime:
         raise ProviderFundingIncomeError("transactionTime is outside supported UTC range") from error
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class ProviderFundingIncomeObservation:
-    """One provider-reported funding cash movement, retaining exact origin/Q."""
+    """Closure-issued provider funding cash fact; insufficient alone to book."""
 
     provider_id: str
     account_id: str
@@ -86,9 +87,8 @@ class ProviderFundingIncomeObservation:
     product_category: str
     settlement_currency: str
     provider_transaction_id: str
-    occurred_at: datetime
+    provider_transaction_at: datetime
     side: str
-    position_size: Decimal
     funding_amount: Decimal
     origin_ref: str
     qualified_evidence_ref: str
@@ -100,47 +100,107 @@ class ProviderFundingIncomeObservation:
     origin_journal_sequence: int
     evidence_ref: str
 
-    def __post_init__(self) -> None:
-        if self.provider_id != "BYBIT":
-            raise ProviderFundingIncomeError("funding income observation requires BYBIT")
-        for name in (
-            "account_id",
-            "runtime_environment",
-            "provider_environment",
-            "instrument_id",
-            "product_category",
-            "settlement_currency",
-            "provider_transaction_id",
-            "side",
-            "qualification_id",
-            "parser_identity",
-        ):
-            _text(getattr(self, name), name=name)
-        if self.runtime_environment not in {"PAPER", "LIVE"}:
-            raise ProviderFundingIncomeError("runtime environment must be PAPER or LIVE")
-        if self.provider_environment not in {"TESTNET", "DEMO", "MAINNET"}:
-            raise ProviderFundingIncomeError("provider environment is not canonical Bybit")
-        if self.product_category not in {"linear", "inverse"}:
-            raise ProviderFundingIncomeError("funding income requires linear or inverse category")
-        if self.side not in {"Buy", "Sell", "None"}:
-            raise ProviderFundingIncomeError("funding income side is not canonical Bybit")
-        if type(self.occurred_at) is not datetime or self.occurred_at.tzinfo is None:
-            raise ProviderFundingIncomeError("funding income occurrence must be timezone-aware")
-        if type(self.position_size) is not Decimal or type(self.funding_amount) is not Decimal:
-            raise ProviderFundingIncomeError("funding economics must use exact Decimal values")
-        if _ORIGIN_RE.fullmatch(self.origin_ref) is None:
-            raise ProviderFundingIncomeError("origin_ref is not canonical")
-        if _QUALIFIED_RE.fullmatch(self.qualified_evidence_ref) is None:
-            raise ProviderFundingIncomeError("qualified_evidence_ref is not canonical")
-        for name in ("response_sha256", "qualified_query_digest", "qualified_route_rule_digest"):
-            if _SHA256_RE.fullmatch(getattr(self, name)) is None:
-                raise ProviderFundingIncomeError(f"{name} is not canonical")
-        if self.parser_identity != _BYBIT_FUNDING_PARSER_IDENTITY:
-            raise ProviderFundingIncomeError("funding parser identity is not qualified")
-        if type(self.origin_journal_sequence) is not int or self.origin_journal_sequence < 1:
-            raise ProviderFundingIncomeError("origin journal sequence is invalid")
-        if _SHA256_RE.fullmatch(self.evidence_ref) is None:
-            raise ProviderFundingIncomeError("funding income evidence_ref is not canonical")
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderFundingIncomeError(
+            "provider funding income must come from qualified provider-origin bytes"
+        )
+
+
+def _validate_income(value: ProviderFundingIncomeObservation) -> None:
+    if type(value) is not ProviderFundingIncomeObservation:
+        raise ProviderFundingIncomeError("exact provider funding income is required")
+    if value.provider_id != "BYBIT":
+        raise ProviderFundingIncomeError("funding income observation requires BYBIT")
+    for name in (
+        "account_id",
+        "runtime_environment",
+        "provider_environment",
+        "instrument_id",
+        "product_category",
+        "settlement_currency",
+        "provider_transaction_id",
+        "side",
+        "qualification_id",
+        "parser_identity",
+    ):
+        _text(getattr(value, name), name=name)
+    if value.runtime_environment not in {"PAPER", "LIVE"}:
+        raise ProviderFundingIncomeError("runtime environment must be PAPER or LIVE")
+    if value.provider_environment not in {"TESTNET", "DEMO", "MAINNET"}:
+        raise ProviderFundingIncomeError("provider environment is not canonical Bybit")
+    if value.product_category not in {"linear", "inverse"}:
+        raise ProviderFundingIncomeError("funding income requires linear or inverse category")
+    if value.side not in {"Buy", "Sell", "None"}:
+        raise ProviderFundingIncomeError("funding income side is not canonical Bybit")
+    if (
+        type(value.provider_transaction_at) is not datetime
+        or value.provider_transaction_at.tzinfo is None
+        or value.provider_transaction_at.utcoffset() is None
+    ):
+        raise ProviderFundingIncomeError("provider transaction time must be timezone-aware")
+    if type(value.funding_amount) is not Decimal:
+        raise ProviderFundingIncomeError("funding amount must use exact Decimal")
+    if _ORIGIN_RE.fullmatch(value.origin_ref) is None:
+        raise ProviderFundingIncomeError("origin_ref is not canonical")
+    if _QUALIFIED_RE.fullmatch(value.qualified_evidence_ref) is None:
+        raise ProviderFundingIncomeError("qualified_evidence_ref is not canonical")
+    for name in ("response_sha256", "qualified_query_digest", "qualified_route_rule_digest"):
+        if _SHA256_RE.fullmatch(getattr(value, name)) is None:
+            raise ProviderFundingIncomeError(f"{name} is not canonical")
+    if value.parser_identity != _BYBIT_FUNDING_PARSER_IDENTITY:
+        raise ProviderFundingIncomeError("funding parser identity is not qualified")
+    if type(value.origin_journal_sequence) is not int or value.origin_journal_sequence < 1:
+        raise ProviderFundingIncomeError("origin journal sequence is invalid")
+    if _SHA256_RE.fullmatch(value.evidence_ref) is None:
+        raise ProviderFundingIncomeError("funding income evidence_ref is not canonical")
+
+
+def _install_funding_income_authority():
+    field_names = tuple(ProviderFundingIncomeObservation.__dataclass_fields__)
+    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+
+    def prune() -> None:
+        for object_id, state in tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def material(value: ProviderFundingIncomeObservation) -> tuple[object, ...]:
+        _validate_income(value)
+        return tuple(getattr(value, name) for name in field_names)
+
+    def issue(**values: object) -> ProviderFundingIncomeObservation:
+        if set(values) != set(field_names):
+            raise ProviderFundingIncomeError("provider funding income issue schema is not exact")
+        value = object.__new__(ProviderFundingIncomeObservation)
+        for name in field_names:
+            object.__setattr__(value, name, values[name])
+        snapshot = material(value)
+        prune()
+        states[id(value)] = (weakref.ref(value), snapshot)
+        return value
+
+    def require(value: ProviderFundingIncomeObservation) -> ProviderFundingIncomeObservation:
+        snapshot = material(value)
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderFundingIncomeError(
+                "provider funding income construction authority is unavailable"
+            )
+        if state[1] != snapshot:
+            raise ProviderFundingIncomeError(
+                "provider funding income changed after qualified origin projection"
+            )
+        return value
+
+    return issue, require
+
+
+(
+    _issue_provider_funding_income,
+    require_provider_funding_income_authority,
+) = _install_funding_income_authority()
+del _install_funding_income_authority
 
 
 def _validated_origin(
@@ -238,11 +298,11 @@ def _validated_origin(
     return binding, neutral, qualified, qualified_ref
 
 
-def bybit_funding_income_observations(
+def _bybit_funding_income_observations_impl(
     source: ProviderOriginObservation,
+    *,
+    _issue_income,
 ) -> tuple[ProviderFundingIncomeObservation, ...]:
-    """Project funding cash movements; grant no rate/price/position authority."""
-
     binding, neutral, qualified, qualified_ref = _validated_origin(source)
     payload = neutral.payload
     if type(payload) is not dict:
@@ -282,8 +342,7 @@ def bybit_funding_income_observations(
         symbol = _text(item.get("symbol"), name="symbol")
         currency = _text(item.get("currency"), name="currency").upper()
         side = _text(item.get("side"), name="side")
-        occurred_at = _transaction_time(item.get("transactionTime"))
-        position_size = _decimal(item.get("size"), name="size")
+        provider_transaction_at = _transaction_time(item.get("transactionTime"))
         funding_amount = _decimal(funding, name="funding")
         material = {
             "schema_version": "1.0.0",
@@ -295,7 +354,6 @@ def bybit_funding_income_observations(
             "settlement_currency": currency,
             "transaction_time_ms": item.get("transactionTime"),
             "side": side,
-            "position_size": format(position_size, "f"),
             "funding_amount": format(funding_amount, "f"),
             "qualification_id": binding.qualification_id,
             "qualified_query_digest": binding.qualified_query_digest,
@@ -306,7 +364,7 @@ def bybit_funding_income_observations(
             canonical_json(material).encode("utf-8")
         ).hexdigest()
         observations.append(
-            ProviderFundingIncomeObservation(
+            _issue_income(
                 provider_id="BYBIT",
                 account_id=binding.account_id,
                 runtime_environment=binding.environment,
@@ -315,9 +373,8 @@ def bybit_funding_income_observations(
                 product_category=category,
                 settlement_currency=currency,
                 provider_transaction_id=provider_transaction_id,
-                occurred_at=occurred_at,
+                provider_transaction_at=provider_transaction_at,
                 side=side,
-                position_size=position_size,
                 funding_amount=funding_amount,
                 origin_ref=binding.origin_ref,
                 qualified_evidence_ref=qualified_ref,
@@ -333,8 +390,29 @@ def bybit_funding_income_observations(
     return tuple(observations)
 
 
+def _bind_bybit_funding_income_observations(impl, issue_income):
+    def bybit_funding_income_observations(
+        source: ProviderOriginObservation,
+    ) -> tuple[ProviderFundingIncomeObservation, ...]:
+        """Project provider funding cash; grant no rate/price/position authority."""
+
+        return impl(source, _issue_income=issue_income)
+
+    return bybit_funding_income_observations
+
+
+bybit_funding_income_observations = _bind_bybit_funding_income_observations(
+    _bybit_funding_income_observations_impl,
+    _issue_provider_funding_income,
+)
+del _bind_bybit_funding_income_observations
+del _bybit_funding_income_observations_impl
+del _issue_provider_funding_income
+
+
 __all__ = [
     "ProviderFundingIncomeError",
     "ProviderFundingIncomeObservation",
     "bybit_funding_income_observations",
+    "require_provider_funding_income_authority",
 ]

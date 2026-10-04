@@ -152,6 +152,14 @@ class RecoveryController:
         if not isinstance(owner_scope, str) or not owner_scope.strip():
             raise ValueError("owner_scope is required")
         self._owner_store = owner_store
+        if owner_store is None:
+            self._owner_store_path = None
+            self._owner_store_identity = None
+        else:
+            (
+                self._owner_store_path,
+                self._owner_store_identity,
+            ) = _canonical_journal_authority_snapshot(owner_store)
         self._owner_scope = owner_scope.strip()
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
@@ -175,12 +183,22 @@ class RecoveryController:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _canonical_owner_store(self) -> JournalStore | None:
-        """Return only the exact unshadowed JournalStore selected for recovery."""
+        """Return only the exact pinned JournalStore generation selected at construction."""
 
-        if self._owner_store is None:
+        store = self._owner_store
+        if store is None:
+            if self._owner_store_path is not None or self._owner_store_identity is not None:
+                raise PermissionError("recovery owner journal authority changed")
             return None
-        _canonical_journal_authority_snapshot(self._owner_store)
-        return self._owner_store
+        path, identity = _canonical_journal_authority_snapshot(store)
+        if (
+            self._owner_store_path is None
+            or self._owner_store_identity is None
+            or path != self._owner_store_path
+            or identity != self._owner_store_identity
+        ):
+            raise PermissionError("recovery owner journal authority changed")
+        return store
 
     @property
     def owner_scope(self) -> str:

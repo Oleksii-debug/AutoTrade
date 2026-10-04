@@ -656,6 +656,7 @@ class ProviderOriginJournal:
             response_bytes=receipt["response_bytes"],
             observed_at=receipt["observed_at"],
             origin_kind=_PROVIDER_ORIGIN_KIND,
+            _provider_observation=observation,
         )
 
     def _record_response(
@@ -667,12 +668,45 @@ class ProviderOriginJournal:
         response_bytes: bytes,
         observed_at: datetime,
         origin_kind: str,
+        _provider_observation: object | None = None,
     ) -> AuthenticatedReadResponseBinding:
         if origin_kind not in {
             _TEST_INJECTED_ORIGIN_KIND,
             _PROVIDER_ORIGIN_KIND,
         }:
             raise ProviderOriginError("response origin classification is invalid")
+        provider_receipt = None
+        if origin_kind == _PROVIDER_ORIGIN_KIND:
+            if _provider_observation is None:
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN retention requires canonical direct-wire observation"
+                )
+            try:
+                provider_receipt = require_authenticated_read_execution_receipt(
+                    _provider_observation
+                )
+            except (ProviderTransportError, TypeError, ValueError) as error:
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN retention lacks canonical direct-wire execution receipt"
+                ) from error
+            if provider_receipt.get("query_binding") is not query_binding.query_binding:
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN receipt changed exact query binding"
+                )
+            terminal = provider_receipt.get("terminal_authority")
+            _require_same_terminal_qualified_authority(query_binding, terminal)
+            if (
+                provider_receipt.get("http_status") != http_status
+                or provider_receipt.get("response_bytes") != response_bytes
+                or provider_receipt.get("observed_at") != observed_at
+            ):
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN retention differs from exact wire receipt"
+                )
+        elif _provider_observation is not None:
+            raise ProviderOriginError(
+                "test-injected retention cannot carry provider wire observation"
+            )
         evidence_kind = (
             "QUALIFIED_PROVIDER_ORIGIN_RESPONSE"
             if origin_kind == _PROVIDER_ORIGIN_KIND
@@ -713,6 +747,31 @@ class ProviderOriginJournal:
             raise ProviderOriginError("durable Prepared state has invalid origin classification")
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable Prepared query differs from exact qualified binding")
+        if provider_receipt is not None:
+            prepared_sequence = prepared.get("journal_sequence")
+            terminal = provider_receipt.get("terminal_authority")
+            if (
+                type(prepared_sequence) is not int
+                or prepared_sequence < 1
+                or terminal.authority_journal_sequence_cut < prepared_sequence
+            ):
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN receipt terminal authority predates durable Prepared event"
+                )
+            if (
+                provider_receipt.get("transport_identity")
+                != prepared_payload.get("transport_identity")
+            ):
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN receipt transport identity differs from Prepared authority"
+                )
+            if (
+                provider_receipt.get("network_policy_identity")
+                != prepared_payload.get("network_policy_identity")
+            ):
+                raise ProviderOriginError(
+                    "PROVIDER_ORIGIN receipt network policy differs from Prepared authority"
+                )
         if _parse_utc_text(observed_text, name="observed_at") < _parse_utc_text(
             prepared.get("committed_at"), name="prepared committed_at"
         ):

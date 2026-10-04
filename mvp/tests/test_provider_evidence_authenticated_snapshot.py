@@ -108,14 +108,14 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             reader_capabilities_before = set(root_authority._READER_CAPABILITIES)
             book = durable(store, artifacts)
             reader_capabilities_with_book = set(root_authority._READER_CAPABILITIES)
-            self.assertEqual(
-                reader_capabilities_with_book - reader_capabilities_before,
-                {next(iter(reader_capabilities_with_book - reader_capabilities_before))},
+            added_reader_capabilities = (
+                reader_capabilities_with_book - reader_capabilities_before
             )
             self.assertEqual(
-                len(reader_capabilities_with_book),
-                len(reader_capabilities_before) + 1,
+                reader_capabilities_before - reader_capabilities_with_book,
+                set(),
             )
+            self.assertEqual(len(added_reader_capabilities), 1)
 
             book_ref = weakref.ref(book)
             store_ref = weakref.ref(store)

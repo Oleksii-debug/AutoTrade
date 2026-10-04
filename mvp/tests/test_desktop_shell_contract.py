@@ -409,6 +409,18 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("desktop-build:", workflow)
         self.assertIn("runs-on: windows-latest", workflow)
         self.assertIn(
+            "dotnet tool restore --tool-manifest .config/dotnet-tools.json",
+            workflow,
+        )
+        self.assertIn(
+            "dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode",
+            workflow,
+        )
+        self.assertIn(
+            "dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode",
+            workflow,
+        )
+        self.assertIn(
             "dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
             workflow,
         )

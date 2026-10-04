@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_oracle import (
@@ -9,6 +9,8 @@ from mvp.autotrade_mvp.execution_oracle import (
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
+    MARKET_PRICE_PROJECTION_POLICY_ID,
+    MARKET_PRICE_PROJECTION_POLICY_VERSION,
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
@@ -32,6 +34,11 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256="b" * 64,
+        price_projection_policy_id=MARKET_PRICE_PROJECTION_POLICY_ID,
+        price_projection_policy_version=MARKET_PRICE_PROJECTION_POLICY_VERSION,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -474,6 +481,109 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=result,
             )
 
+
+
+    def test_oracle_market_projection_is_context_independent(self):
+        o = order(quantity="1", lot_size="1")
+        q = observation(available_volume="3")
+        m = model(max_participation="0.5")
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+    def test_oracle_rejects_market_price_better_than_projected_grid_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        self.assertGreater(result.fill_price, q.ask)
+        forged = replace(
+            result,
+            fill_price=result.fill_price - Decimal("0.01"),
+        )
+        self.assertGreater(forged.fill_price, q.ask)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently projected bound",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
+        sell_order = order(side="SELL")
+        sell_result = simulate_execution(sell_order, q, m)
+        forged_sell = replace(
+            sell_result,
+            fill_price=sell_result.fill_price + Decimal("0.01"),
+        )
+        self.assertLess(forged_sell.fill_price, q.bid)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently projected bound",
+        ):
+            assert_conservative_execution(
+                order=sell_order,
+                observation=q,
+                model=m,
+                result=forged_sell,
+            )
+
+    def test_oracle_rejects_off_grid_market_price_even_when_more_adverse(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(
+            result,
+            fill_price=result.fill_price + Decimal("0.005"),
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "violates declared price quantum",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
+    def test_oracle_fails_closed_without_market_price_grid_authority(self):
+        o, q = order(), observation()
+        valid = model()
+        result = simulate_execution(o, q, valid)
+        missing = model(
+            price_quantum=None,
+            price_grid_instrument_version=None,
+            price_grid_evidence_sha256=None,
+            price_projection_policy_id=None,
+            price_projection_policy_version=None,
+        )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires explicit price-grid projection authority",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=missing,
+                result=result,
+            )
 
 if __name__ == "__main__":
     unittest.main()

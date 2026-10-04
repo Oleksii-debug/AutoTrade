@@ -412,6 +412,111 @@ def _raise_exact(name: str):
     raise TypeError(f"items must be exact {name}")
 
 
+def _snapshot_blinding_profile(profile: BlindingProfile) -> BlindingProfile:
+    """Detach one exact profile cut without invoking mutated container callbacks."""
+
+    if type(profile) is not BlindingProfile:
+        raise TypeError("profile must be exact BlindingProfile")
+    identity_fields = object.__getattribute__(profile, "identity_fields")
+    calendar_fields = object.__getattribute__(profile, "calendar_fields")
+    strict_text_scan = object.__getattribute__(profile, "strict_text_scan")
+    price_scale_mode = object.__getattribute__(profile, "price_scale_mode")
+    if type(identity_fields) is not tuple:
+        raise TypeError("profile identity_fields must remain an exact tuple")
+    if type(calendar_fields) is not tuple:
+        raise TypeError("profile calendar_fields must remain an exact tuple")
+
+    identities: list[IdentityField] = []
+    for index, field in enumerate(identity_fields):
+        if type(field) is not IdentityField:
+            raise TypeError(
+                f"profile identity_fields[{index}] must remain exact IdentityField"
+            )
+        identities.append(
+            IdentityField(
+                path=object.__getattribute__(field, "path"),
+                namespace=object.__getattribute__(field, "namespace"),
+                required=object.__getattribute__(field, "required"),
+                alias_paths=object.__getattribute__(field, "alias_paths"),
+            )
+        )
+
+    calendars: list[CalendarField] = []
+    for index, field in enumerate(calendar_fields):
+        if type(field) is not CalendarField:
+            raise TypeError(
+                f"profile calendar_fields[{index}] must remain exact CalendarField"
+            )
+        calendars.append(
+            CalendarField(
+                path=object.__getattribute__(field, "path"),
+                required=object.__getattribute__(field, "required"),
+            )
+        )
+
+    return BlindingProfile(
+        identity_fields=tuple(identities),
+        calendar_fields=tuple(calendars),
+        strict_text_scan=strict_text_scan,
+        price_scale_mode=price_scale_mode,
+    )
+
+
+def _snapshot_source_dataset(dataset: CausalDataset) -> CausalDataset:
+    """Detach one committed source cut before any authority-bearing traversal."""
+
+    if type(dataset) is not CausalDataset:
+        raise TypeError("dataset must be exact CausalDataset")
+    manifest = _digest(
+        object.__getattribute__(dataset, "manifest_sha256"),
+        name="manifest_sha256",
+    )
+    committed_digest = _digest(
+        object.__getattribute__(dataset, "dataset_sha256"),
+        name="dataset_sha256",
+    )
+    source_events = object.__getattribute__(dataset, "events")
+    if type(source_events) is not tuple:
+        raise TypeError("source dataset events must remain an exact tuple")
+
+    detached_events: list[CausalEvent] = []
+    for index, event in enumerate(source_events):
+        if type(event) is not CausalEvent:
+            raise TypeError(
+                f"source dataset event[{index}] must remain exact CausalEvent"
+            )
+        payload = object.__getattribute__(event, "payload")
+        if type(payload) is not _MAPPING_PROXY_TYPE:
+            raise TypeError(
+                f"source dataset event[{index}] payload must remain an exact frozen mapping"
+            )
+        detached_events.append(
+            CausalEvent(
+                event_id=object.__getattribute__(event, "event_id"),
+                kind=object.__getattribute__(event, "kind"),
+                event_time=object.__getattribute__(event, "event_time"),
+                available_at=object.__getattribute__(event, "available_at"),
+                ingested_at=object.__getattribute__(event, "ingested_at"),
+                source_priority=object.__getattribute__(event, "source_priority"),
+                source_sequence=object.__getattribute__(event, "source_sequence"),
+                payload=_freeze(
+                    payload,
+                    path=f"source event[{index}] payload",
+                ),
+            )
+        )
+
+    snapshot = CausalDataset.create(
+        manifest_sha256=manifest,
+        events=tuple(detached_events),
+    )
+    if snapshot.dataset_sha256 != committed_digest:
+        raise BlindingError(
+            "source dataset content no longer matches its committed digest"
+        )
+    return snapshot
+
+
 @dataclass(frozen=True, slots=True)
 class BlindedEvent:
     """Strategy-facing replay event with no raw identity or absolute timestamp."""
@@ -565,8 +670,7 @@ def blind_dataset(
 
     if type(dataset) is not CausalDataset:
         raise TypeError("dataset must be exact CausalDataset")
-    if type(profile) is not BlindingProfile:
-        raise TypeError("profile must be exact BlindingProfile")
+    profile = _snapshot_blinding_profile(profile)
     experiment = _text(experiment_id, name="experiment_id")
     shuffle_key = _digest(shuffle_key_sha256, name="shuffle_key_sha256")
     shuffle_key_commitment = "sha256:" + sha256(
@@ -576,14 +680,8 @@ def blind_dataset(
         training_cutoff_uncertainty, name="training_cutoff_uncertainty"
     )
 
-    # Re-materialization both snapshots the caller-owned object graph and detects
-    # object.__setattr__ tampering after CausalDataset construction.
-    snapshot = CausalDataset.create(
-        manifest_sha256=dataset.manifest_sha256,
-        events=dataset.events,
-    )
-    if snapshot.dataset_sha256 != dataset.dataset_sha256:
-        raise BlindingError("source dataset content no longer matches its committed digest")
+    # Snapshot once before inspecting identities, calendars or economics.
+    snapshot = _snapshot_source_dataset(dataset)
     if not snapshot.events:
         raise BlindingError("blinded replay requires at least one causal event")
 
@@ -820,17 +918,11 @@ def _blinded_prefix_digest(events: tuple[BlindedEvent, ...], cursor: int) -> str
 def _source_anchor(dataset: CausalDataset, profile: BlindingProfile) -> datetime:
     if type(dataset) is not CausalDataset:
         raise TypeError("dataset must be exact CausalDataset")
-    snapshot = CausalDataset.create(
-        manifest_sha256=dataset.manifest_sha256,
-        events=dataset.events,
-    )
-    if snapshot.dataset_sha256 != dataset.dataset_sha256:
-        raise BlindingError("source dataset content no longer matches its committed digest")
-    if not snapshot.events:
+    if type(profile) is not BlindingProfile:
+        raise TypeError("profile must be exact BlindingProfile")
+    if not dataset.events:
         raise BlindingError("blinded replay requires at least one causal event")
-    # Use only the first causally available event.  Later-published corrections
-    # may carry older event times and must not rewrite the visible clock origin.
-    return snapshot.events[0].event_time
+    return min(event.event_time for event in dataset.events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -992,17 +1084,17 @@ class BlindedCausalFeeder:
         # Import locally to keep blinding data types independent from feeder internals.
         from .feeder import CausalFeeder
 
-        if type(profile) is not BlindingProfile:
-            raise TypeError("profile must be exact BlindingProfile")
+        dataset_snapshot = _snapshot_source_dataset(dataset)
+        profile_snapshot = _snapshot_blinding_profile(profile)
         self._blinded = blind_dataset(
-            dataset=dataset,
+            dataset=dataset_snapshot,
             experiment_id=experiment_id,
             shuffle_key_sha256=shuffle_key_sha256,
-            profile=profile,
+            profile=profile_snapshot,
             training_cutoff_uncertainty=training_cutoff_uncertainty,
         )
-        self._anchor = _source_anchor(dataset, profile)
-        self._source = CausalFeeder(dataset, start_time=start_time)
+        self._anchor = _source_anchor(dataset_snapshot, profile_snapshot)
+        self._source = CausalFeeder(dataset_snapshot, start_time=start_time)
         if self._source.published_count > len(self._blinded.events):
             raise BlindingError("causal source cursor exceeds blinded event set")
 

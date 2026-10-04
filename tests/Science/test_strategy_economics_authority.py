@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
 from uuid import UUID
 
@@ -190,6 +191,10 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             assessment.unresolved_owners,
         )
         self.assertIn(
+            "provider_economic_cut",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
             "instrument_registry_shape",
             assessment.verified_owners,
         )
@@ -256,6 +261,47 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         self.assertIn(
             "instrument_registry_authority",
             assessment.unresolved_owners,
+        )
+
+    def test_caller_provider_replay_does_not_satisfy_owner_authority(self):
+        item = _proposal()
+        original = economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT
+        calls = []
+
+        def replay(book, cut, *, expected_visibility_journal_sequence):
+            calls.append((book, cut, expected_visibility_journal_sequence))
+            return SimpleNamespace(
+                provider_id="SIMULATED",
+                cut_digest="sha256:" + "4" * 64,
+            )
+
+        book = object.__new__(economics_authority.DurableProviderEconomicBook)
+        cut = object.__new__(economics_authority.ProviderEconomicCut)
+        economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT = replay
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                _binding(item),
+                instrument_registry=_registry(),
+                provider_economic_book=book,
+                provider_economic_cut=cut,
+                expected_visibility_journal_sequence=7,
+            )
+        finally:
+            economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn(
+            "provider_economic_cut_replay",
+            assessment.verified_owners,
+        )
+        self.assertIn(
+            "provider_economic_cut",
+            assessment.unresolved_owners,
+        )
+        self.assertEqual(
+            assessment.provider_economic_cut_digest,
+            "sha256:" + "4" * 64,
         )
 
     def test_assessment_is_issued_and_mutation_invalidates_it(self):

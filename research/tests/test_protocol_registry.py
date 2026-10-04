@@ -274,6 +274,16 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     status="FAILED",
                     payload={"reason": "no-physical-holdout-yet"},
                 )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "must be preregistered before the first trial",
+            ):
+                registry.record_holdout_access(
+                    registered.protocol_id,
+                    holdout_id="unbound-peek",
+                    holdout_identity=locked_a,
+                    purpose="must-fail-before-physical-freeze",
+                )
 
             first_hash = registry.preregister_locked_holdout(
                 registered.protocol_id,
@@ -475,6 +485,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             first_protocol = registry.register_protocol(protocol())
+            registry.preregister_locked_holdout(
+                first_protocol.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
 
             second_payload = protocol()
             second_payload["hypothesis"] = "independent candidate over same locked segment"
@@ -505,6 +519,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             first = ScientificRegistry(path)
             p1 = first.register_protocol(protocol())
             identity = holdout_identity()
+            first.preregister_locked_holdout(
+                p1.protocol_id,
+                holdout_identity=identity,
+            )
             first.record_holdout_access(
                 p1.protocol_id,
                 holdout_id="forward-display-A",
@@ -573,6 +591,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             first = registry.register_protocol(protocol())
+            registry.preregister_locked_holdout(
+                first.protocol_id,
+                holdout_identity=holdout_identity("a"),
+            )
             registry.record_holdout_access(
                 first.protocol_id,
                 holdout_id="locked-forward",

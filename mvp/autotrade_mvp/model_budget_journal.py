@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any, Callable, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from mvp.autotrade_mvp.model_gateway import (
     BudgetLedger,
@@ -32,13 +33,15 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
 
 def _environment(value: str) -> str:
-    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if type(value) is not str:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    normalized = value.strip().upper()
     if normalized not in _ENVIRONMENTS:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     return normalized
@@ -46,6 +49,14 @@ def _environment(value: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _route_now(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if type(value) is not datetime or type(value.tzinfo) not in (timezone, ZoneInfo):
+        raise ValueError("now_utc must be an exact timezone-aware datetime")
+    return value
 
 
 def _reservation_context(
@@ -58,14 +69,17 @@ def _reservation_context(
     """
     if values is None:
         return None
-    if not isinstance(values, Mapping):
-        raise TypeError("reservation_context must be a mapping")
+    if type(values) is not dict:
+        raise TypeError("reservation_context must be an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
-    for raw_key, raw_value in values.items():
+    for raw_key, raw_value in snapshot.items():
+        if type(raw_key) is not str:
+            raise TypeError("reservation_context keys must be text")
         key = _text(raw_key, name="reservation_context key")
         if raw_key != key:
             raise ValueError("reservation_context keys must be canonical text")
-        if not isinstance(raw_value, str):
+        if type(raw_value) is not str:
             raise TypeError("reservation_context values must be text")
         value = _text(raw_value, name=f"reservation_context[{key}]")
         if raw_value != value:
@@ -149,7 +163,9 @@ class DurableModelBudget:
         self.journal = journal
         self.budget_id = _text(budget_id, name="budget_id")
         self.environment = _environment(environment)
-        self._clock = clock or _now
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = _now if clock is None else clock
 
         candidate = BudgetLedger(ceiling)
         self._ceiling = candidate.snapshot().ceiling
@@ -202,7 +218,7 @@ class DurableModelBudget:
             "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "committed_at": self._clock(),
+            "committed_at": _text(self._clock(), name="clock result"),
         }
 
     @staticmethod
@@ -405,12 +421,12 @@ class DurableModelBudget:
         descriptors: tuple[ModelDescriptor, ...],
         reservation_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(policy, RoutingPolicy):
-            raise TypeError("policy must be RoutingPolicy")
-        if not isinstance(request, ModelRequest):
-            raise TypeError("request must be ModelRequest")
-        if not all(isinstance(item, ModelDescriptor) for item in descriptors):
-            raise TypeError("descriptors must contain ModelDescriptor values")
+        if type(policy) is not RoutingPolicy:
+            raise TypeError("policy must be exact RoutingPolicy")
+        if type(request) is not ModelRequest:
+            raise TypeError("request must be exact ModelRequest")
+        if not all(type(item) is ModelDescriptor for item in descriptors):
+            raise TypeError("descriptors must contain exact ModelDescriptor values")
         material = {
             "policy": {
                 "mode": policy.mode.value,
@@ -477,34 +493,63 @@ class DurableModelBudget:
         now_utc: datetime | None = None,
         reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
+        if type(policy) is not RoutingPolicy:
+            raise TypeError("policy must be exact RoutingPolicy")
+        if type(request) is not ModelRequest:
+            raise TypeError("request must be exact ModelRequest")
+
+        # Caller-owned frozen dataclasses remain mutable through object.__setattr__
+        # and may be changed by another thread while journal reads occur below.
+        # Detach scalar routing authority before touching optional model inventory.
+        policy = RoutingPolicy(
+            mode=policy.mode,
+            allowed_model_ids=policy.allowed_model_ids,
+            fixed_model_id=policy.fixed_model_id,
+            allow_remote=policy.allow_remote,
+            maximum_cost=policy.maximum_cost,
+            maximum_latency_ms=policy.maximum_latency_ms,
+        )
+        request = ModelRequest(
+            request_id=request.request_id,
+            allowed_model_ids=request.allowed_model_ids,
+            privacy_remote_allowed=request.privacy_remote_allowed,
+            budget_remaining=request.budget_remaining,
+            deadline_utc=request.deadline_utc,
+            cancelled=request.cancelled,
+        )
+        now = _route_now(now_utc)
+
+        # Preserve the pure router's inventory-free short circuits end-to-end.
+        # These outcomes cannot reserve cost, so descriptor and reservation
+        # context are semantically irrelevant and must not be enumerated.
+        if (
+            request.cancelled
+            or now >= request.deadline_utc
+            or getattr(policy.mode, "value", None) == "ZERO"
+        ):
+            return route_model(policy, request, (), now_utc=now)
+
         materialized = tuple(descriptors)
+        if any(type(item) is not ModelDescriptor for item in materialized):
+            raise TypeError("descriptors must contain exact ModelDescriptor values")
+        materialized = tuple(
+            ModelDescriptor(
+                model_id=item.model_id,
+                provider_id=item.provider_id,
+                revision=item.revision,
+                remote=item.remote,
+                estimated_cost=item.estimated_cost,
+                latency_ms=item.latency_ms,
+                quality_score=item.quality_score,
+            )
+            for item in materialized
+        )
         routing_input = self._routing_input(
             policy,
             request,
             materialized,
             reservation_context=reservation_context,
         )
-        now = now_utc or datetime.now(timezone.utc)
-        if now.tzinfo is None:
-            raise ValueError("now_utc must be timezone-aware")
-        if request.cancelled:
-            return RouteDecision(
-                RouteStatus.REJECTED,
-                None,
-                None,
-                None,
-                Decimal("0"),
-                "request_cancelled",
-            )
-        if now >= request.deadline_utc:
-            return RouteDecision(
-                RouteStatus.REJECTED,
-                None,
-                None,
-                None,
-                Decimal("0"),
-                "deadline_expired",
-            )
         idempotency_key = _idempotency_key(
             budget_id=self.budget_id,
             action="route_reserve",

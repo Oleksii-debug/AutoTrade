@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.production_financial_host import compose_financial_author
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_route_dispatch import (
     ProviderRouteDispatchError,
+    bind_selected_provider_route_submission_scope,
     compose_selected_provider_route_authority,
 )
 from mvp.autotrade_mvp.security import SecurityBoundary
@@ -161,6 +162,48 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                     lambda intent_hash, at: (True, "financial_authority_current"),
                 )
 
+    def test_route_submission_scope_persists_exact_c_q_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, _capabilities, _qualifications, route, _dispatcher, q1, _harness = (
+                self._fixture(directory)
+            )
+            scope = bind_selected_provider_route_submission_scope(
+                route,
+                {
+                    "provider_id": "BYBIT",
+                    "account_id": "paper-account",
+                    "environment": "PAPER",
+                    "provider_environment": "TESTNET",
+                    "capability_snapshot_id": route.capability_snapshot_id,
+                },
+            )
+            self.assertEqual(
+                scope["provider_route_qualification_id"],
+                q1.qualification_id,
+            )
+            self.assertEqual(
+                scope["provider_route_capability_snapshot_id"],
+                route.capability_snapshot_id,
+            )
+            self.assertEqual(
+                scope["provider_route_decision_journal_sequence_cut"],
+                route.decision_journal_sequence_cut,
+            )
+
+    def test_route_submission_scope_rejects_reserved_identity_override(self):
+        with TemporaryDirectory() as directory:
+            _journal, _capabilities, _qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteDispatchError,
+                "attempts to override provider-route authority fields",
+            ):
+                bind_selected_provider_route_submission_scope(
+                    route,
+                    {"provider_route_qualification_id": "forged"},
+                )
+
     def test_financial_issuer_can_be_bound_to_exact_selected_route_authority(self):
         with TemporaryDirectory() as directory:
             journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
@@ -241,6 +284,37 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                     _ = issuer.provider_route_bound
             finally:
                 financial_send_authority.compose_selected_provider_route_authority = original
+            self.assertEqual(calls, [])
+
+    def test_route_submission_scope_rebinding_fails_before_use(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            original = financial_send_authority.bind_selected_provider_route_submission_scope
+            calls = []
+
+            def forged(*_args, **_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged provider route submission scope executed")
+
+            financial_send_authority.bind_selected_provider_route_submission_scope = forged
+            try:
+                with self.assertRaisesRegex(
+                    FinancialSendAuthorityError,
+                    "provider route submission scope authority changed",
+                ):
+                    _ = issuer.provider_route_bound
+            finally:
+                financial_send_authority.bind_selected_provider_route_submission_scope = original
             self.assertEqual(calls, [])
 
 

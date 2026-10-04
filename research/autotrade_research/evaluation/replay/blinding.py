@@ -282,14 +282,25 @@ def _scan_payload(
 
 @dataclass(frozen=True, slots=True)
 class IdentityField:
-    """One structured payload path whose string identity must be pseudonymized."""
+    """Canonical identity path plus optional aliases sharing one pseudonym."""
 
     path: tuple[str, ...]
     namespace: str
     required: bool = False
+    alias_paths: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "path", _path(self.path, name="identity path"))
+        canonical = _path(self.path, name="identity path")
+        object.__setattr__(self, "path", canonical)
+        if type(self.alias_paths) is not tuple:
+            raise TypeError("alias_paths must be an exact tuple")
+        aliases = tuple(
+            _path(item, name=f"alias_paths[{index}]")
+            for index, item in enumerate(self.alias_paths)
+        )
+        if canonical in aliases or len(aliases) != len(set(aliases)):
+            raise BlindingError("identity alias paths must be unique and differ from canonical path")
+        object.__setattr__(self, "alias_paths", aliases)
         namespace = _text(self.namespace, name="namespace").upper()
         if _NAMESPACE.fullmatch(namespace) is None:
             raise BlindingError("namespace must match [A-Z][A-Z0-9_]*")
@@ -358,7 +369,11 @@ class BlindingProfile:
                 "instrument/execution invariant qualification"
             )
         object.__setattr__(self, "price_scale_mode", price_scale_mode)
-        paths = [item.path for item in identities] + [item.path for item in calendars]
+        paths = (
+            [item.path for item in identities]
+            + [alias for item in identities for alias in item.alias_paths]
+            + [item.path for item in calendars]
+        )
         for index, left in enumerate(paths):
             for right in paths[index + 1 :]:
                 if (
@@ -379,6 +394,7 @@ class BlindingProfile:
                     "path": list(item.path),
                     "namespace": item.namespace,
                     "required": item.required,
+                    "alias_paths": [list(path) for path in item.alias_paths],
                 }
                 for item in self.identity_fields
             ],
@@ -570,15 +586,29 @@ def blind_dataset(
     if not snapshot.events:
         raise BlindingError("blinded replay requires at least one causal event")
 
-    identity_paths = frozenset(item.path for item in profile.identity_fields)
+    identity_paths = frozenset(
+        path
+        for item in profile.identity_fields
+        for path in (item.path, *item.alias_paths)
+    )
     calendar_paths = frozenset(item.path for item in profile.calendar_fields)
 
     raw_by_namespace: dict[str, set[str]] = {}
+    aliases_by_identity: dict[tuple[str, str], set[str]] = {}
+    alias_owner: dict[tuple[str, str], str] = {}
     calendar_values: list[datetime] = []
     for event in snapshot.events:
         for field in profile.identity_fields:
             present, value = _lookup(event.payload, field.path)
             if not present:
+                alias_present = any(
+                    _lookup(event.payload, alias_path)[0]
+                    for alias_path in field.alias_paths
+                )
+                if alias_present:
+                    raise BlindingError(
+                        f"identity aliases for {'.'.join(field.path)} exist without canonical identity"
+                    )
                 if field.required:
                     raise BlindingError(
                         f"required identity path {'.'.join(field.path)} is missing"
@@ -588,7 +618,28 @@ def blind_dataset(
                 raise BlindingError(
                     f"identity path {'.'.join(field.path)} must contain non-empty text"
                 )
-            raw_by_namespace.setdefault(field.namespace, set()).add(value.strip())
+            canonical_raw = value.strip()
+            raw_by_namespace.setdefault(field.namespace, set()).add(canonical_raw)
+            aliases = aliases_by_identity.setdefault(
+                (field.namespace, canonical_raw), set()
+            )
+            for alias_path in field.alias_paths:
+                alias_present, alias_value = _lookup(event.payload, alias_path)
+                if not alias_present:
+                    continue
+                if type(alias_value) is not str or not alias_value.strip():
+                    raise BlindingError(
+                        f"identity alias path {'.'.join(alias_path)} must contain non-empty text"
+                    )
+                alias_raw = alias_value.strip()
+                owner_key = (field.namespace, alias_raw)
+                prior_owner = alias_owner.get(owner_key)
+                if prior_owner is not None and prior_owner != canonical_raw:
+                    raise BlindingError(
+                        "one identity alias cannot refer to multiple canonical identities"
+                    )
+                alias_owner[owner_key] = canonical_raw
+                aliases.add(alias_raw)
         for field in profile.calendar_fields:
             present, value = _lookup(event.payload, field.path)
             if not present:
@@ -601,8 +652,26 @@ def blind_dataset(
                 _calendar_value(value, path=".".join(field.path))
             )
 
+    for (namespace, alias_raw), canonical_raw in alias_owner.items():
+        if (
+            alias_raw in raw_by_namespace.get(namespace, set())
+            and alias_raw != canonical_raw
+        ):
+            raise BlindingError(
+                "identity alias collides with another canonical identity"
+            )
+
     raw_identities = frozenset(
-        raw for values in raw_by_namespace.values() for raw in values
+        [
+            raw
+            for values in raw_by_namespace.values()
+            for raw in values
+        ]
+        + [
+            alias
+            for aliases in aliases_by_identity.values()
+            for alias in aliases
+        ]
     )
     for event in snapshot.events:
         for raw in raw_identities:
@@ -637,7 +706,12 @@ def blind_dataset(
             identity_map[(namespace, raw)] = f"{prefix} {index:0{width}d}"
 
     mapping_commitment = [
-        {"namespace": namespace, "raw": raw, "blind": blind}
+        {
+            "namespace": namespace,
+            "raw": raw,
+            "aliases": sorted(aliases_by_identity.get((namespace, raw), set())),
+            "blind": blind,
+        }
         for (namespace, raw), blind in sorted(identity_map.items())
     ]
     mapping_sha256 = "sha256:" + hmac.new(
@@ -671,11 +745,12 @@ def blind_dataset(
             present, value = _lookup(event.payload, field.path)
             if not present:
                 continue
-            payload = _replace(
-                payload,
-                field.path,
-                identity_map[(field.namespace, value.strip())],
-            )
+            pseudonym = identity_map[(field.namespace, value.strip())]
+            payload = _replace(payload, field.path, pseudonym)
+            for alias_path in field.alias_paths:
+                alias_present, _alias_value = _lookup(event.payload, alias_path)
+                if alias_present:
+                    payload = _replace(payload, alias_path, pseudonym)
         for field in profile.calendar_fields:
             present, value = _lookup(event.payload, field.path)
             if not present:

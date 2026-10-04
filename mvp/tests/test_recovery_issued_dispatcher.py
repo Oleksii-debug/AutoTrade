@@ -162,6 +162,79 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 [event["event_type"] for event in events],
             )
 
+    def test_durable_mutation_after_reconciliation_check_blocks_final_send_cas(self):
+        with TemporaryDirectory() as directory:
+            journal = self._journal(directory)
+            recovery = self._recovery(journal)
+            dispatcher = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            self._mark_ready(recovery, journal)
+
+            authority_calls = 0
+            wire_calls = []
+
+            def authority_check(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 2:
+                    payload = {"reason": "concurrent-financial-authority-change"}
+                    JournalStore.append_event(
+                        journal,
+                        {
+                            "event_id": str(uuid4()),
+                            "event_type": "ConcurrentFinancialAuthorityChanged",
+                            "aggregate_type": "financial_control",
+                            "aggregate_id": "PAPER:acct",
+                            "aggregate_version": "1",
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": "2026-10-04T01:00:00Z",
+                        },
+                    )
+                return True, "allowed"
+
+            def transport_send(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"ok": True}
+
+            outcome = dispatcher.dispatch(
+                attempt_id="attempt-cas-race",
+                intent_id="intent-cas-race",
+                intent_hash="intent-hash-cas-race",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-10-04T01:00:00Z",
+                authority_check=authority_check,
+                transport_send=transport_send,
+            )
+
+            self.assertEqual(authority_calls, 2)
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(
+                outcome.reason,
+                "journal_changed_during_final_send_validation",
+            )
+            self.assertEqual(wire_calls, [])
+            inner = dispatcher._RecoveryIssuedDispatcher__dispatcher
+            events = JournalStore.load_events(
+                journal,
+                "submission_attempt",
+                inner._aggregate_id("attempt-cas-race"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertNotIn(
+                "SubmissionSending",
+                [event["event_type"] for event in events],
+            )
+
     def test_same_process_unknown_reopens_reconciliation_gate_before_next_send(self):
         with TemporaryDirectory() as directory:
             journal = self._journal(directory)

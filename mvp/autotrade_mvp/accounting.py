@@ -548,8 +548,13 @@ class ScopedEconomicBook:
         normalized_environment = _name(environment, field="environment").upper()
         if normalized_environment not in self._ENVIRONMENTS:
             raise ValueError("unsupported environment")
+        normalized_account_id = _name(account_id, field="account_id")
+        # Retain construction-time scope separately from caller-visible labels.
+        # Financial consumers that must prove original account/runtime selection
+        # use this canonical owner tuple rather than mutable public attributes.
+        self._scope_owner = (normalized_environment, normalized_account_id)
         self.environment = normalized_environment
-        self.account_id = _name(account_id, field="account_id")
+        self.account_id = normalized_account_id
         self._book = EconomicBook(transactions)
 
     @property

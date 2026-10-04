@@ -691,6 +691,7 @@ class SettlementBook:
         old settlement facts cannot release capital twice.
         """
 
+        scoped_owner: tuple[str, str] | None = None
         if type(economic_book) is EconomicBook:
             canonical_book = economic_book
         elif type(economic_book) is ScopedEconomicBook:
@@ -699,6 +700,17 @@ class SettlementBook:
                 raise TypeError(
                     "ScopedEconomicBook must own an exact EconomicBook"
                 )
+            owner = object.__getattribute__(economic_book, "_scope_owner")
+            if (
+                type(owner) is not tuple
+                or len(owner) != 2
+                or type(owner[0]) is not str
+                or type(owner[1]) is not str
+            ):
+                raise TypeError(
+                    "ScopedEconomicBook must retain an exact immutable scope owner"
+                )
+            scoped_owner = owner
         else:
             raise TypeError(
                 "economic_book must be an exact EconomicBook or ScopedEconomicBook"
@@ -784,6 +796,15 @@ class SettlementBook:
                 raise SettlementConflict(
                     "economic-book settlement requires source transaction and rule binding"
                 )
+            if scoped_owner is not None:
+                binding_scope = obligation.rule_binding.scope
+                if (
+                    binding_scope.environment,
+                    binding_scope.account_id,
+                ) != scoped_owner:
+                    raise SettlementConflict(
+                        "settlement obligation differs from immutable scoped-book owner"
+                    )
             transaction = by_transaction.get(obligation.source_transaction_id)
             if transaction is None:
                 raise SettlementConflict(

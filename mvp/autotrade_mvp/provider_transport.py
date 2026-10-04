@@ -32,7 +32,9 @@ from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
+    AbstractHTTPHandler,
     HTTPRedirectHandler,
+    HTTPSHandler,
     OpenerDirector,
     Request,
     ProxyHandler,
@@ -1426,6 +1428,10 @@ def _install_direct_authenticated_read_execution_authority():
         ],
     ] = {}
     canonical_opener_open = OpenerDirector.open
+    canonical_opener_dispatch = OpenerDirector._open
+    canonical_opener_call_chain = OpenerDirector._call_chain
+    canonical_http_do_open = AbstractHTTPHandler.do_open
+    canonical_https_open = HTTPSHandler.https_open
     canonical_proxy_open = ProxyHandler.proxy_open
     canonical_redirect_request = _NoRedirectHandler.redirect_request
 
@@ -1470,6 +1476,10 @@ def _install_direct_authenticated_read_execution_authority():
             )
         if (
             OpenerDirector.open is not canonical_opener_open
+            or OpenerDirector._open is not canonical_opener_dispatch
+            or OpenerDirector._call_chain is not canonical_opener_call_chain
+            or AbstractHTTPHandler.do_open is not canonical_http_do_open
+            or HTTPSHandler.https_open is not canonical_https_open
             or ProxyHandler.proxy_open is not canonical_proxy_open
             or _NoRedirectHandler.redirect_request is not canonical_redirect_request
         ):

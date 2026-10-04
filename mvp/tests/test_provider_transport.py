@@ -4495,6 +4495,24 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             self.assertEqual(selected[0].proxies, {})
         self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
 
+    def test_direct_authenticated_read_authority_rejects_https_handler_method_patch(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        https_handler = next(
+            handler
+            for handler in client._opener.handlers
+            if type(handler).__name__ == "HTTPSHandler"
+        )
+        with patch.object(
+            type(https_handler),
+            "https_open",
+            lambda *_args, **_kwargs: None,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_authenticated_read_client(client)
+
     def test_direct_authenticated_read_authority_rejects_proxy_policy_mutation(self):
         client = UrllibJsonWireClient(max_response_bytes=64)
         proxy = next(

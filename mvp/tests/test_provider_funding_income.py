@@ -153,7 +153,14 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         )
         return record, receipt, protocol
 
-    def _origin_observation(self, directory: str, body: bytes, *, parser: str = PARSER):
+    def _origin_observation(
+        self,
+        directory: str,
+        body: bytes,
+        *,
+        parser: str = PARSER,
+        query_currency: str | None = None,
+    ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
@@ -215,17 +222,20 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         self.assertEqual(selection.status, "SELECTED_UNAMBIGUOUS")
         route = selection.selected
         self.assertIsNotNone(route)
+        query = {
+            "accountType": "UNIFIED",
+            "category": "linear",
+            "type": "SETTLEMENT",
+        }
+        if query_currency is not None:
+            query["currency"] = query_currency
         binding = prepare_qualified_provider_read(
             route,
             capabilities,
             qualifications,
             surface=Surface.AUTHENTICATED_READ,
             endpoint=ENDPOINT,
-            query={
-                "accountType": "UNIFIED",
-                "category": "linear",
-                "type": "SETTLEMENT",
-            },
+            query=query,
             at=NOW,
             permission_scope="ACCOUNT.READ",
         )
@@ -278,7 +288,14 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         return observation
 
     @staticmethod
-    def _body(*, duplicate=False, ret_code=0):
+    def _body(
+        *,
+        duplicate=False,
+        ret_code=0,
+        transaction_time="1672128000000",
+        currency="USDT",
+        change="-0.003676",
+    ):
         settlement = {
             "transSubType": "",
             "id": "592324_XRPUSDT_161440249321",
@@ -288,16 +305,16 @@ class ProviderFundingIncomeTests(unittest.TestCase):
             "orderLinkId": "",
             "orderId": "1672128000-8-592324-1-2",
             "fee": "0.00000000",
-            "change": "-0.003676",
+            "change": change,
             "cashFlow": "0",
-            "transactionTime": "1672128000000",
+            "transactionTime": transaction_time,
             "type": "SETTLEMENT",
             "feeRate": "0.0001",
             "bonusChange": "",
             "size": "100",
             "qty": "100",
             "cashBalance": "5086.55825002",
-            "currency": "USDT",
+            "currency": currency,
             "category": "linear",
             "tradePrice": "0.3676",
             "tradeId": "534c0003-4bf7-486f-aa02-78cee36825e4",
@@ -362,6 +379,67 @@ class ProviderFundingIncomeTests(unittest.TestCase):
                 "changed after qualified origin projection",
             ):
                 require_provider_funding_income_authority(funding)
+
+    def test_transaction_time_preserves_exact_millisecond_without_float(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(transaction_time="1672128000001"),
+            )
+            funding = bybit_funding_income_observations(origin)[0]
+            self.assertEqual(
+                funding.provider_transaction_at.isoformat(),
+                "2022-12-27T08:00:00.001000+00:00",
+            )
+
+    def test_noncanonical_leading_zero_transaction_time_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(transaction_time="01672128000000"),
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "canonical epoch-millisecond",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_qualified_currency_scope_mismatch_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(currency="USDC"),
+                query_currency="USDT",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified currency scope",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_lowercase_provider_currency_is_not_silently_canonicalized(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(currency="usdt"),
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "canonical uppercase ASCII",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_funding_row_change_equation_must_reconcile_exactly(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(change="-0.003675"),
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "cashFlow \+ funding - fee",
+            ):
+                bybit_funding_income_observations(origin)
 
     def test_wrong_qualified_parser_identity_cannot_mint_funding_income(self):
         with TemporaryDirectory() as directory:

@@ -900,6 +900,24 @@ class InformationClaimTests(unittest.TestCase):
             claim.evidence_digest(),
         )
 
+    def test_snapshot_detaches_input_claim_from_later_mutation(self):
+        store = ClaimStore()
+        claim = store.build_claim(
+            doc("corp", "r1", "guidance is 10"),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        snapshot = InformationSnapshot(cutoff=BASE, claims=(claim,))
+        before = snapshot.digest()
+
+        object.__setattr__(claim, "value", "attacker-rewrite")
+        object.__setattr__(claim, "available_at", BASE + timedelta(days=30))
+
+        self.assertEqual(snapshot.claims[0].value, "10")
+        self.assertEqual(snapshot.claims[0].available_at, BASE)
+        self.assertEqual(snapshot.digest(), before)
+
     def test_direct_snapshot_rejects_syndicated_duplicate_identities(self):
         first_store = ClaimStore()
         first = first_store.build_claim(

@@ -572,6 +572,117 @@ class ProviderOriginJournal:
             raise ProviderOriginError(
                 "test-injected response requires the deterministic test record token"
             )
+        return self._record_response(
+            attempt_id,
+            query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            origin_kind=_TEST_INJECTED_ORIGIN_KIND,
+        )
+
+    def _record_provider_origin_response(
+        self,
+        attempt_id: str,
+        query_binding: QualifiedProviderReadQueryBinding,
+        observation: object,
+    ) -> AuthenticatedReadResponseBinding:
+        try:
+            receipt = require_authenticated_read_execution_receipt(observation)
+        except (ProviderTransportError, TypeError, ValueError) as error:
+            raise ProviderOriginError(
+                "provider-origin response lacks canonical direct-wire execution receipt"
+            ) from error
+        snapshot = _qualified_query_snapshot(query_binding)
+        base = query_binding.query_binding
+        if receipt.get("query_binding") is not base:
+            raise ProviderOriginError(
+                "provider-origin execution receipt changed exact query binding"
+            )
+        terminal = receipt.get("terminal_authority")
+        _require_same_terminal_qualified_authority(query_binding, terminal)
+
+        attempt = _exact_text(attempt_id, name="attempt_id")
+        events = JournalStore.load_events(
+            self._require_store(),
+            _AGGREGATE_TYPE,
+            attempt,
+        )
+        if len(events) != 1:
+            raise ProviderOriginError(
+                "provider-origin receipt requires one exact durable Prepared event"
+            )
+        prepared = events[0]
+        prepared_payload = _require_event(
+            prepared,
+            attempt_id=attempt,
+            event_type=_PREPARED_EVENT,
+            version=1,
+            payload_keys=_PREPARED_PAYLOAD_KEYS,
+        )
+        if prepared_payload.get("origin_kind") != _PENDING_ORIGIN_KIND:
+            raise ProviderOriginError(
+                "provider-origin Prepared state has invalid origin classification"
+            )
+        if prepared_payload.get("qualified_query") != snapshot:
+            raise ProviderOriginError(
+                "provider-origin receipt differs from durable Prepared query"
+            )
+        prepared_sequence = prepared.get("journal_sequence")
+        if type(prepared_sequence) is not int or prepared_sequence < 1:
+            raise ProviderOriginError(
+                "provider-origin Prepared journal sequence is invalid"
+            )
+        if terminal.authority_journal_sequence_cut < prepared_sequence:
+            raise ProviderOriginError(
+                "provider-origin receipt terminal authority predates durable Prepared event"
+            )
+        if receipt.get("transport_identity") != prepared_payload.get("transport_identity"):
+            raise ProviderOriginError(
+                "provider-origin receipt transport identity differs from Prepared authority"
+            )
+        if (
+            receipt.get("network_policy_identity")
+            != prepared_payload.get("network_policy_identity")
+        ):
+            raise ProviderOriginError(
+                "provider-origin receipt network policy differs from Prepared authority"
+            )
+
+        return self._record_response(
+            attempt,
+            query_binding,
+            http_status=receipt["http_status"],
+            response_bytes=receipt["response_bytes"],
+            observed_at=receipt["observed_at"],
+            origin_kind=_PROVIDER_ORIGIN_KIND,
+        )
+
+    def _record_response(
+        self,
+        attempt_id: str,
+        query_binding: QualifiedProviderReadQueryBinding,
+        *,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+        origin_kind: str,
+    ) -> AuthenticatedReadResponseBinding:
+        if origin_kind not in {
+            _TEST_INJECTED_ORIGIN_KIND,
+            _PROVIDER_ORIGIN_KIND,
+        }:
+            raise ProviderOriginError("response origin classification is invalid")
+        evidence_kind = (
+            "QUALIFIED_PROVIDER_ORIGIN_RESPONSE"
+            if origin_kind == _PROVIDER_ORIGIN_KIND
+            else "QUALIFIED_TEST_INJECTED_PROVIDER_RESPONSE"
+        )
+        rights_id = (
+            "qualified-provider-origin-response:v1"
+            if origin_kind == _PROVIDER_ORIGIN_KIND
+            else "qualified-test-injected-provider-response:v1"
+        )
         attempt = _exact_text(attempt_id, name="attempt_id")
         snapshot = _qualified_query_snapshot(query_binding)
         if type(http_status) is not int or http_status not in query_binding.accepted_success_statuses:
@@ -617,7 +728,7 @@ class ProviderOriginJournal:
             prepared.get("payload_hash"), name="prepared_subject_digest"
         )
         metadata = {
-            "evidence_kind": "QUALIFIED_TEST_INJECTED_PROVIDER_RESPONSE",
+            "evidence_kind": evidence_kind,
             "attempt_id": attempt,
             "prepared_subject_digest": prepared_subject_digest,
             "qualified_query_digest": snapshot["qualified_query_digest"],
@@ -637,7 +748,7 @@ class ProviderOriginJournal:
                 rights={
                     "storage": True,
                     "export": False,
-                    "rights_id": "qualified-test-injected-provider-response:v1",
+                    "rights_id": rights_id,
                 },
                 source_refs=[],
                 metadata=metadata,
@@ -653,7 +764,7 @@ class ProviderOriginJournal:
             raise ProviderOriginError("provider response artifact conflicts with exact response")
 
         common = {
-            "origin_kind": _TEST_INJECTED_ORIGIN_KIND,
+            "origin_kind": origin_kind,
             "prepared_event_id": prepared.get("event_id"),
             "prepared_subject_digest": prepared_subject_digest,
             "qualified_query_digest": snapshot["qualified_query_digest"],
@@ -728,9 +839,13 @@ class ProviderOriginJournal:
         )
         if prepared_payload.get("origin_kind") != _PENDING_ORIGIN_KIND:
             raise ProviderOriginError("recovery Prepared state has invalid origin classification")
-        if retained_payload.get("origin_kind") != _TEST_INJECTED_ORIGIN_KIND:
+        retained_origin_kind = retained_payload.get("origin_kind")
+        if retained_origin_kind not in {
+            _TEST_INJECTED_ORIGIN_KIND,
+            _PROVIDER_ORIGIN_KIND,
+        }:
             raise ProviderOriginError(
-                "recovery cannot promote unverified response to provider origin"
+                "recovery retained response origin classification is invalid"
             )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event is not bound to exact Prepared event")
@@ -789,9 +904,12 @@ class ProviderOriginJournal:
         if observed_payload != {**retained_payload, "retained_event_id": retained.get("event_id")}:
             raise ProviderOriginError("Observed event differs from exact Retained response")
         origin_kind = retained_payload.get("origin_kind")
-        if origin_kind != _TEST_INJECTED_ORIGIN_KIND:
+        if origin_kind not in {
+            _TEST_INJECTED_ORIGIN_KIND,
+            _PROVIDER_ORIGIN_KIND,
+        }:
             raise ProviderOriginError(
-                "durable response lacks independently authenticated provider-origin issuer"
+                "durable response origin classification is invalid"
             )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event differs from exact Prepared response")
@@ -1163,13 +1281,10 @@ def execute_qualified_provider_origin_read(
             "provider-origin receipt terminal authority predates durable Prepared event"
         )
 
-    return origin._record_provider_origin(
+    return origin._record_provider_origin_response(
         attempt_id,
         query_binding,
-        http_status=receipt["http_status"],
-        response_bytes=receipt["response_bytes"],
-        observed_at=receipt["observed_at"],
-        _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+        observation,
     )
 
 

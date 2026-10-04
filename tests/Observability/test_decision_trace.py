@@ -1,7 +1,11 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import unittest
+
+from autotrade_runtime.resource_lock import ResourceLock
 
 from mvp.autotrade_mvp.decision_trace import BoundedMetricBacklog, DecisionTraceStore
 
@@ -26,6 +30,71 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
 
 
 class DecisionTraceEvidenceTests(unittest.TestCase):
+    def test_relative_backing_path_is_frozen_across_cwd_change(self):
+        original_cwd = os.getcwd()
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:
+            try:
+                source_root = Path(source_directory)
+                other_root = Path(other_directory)
+                os.chdir(source_root)
+                store = DecisionTraceStore(Path("nested") / "decision-traces.jsonl")
+                expected_path = source_root / "nested" / "decision-traces.jsonl"
+
+                os.chdir(other_root)
+                self.assertTrue(store.append(evidence_trace("decision-cwd-frozen")))
+
+                self.assertEqual(store.path, expected_path)
+                self.assertTrue(expected_path.exists())
+                self.assertFalse(
+                    (other_root / "nested" / "decision-traces.jsonl").exists()
+                )
+                self.assertTrue(store.verify())
+                self.assertEqual(
+                    [item["trace_id"] for item in store.records()],
+                    ["decision-cwd-frozen"],
+                )
+            finally:
+                # Windows cannot remove a TemporaryDirectory that is the process CWD.
+                # Restore it before either context manager starts cleanup.
+                os.chdir(original_cwd)
+
+    def test_append_waits_for_shared_cross_process_writer_lock(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            lock_path = path.with_name(path.name + ".lock")
+            store = DecisionTraceStore(path)
+            started = Event()
+            completed = Event()
+            results = []
+            errors = []
+
+            def writer():
+                started.set()
+                try:
+                    results.append(store.append(evidence_trace("decision-locked")))
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    completed.set()
+
+            with ResourceLock(lock_path, blocking=False):
+                thread = Thread(target=writer, daemon=True)
+                thread.start()
+                self.assertTrue(started.wait(timeout=1.0))
+                self.assertFalse(
+                    completed.wait(timeout=0.20),
+                    "append bypassed the shared decision-trace writer lock",
+                )
+
+            self.assertTrue(completed.wait(timeout=5.0))
+            thread.join(timeout=1.0)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [True])
+            self.assertTrue(store.verify())
+            records = store.records()
+            self.assertEqual([item["trace_id"] for item in records], ["decision-locked"])
+
     def test_durable_trace_redacts_sensitive_diagnostics_before_persistence(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

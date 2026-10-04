@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
+from autotrade_runtime.resource_lock import ResourceLock
+
 
 GENESIS_HASH = "0" * 64
 REQUIRED_FIELDS = (
@@ -211,7 +213,10 @@ class DecisionTraceStore:
     """Durable JSONL trace store with idempotent append and hash-chain verification."""
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        # Freeze the selected backing location at composition time.  A later
+        # process-wide CWD change must not retarget either the JSONL authority
+        # or its sibling ResourceLock to a different directory.
+        self.path = Path(os.path.abspath(os.fspath(path)))
 
     def _load(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -289,35 +294,45 @@ class DecisionTraceStore:
             raise ValueError("attributes must be an object")
 
     def append(self, trace: dict[str, Any]) -> bool:
-        """Append a trace once; identical retry is a no-op, conflicting retry fails closed."""
+        """Append one trace under the canonical cross-process writer lock.
+
+        The hash-chain predecessor is shared durable state.  Reading the current
+        tail and appending the successor therefore form one critical section;
+        otherwise two cooperating writers can both observe the same predecessor
+        and permanently fork the JSONL chain.
+        """
 
         prepared = _redact(trace)
         self._validate_input(prepared)
-        records = self._load()
-        # Integrity verification must precede idempotency handling. Otherwise an
-        # identical retry could silently succeed against a tampered hash chain.
-        if records and not self.verify():
-            raise ValueError("Existing decision trace chain is corrupt")
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with ResourceLock(lock_path, blocking=True):
+            records = self._load()
+            # Integrity verification must precede idempotency handling. Otherwise
+            # an identical retry could silently succeed against a tampered chain.
+            if records and not self.verify():
+                raise ValueError("Existing decision trace chain is corrupt")
 
-        trace_id = prepared["trace_id"]
-        for existing in records:
-            if existing.get("trace_id") == trace_id:
-                if _semantic_payload(existing) != prepared:
-                    raise ValueError("trace_id already exists with different decision content")
-                return False
+            trace_id = prepared["trace_id"]
+            for existing in records:
+                if existing.get("trace_id") == trace_id:
+                    if _semantic_payload(existing) != prepared:
+                        raise ValueError(
+                            "trace_id already exists with different decision content"
+                        )
+                    return False
 
-        previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
-        record = dict(prepared)
-        record["recorded_at"] = datetime.now(timezone.utc).isoformat()
-        record["previous_hash"] = previous_hash
-        record["record_hash"] = _hash_record(record)
+            previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
+            record = dict(prepared)
+            record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+            record["previous_hash"] = previous_hash
+            record["record_hash"] = _hash_record(record)
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(canonical_json(record) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return True
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(canonical_json(record) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return True
 
     def records(self) -> list[dict[str, Any]]:
         records = self._load()

@@ -366,6 +366,7 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         b = revision(
             information_id="story-b",
             source_sequence=2,
+            syndication_sha256="sha256:" + ("8" * 64),
             published_at="2024-03-12T10:01:00Z",
             available_at="2024-03-12T10:01:05Z",
             ingested_at="2024-03-12T10:01:07Z",

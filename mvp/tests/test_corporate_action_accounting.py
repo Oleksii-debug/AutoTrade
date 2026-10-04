@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    CorporateActionEvidenceConflict,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
@@ -202,6 +203,49 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                     accepted=accepted,
                 )
             self.assertEqual(calls, [])
+
+    def test_financial_entry_rejects_mutated_authority_before_field_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def replace(self, *args, **kwargs):
+                calls.append("replace")
+                raise AssertionError("hostile observed_at callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            accepted = resolve_action(sealed_action())
+            object.__setattr__(
+                accepted,
+                "observed_at",
+                HostileText(accepted.observed_at),
+            )
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            transaction_count = len(economics.transactions)
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "observed_at is non-canonical",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(len(economics.transactions), transaction_count)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
 
     def test_sealed_dividend_source_and_economics_commit_together(self):
         with TemporaryDirectory() as directory:

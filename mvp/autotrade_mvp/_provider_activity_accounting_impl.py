@@ -2802,20 +2802,36 @@ def commit_economic_batch_with_reservation_consumption(
         economic_book.environment,
         idem,
     )
-    reservation_plan = reservation_book.prepare_consume_mutation(
-        event_key=_scoped_identity(
-            "atomic-fill-reservation-event",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
-            cid,
-        ),
-        idempotency_key=reservation_component_key,
-        reservation_id=rid,
-        usage=usage,
-        committed_at=when,
-        expected_snapshot_digest=reservation_expected_snapshot_digest,
+    reservation_event_key = _scoped_identity(
+        "atomic-fill-reservation-event",
+        economic_book.provider_id,
+        economic_book.account_id,
+        economic_book.environment,
+        cid,
     )
+    if _order_fill_plan is not None and _order_fill_plan.snapshot.state == "FILLED":
+        reservation_plan = reservation_book.prepare_consume_and_mark_filled_mutation(
+            event_key=reservation_event_key,
+            idempotency_key=reservation_component_key,
+            reservation_id=rid,
+            usage=usage,
+            order_fill_event_id=_order_fill_plan.event_id,
+            order_fill_snapshot_digest=payload_digest(
+                _order_fill_plan.snapshot_payload
+            ),
+            order_fill_mutation_hash=_order_fill_plan.mutation_hash,
+            committed_at=when,
+            expected_snapshot_digest=reservation_expected_snapshot_digest,
+        )
+    else:
+        reservation_plan = reservation_book.prepare_consume_mutation(
+            event_key=reservation_event_key,
+            idempotency_key=reservation_component_key,
+            reservation_id=rid,
+            usage=usage,
+            committed_at=when,
+            expected_snapshot_digest=reservation_expected_snapshot_digest,
+        )
     economic_plan = economic_book.prepare_batch_mutation(
         transactions,
         committed_at=when,

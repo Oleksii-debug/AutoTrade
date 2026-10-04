@@ -611,15 +611,27 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         raise ValueError("autonomous source/build identity differs")
     completed = []
     active = None
+    observed_fill = False
     for event in loops[1:]:
         payload = event["payload"]
         if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
             raise ValueError("autonomous episode protocol identity differs")
         if event["event_type"] == "AutonomousEpisodeStarted" and active is None and payload["episode"] == len(completed) + 1:
             active = payload
+            observed_fill = False
+        elif (
+            event["event_type"] == "AutonomousEpisodeFillObserved"
+            and active is not None
+            and not observed_fill
+            and payload["episode"] == active["episode"]
+        ):
+            # Operator inspection is read-only. Recovery is performed only by
+            # the execution path under the canonical simulation lock.
+            observed_fill = True
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
             active = None
+            observed_fill = False
         else:
             raise ValueError("autonomous episode chronology conflicts")
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -634,6 +646,7 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         "cash": canonical_decimal_text(cash), "position": canonical_decimal_text(position),
         "initial_cash": protocol["initial_cash"], "symbol": INSTRUMENT, "journal_sequence": cut,
         "replay_verified": active is None, "evidence_count": len(completed),
+        "retained_fill_observed": bool(active is not None and observed_fill),
         "active_reservations": [{"state": item.state, "remaining": {k: canonical_decimal_text(v) for k,v in item.remaining.items()}}
                                 for item in reservations.active()],
         "history": [{k: event[k] for k in ("event_id", "event_type", "aggregate_type", "journal_sequence")}

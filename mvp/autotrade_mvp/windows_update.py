@@ -15,14 +15,20 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+from uuid import UUID
 
 from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
+    AcceptedQualificationAttestation,
+    EvidenceArtifactRef,
+    QualificationAttestation,
     QualificationTrustError,
     QualificationTrustPolicy,
+    SignedQualificationAttestation,
     parse_signed_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 from .release_candidate import (
     ReleaseArtifactEvidence,
@@ -91,6 +97,17 @@ class WindowsUpdateTrustContext:
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
+_UPDATE_EVIDENCE_DOMAIN = "RECOVERY"
+_UPDATE_EVIDENCE_GATE = "UPDATE"
+_UPDATE_EVIDENCE_PACKAGE = "WP-50"
+_UPDATE_EVIDENCE_PROTOCOL = "windows-update-evidence-v1"
+_UPDATE_EVIDENCE_PROTOCOL_VERSION = "1.0.0"
+WINDOWS_UPDATE_BACKUP_MEDIA_TYPE = "application/vnd.autotrade.pre-update-backup"
+WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND = "PRE_UPDATE_BACKUP"
+WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE = "application/vnd.autotrade.schema-migration"
+WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND = "SCHEMA_MIGRATION"
+WINDOWS_UPDATE_REVERSE_MIGRATION_EVIDENCE_KIND = "SCHEMA_MIGRATION_REVERSE"
+
 _INSTALL_STEPS = (
     "VERIFY_CANDIDATE_SIGNATURE_AND_EXACT_HASH",
     "QUIESCE_NEW_ADMISSIONS",
@@ -153,6 +170,17 @@ def _positive_version(value: object, *, name: str) -> int:
     return value
 
 
+def _artifact_id(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        canonical = str(UUID(text))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise WindowsUpdateError(f"{name} must be a canonical UUID") from error
+    if canonical != text:
+        raise WindowsUpdateError(f"{name} must be a canonical lowercase UUID")
+    return canonical
+
+
 def _validated_trust_context(
     value: WindowsUpdateTrustContext,
 ) -> WindowsUpdateTrustContext:
@@ -176,6 +204,8 @@ class BackupEvidence:
     journal_schema_version: int
     verification_status: str
     reconciliation_required_after_restore: bool
+    evidence_artifact_id: str | None = None
+    qualification_receipt: SignedQualificationAttestation | None = None
 
     def __post_init__(self) -> None:
         status = _text(
@@ -206,7 +236,19 @@ class BackupEvidence:
                 name="journal_schema_version",
             ),
         )
+        artifact_id = self.evidence_artifact_id
+        if artifact_id is not None:
+            artifact_id = _artifact_id(
+                artifact_id,
+                name="evidence_artifact_id",
+            )
+        receipt = self.qualification_receipt
+        if receipt is not None and type(receipt) is not SignedQualificationAttestation:
+            raise TypeError(
+                "qualification_receipt must be exact SignedQualificationAttestation or None"
+            )
         object.__setattr__(self, "verification_status", status)
+        object.__setattr__(self, "evidence_artifact_id", artifact_id)
 
 
 @dataclass(frozen=True)
@@ -218,6 +260,9 @@ class MigrationEvidence:
     verification_status: str
     rollback_mode: str
     reverse_evidence_sha256: str | None = None
+    evidence_artifact_id: str | None = None
+    reverse_evidence_artifact_id: str | None = None
+    qualification_receipt: SignedQualificationAttestation | None = None
 
     def __post_init__(self) -> None:
         from_version = _positive_version(
@@ -256,7 +301,14 @@ class MigrationEvidence:
             "evidence_sha256",
             _sha256(self.evidence_sha256, name="evidence_sha256"),
         )
+        artifact_id = self.evidence_artifact_id
+        if artifact_id is not None:
+            artifact_id = _artifact_id(
+                artifact_id,
+                name="evidence_artifact_id",
+            )
         reverse_digest = self.reverse_evidence_sha256
+        reverse_artifact_id = self.reverse_evidence_artifact_id
         if rollback_mode == "REVERSIBLE_MIGRATION":
             if reverse_digest is None:
                 raise WindowsUpdateError(
@@ -270,13 +322,33 @@ class MigrationEvidence:
                 raise WindowsUpdateError(
                     "forward and reverse migration evidence must be distinct"
                 )
-        elif reverse_digest is not None:
+            if reverse_artifact_id is not None:
+                reverse_artifact_id = _artifact_id(
+                    reverse_artifact_id,
+                    name="reverse_evidence_artifact_id",
+                )
+                if artifact_id is not None and reverse_artifact_id == artifact_id:
+                    raise WindowsUpdateError(
+                        "forward and reverse migration artifact identities must be distinct"
+                    )
+        elif reverse_digest is not None or reverse_artifact_id is not None:
             raise WindowsUpdateError(
                 "backup-restore rollback cannot claim reverse migration evidence"
+            )
+        receipt = self.qualification_receipt
+        if receipt is not None and type(receipt) is not SignedQualificationAttestation:
+            raise TypeError(
+                "qualification_receipt must be exact SignedQualificationAttestation or None"
             )
         object.__setattr__(self, "verification_status", status)
         object.__setattr__(self, "rollback_mode", rollback_mode)
         object.__setattr__(self, "reverse_evidence_sha256", reverse_digest)
+        object.__setattr__(self, "evidence_artifact_id", artifact_id)
+        object.__setattr__(
+            self,
+            "reverse_evidence_artifact_id",
+            reverse_artifact_id,
+        )
 
 
 def _validated_backup_evidence(value: BackupEvidence) -> BackupEvidence:
@@ -292,6 +364,8 @@ def _validated_backup_evidence(value: BackupEvidence) -> BackupEvidence:
         reconciliation_required_after_restore=(
             value.reconciliation_required_after_restore
         ),
+        evidence_artifact_id=value.evidence_artifact_id,
+        qualification_receipt=value.qualification_receipt,
     )
 
 
@@ -308,7 +382,255 @@ def _validated_migration_evidence(value: MigrationEvidence) -> MigrationEvidence
         verification_status=value.verification_status,
         rollback_mode=value.rollback_mode,
         reverse_evidence_sha256=value.reverse_evidence_sha256,
+        evidence_artifact_id=value.evidence_artifact_id,
+        reverse_evidence_artifact_id=value.reverse_evidence_artifact_id,
+        qualification_receipt=value.qualification_receipt,
     )
+
+
+def backup_evidence_subject_requirement(evidence: BackupEvidence) -> str:
+    """Bind every update-relevant pre-update backup assertion into signed scope."""
+
+    if type(evidence) is not BackupEvidence:
+        raise TypeError("evidence must be exact BackupEvidence")
+    payload = {
+        "evidence_artifact_id": evidence.evidence_artifact_id,
+        "journal_schema_version": evidence.journal_schema_version,
+        "manifest_sha256": evidence.manifest_sha256,
+        "reconciliation_required_after_restore": (
+            evidence.reconciliation_required_after_restore
+        ),
+        "source_sha": evidence.source_sha,
+        "verification_status": evidence.verification_status,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "windows-update-backup/sha256:" + sha256(canonical).hexdigest()
+
+
+def migration_evidence_subject_requirement(evidence: MigrationEvidence) -> str:
+    """Bind exact forward/reverse migration identity into signed update scope."""
+
+    if type(evidence) is not MigrationEvidence:
+        raise TypeError("evidence must be exact MigrationEvidence")
+    payload = {
+        "evidence_artifact_id": evidence.evidence_artifact_id,
+        "evidence_sha256": evidence.evidence_sha256,
+        "from_schema_version": evidence.from_schema_version,
+        "reverse_evidence_artifact_id": evidence.reverse_evidence_artifact_id,
+        "reverse_evidence_sha256": evidence.reverse_evidence_sha256,
+        "rollback_mode": evidence.rollback_mode,
+        "source_sha": evidence.source_sha,
+        "to_schema_version": evidence.to_schema_version,
+        "verification_status": evidence.verification_status,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "windows-update-migration/sha256:" + sha256(canonical).hexdigest()
+
+
+def _backup_evidence_refs(evidence: BackupEvidence) -> tuple[EvidenceArtifactRef, ...]:
+    artifact_id = evidence.evidence_artifact_id
+    if artifact_id is None:
+        raise WindowsUpdateError(
+            "pre-update backup has no immutable evidence artifact identity"
+        )
+    return (
+        EvidenceArtifactRef(
+            artifact_id=artifact_id,
+            sha256=evidence.manifest_sha256,
+            media_type=WINDOWS_UPDATE_BACKUP_MEDIA_TYPE,
+            evidence_kind=WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND,
+            source_sha=evidence.source_sha,
+        ),
+    )
+
+
+def _migration_evidence_refs(
+    evidence: MigrationEvidence,
+) -> tuple[EvidenceArtifactRef, ...]:
+    artifact_id = evidence.evidence_artifact_id
+    if artifact_id is None:
+        raise WindowsUpdateError(
+            "migration has no immutable forward evidence artifact identity"
+        )
+    refs = [
+        EvidenceArtifactRef(
+            artifact_id=artifact_id,
+            sha256=evidence.evidence_sha256,
+            media_type=WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+            evidence_kind=WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND,
+            source_sha=evidence.source_sha,
+        )
+    ]
+    if evidence.rollback_mode == "REVERSIBLE_MIGRATION":
+        if (
+            evidence.reverse_evidence_sha256 is None
+            or evidence.reverse_evidence_artifact_id is None
+        ):
+            raise WindowsUpdateError(
+                "reversible migration has no immutable reverse evidence identity"
+            )
+        refs.append(
+            EvidenceArtifactRef(
+                artifact_id=evidence.reverse_evidence_artifact_id,
+                sha256=evidence.reverse_evidence_sha256,
+                media_type=WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                evidence_kind=WINDOWS_UPDATE_REVERSE_MIGRATION_EVIDENCE_KIND,
+                source_sha=evidence.source_sha,
+            )
+        )
+    return tuple(refs)
+
+
+def _ref_identities(
+    refs: tuple[EvidenceArtifactRef, ...],
+) -> frozenset[tuple[str, str, str, str, str]]:
+    return frozenset(
+        (
+            ref.artifact_id,
+            ref.sha256,
+            ref.media_type,
+            ref.evidence_kind,
+            ref.source_sha,
+        )
+        for ref in refs
+    )
+
+
+def _signed_receipt_payload(
+    receipt: SignedQualificationAttestation,
+) -> dict[str, object]:
+    if type(receipt) is not SignedQualificationAttestation:
+        raise TypeError("receipt must be exact SignedQualificationAttestation")
+    if type(receipt.attestation) is not QualificationAttestation:
+        raise TypeError("receipt.attestation must be exact QualificationAttestation")
+    return {
+        "attestation": QualificationAttestation.canonical_payload(
+            receipt.attestation
+        ),
+        "signature_b64": receipt.signature_b64,
+    }
+
+
+def _detached_receipt(
+    receipt: SignedQualificationAttestation,
+    *,
+    name: str,
+) -> SignedQualificationAttestation:
+    try:
+        return parse_signed_qualification_attestation(
+            _signed_receipt_payload(receipt)
+        )
+    except (QualificationTrustError, TypeError, ValueError) as error:
+        raise WindowsUpdateError(f"{name} qualification receipt is invalid") from error
+
+
+def _verify_backup_qualification(
+    evidence: BackupEvidence,
+    *,
+    trust: WindowsUpdateTrustContext,
+    expected_source_sha: str,
+) -> tuple[AcceptedQualificationAttestation, SignedQualificationAttestation]:
+    receipt = evidence.qualification_receipt
+    if receipt is None:
+        raise WindowsUpdateError("pre-update backup qualification receipt is missing")
+    detached = _detached_receipt(receipt, name="pre-update backup")
+    requirement = backup_evidence_subject_requirement(evidence)
+    expected_refs = _backup_evidence_refs(evidence)
+    try:
+        accepted = verify_canonical_qualification_attestation(
+            detached,
+            evidence_store=trust.evidence_store,
+            evidence_root=trust.evidence_root,
+            expected_source_sha=expected_source_sha,
+            expected_domain=_UPDATE_EVIDENCE_DOMAIN,
+            expected_gate=_UPDATE_EVIDENCE_GATE,
+            expected_package_id=_UPDATE_EVIDENCE_PACKAGE,
+            expected_protocol_id=_UPDATE_EVIDENCE_PROTOCOL,
+            expected_protocol_version=_UPDATE_EVIDENCE_PROTOCOL_VERSION,
+            expected_requirement_id=requirement,
+        )
+    except (QualificationTrustError, OSError, TypeError, ValueError) as error:
+        raise WindowsUpdateError(
+            "pre-update backup qualification is not canonically verified"
+        ) from error
+    if accepted.result != "PASS":
+        raise WindowsUpdateError(
+            "pre-update backup qualification must be canonical PASS"
+        )
+    if _ref_identities(detached.attestation.evidence_refs) != _ref_identities(expected_refs):
+        raise WindowsUpdateError(
+            "pre-update backup qualification does not cover exact evidence"
+        )
+    return accepted, detached
+
+
+def _verify_migration_qualification(
+    evidence: MigrationEvidence,
+    *,
+    trust: WindowsUpdateTrustContext,
+    expected_source_sha: str,
+) -> tuple[AcceptedQualificationAttestation, SignedQualificationAttestation]:
+    receipt = evidence.qualification_receipt
+    if receipt is None:
+        raise WindowsUpdateError("migration qualification receipt is missing")
+    detached = _detached_receipt(receipt, name="migration")
+    requirement = migration_evidence_subject_requirement(evidence)
+    expected_refs = _migration_evidence_refs(evidence)
+    try:
+        accepted = verify_canonical_qualification_attestation(
+            detached,
+            evidence_store=trust.evidence_store,
+            evidence_root=trust.evidence_root,
+            expected_source_sha=expected_source_sha,
+            expected_domain=_UPDATE_EVIDENCE_DOMAIN,
+            expected_gate=_UPDATE_EVIDENCE_GATE,
+            expected_package_id=_UPDATE_EVIDENCE_PACKAGE,
+            expected_protocol_id=_UPDATE_EVIDENCE_PROTOCOL,
+            expected_protocol_version=_UPDATE_EVIDENCE_PROTOCOL_VERSION,
+            expected_requirement_id=requirement,
+        )
+    except (QualificationTrustError, OSError, TypeError, ValueError) as error:
+        raise WindowsUpdateError(
+            "migration qualification is not canonically verified"
+        ) from error
+    if accepted.result != "PASS":
+        raise WindowsUpdateError(
+            "migration qualification must be canonical PASS"
+        )
+    if _ref_identities(detached.attestation.evidence_refs) != _ref_identities(expected_refs):
+        raise WindowsUpdateError(
+            "migration qualification does not cover exact evidence"
+        )
+    return accepted, detached
+
+
+def _qualification_plan_payload(
+    *,
+    receipt: SignedQualificationAttestation,
+    accepted: AcceptedQualificationAttestation,
+    subject_requirement: str,
+) -> dict[str, object]:
+    return {
+        "attestation_id": accepted.attestation_id,
+        "attestation_digest": accepted.attestation_digest,
+        "policy_id": accepted.policy_id,
+        "policy_version": accepted.policy_version,
+        "trust_root_id": accepted.trust_root_id,
+        "subject_requirement": subject_requirement,
+        "receipt": _signed_receipt_payload(receipt),
+    }
 
 
 @dataclass(frozen=True)
@@ -607,7 +929,20 @@ def build_windows_update_plan(
     if backup_evidence.source_sha != current["source_sha"]:
         reasons.append("backup_source_does_not_match_current_release")
 
+    backup_accepted: AcceptedQualificationAttestation | None = None
+    backup_receipt: SignedQualificationAttestation | None = None
+    try:
+        backup_accepted, backup_receipt = _verify_backup_qualification(
+            backup_evidence,
+            trust=trust,
+            expected_source_sha=current["source_sha"],
+        )
+    except WindowsUpdateError:
+        reasons.append("pre_update_backup_authority_unverified")
+
     schema_changes = current_schema != candidate_schema
+    migration_accepted: AcceptedQualificationAttestation | None = None
+    migration_receipt: SignedQualificationAttestation | None = None
     if schema_changes:
         if migration_evidence is None:
             reasons.append("schema_change_requires_verified_migration_evidence")
@@ -620,6 +955,14 @@ def build_windows_update_plan(
                 reasons.append("migration_to_schema_mismatch")
             if migration_evidence.source_sha != candidate["source_sha"]:
                 reasons.append("migration_source_sha_mismatch")
+            try:
+                migration_accepted, migration_receipt = _verify_migration_qualification(
+                    migration_evidence,
+                    trust=trust,
+                    expected_source_sha=candidate["source_sha"],
+                )
+            except WindowsUpdateError:
+                reasons.append("migration_evidence_authority_unverified")
     elif migration_evidence is not None:
         reasons.append("migration_evidence_supplied_without_schema_change")
 
@@ -631,6 +974,13 @@ def build_windows_update_plan(
             plan_json=None,
             plan_sha256=None,
         )
+
+    if backup_accepted is None or backup_receipt is None:
+        raise WindowsUpdateError("verified backup authority unexpectedly missing")
+    if schema_changes and (
+        migration_accepted is None or migration_receipt is None
+    ):
+        raise WindowsUpdateError("verified migration authority unexpectedly missing")
 
     rollback_mode = (
         migration_evidence.rollback_mode
@@ -653,6 +1003,14 @@ def build_windows_update_plan(
             "reconciliation_required_after_restore": (
                 backup_evidence.reconciliation_required_after_restore
             ),
+            "evidence_artifact_id": backup_evidence.evidence_artifact_id,
+            "qualification": _qualification_plan_payload(
+                receipt=backup_receipt,
+                accepted=backup_accepted,
+                subject_requirement=backup_evidence_subject_requirement(
+                    backup_evidence
+                ),
+            ),
         },
         "migration_evidence": (
             None
@@ -665,6 +1023,17 @@ def build_windows_update_plan(
                 "verification_status": migration_evidence.verification_status,
                 "rollback_mode": migration_evidence.rollback_mode,
                 "reverse_evidence_sha256": migration_evidence.reverse_evidence_sha256,
+                "evidence_artifact_id": migration_evidence.evidence_artifact_id,
+                "reverse_evidence_artifact_id": (
+                    migration_evidence.reverse_evidence_artifact_id
+                ),
+                "qualification": _qualification_plan_payload(
+                    receipt=migration_receipt,
+                    accepted=migration_accepted,
+                    subject_requirement=migration_evidence_subject_requirement(
+                        migration_evidence
+                    ),
+                ),
             }
         ),
         "install_steps": list(_INSTALL_STEPS),
@@ -955,10 +1324,18 @@ def _plan_document(
         "journal_schema_version",
         "verification_status",
         "reconciliation_required_after_restore",
+        "evidence_artifact_id",
+        "qualification",
     }
     if type(backup_raw) is not dict or set(backup_raw) != backup_fields:
         raise WindowsUpdateError("pre-update backup evidence is not canonical")
+    backup_qualification = backup_raw.get("qualification")
+    if type(backup_qualification) is not dict:
+        raise WindowsUpdateError("pre-update backup qualification is missing")
     try:
+        backup_receipt = parse_signed_qualification_attestation(
+            backup_qualification["receipt"]
+        )
         backup = BackupEvidence(
             manifest_sha256=backup_raw["manifest_sha256"],
             source_sha=backup_raw["source_sha"],
@@ -967,8 +1344,16 @@ def _plan_document(
             reconciliation_required_after_restore=backup_raw[
                 "reconciliation_required_after_restore"
             ],
+            evidence_artifact_id=backup_raw["evidence_artifact_id"],
+            qualification_receipt=backup_receipt,
         )
-    except (TypeError, ValueError, WindowsUpdateError) as error:
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        WindowsUpdateError,
+        QualificationTrustError,
+    ) as error:
         raise WindowsUpdateError("pre-update backup evidence is invalid") from error
     if backup.verification_status != "PASS":
         raise WindowsUpdateError("pre-update backup is not verified")
@@ -978,6 +1363,20 @@ def _plan_document(
         raise WindowsUpdateError("backup schema does not match current runtime")
     if backup.source_sha != current["source_sha"]:
         raise WindowsUpdateError("backup source does not match current release")
+    backup_accepted, detached_backup_receipt = _verify_backup_qualification(
+        backup,
+        trust=trust,
+        expected_source_sha=current["source_sha"],
+    )
+    expected_backup_qualification = _qualification_plan_payload(
+        receipt=detached_backup_receipt,
+        accepted=backup_accepted,
+        subject_requirement=backup_evidence_subject_requirement(backup),
+    )
+    if backup_qualification != expected_backup_qualification:
+        raise WindowsUpdateError(
+            "pre-update backup qualification identity is not canonical"
+        )
 
     migration_raw = document.get("migration_evidence")
     schema_changes = current_schema != candidate_schema
@@ -991,12 +1390,21 @@ def _plan_document(
             "verification_status",
             "rollback_mode",
             "reverse_evidence_sha256",
+            "evidence_artifact_id",
+            "reverse_evidence_artifact_id",
+            "qualification",
         }
         if type(migration_raw) is not dict or set(migration_raw) != migration_fields:
             raise WindowsUpdateError(
                 "schema change requires canonical migration evidence"
             )
+        migration_qualification = migration_raw.get("qualification")
+        if type(migration_qualification) is not dict:
+            raise WindowsUpdateError("migration qualification is missing")
         try:
+            migration_receipt = parse_signed_qualification_attestation(
+                migration_qualification["receipt"]
+            )
             migration = MigrationEvidence(
                 from_schema_version=migration_raw["from_schema_version"],
                 to_schema_version=migration_raw["to_schema_version"],
@@ -1005,8 +1413,19 @@ def _plan_document(
                 verification_status=migration_raw["verification_status"],
                 rollback_mode=migration_raw["rollback_mode"],
                 reverse_evidence_sha256=migration_raw["reverse_evidence_sha256"],
+                evidence_artifact_id=migration_raw["evidence_artifact_id"],
+                reverse_evidence_artifact_id=migration_raw[
+                    "reverse_evidence_artifact_id"
+                ],
+                qualification_receipt=migration_receipt,
             )
-        except (TypeError, ValueError, WindowsUpdateError) as error:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            WindowsUpdateError,
+            QualificationTrustError,
+        ) as error:
             raise WindowsUpdateError("migration evidence is invalid") from error
         if migration.verification_status != "PASS":
             raise WindowsUpdateError("migration evidence is not verified")
@@ -1016,6 +1435,20 @@ def _plan_document(
             raise WindowsUpdateError("migration target schema mismatch")
         if migration.source_sha != candidate["source_sha"]:
             raise WindowsUpdateError("migration source release mismatch")
+        migration_accepted, detached_migration_receipt = _verify_migration_qualification(
+            migration,
+            trust=trust,
+            expected_source_sha=candidate["source_sha"],
+        )
+        expected_migration_qualification = _qualification_plan_payload(
+            receipt=detached_migration_receipt,
+            accepted=migration_accepted,
+            subject_requirement=migration_evidence_subject_requirement(migration),
+        )
+        if migration_qualification != expected_migration_qualification:
+            raise WindowsUpdateError(
+                "migration qualification identity is not canonical"
+            )
     elif migration_raw is not None:
         raise WindowsUpdateError(
             "migration evidence cannot exist without schema change"

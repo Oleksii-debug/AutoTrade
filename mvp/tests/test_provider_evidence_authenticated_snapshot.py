@@ -129,7 +129,7 @@ if leaked:
                 "-I",
                 "-S",
                 "-c",
-                f"sys.path.insert(0, {str(root)!r})\n" + script,
+                f"import sys; sys.path.insert(0, {str(root)!r})\n" + script,
             ],
             cwd=root,
             capture_output=True,
@@ -165,24 +165,26 @@ if leaked:
 
     def test_authenticated_bytes_are_independently_rehashed(self):
         with TemporaryDirectory() as directory:
-            book, _artifacts, _request, ref = prepared_book(directory)
-            with patch.object(
-                ArtifactStore,
-                "_read_verified_object_bytes",
-                return_value=b"forged provider bytes",
+            book, artifacts, request, ref = prepared_book(directory)
+            manifest, _artifact_bytes = artifacts.read_authenticated_snapshot(
+                ref["artifact_id"]
+            )
+
+            def forged_snapshot(_book, artifact_id):
+                self.assertEqual(artifact_id, ref["artifact_id"])
+                return manifest, b"forged provider bytes"
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "digest differs from immutable artifact",
             ):
-                with self.assertRaisesRegex(
-                    OrderProjectionConflict,
-                    "digest differs from immutable artifact",
-                ):
-                    book.acknowledge(
-                        event_key="ack-rehash",
-                        client_order_id="c1",
-                        provider_order_id="provider-order-1",
-                        status="ACCEPTED",
-                        committed_at=T1,
-                        evidence_refs=[ref],
-                    )
+                book._verify_provider_evidence(
+                    operation="ACKNOWLEDGE",
+                    request=request,
+                    evidence_refs=[ref],
+                    committed_at=T1,
+                    _read_authenticated_snapshot=forged_snapshot,
+                )
 
     def test_artifact_store_namespace_retarget_fails_closed(self):
         with TemporaryDirectory() as directory:

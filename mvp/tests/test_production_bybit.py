@@ -204,6 +204,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         ]
         self.assertIn("authority", bound_arguments)
         self.assertNotIn("authority_check", bound_arguments)
+        self.assertNotIn("final_barrier_clock", bound_arguments)
 
     def test_builder_uses_exact_host_security_boundary_and_financial_scope(self) -> None:
         with TemporaryDirectory() as root:

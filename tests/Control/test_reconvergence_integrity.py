@@ -452,6 +452,65 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 protected_sentinels=frozenset(),
             )
 
+    def test_candidate_tree_rejects_case_insensitive_add_collision(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["README.md", "src/runtime.py"],
+                changes=[Change(status="A", path="readme.MD")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_candidate_tree_rejects_case_insensitive_rename_collision(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["src/alpha.py", "src/BETA.py"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/alpha.py",
+                        path="src/beta.py",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_candidate_tree_allows_collision_only_when_conflicting_path_is_removed(self):
+        result = assess_reconvergence(
+            base_paths=["src/alpha.py", "src/BETA.py", "README.md"],
+            changes=[
+                Change(status="D", path="src/BETA.py"),
+                Change(
+                    status="R100",
+                    previous_path="src/alpha.py",
+                    path="src/beta.py",
+                ),
+            ],
+            max_deletions=50,
+            max_deleted_fraction=0.9,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 1)
+        self.assertEqual(result.destructive_change_count, 2)
+
+    def test_base_tree_case_collision_fails_closed_even_without_changes(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["src/Module.py", "src/module.py"],
+                changes=[],
+                protected_sentinels=frozenset(),
+            )
+
     def test_nul_name_status_parser_is_unambiguous_and_fail_closed(self):
         self.assertEqual(
             parse_name_status_z(b"M\x00README.md\x00A\x00new file.txt\x00"),

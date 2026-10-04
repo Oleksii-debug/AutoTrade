@@ -52,10 +52,25 @@ class ProviderOriginAcquisitionBindingTests(unittest.TestCase):
                 account_acquisition_authority=authority,
                 account_acquisition=acquisition,
             )
-            event = JournalStore.load_events(
+            prepared = JournalStore.load_events(
                 journal, "qualified_authenticated_provider_read", attempt_id
             )[0]
-            snapshot = event["payload"]["account_acquisition"]
+            self.assertEqual(
+                set(prepared["payload"]),
+                {
+                    "origin_kind",
+                    "qualified_query",
+                    "transport_identity",
+                    "network_policy_identity",
+                },
+            )
+            binding_events = JournalStore.load_events(
+                journal,
+                "provider_origin_account_acquisition_binding",
+                attempt_id,
+            )
+            self.assertEqual(len(binding_events), 1)
+            snapshot = binding_events[0]["payload"]["account_acquisition"]
             self.assertEqual(snapshot["acquisition_id"], acquisition.acquisition_id)
             self.assertEqual(snapshot["acquisition_generation"], acquisition.acquisition_generation)
             self.assertEqual(snapshot["acquisition_journal_sequence_cut"], acquisition.acquisition_journal_sequence_cut)
@@ -255,8 +270,20 @@ class ProviderOriginAcquisitionBindingTests(unittest.TestCase):
 
     def test_generic_origin_remains_explicitly_unbound(self):
         with TemporaryDirectory() as directory:
-            _journal, origin, _authority, _acquisition, _q1, binding = self._fixture(directory)
+            journal, origin, _authority, _acquisition, _q1, binding = self._fixture(directory)
             attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+            prepared = JournalStore.load_events(
+                journal, "qualified_authenticated_provider_read", attempt_id
+            )[0]
+            self.assertNotIn("account_acquisition", prepared["payload"])
+            self.assertEqual(
+                JournalStore.load_events(
+                    journal,
+                    "provider_origin_account_acquisition_binding",
+                    attempt_id,
+                ),
+                [],
+            )
             response = origin._record_provider_origin(
                 attempt_id, binding, http_status=200,
                 response_bytes=b'{"retCode":0,"result":{"list":[]}}',

@@ -151,7 +151,7 @@ def _parse_utc_text(value: object, *, name: str) -> datetime:
 def _risk_intent_payload(intent: object) -> dict[str, object]:
     if type(intent) is not RiskIntent:
         raise PendingIntentError("risk_intent must be exact RiskIntent")
-    # Re-admit every field at the trust boundary.  A frozen dataclass can still
+    # Re-admit every field at the trust boundary. A frozen dataclass can still
     # be mutated with object.__setattr__, so type identity alone is insufficient.
     try:
         admitted = RiskIntent.create(
@@ -312,8 +312,6 @@ class PendingFinancialIntent:
 def _registered_payload(value: PendingFinancialIntent) -> dict[str, object]:
     if type(value) is not PendingFinancialIntent:
         raise PendingIntentError("exact PendingFinancialIntent is required")
-    # __post_init__ already admitted this instance; re-admit nested economics at
-    # persistence boundaries so post-construction mutation still fails closed.
     risk_payload = _risk_intent_payload(value.risk_intent)
     return {
         "pending_intent_id": value.pending_intent_id,
@@ -383,6 +381,18 @@ def _require_event(
     if type(sequence) is not int or sequence < 1:
         raise PendingIntentError("pending intent journal sequence is invalid")
     return payload
+
+
+def _confirmation_claim_identity(value: object) -> tuple[str, str, str, str, str]:
+    if type(value) is not dict or set(value) != _CLAIM_KEYS:
+        raise PendingIntentError("pending confirmation claim schema is invalid")
+    return (
+        _text(value.get("pending_intent_id"), name="pending_intent_id"),
+        _text(value.get("registered_event_id"), name="registered_event_id"),
+        _text(value.get("intent_hash"), name="intent_hash"),
+        _text(value.get("confirmation_id"), name="confirmation_id"),
+        _text(value.get("actor_id"), name="actor_id"),
+    )
 
 
 class DurablePendingIntentRegistry:
@@ -620,18 +630,59 @@ class DurablePendingIntentRegistry:
         pending_id = _text(pending_intent_id, name="pending_intent_id")
         confirmation = _text(confirmation_id, name="confirmation_id")
         actor = _text(actor_id, name="actor_id")
-        value = self.resolve(
-            pending_id,
-            account_id=account_id,
-            environment=environment,
-            policy_id=policy_id,
-            authority_policy_version=authority_policy_version,
-            at=at,
+        point = _utc(at, name="at")
+        if type(authority_policy_version) is not int or authority_policy_version < 1:
+            raise PendingIntentError("authority_policy_version must be positive")
+
+        value, existing_claim = self._read(pending_id)
+        expected_scope = (
+            _text(account_id, name="account_id"),
+            _environment(environment),
+            _text(policy_id, name="policy_id"),
+            authority_policy_version,
         )
-        existing_value, existing_claim = self._read(pending_id)
-        if existing_value != value:
-            raise PendingIntentError("pending intent changed during confirmation claim")
-        claimed_at = _utc_text(at, name="at")
+        actual_scope = (
+            value.account_id,
+            value.environment,
+            value.policy_id,
+            value.authority_policy_version,
+        )
+        if actual_scope != expected_scope:
+            raise PendingIntentError(
+                "pending intent scope differs from authenticated confirmation scope"
+            )
+
+        expected_claim_identity = (
+            pending_id,
+            f"pending-intent:{pending_id}:registered",
+            value.intent_hash,
+            confirmation,
+            actor,
+        )
+        if existing_claim is not None:
+            if _confirmation_claim_identity(existing_claim) != expected_claim_identity:
+                raise PendingIntentError(
+                    "pending intent was already claimed by another confirmation"
+                )
+            durable_claimed_at = _parse_utc_text(
+                existing_claim.get("claimed_at"), name="claimed_at"
+            )
+            if point < durable_claimed_at:
+                raise PendingIntentError(
+                    "confirmation retry cannot precede the durable original claim"
+                )
+            # The durable claim already fixed the exact pending intent,
+            # confirmation and actor. A retry may happen after pending expiry
+            # while recovering a crash before AuthorityConfirmationAdded. Keep
+            # the original claimed_at rather than minting a later authority cut.
+            return value
+
+        registered = _parse_utc_text(value.registered_at, name="registered_at")
+        expires = _parse_utc_text(value.expires_at, name="expires_at")
+        if not registered <= point < expires:
+            raise PendingIntentError("pending intent is not current at confirmation time")
+
+        claimed_at = point.isoformat().replace("+00:00", "Z")
         claim = {
             "pending_intent_id": pending_id,
             "registered_event_id": f"pending-intent:{pending_id}:registered",
@@ -640,12 +691,6 @@ class DurablePendingIntentRegistry:
             "actor_id": actor,
             "claimed_at": claimed_at,
         }
-        if existing_claim is not None:
-            if existing_claim != claim:
-                raise PendingIntentError(
-                    "pending intent was already claimed by another confirmation"
-                )
-            return value
         try:
             _CANONICAL_JOURNAL_APPEND_EVENT(
                 self._require_store(),
@@ -665,10 +710,24 @@ class DurablePendingIntentRegistry:
                 raise PendingIntentError(
                     "pending confirmation claim conflicted with durable state"
                 ) from error
-            if concurrent_value != value or concurrent_claim != claim:
+            if (
+                concurrent_value != value
+                or concurrent_claim is None
+                or _confirmation_claim_identity(concurrent_claim)
+                != expected_claim_identity
+            ):
                 raise PendingIntentError(
                     "pending intent was concurrently claimed by another confirmation"
                 ) from error
+            concurrent_claimed_at = _parse_utc_text(
+                concurrent_claim.get("claimed_at"), name="claimed_at"
+            )
+            if concurrent_claimed_at > point:
+                raise PendingIntentError(
+                    "concurrent pending confirmation claim is from a future cut"
+                ) from error
+            return concurrent_value
+
         final_value, final_claim = self._read(pending_id)
         if final_value != value or final_claim != claim:
             raise PendingIntentError("pending confirmation claim is not durable")

@@ -720,6 +720,58 @@ class Section17BlindedReplayTests(unittest.TestCase):
         self.assertEqual(view.events[0].payload["instrument_id"], "Instrument 001")
         self.assertEqual(view.events[0].payload["provider_id"], "Provider 001")
 
+    def test_string_subclass_cannot_bypass_payload_identity_leak_scan(self):
+        callbacks = []
+
+        class HiddenIdentity(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                return super().strip(*args, **kwargs)
+
+            def casefold(self):
+                callbacks.append("casefold")
+                return super().casefold()
+
+        source = dataset(
+            event(
+                "one",
+                payload_extra={
+                    "description": HiddenIdentity(
+                        "BTC-USD hidden raw identity in an unbound field"
+                    )
+                },
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact JSON-like blinded scalar"):
+            self.blind(source)
+        self.assertEqual(callbacks, [])
+
+    def test_price_scale_mode_subclass_is_rejected_before_virtual_comparison(self):
+        callbacks = []
+
+        class HostileMode(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                return super().strip(*args, **kwargs)
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                return super().__eq__(other)
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                return super().__ne__(other)
+
+        with self.assertRaisesRegex(BlindingError, "price_scale_mode"):
+            BlindingProfile(
+                identity_fields=(
+                    IdentityField(("instrument_id",), "INSTRUMENT"),
+                ),
+                price_scale_mode=HostileMode("IDENTITY"),
+            )
+        self.assertEqual(callbacks, [])
+
     def test_hostile_dataset_and_profile_subclasses_are_rejected(self):
         class HostileDataset(CausalDataset):
             pass

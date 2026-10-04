@@ -580,6 +580,84 @@ class BackupRestoreTests(unittest.TestCase):
                     completed_at="2026-09-25T08:00:03Z",
                 )
 
+    def test_schema_v1_cannot_smuggle_runtime_checkpoint_evidence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            evidence = (
+                backup
+                / "restore-evidence"
+                / "autonomous-runtime-checkpoint.json"
+            )
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_bytes(b'{"sealed":"smuggled"}\n')
+
+            manifest_path = backup / "backup-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 1
+            manifest.pop("runtime_checkpoint_evidence")
+            manifest["files"].append(
+                {
+                    "path": "restore-evidence/autonomous-runtime-checkpoint.json",
+                    "sha256": "sha256:" + sha256(evidence.read_bytes()).hexdigest(),
+                    "size_bytes": evidence.stat().st_size,
+                    "kind": "runtime-checkpoint-evidence",
+                }
+            )
+            manifest_path.write_text(
+                json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _reseal_backup_manifest(backup)
+
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "schema v1 cannot carry",
+            ):
+                verify_backup(backup)
+
+    def test_partial_runtime_checkpoint_marker_binding_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker.pop("runtime_checkpoint_evidence_sha256")
+            marker_path.write_text(
+                json.dumps(
+                    marker,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(restore_requires_reconciliation(restored))
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "binding is partial",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+
     def test_journal_only_backup_declares_journal_only_consistency(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

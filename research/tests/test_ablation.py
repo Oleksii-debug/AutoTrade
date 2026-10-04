@@ -2661,5 +2661,57 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(calls, [])
 
 
+    def test_caller_correction_evidence_resolver_is_not_terminal_authority(self):
+        calls: list[str] = []
+
+        def hostile_resolver(_reference):
+            calls.append("resolver")
+            raise AssertionError("caller correction evidence resolver executed")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(
+                root / "memory.sqlite3",
+                correction_evidence_resolver=hostile_resolver,
+            )
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="caller-correction-resolver",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+
+            result = evaluate_qualified_incremental_value(
+                "agent",
+                [
+                    pair(
+                        "caller-resolver-a",
+                        "2",
+                        population_unit="caller-resolver-unit-a",
+                    ),
+                    pair(
+                        "caller-resolver-b",
+                        "2",
+                        population_unit="caller-resolver-unit-b",
+                    ),
+                ],
+                authority=authority,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+            self.assertEqual(
+                result.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

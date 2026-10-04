@@ -140,6 +140,56 @@ class JournalStoreTests(unittest.TestCase):
                 0,
             )
 
+    def test_numeric_persistence_authority_rejects_int_subclasses_without_callbacks(self):
+        class HostileInt(int):
+            comparison_calls = 0
+
+            def __lt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("caller-controlled numeric comparison must not execute")
+
+            def __gt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("caller-controlled numeric comparison must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "state_version must be a non-negative integer",
+            ):
+                store.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-hostile-state-version",
+                    idempotency_key="key-hostile-state-version",
+                    request={"action": "A"},
+                    result={"status": "REJECTED"},
+                    state_version=HostileInt(1),
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version must be a non-negative integer",
+            ):
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=HostileInt(0),
+                    state={"net": "0"},
+                )
+
+            with self.assertRaisesRegex(ValueError, "limit must be between 1 and 1000"):
+                store.pending_outbox(limit=HostileInt(100))
+
+            self.assertEqual(HostileInt.comparison_calls, 0)
+            self.assertEqual(
+                store.whole_store_state_cut()["counts"]["command_dedupe"],
+                0,
+            )
+
     def test_event_and_outbox_commit_atomically_and_replay_idempotently(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

@@ -411,15 +411,22 @@ def _parse_bybit_funding_income_rows(
             name="qualified query endTime",
         )
     )
+    day_millis = 24 * 60 * 60 * 1000
+    effective_start_millis = start_millis
+    effective_end_millis = end_millis
     if start_millis is not None and end_millis is not None:
         if end_millis < start_millis:
             raise ProviderFundingIncomeError(
                 "qualified funding query endTime precedes startTime"
             )
-        if end_millis - start_millis > 7 * 24 * 60 * 60 * 1000:
+        if end_millis - start_millis > 7 * day_millis:
             raise ProviderFundingIncomeError(
                 "qualified funding query exceeds Bybit seven-day range"
             )
+    elif start_millis is not None:
+        effective_end_millis = start_millis + day_millis
+    elif end_millis is not None:
+        effective_start_millis = max(1, end_millis - day_millis)
 
     rows: list[_ParsedBybitFundingIncomeRow] = []
     seen_ids: set[str] = set()
@@ -432,7 +439,9 @@ def _parse_bybit_funding_income_rows(
         category = item.get("category")
         funding = item.get("funding")
         if row_type != "SETTLEMENT":
-            continue
+            raise ProviderFundingIncomeError(
+                "Bybit transaction-log row escaped the qualified transaction type"
+            )
         if category != expected_category:
             raise ProviderFundingIncomeError(
                 "Bybit funding row escaped the qualified derivative category"
@@ -466,11 +475,17 @@ def _parse_bybit_funding_income_rows(
             transaction_time_text,
             name="transactionTime",
         )
-        if start_millis is not None and transaction_millis < start_millis:
+        if (
+            effective_start_millis is not None
+            and transaction_millis < effective_start_millis
+        ):
             raise ProviderFundingIncomeError(
                 "Bybit funding row predates the qualified startTime"
             )
-        if end_millis is not None and transaction_millis > end_millis:
+        if (
+            effective_end_millis is not None
+            and transaction_millis > effective_end_millis
+        ):
             raise ProviderFundingIncomeError(
                 "Bybit funding row exceeds the qualified endTime"
             )

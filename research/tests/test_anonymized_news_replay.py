@@ -395,10 +395,76 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         (item,) = feeder.advance_to("2024-03-12T10:00:05Z")
         rendered = render_blinded_news(item)
 
-        self.assertIn("Person 001", rendered)
-        self.assertIn("Country 001", rendered)
+        self.assertRegex(rendered, r"Person [0-9A-F]{64}")
+        self.assertRegex(rendered, r"Country [0-9A-F]{64}")
         self.assertNotIn("Freedonia", rendered)
         self.assertNotIn("Alice Example", rendered)
+
+    def test_declared_alias_cannot_leak_through_template_or_structured_claim(self):
+        identity = NewsIdentity(
+            "company",
+            "COMPANY",
+            "Acme Corp",
+            ("ACME",),
+        )
+        with self.assertRaisesRegex(NewsReplayError, "raw identity"):
+            revision(
+                identities=(identity,),
+                summary_template="ACME reported quarterly earnings above expectations",
+            )
+        with self.assertRaisesRegex(NewsReplayError, "predicate exposes"):
+            revision(
+                identities=(identity,),
+                claims=(claim(predicate="ACME_WARNING"),),
+            )
+
+    def test_alias_collision_across_distinct_entities_is_rejected(self):
+        first = revision(
+            information_id="story-a",
+            identities=(
+                NewsIdentity("company", "COMPANY", "Acme Corp", ("SHARED",)),
+            ),
+        )
+        second = revision(
+            information_id="story-b",
+            source_id="Independent Source",
+            source_sequence=2,
+            syndication_sha256="sha256:" + ("8" * 64),
+            content_sha256="sha256:" + ("8" * 64),
+            published_at="2024-03-12T10:01:00Z",
+            available_at="2024-03-12T10:01:05Z",
+            ingested_at="2024-03-12T10:01:07Z",
+            identities=(
+                NewsIdentity("company", "COMPANY", "Other Corp", ("SHARED",)),
+            ),
+            summary_template="{company} reported quarterly earnings above expectations",
+        )
+        with self.assertRaisesRegex(
+            NewsReplayError, "multiple canonical entities"
+        ):
+            self.bundle(first, second)
+
+    def test_later_alias_declaration_rejects_earlier_cross_record_leak(self):
+        earlier = revision(
+            information_id="story-a",
+            summary_template="{company} discussed ACME in neutral-looking prose",
+        )
+        later = revision(
+            information_id="story-b",
+            source_id="Independent Source",
+            source_sequence=2,
+            syndication_sha256="sha256:" + ("8" * 64),
+            content_sha256="sha256:" + ("8" * 64),
+            published_at="2024-03-12T10:01:00Z",
+            available_at="2024-03-12T10:01:05Z",
+            ingested_at="2024-03-12T10:01:07Z",
+            identities=(
+                NewsIdentity("company", "COMPANY", "Other Corp", ("ACME",)),
+            ),
+            summary_template="{company} reported quarterly earnings above expectations",
+        )
+        with self.assertRaisesRegex(NewsReplayError, "raw identity"):
+            self.bundle(earlier, later)
 
     def test_raw_identity_in_template_is_rejected(self):
         with self.assertRaisesRegex(NewsReplayError, "raw identity"):

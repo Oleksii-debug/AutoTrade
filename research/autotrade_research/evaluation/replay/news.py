@@ -195,11 +195,12 @@ def _validate_template(
 
 @dataclass(frozen=True, slots=True)
 class NewsIdentity:
-    """One raw identity carried in a named template/claim slot."""
+    """One raw identity plus privileged aliases used for leak detection."""
 
     slot: str
     namespace: str
     raw_value: str
+    aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         slot = _text(self.slot, name="identity slot")
@@ -209,9 +210,21 @@ class NewsIdentity:
         if _NAMESPACE.fullmatch(namespace) is None:
             raise NewsReplayError("identity namespace must match [A-Z][A-Z0-9_]*")
         raw = _text(self.raw_value, name="identity raw_value")
+        if type(self.aliases) is not tuple:
+            raise TypeError("identity aliases must be an exact tuple")
+        aliases: list[str] = []
+        seen = {raw.casefold()}
+        for index, value in enumerate(self.aliases):
+            alias = _text(value, name=f"identity aliases[{index}]")
+            folded = alias.casefold()
+            if folded in seen:
+                raise NewsReplayError("identity aliases must be unique and non-redundant")
+            seen.add(folded)
+            aliases.append(alias)
         object.__setattr__(self, "slot", slot)
         object.__setattr__(self, "namespace", namespace)
         object.__setattr__(self, "raw_value", raw)
+        object.__setattr__(self, "aliases", tuple(aliases))
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,7 +377,12 @@ class NewsRevision:
         for item in self.identities:
             if type(item) is not NewsIdentity:
                 raise TypeError("identities must contain exact NewsIdentity")
-            normalized = NewsIdentity(item.slot, item.namespace, item.raw_value)
+            normalized = NewsIdentity(
+                item.slot,
+                item.namespace,
+                item.raw_value,
+                item.aliases,
+            )
             if normalized.slot in slots:
                 raise NewsReplayError(f"duplicate identity slot: {normalized.slot}")
             slots.add(normalized.slot)
@@ -399,7 +417,9 @@ class NewsRevision:
         object.__setattr__(self, "claims", tuple(claims))
 
         raw_identities = frozenset(
-            [self.source_id] + [item.raw_value for item in identities]
+            [self.source_id]
+            + [item.raw_value for item in identities]
+            + [alias for item in identities for alias in item.aliases]
         )
         allowed_slots = frozenset(slots)
         summary = _validate_template(
@@ -410,6 +430,20 @@ class NewsRevision:
         )
         object.__setattr__(self, "summary_template", summary)
         for claim in claims:
+            for field_name, value in (
+                ("claim_id", claim.claim_id),
+                ("predicate", claim.predicate),
+                ("magnitude", claim.magnitude),
+                ("unit", claim.unit),
+                ("direction", claim.direction),
+            ):
+                if value is None:
+                    continue
+                for raw in raw_identities:
+                    if _contains_identity(value, raw):
+                        raise NewsReplayError(
+                            f"claim {claim.claim_id} {field_name} exposes a declared raw identity"
+                        )
             if claim.qualifier_template is not None:
                 _validate_template(
                     claim.qualifier_template,
@@ -452,6 +486,7 @@ class NewsRevision:
                     "slot": item.slot,
                     "namespace": item.namespace,
                     "raw_value": item.raw_value,
+                    "aliases": item.aliases,
                 }
                 for item in self.identities
             ],
@@ -692,6 +727,52 @@ def build_news_replay_bundle(
         sorted(snapshot, key=lambda item: (item.information_id, item.revision))
     )
     _validate_revision_chains(records_tuple)
+
+    alias_owner: dict[tuple[str, str], str] = {}
+    all_raw_identities: set[str] = {record.source_id for record in records_tuple}
+    for record in records_tuple:
+        for identity in record.identities:
+            all_raw_identities.add(identity.raw_value)
+            all_raw_identities.update(identity.aliases)
+            for candidate in (identity.raw_value, *identity.aliases):
+                key = (identity.namespace, candidate.casefold())
+                owner = alias_owner.setdefault(key, identity.raw_value)
+                if owner != identity.raw_value:
+                    raise NewsReplayError(
+                        "one identity or alias cannot refer to multiple canonical entities"
+                    )
+
+    global_raw_identities = frozenset(all_raw_identities)
+    for record in records_tuple:
+        allowed_slots = frozenset(item.slot for item in record.identities)
+        _validate_template(
+            record.summary_template,
+            name=f"{record.information_id} summary_template",
+            allowed_slots=allowed_slots,
+            raw_identities=global_raw_identities,
+        )
+        for claim in record.claims:
+            for field_name, value in (
+                ("claim_id", claim.claim_id),
+                ("predicate", claim.predicate),
+                ("magnitude", claim.magnitude),
+                ("unit", claim.unit),
+                ("direction", claim.direction),
+            ):
+                if value is None:
+                    continue
+                for raw in global_raw_identities:
+                    if _contains_identity(value, raw):
+                        raise NewsReplayError(
+                            f"claim {claim.claim_id} {field_name} exposes a declared raw identity"
+                        )
+            if claim.qualifier_template is not None:
+                _validate_template(
+                    claim.qualifier_template,
+                    name=f"claim {claim.claim_id} qualifier_template",
+                    allowed_slots=allowed_slots,
+                    raw_identities=global_raw_identities,
+                )
 
     syndication_owner: dict[str, str] = {}
     content_owner: dict[str, str] = {}

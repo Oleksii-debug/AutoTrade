@@ -63,6 +63,8 @@ def _instant(value: object, *, name: str) -> datetime:
         if type(value.tzinfo) is not timezone:
             raise ValueError(f"{name} must use built-in timezone authority")
         return value.astimezone(timezone.utc)
+    if isinstance(value, datetime):
+        raise ValueError(f"{name} must be an exact datetime")
     text = _text(value, name=name)
     if not text.endswith("Z"):
         raise ValueError(f"{name} must be UTC and end in Z")
@@ -148,6 +150,8 @@ class HistoricalFeatureInputSpec:
         )
         if type(self.window_count) is not int or self.window_count < 2:
             raise ValueError("window_count must be an integer >= 2")
+        if type(self.event_kinds) is not tuple:
+            raise TypeError("event_kinds must be an exact tuple")
         kinds = tuple(_text(kind, name="event_kind") for kind in self.event_kinds)
         if not kinds or len(set(kinds)) != len(kinds):
             raise ValueError("event_kinds must be non-empty and unique")

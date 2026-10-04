@@ -42,6 +42,9 @@ def _issue_runtime_state_authority(
     )
 
 
+_TEST_RUNTIME_VERIFIERS = {}
+
+
 class CausalReplayTests(unittest.TestCase):
     def test_future_data_is_not_exposed_before_availability(self):
         replay = CausalReplay(
@@ -188,15 +191,18 @@ class CausalReplayTests(unittest.TestCase):
         verifier_id="runtime:test-verifier",
         secret=b"runtime-test-authority-secret-0000000001",
     ):
-        def verify(material, signature):
-            expected = hmac.new(secret, material, hashlib.sha256).hexdigest()
-            return hmac.compare_digest(expected, signature)
+        key = (authority_id, verifier_id, secret)
+        if key not in _TEST_RUNTIME_VERIFIERS:
+            def verify(material, signature):
+                expected = hmac.new(secret, material, hashlib.sha256).hexdigest()
+                return hmac.compare_digest(expected, signature)
 
-        return RuntimeStateVerifier.select_product_trust(
-            authority_id=authority_id,
-            verifier_id=verifier_id,
-            verify_signature=verify,
-        )
+            _TEST_RUNTIME_VERIFIERS[key] = RuntimeStateVerifier.select_product_trust(
+                authority_id=authority_id,
+                verifier_id=verifier_id,
+                verify_signature=verify,
+            )
+        return _TEST_RUNTIME_VERIFIERS[key]
 
     def test_composite_checkpoint_rejects_changed_rng_before_next_event(self):
         events = [
@@ -449,7 +455,7 @@ class CausalReplayTests(unittest.TestCase):
             attacker.capture = lambda: RuntimeStateSnapshot(
                 cut_id=checkpoint.runtime_cut_id,
                 replay=checkpoint.replay,
-                runtime_components=checkpoint.runtime_components,
+                runtime_components=dict(checkpoint.runtime_components),
                 authority_id=checkpoint.runtime_authority_id,
                 verifier_id=checkpoint.runtime_verifier_id,
                 authority_seal=checkpoint.runtime_authority_seal,
@@ -498,7 +504,7 @@ class CausalReplayTests(unittest.TestCase):
 
         forged = ForgedCheckpoint(
             replay=checkpoint.replay,
-            runtime_components=checkpoint.runtime_components,
+            runtime_components=dict(checkpoint.runtime_components),
             runtime_cut_id=checkpoint.runtime_cut_id,
             runtime_authority_id=checkpoint.runtime_authority_id,
             runtime_verifier_id=checkpoint.runtime_verifier_id,
@@ -718,7 +724,7 @@ class CausalReplayTests(unittest.TestCase):
             with self.subTest(build_sha=build_sha, protocol_ref=protocol_ref):
                 tampered = CompositeReplayCheckpoint(
                     replay=checkpoint.replay,
-                    runtime_components=checkpoint.runtime_components,
+                    runtime_components=dict(checkpoint.runtime_components),
                     runtime_cut_id=checkpoint.runtime_cut_id,
                     runtime_authority_id=checkpoint.runtime_authority_id,
                     runtime_verifier_id=checkpoint.runtime_verifier_id,

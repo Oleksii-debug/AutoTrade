@@ -251,13 +251,12 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     query_binding=binding,
                     transport=transport,
                 )
-            events = JournalStore.load_events_by_aggregate_type(
-                journal,
-                "qualified_authenticated_provider_wire_execution",
+            events = journal.load_events_by_aggregate_type(
+                "qualified_authenticated_provider_wire_execution"
             )
             self.assertEqual(events, [])
 
-    def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
+    def test_instance_shadowed_opener_cannot_be_promoted_to_direct_provider_origin(self):
         class Resolver:
             @contextmanager
             def lease_for_execution(self, *_args, **_kwargs):
@@ -273,18 +272,17 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 capabilities,
                 qualifications,
                 route,
-                q1,
+                _q1,
                 _harness,
                 binding,
             ) = self._route_fixture(directory)
             origin = self._origin(journal, directory)
-            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"10.25"}]}}'
 
             class Stream(BytesIO):
                 status = 200
 
             client = UrllibJsonWireClient(max_response_bytes=1024)
-            client._opener.open = lambda *_args, **_kwargs: Stream(body)
+            client._opener.open = lambda *_args, **_kwargs: Stream(b'{"retCode":0}')
             base = binding.query_binding
             transport = BybitV5AuthenticatedReadTransport(
                 policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
@@ -309,62 +307,53 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 clock_utc=lambda: NOW,
                 wire_client=client,
             )
-            recorded = execute_direct_provider_origin_read(
-                origin=origin,
-                route=route,
-                capability_registry=capabilities,
-                qualification_registry=qualifications,
-                query_binding=binding,
-                transport=transport,
-            )
-            self.assertEqual(recorded.execution_class, "DIRECT_PROVIDER_WIRE")
-            self.assertEqual(recorded.qualification_id, q1.qualification_id)
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "direct network authority is unavailable",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
 
-            # A second real call with the same exact signed request bytes (the
-            # test clock is intentionally fixed) is not independent provider
-            # evidence. Its request digest is already durably claimed by the
-            # first Prepared attempt, so it must fail closed instead of minting
-            # a second origin from an execution-equivalent request.
+    def test_direct_wire_claim_is_single_use_and_restart_verifiable(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.sqlite3")
+            kwargs = {
+                "attempt_id": "provider-read:" + "a" * 32,
+                "qualified_query_digest": "sha256:" + "1" * 64,
+                "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+                "response_sha256": "sha256:" + "3" * 64,
+                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                "wire_request_sha256": "sha256:" + "4" * 64,
+                "wire_request_semantics_sha256": "sha256:" + "5" * 64,
+                "terminal_authority_journal_sequence_cut": 1,
+                "terminal_authority_verified_at": NOW.isoformat().replace("+00:00", "Z"),
+            }
+            provider_origin_module._claim_direct_wire_execution(journal, **kwargs)
+            provider_origin_module._require_direct_wire_execution_claim(journal, **kwargs)
+            restarted = JournalStore(journal.path)
+            provider_origin_module._require_direct_wire_execution_claim(restarted, **kwargs)
+            conflicting = dict(kwargs)
+            conflicting["attempt_id"] = "provider-read:" + "b" * 32
             with self.assertRaisesRegex(
                 ProviderOriginError,
                 "already claimed by another attempt",
             ):
-                execute_direct_provider_origin_read(
-                    origin=origin,
-                    route=route,
-                    capability_registry=capabilities,
-                    qualification_registry=qualifications,
-                    query_binding=binding,
-                    transport=transport,
+                provider_origin_module._claim_direct_wire_execution(
+                    restarted,
+                    **conflicting,
                 )
-
-            claims = JournalStore.load_events(
-                journal,
-                "qualified_authenticated_provider_wire_execution",
-                recorded.wire_request_sha256,
-            )
-            self.assertEqual(len(claims), 1)
-            self.assertEqual(claims[0]["payload"]["attempt_id"], recorded.attempt_id)
-            self.assertEqual(
-                claims[0]["payload"]["response_sha256"],
-                recorded.response_sha256,
-            )
-
-            restarted = self._origin(JournalStore(journal.path), directory)
-            recovered = restarted.load_response_binding(recorded.attempt_id, binding)
-            observation = observe_provider_origin_json_response(
-                response_binding=recovered,
-                query_binding=binding,
-            )
-            self.assertEqual(observation.origin_ref, recovered.origin_ref)
-            self.assertEqual(
-                observation.payload["result"]["list"][0]["equity"],
-                "10.25",
-            )
-            self.assertNotEqual(
-                observation.origin_ref,
-                observation.qualified_evidence_ref,
-            )
 
     def test_journal_never_embeds_provider_response_bytes(self):
         with TemporaryDirectory() as directory:

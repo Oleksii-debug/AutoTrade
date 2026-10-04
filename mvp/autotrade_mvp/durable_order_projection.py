@@ -61,6 +61,16 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _evidence_text(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+    ):
+        raise ValueError(f"{name} must be canonical non-empty text")
+    return value
+
+
 def _environment(value: str) -> str:
     normalized = _text(value, name="environment").upper()
     if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
@@ -133,12 +143,14 @@ def _canonical_evidence_refs(
                 "evidence ref contains unsupported fields: "
                 + ", ".join(sorted(str(item) for item in unknown))
             )
-        artifact_id = _text(item.get("artifact_id"), name="artifact_id")
+        artifact_id = _evidence_text(item.get("artifact_id"), name="artifact_id")
         try:
-            artifact_id = str(UUID(artifact_id))
+            canonical_artifact_id = str(UUID(artifact_id))
         except ValueError as error:
             raise ValueError("artifact_id must be a UUID") from error
-        digest = _text(item.get("sha256"), name="sha256")
+        if artifact_id != canonical_artifact_id:
+            raise ValueError("artifact_id must be a canonical lowercase UUID")
+        digest = _evidence_text(item.get("sha256"), name="sha256")
         if (
             len(digest) != 71
             or not digest.startswith("sha256:")
@@ -148,11 +160,14 @@ def _canonical_evidence_refs(
         ref: dict[str, str] = {
             "artifact_id": artifact_id,
             "sha256": digest,
-            "observed_at": _instant(item.get("observed_at"), name="observed_at"),
+            "observed_at": _instant(
+                _evidence_text(item.get("observed_at"), name="observed_at"),
+                name="observed_at",
+            ),
         }
         for optional in ("source_uri", "rights_id"):
             if item.get(optional) is not None:
-                ref[optional] = _text(item.get(optional), name=optional)
+                ref[optional] = _evidence_text(item.get(optional), name=optional)
         if artifact_id in seen_artifact_ids:
             raise ValueError("evidence_refs must have unique artifact_id values")
         seen_artifact_ids.add(artifact_id)

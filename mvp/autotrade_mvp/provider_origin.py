@@ -6,13 +6,13 @@ persisted before I/O; exact response bytes can then be retained in the neutral
 ArtifactStore before a terminal Observed event is published.  Restart can
 finish Retained -> Observed without a provider re-query.
 
-Important authority boundary: ``_record_provider_origin`` is deliberately a
-private integration seam.  The module-local token exists only so deterministic
-unit tests can falsify the durable chronology.  An importable Python token is
-*not* PAPER/LIVE provider-origin authority.  Product code must not call this
-seam until a canonical provider transport supplies a non-self-mintable wire
-execution receipt.  Consequently this module by itself makes no PAPER/LIVE
-provenance or release-readiness claim.
+Important authority boundary: the module-local record token exists only so
+deterministic tests can exercise Prepared/Retained/Observed recovery as
+``TEST_INJECTED`` evidence.  It can never mint ``PROVIDER_ORIGIN``.
+PAPER/LIVE provider-origin observation remains unavailable until a canonical
+provider transport supplies a non-self-mintable independently authenticated
+wire execution receipt.  Consequently this module by itself makes no
+PAPER/LIVE provenance or release-readiness claim.
 """
 
 from __future__ import annotations
@@ -53,7 +53,9 @@ _AGGREGATE_TYPE = "qualified_authenticated_provider_read"
 _PREPARED_EVENT = "AuthenticatedReadPrepared"
 _RETAINED_EVENT = "AuthenticatedReadRetained"
 _OBSERVED_EVENT = "AuthenticatedReadObserved"
-_ORIGIN_KIND = "PROVIDER_ORIGIN"
+_PENDING_ORIGIN_KIND = "PENDING_WIRE_EVIDENCE"
+_TEST_INJECTED_ORIGIN_KIND = "TEST_INJECTED"
+_PROVIDER_ORIGIN_KIND = "PROVIDER_ORIGIN"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
@@ -335,6 +337,7 @@ class AuthenticatedReadResponseBinding:
     """Restartable durable binding for one exact qualified provider response."""
 
     attempt_id: str
+    origin_kind: str
     provider_id: str
     account_id: str
     environment: str
@@ -365,6 +368,7 @@ class AuthenticatedReadResponseBinding:
             )
         for name in (
             "attempt_id",
+            "origin_kind",
             "provider_id",
             "account_id",
             "environment",
@@ -385,6 +389,11 @@ class AuthenticatedReadResponseBinding:
             "origin_ref",
         ):
             _exact_text(getattr(self, name), name=name)
+        if self.origin_kind not in {
+            _TEST_INJECTED_ORIGIN_KIND,
+            _PROVIDER_ORIGIN_KIND,
+        }:
+            raise ProviderOriginError("provider response origin kind is invalid")
         if _QID_RE.fullmatch(self.qualification_id) is None:
             raise ProviderOriginError("qualification_id is non-canonical")
         for digest in (
@@ -426,6 +435,10 @@ class ProviderOriginObservation:
             raise ProviderOriginError("response_binding is not exact durable binding")
         if type(self.qualified_observation) is not QualifiedProviderResponseObservation:
             raise ProviderOriginError("qualified observation is not canonical")
+        if self.response_binding.origin_kind != _PROVIDER_ORIGIN_KIND:
+            raise ProviderOriginError(
+                "provider-origin observation requires independently authenticated wire evidence"
+            )
         if (
             self.qualified_observation.evidence_ref
             == self.response_binding.origin_ref
@@ -501,7 +514,7 @@ class ProviderOriginJournal:
             raise ProviderOriginError("provider-origin prepare cannot precede query preparation")
         attempt_id = "provider-read:" + uuid4().hex
         payload = {
-            "origin_kind": _ORIGIN_KIND,
+            "origin_kind": _PENDING_ORIGIN_KIND,
             "qualified_query": snapshot,
             "transport_identity": transport,
             "network_policy_identity": policy,
@@ -519,7 +532,7 @@ class ProviderOriginJournal:
         )
         return attempt_id
 
-    def _record_provider_origin(
+    def _record_test_injected_response(
         self,
         attempt_id: str,
         query_binding: QualifiedProviderReadQueryBinding,
@@ -531,7 +544,7 @@ class ProviderOriginJournal:
     ) -> AuthenticatedReadResponseBinding:
         if _origin_token is not _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN:
             raise ProviderOriginError(
-                "provider-origin response lacks canonical transport execution receipt"
+                "test-injected response requires the deterministic test record token"
             )
         attempt = _exact_text(attempt_id, name="attempt_id")
         snapshot = _qualified_query_snapshot(query_binding)
@@ -559,6 +572,8 @@ class ProviderOriginJournal:
             version=1,
             payload_keys=_PREPARED_PAYLOAD_KEYS,
         )
+        if prepared_payload.get("origin_kind") != _PENDING_ORIGIN_KIND:
+            raise ProviderOriginError("durable Prepared state has invalid origin classification")
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable Prepared query differs from exact qualified binding")
         if _parse_utc_text(observed_text, name="observed_at") < _parse_utc_text(
@@ -576,7 +591,7 @@ class ProviderOriginJournal:
             prepared.get("payload_hash"), name="prepared_subject_digest"
         )
         metadata = {
-            "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
+            "evidence_kind": "QUALIFIED_TEST_INJECTED_PROVIDER_RESPONSE",
             "attempt_id": attempt,
             "prepared_subject_digest": prepared_subject_digest,
             "qualified_query_digest": snapshot["qualified_query_digest"],
@@ -596,7 +611,7 @@ class ProviderOriginJournal:
                 rights={
                     "storage": True,
                     "export": False,
-                    "rights_id": "qualified-provider-origin-response:v1",
+                    "rights_id": "qualified-test-injected-provider-response:v1",
                 },
                 source_refs=[],
                 metadata=metadata,
@@ -612,7 +627,7 @@ class ProviderOriginJournal:
             raise ProviderOriginError("provider response artifact conflicts with exact response")
 
         common = {
-            "origin_kind": _ORIGIN_KIND,
+            "origin_kind": _TEST_INJECTED_ORIGIN_KIND,
             "prepared_event_id": prepared.get("event_id"),
             "prepared_subject_digest": prepared_subject_digest,
             "qualified_query_digest": snapshot["qualified_query_digest"],
@@ -685,6 +700,12 @@ class ProviderOriginJournal:
             version=2,
             payload_keys=_RETAINED_PAYLOAD_KEYS,
         )
+        if prepared_payload.get("origin_kind") != _PENDING_ORIGIN_KIND:
+            raise ProviderOriginError("recovery Prepared state has invalid origin classification")
+        if retained_payload.get("origin_kind") != _TEST_INJECTED_ORIGIN_KIND:
+            raise ProviderOriginError(
+                "recovery cannot promote unverified response to provider origin"
+            )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event is not bound to exact Prepared event")
         observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
@@ -721,6 +742,8 @@ class ProviderOriginJournal:
             version=1,
             payload_keys=_PREPARED_PAYLOAD_KEYS,
         )
+        if prepared_payload.get("origin_kind") != _PENDING_ORIGIN_KIND:
+            raise ProviderOriginError("durable Prepared state has invalid origin classification")
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable provider-origin query does not match exact qualified binding")
         retained_payload = _require_event(
@@ -739,6 +762,11 @@ class ProviderOriginJournal:
         )
         if observed_payload != {**retained_payload, "retained_event_id": retained.get("event_id")}:
             raise ProviderOriginError("Observed event differs from exact Retained response")
+        origin_kind = retained_payload.get("origin_kind")
+        if origin_kind != _TEST_INJECTED_ORIGIN_KIND:
+            raise ProviderOriginError(
+                "durable response lacks independently authenticated provider-origin issuer"
+            )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event differs from exact Prepared response")
         expected_subject_digest = _exact_text(
@@ -796,6 +824,7 @@ class ProviderOriginJournal:
         )
         return AuthenticatedReadResponseBinding(
             attempt_id=attempt,
+            origin_kind=origin_kind,
             provider_id=base["provider_id"],
             account_id=base["account_id"],
             environment=base["environment"],
@@ -839,6 +868,10 @@ class ProviderOriginJournal:
             attempt_id,
             query_binding,
         )
+        if response_binding.origin_kind != _PROVIDER_ORIGIN_KIND:
+            raise ProviderOriginError(
+                "provider-origin observation is unavailable without independently authenticated wire evidence"
+            )
         return _observe_loaded_provider_origin_json_response(
             response_binding=response_binding,
             query_binding=query_binding,
@@ -852,6 +885,10 @@ def _observe_loaded_provider_origin_json_response(
 ) -> ProviderOriginObservation:
     if type(response_binding) is not AuthenticatedReadResponseBinding:
         raise TypeError("response_binding must be exact AuthenticatedReadResponseBinding")
+    if response_binding.origin_kind != _PROVIDER_ORIGIN_KIND:
+        raise ProviderOriginError(
+            "normalized provider-origin content requires independently authenticated wire evidence"
+        )
     snapshot = _qualified_query_snapshot(query_binding)
     base = snapshot["base_query"]
     if (

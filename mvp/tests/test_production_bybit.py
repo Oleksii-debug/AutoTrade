@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
@@ -73,6 +74,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             server=object(),
             instance_fence=_FenceStub(),
             admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
         return compose_financial_authority(host), host, boundary
 

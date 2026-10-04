@@ -2,7 +2,8 @@
 
 The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
-binds every changed path to those scopes. A candidate must descend from the exact
+binds every changed path to those scopes. Destructive base-tree accounting covers
+not only direct deletions but also rename-away and Git object-type replacement. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
 cannot be deleted, renamed away or changed to another Git object type. A PR that
 deletes both a material absolute number and a material fraction of the base tree
@@ -106,6 +107,8 @@ class IntegrityAssessment:
     base_path_count: int
     deletion_count: int
     deletion_fraction: float
+    destructive_change_count: int
+    destructive_change_fraction: float
     protected_deletions: tuple[str, ...]
     protected_violations: tuple[str, ...]
     scope_violations: tuple[str, ...]
@@ -242,6 +245,20 @@ def assess_reconvergence(
     )
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
+    destructive_base_paths = tuple(
+        sorted(
+            {
+                (
+                    change.previous_path
+                    if change.status[:1] == "R"
+                    else change.path
+                )
+                for change in validated_changes
+                if change.status[:1] in {"D", "R", "T"}
+            }
+        )
+    )
+    destructive_fraction = len(destructive_base_paths) / base_count
 
     protected_damage: set[str] = set(protected)
     for change in validated_changes:
@@ -299,11 +316,21 @@ def assess_reconvergence(
             "changed paths outside declared mutation scope: "
             + ", ".join(scope_violations)
         )
-    if len(deleted) >= max_deletions and fraction >= max_deleted_fraction:
-        reasons.append(
-            "mass base-tree deletion: "
-            f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
-        )
+    if (
+        len(destructive_base_paths) >= max_deletions
+        and destructive_fraction >= max_deleted_fraction
+    ):
+        if len(destructive_base_paths) == len(deleted):
+            reasons.append(
+                "mass base-tree deletion: "
+                f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
+            )
+        else:
+            reasons.append(
+                "mass destructive base-tree change: "
+                f"{len(destructive_base_paths)}/{base_count} paths "
+                f"({destructive_fraction:.1%}); direct deletions={len(deleted)}"
+            )
 
     return IntegrityAssessment(
         allowed=not reasons,
@@ -311,6 +338,8 @@ def assess_reconvergence(
         base_path_count=base_count,
         deletion_count=len(deleted),
         deletion_fraction=fraction,
+        destructive_change_count=len(destructive_base_paths),
+        destructive_change_fraction=destructive_fraction,
         protected_deletions=protected,
         protected_violations=protected_violations,
         scope_violations=scope_violations,
@@ -466,6 +495,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"base_paths={assessment.base_path_count} "
         f"deletions={assessment.deletion_count} "
         f"deleted_fraction={assessment.deletion_fraction:.3f} "
+        f"destructive_changes={assessment.destructive_change_count} "
+        f"destructive_fraction={assessment.destructive_change_fraction:.3f} "
         f"protected_violations={len(assessment.protected_violations)} "
         f"scope_violations={len(assessment.scope_violations)}"
     )

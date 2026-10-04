@@ -85,6 +85,72 @@ class HardCrashPersistenceTests(unittest.TestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["event_id"], "evt-hard-crash")
 
+    def test_append_event_process_exit_before_outbox_insert_rolls_back_event(self):
+        """An event cannot survive a hard exit without its outbox intent."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"kind": "fill", "quantity": "1"}
+                envelope = {
+                    "event_id": "evt-hard-crash",
+                    "event_type": "ExecutionFillObserved",
+                    "aggregate_type": "account",
+                    "aggregate_id": "paper-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+
+                def crash_before_outbox_insert():
+                    os._exit(79)
+
+                store._now = crash_before_outbox_insert
+                store.append_event(envelope, outbox_topic="events")
+                raise SystemExit(91)
+                """
+            )
+            env = os.environ.copy()
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=env,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 79)
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.whole_store_state_cut(),
+                {
+                    "journal_sequence": 0,
+                    "counts": {
+                        "events": 0,
+                        "outbox": 0,
+                        "command_dedupe": 0,
+                        "projection_checkpoints": 0,
+                        "global_projection_checkpoints": 0,
+                    },
+                },
+            )
+            result = reopened.append_event(_event(), outbox_topic="events")
+            self.assertTrue(result.inserted)
+            self.assertEqual(reopened.current_journal_sequence(), 1)
+            pending = reopened.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["event_id"], "evt-hard-crash")
+
     def test_process_exit_before_outbox_insert_rolls_back_whole_command_transaction(self):
         """Command/event writes cannot survive without their atomic outbox intent."""
 

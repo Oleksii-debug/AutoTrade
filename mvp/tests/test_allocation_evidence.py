@@ -15,6 +15,14 @@ from mvp.autotrade_mvp.allocation import (
 )
 
 
+class _HostileText(str):
+    calls = []
+
+    def strip(self, *args, **kwargs):
+        type(self).calls.append("strip")
+        raise AssertionError("hostile text callback executed")
+
+
 class _MutatingMapping(Mapping):
     def __init__(self, values, callback):
         self._values = dict(values)
@@ -1190,6 +1198,57 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 stress_source_evidence=(stress,),
                 resolved_evidence=resolved,
                 environment="LIVE",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
+    def test_environment_text_subclass_is_rejected_before_callback(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        hostile = _HostileText("SIMULATION")
+        _HostileText.calls.clear()
+
+        with self.assertRaisesRegex(ValueError, "allocation environment"):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(),),
+                self.policy(),
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment=hostile,
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
+        self.assertEqual(_HostileText.calls, [])
+
+    def test_policy_subclass_is_rejected_before_financial_use(self):
+        canonical = self.policy()
+
+        class PolicySubclass(AllocationPolicy):
+            pass
+
+        hostile = PolicySubclass(
+            **{
+                field: getattr(canonical, field)
+                for field in canonical.__dataclass_fields__
+            }
+        )
+        objective, market, capital, stress, resolved = self.bundle()
+
+        with self.assertRaisesRegex(TypeError, "exact AllocationPolicy"):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(),),
+                hostile,
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": resolved["valuation:aaa:v1"]},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
                 decision_time=self.DECISION_TIME,
                 policy_version="risk-policy:12",
             )

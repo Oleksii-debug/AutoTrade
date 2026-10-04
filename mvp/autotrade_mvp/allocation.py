@@ -154,9 +154,12 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -2248,8 +2251,8 @@ _ALLOCATION_FX_PROJECTION_ALGORITHM = "role-side-conservative-fx-projection-exac
 
 
 def _allocation_policy_digest(policy: AllocationPolicy) -> str:
-    if not isinstance(policy, AllocationPolicy):
-        raise TypeError("policy must be an AllocationPolicy")
+    if type(policy) is not AllocationPolicy:
+        raise TypeError("policy must be exact AllocationPolicy")
     payload = {
         "execution_search_algorithm": _EXECUTION_SEARCH_ALGORITHM,
         "objective_horizon_binding_algorithm": _OBJECTIVE_HORIZON_BINDING_ALGORITHM,
@@ -2418,6 +2421,16 @@ def allocate_evidence_bound_objective_targets(
     )
     stress_source_evidence = tuple(stress_source_evidence)
     materialized = tuple(candidates)
+
+    if type(policy) is not AllocationPolicy:
+        raise TypeError("policy must be exact AllocationPolicy")
+    for item in materialized:
+        if type(item) is not ObjectiveCandidate:
+            raise TypeError("all candidates must be exact ObjectiveCandidate values")
+        if type(item.candidate) is not AllocationCandidate:
+            raise TypeError(
+                "objective candidate must contain exact AllocationCandidate"
+            )
 
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment not in _ALLOWED_EVIDENCE_ENVIRONMENTS:
@@ -2974,6 +2987,8 @@ def revalidate_evidence_bound_allocation(
 
     if type(result) is not EvidenceBoundObjectiveAllocationResult:
         raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    if type(current_policy) is not AllocationPolicy:
+        raise TypeError("current_policy must be exact AllocationPolicy")
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment != result.environment:
         raise ValueError("allocation result environment does not match authority environment")
@@ -3035,8 +3050,8 @@ def revalidate_evidence_bound_allocation(
             result.reservation_state_version,
         ),
     ):
-        if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
-            raise ValueError(f"current {name} must be a non-negative integer")
+        if type(actual) is not int or actual < 0:
+            raise ValueError(f"current {name} must be a non-negative exact integer")
         if actual != expected:
             raise ValueError(f"{name} advanced after allocation proposal")
 

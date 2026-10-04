@@ -16,7 +16,14 @@ def _strict_json(text: str):
             result[key] = value
         return result
 
-    return json.loads(text, object_pairs_hook=reject_duplicates)
+    def reject_non_finite(constant: str):
+        raise ValueError(f'non-finite JSON constant: {constant}')
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_non_finite,
+    )
 
 
 def _package_references(project: Path) -> dict[str, str]:

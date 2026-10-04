@@ -3062,7 +3062,8 @@ class AuthorityService:
         )
         settlement_book, _economic_book = _authority_service_capital_binding(self)
         if (
-            settlement_book is not None
+            require_transaction_cut
+            and settlement_book is not None
             and raw_capital_adjustment is None
             and any(resource.startswith("CASH:") for resource in risk_requirements)
         ):

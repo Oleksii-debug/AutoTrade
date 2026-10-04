@@ -64,6 +64,18 @@ class ArtifactAuthorityTests(unittest.TestCase):
             trusted_authenticated_reader(HostileText("/not-authoritative"))
         self.assertEqual(touched, [])
 
+    def test_trusted_root_rejects_path_subclass_before_fspath_dispatch(self):
+        touched: list[str] = []
+
+        class HostilePath(type(Path())):
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("hostile trusted-root path conversion")
+
+        with self.assertRaisesRegex(TypeError, "exact string or Path"):
+            trusted_authenticated_reader(HostilePath("/not-authoritative"))
+        self.assertEqual(touched, [])
+
     def test_production_code_cannot_reintroduce_legacy_content_store_authority(self):
         offenders = []
         for path in sorted(ROOT.rglob("*.py")):

@@ -354,6 +354,10 @@ def evaluate_declared_runtime_budget(
     This API intentionally accepts neither expected event bindings/counts nor a
     start cut. All are reloaded from the immutable declaration issued before
     campaign events, eliminating post-outcome caller selection of those facts.
+
+    Metric series remain caller-supplied at this layer. Hard failures are useful
+    diagnostics, but a favorable result cannot become qualification PASS until
+    those series are recomputed from retained target-host measurement provenance.
     """
 
     spec = _validated_spec(spec)
@@ -371,4 +375,11 @@ def evaluate_declared_runtime_budget(
         observed_duration_us=observed_duration_us,
         max_journal_events=plan.max_journal_events,
     )
+    if decision.status == "PASS":
+        decision = RuntimeBudgetDecision(
+            status="INCONCLUSIVE",
+            scenario_id=decision.scenario_id,
+            reasons=("unverified_runtime_measurement_provenance",),
+            metrics=decision.metrics,
+        )
     return decision, evidence, plan

@@ -104,6 +104,23 @@ class DurableProviderAccountAcquisitionAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(authority.require_current(issued), issued)
 
+    def test_preexisting_durable_fact_is_inside_acquisition_pre_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            JournalStore.append_event(store, unrelated_event())
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+
+            issued = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-after-financial-fact",
+                committed_at=NOW,
+            )
+
+            self.assertEqual(issued.acquisition_journal_sequence_cut, 1)
+            self.assertEqual(issued.issued_journal_sequence, 2)
+            self.assertEqual(store.current_journal_sequence(), 2)
+
     def test_exact_request_retry_is_idempotent_while_current(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -396,6 +413,38 @@ class DurableProviderAccountAcquisitionAuthorityTests(unittest.TestCase):
                 "acquisition_id is not current",
             ):
                 authority.require_account_cut_acquisition(forged)
+
+    def test_account_cut_generation_and_journal_cut_are_independently_bound(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            issued = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-1",
+                committed_at=NOW,
+            )
+
+            wrong_generation = account_cut_for(
+                issued,
+                acquisition_generation=issued.acquisition_generation + 1,
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "acquisition_generation is not current",
+            ):
+                authority.require_account_cut_acquisition(wrong_generation)
+
+            wrong_cut = account_cut_for(
+                issued,
+                acquisition_journal_sequence_cut=
+                    issued.acquisition_journal_sequence_cut + 1,
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "journal cut does not match",
+            ):
+                authority.require_account_cut_acquisition(wrong_cut)
 
     def test_provider_native_account_cut_is_not_serialized_authority(self):
         with TemporaryDirectory() as directory:

@@ -348,7 +348,7 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
 
             def crash_after_reduce_commit(*args, **kwargs):
                 result = original_atomic(*args, **kwargs)
-                if kwargs["committed_at"] == "2026-10-03T00:00:04Z":
+                if kwargs["committed_at"] == "2026-10-03T00:00:04.000001Z":
                     raise RuntimeError("reduce commit response lost")
                 return result
 

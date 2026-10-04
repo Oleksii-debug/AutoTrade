@@ -7,7 +7,7 @@ cuts. Unfinished sends remain UNKNOWN and are never spontaneously retried.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -22,11 +22,19 @@ from .dispatch import (
     submission_attempt_aggregate_id,
 )
 from .durable_reservations import DurableReservationBook
+from .durable_settlement import (
+    DurableSettlementBook,
+    SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+    settlement_completion_evidence_metadata,
+    settlement_completion_evidence_receipt,
+    settlement_rule_evidence_metadata,
+    settlement_rule_evidence_receipt,
+)
 from .exact_decimal import (
     canonical_decimal_text, exact_add, exact_multiply,
     parse_bounded_exact_decimal,
 )
-from .persistence import JournalStore, payload_digest
+from .persistence import JournalStore, canonical_json, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -45,7 +53,15 @@ from .reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from .risk import RiskContext, RiskIntent, RiskPolicy
+from .settlement import (
+    SettlementAccountScope,
+    SettlementEvidence,
+    SettlementObligation,
+    SettlementRuleBinding,
+    equity_cash_obligation_from_transaction,
+)
 from .simulated_provider import SimulatedProvider
+from .simulation_runtime_checkpoint import autonomous_protocol_digest
 from research.autotrade_research.artifacts.resource_lock import ResourceLock
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -62,7 +78,7 @@ _OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
 _OWNER_AGGREGATE_ID = "canonical"
 _BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
 
-_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@3"
+_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@4"
 _SIMULATION_EPOCH = "2026-09-30T12:00:00Z"
 _STRATEGY_ID = "moving-average"
 _STRATEGY_VERSION = "1"
@@ -86,6 +102,9 @@ _ADMISSION_PROTOCOL = "authority-admission@1"
 _ECONOMIC_PROTOCOL = "provider-economic-book@1"
 _RECONCILIATION_PROTOCOL = "account-reconciliation@1"
 _PROVIDER_PROTOCOL = "simulated-provider@1"
+_SIMULATION_SETTLEMENT_RULE_ID = "canonical-simulator-equity-cash-same-day"
+_SIMULATION_SETTLEMENT_RULE_VERSION = "1"
+_SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS = 3
 
 
 def _uuid(kind: str, episode_id: str) -> str:
@@ -143,8 +162,12 @@ def _simulation_build_identity() -> str:
         "research_artifact_source_tree": _python_source_tree_digest(
             _module_source_root(ArtifactStore)
         ),
-        "research_strategy_source_tree": _python_source_tree_digest(_module_source_root(ReturnThresholdBaseline)),
-        "research_agent_source_tree": _python_source_tree_digest(_module_source_root(aggregate_specialists)),
+        "research_strategy_source_tree": _python_source_tree_digest(
+            _module_source_root(ReturnThresholdBaseline)
+        ),
+        "research_agent_source_tree": _python_source_tree_digest(
+            _module_source_root(aggregate_specialists)
+        ),
     }
     return payload_digest(document)
 
@@ -181,6 +204,12 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
             "fee_rate": canonical_decimal_text(FEE_RATE),
             "provider_protocol": _PROVIDER_PROTOCOL,
             "economic_protocol": _ECONOMIC_PROTOCOL,
+        },
+        "settlement_policy": {
+            "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
+            "rule_version": _SIMULATION_SETTLEMENT_RULE_VERSION,
+            "contractual_cycle": "SAME_DAY",
+            "provider_evidence_delay_seconds": _SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS,
         },
         "risk_policy": _canonical_risk_policy_document(),
         "authority_protocols": {
@@ -1060,7 +1089,32 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 )
                 if result != expected:
                     raise ValueError("completed RISK_REJECTED differs from durable zero-wire facts")
-            elif result.get("status") != "FILL_RECONCILED_ORDER_UNCONFIRMED":
+            elif result.get("status") == "FILL_RECONCILED_ORDER_UNCONFIRMED":
+                artifacts = ArtifactStore(root / "artifacts")
+                settlements = DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=ENVIRONMENT,
+                    evidence_artifact_root=root / "artifacts",
+                    evidence_artifact_store=artifacts,
+                )
+                obligations = settlements.obligations
+                if (
+                    len(obligations) != 1
+                    or obligations[0].cause_event_id != result.get("fill_id")
+                    or obligations[0].amount >= 0
+                ):
+                    raise ValueError(
+                        "completed BUY session does not match durable settlement provenance"
+                    )
+                projected = settlements.project(economic)
+                if str(projected.available_to_spend("USD")) != result["cash"]:
+                    raise ValueError(
+                        "completed BUY session settlement capital differs from economics"
+                    )
+            else:
                 raise ValueError("unsupported completed simulation outcome")
             result["resumed"] = True
             result["new_outbound_requests"] = 0
@@ -1196,13 +1250,17 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         reconciliation_events=reconciliation_events,
     )
     if economic_events:
-        plan = economic.prepare_batch_mutation((seed,), committed_at=timestamp)
+        seed_at = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                   - timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
+        plan = economic.prepare_batch_mutation((seed,), committed_at=seed_at)
         if len(economic_events) != 1 or not plan.already_committed:
             raise ValueError("canonical simulation seed bootstrap is invalid")
     else:
+        seed_at = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                   - timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
         economic.append(
             seed,
-            committed_at=timestamp,
+            committed_at=seed_at,
             expected_journal_sequence=bootstrap_cut["journal_sequence"],
             expected_whole_store_counts=bootstrap_cut["counts"],
         )
@@ -1321,7 +1379,22 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             )},
         )
 
-    authority = AuthorityService(store, risk_authority_resolver=resolve_risk)
+    artifacts = ArtifactStore(root / "artifacts")
+    settlements = DurableSettlementBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_environment=ENVIRONMENT,
+        evidence_artifact_root=root / "artifacts",
+        evidence_artifact_store=artifacts,
+    )
+    authority = AuthorityService(
+        store,
+        risk_authority_resolver=resolve_risk,
+        settlement_book=settlements,
+        economic_book=economic,
+    )
     policy_id = _uuid("policy", episode_id)
     authority.register_policy(AuthorityPolicy.create(
         policy_id=policy_id, account_id=ACCOUNT, environments={ENVIRONMENT},
@@ -1331,7 +1404,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     ), simulation_time=timestamp)
     reservations = DurableReservationBook(
         store, environment=ENVIRONMENT, account_id=ACCOUNT,
-        resolution_artifact_store=ArtifactStore(root / "artifacts"),
+        resolution_artifact_store=artifacts,
         resolution_artifact_root=root / "artifacts",
     )
     amount, required = buy_requirements
@@ -1425,20 +1498,47 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         raise ValueError("acknowledgement is not a fill; reconciliation required")
     fill = fills[0]
     fee = fill["fees"][0]
+    fill_transaction = book_equity_fill(
+        transaction_id=_uuid("fill-transaction", episode_id),
+        cause_event_id=fill["provider_execution_id"],
+        instrument=fill["instrument_version"],
+        settlement_currency="USD",
+        side=fill["side"],
+        quantity=fill["last_quantity"]["value"],
+        price=fill["last_price"],
+        fee=fee["amount"],
+        fee_currency=fee["currency"],
+        economic_effective_at=fill["trade_time"],
+        economic_order_key=f"provider:{PROVIDER}:execution:{fill['provider_execution_id']}",
+        observed_at=fill["receipt_time"],
+    )
+    trade_point = datetime.fromisoformat(
+        fill["trade_time"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    settlement_date = date.fromisoformat(fill["settlement_date"])
+    settlement_rule = _simulation_settlement_rule(
+        artifacts,
+        trade_date=trade_point.date(),
+        settlement_date=settlement_date,
+    )
+    settlement_obligation = equity_cash_obligation_from_transaction(
+        fill_transaction,
+        obligation_id=_uuid("settlement-obligation", episode_id),
+        instrument=INSTRUMENT,
+        settlement_currency="USD",
+        settlement_date=settlement_date,
+        rule_binding=settlement_rule,
+    )
     commit_economic_batch_with_reservation_consumption(
         economic, reservations,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
         reservation_id=_uuid("reservation", episode_id),
         usage={"CASH:USD": required_text},
-        transactions=(book_equity_fill(
-            transaction_id=_uuid("fill-transaction", episode_id),
-            cause_event_id=fill["provider_execution_id"],
-            instrument=fill["instrument_version"], settlement_currency="USD",
-            side=fill["side"], quantity=fill["last_quantity"]["value"],
-            price=fill["last_price"], fee=fee["amount"],
-            fee_currency=fee["currency"],
-        ),), committed_at=timestamp,
+        transactions=(fill_transaction,),
+        committed_at=timestamp,
+        settlement_book=settlements,
+        settlement_obligations=(settlement_obligation,),
     )
     reconciled, _ = _reconcile(
         provider, economic, timestamp, fill=fill, client_order_id=dispatch.client_order_id,
@@ -1469,7 +1569,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 # Multi-episode orchestration shares the existing financial authorities and OMS.
 # It owns no ledger, risk engine, strategy, transport or allocation algorithm.
 _LOOP_AGGREGATE = "canonical_autonomous_simulation"
-_LOOP_PROTOCOL = "provider-free-zero-loop-v4"
+_LOOP_PROTOCOL = "provider-free-zero-loop-v7"
 
 
 def _loop_event(
@@ -1487,6 +1587,22 @@ def _loop_event(
         if expected_journal_sequence is None
         else expected_journal_sequence
     )
+    if kind == "AutonomousEpisodeCompleted":
+        # Deliver existing publications before freezing the completion preimage.
+        for item in store.pending_outbox(limit=1000):
+            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+        from .simulation_runtime_checkpoint import (
+            COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
+        )
+        first = store.load_events(_LOOP_AGGREGATE, run_id)[0]
+        protocol = first["payload"]["protocol"]
+        receipt = prepare_autonomous_completion_receipt(
+            Path(store.store_identity.canonical_path).parent, store,
+            protocol=protocol, result=payload, event_id=_uuid(kind, f"{run_id}:{key}"),
+        )
+        if receipt["prior_cut"]["journal_sequence"] != cut:
+            raise ValueError("journal sequence changed before completion checkpoint")
+        payload = {**payload, COMPLETION_RECEIPT_FIELD: receipt}
     event = {
         "event_id": _uuid(kind, f"{run_id}:{key}"),
         "event_type": kind, "schema_version": "1.0.0",
@@ -1512,15 +1628,268 @@ def _loop_instrument(effective_from):
         venue_id="internal-simulation", provider_symbol="CANONICAL-SIM", asset_class="CASH_EQUITY",
         base_currency="CANONICAL-SIM", quote_currency="USD", settlement_currency="USD", quantity_unit="SHARE",
         contract_multiplier=Decimal("1"), price_tick=Decimal("0.01"), quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"), maximum_quantity=Decimal("10"), calendar_id="CONTINUOUS_24_7",
+        minimum_quantity=Decimal("1"),
+        maximum_quantity=Decimal("10"), calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC", effective_from=effective_from)
     return InstrumentRegistry(versions=(version,))
+
+
+def _simulation_settlement_scope() -> SettlementAccountScope:
+    return SettlementAccountScope(
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_environment=ENVIRONMENT,
+    )
+
+
+def _simulation_settlement_rule(
+    artifacts: ArtifactStore,
+    *,
+    trade_date: date,
+    settlement_date: date,
+) -> SettlementRuleBinding:
+    """Publish and bind the simulator's explicit contractual cash-settlement rule."""
+
+    if settlement_date != trade_date:
+        raise ValueError(
+            "canonical simulation same-day settlement policy conflicts with provider fill"
+        )
+
+    source_ref = (
+        f"simulation:settlement-rule:{_SIMULATION_SETTLEMENT_RULE_ID}:"
+        f"{_SIMULATION_SETTLEMENT_RULE_VERSION}"
+    )
+    scope = _simulation_settlement_scope()
+    provisional = SettlementRuleBinding(
+        rule_id=_SIMULATION_SETTLEMENT_RULE_ID,
+        rule_version=_SIMULATION_SETTLEMENT_RULE_VERSION,
+        scope=scope,
+        instrument_version=INSTRUMENT,
+        settlement_currency="USD",
+        effective_from=date(1970, 1, 1),
+        effective_to=None,
+        evidence_refs=(source_ref,),
+    )
+    receipt = settlement_rule_evidence_receipt(
+        provisional,
+        trade_date=trade_date,
+        expected_settlement_date=settlement_date,
+    )
+    receipt_text = canonical_json(receipt)
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://evidence.autotrade.local/canonical-simulation/"
+            "settlement-rule/" + receipt_text,
+        )
+    )
+    manifest = artifacts.publish_bytes(
+        artifact_id=artifact_id,
+        data=receipt_text.encode("utf-8"),
+        media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+        rights={"storage": True, "export": False},
+        source_refs=[source_ref],
+        metadata=settlement_rule_evidence_metadata(
+            provisional,
+            trade_date=trade_date,
+            expected_settlement_date=settlement_date,
+        ),
+    )
+    return SettlementRuleBinding(
+        rule_id=provisional.rule_id,
+        rule_version=provisional.rule_version,
+        scope=scope,
+        instrument_version=provisional.instrument_version,
+        settlement_currency=provisional.settlement_currency,
+        effective_from=provisional.effective_from,
+        effective_to=provisional.effective_to,
+        evidence_refs=(
+            source_ref,
+            f"artifact:{artifact_id}@{manifest['sha256']}",
+        ),
+    )
+
+
+def _simulation_settlement_completion(
+    artifacts: ArtifactStore,
+    obligation: SettlementObligation,
+    *,
+    observed_at: datetime,
+) -> SettlementEvidence:
+    """Materialize one deterministic SIMULATION-only provider settlement fact."""
+
+    source_ref = f"simulation:provider-settlement:{obligation.cause_event_id}"
+    provisional = SettlementEvidence(
+        obligation_id=obligation.obligation_id,
+        evidence_ref=source_ref,
+        observed_at=observed_at,
+    )
+    scope = _simulation_settlement_scope()
+    receipt = settlement_completion_evidence_receipt(
+        scope=scope,
+        obligation=obligation,
+        evidence=provisional,
+    )
+    receipt_text = canonical_json(receipt)
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://evidence.autotrade.local/canonical-simulation/"
+            "settlement-completion/" + receipt_text,
+        )
+    )
+    manifest = artifacts.publish_bytes(
+        artifact_id=artifact_id,
+        data=receipt_text.encode("utf-8"),
+        media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+        rights={"storage": True, "export": False},
+        source_refs=[source_ref],
+        metadata=settlement_completion_evidence_metadata(
+            scope=scope,
+            obligation=obligation,
+            evidence=provisional,
+        ),
+    )
+    return SettlementEvidence(
+        obligation_id=obligation.obligation_id,
+        evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
+        observed_at=observed_at,
+    )
+
+
+
+def _autonomous_fill_financials(artifacts, fill, key):
+    """Use identical economics and settlement identities during execution/recovery."""
+    fill_id = fill["provider_execution_id"]
+    fill_transaction = book_equity_fill(
+        transaction_id=_uuid("loop-fill-transaction", key),
+        cause_event_id=fill_id,
+        instrument=INSTRUMENT,
+        settlement_currency="USD",
+        side=fill["side"],
+        quantity=fill["last_quantity"]["value"],
+        price=fill["last_price"],
+        fee=fill["fees"][0]["amount"],
+        fee_currency="USD",
+        economic_effective_at=fill["trade_time"],
+        economic_order_key=f"provider:{PROVIDER}:execution:{fill_id}",
+        observed_at=fill["receipt_time"],
+    )
+    trade_point = datetime.fromisoformat(
+        fill["trade_time"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    settlement_date = date.fromisoformat(fill["settlement_date"])
+    settlement_rule = _simulation_settlement_rule(
+        artifacts,
+        trade_date=trade_point.date(),
+        settlement_date=settlement_date,
+    )
+    settlement_obligation = equity_cash_obligation_from_transaction(
+        fill_transaction,
+        obligation_id=_uuid("loop-settlement-obligation", key),
+        instrument=INSTRUMENT,
+        settlement_currency="USD",
+        settlement_date=settlement_date,
+        rule_binding=settlement_rule,
+    )
+    return fill_transaction, settlement_obligation
+
+
+def _retained_autonomous_fills(observed, protocol):
+    partials = protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}
+    field = "fills" if partials else "fill"
+    if set(observed) != {"episode", "protocol_digest", "provider_state", field}:
+        raise ValueError("retained fill observation identity differs")
+    fills = observed[field] if partials else [observed[field]]
+    if type(fills) is not list or len(fills) != (2 if partials else 1) or any(type(f) is not dict for f in fills):
+        raise ValueError("retained fill observation identity differs")
+    return tuple(fills)
+
+
+def _commit_autonomous_fill_batch(orders, economic, reservations, settlements, artifacts,
+                                fills, key, order_id, reservation_id, timestamp, *,
+                                expected_journal_sequence=None):
+    """The canonical atomic writer owns each partial execution and its exact usage."""
+    for index, fill in enumerate(fills, 1):
+        fill_key = key if len(fills) == 1 else f"{key}:part:{index}"
+        transaction, obligation = _autonomous_fill_financials(artifacts, fill, fill_key)
+        amount = exact_multiply(parse_bounded_exact_decimal(fill["last_quantity"]["value"]),
+                                parse_bounded_exact_decimal(fill["last_price"]))
+        fee = exact_multiply(amount, FEE_RATE)
+        usage = exact_add(amount, fee) if fill["side"] == "BUY" else fee
+        commit_order_fill_with_reservation_consumption(
+            orders, economic, reservations,
+            order_event_key=f"{fill_key}:fill", client_order_id=order_id,
+            fill_id=fill["provider_execution_id"], provider_execution_id=fill["provider_execution_id"],
+            quantity=fill["last_quantity"]["value"], price=fill["last_price"],
+            order_evidence_refs=fill["evidence"], command_id=_uuid("loop-fill-command", fill_key),
+            idempotency_key=_uuid("loop-fill-command", fill_key), reservation_id=reservation_id,
+            usage={"CASH:USD": usage}, transactions=(transaction,), committed_at=timestamp,
+            settlement_book=settlements, settlement_obligations=(obligation,),
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if expected_journal_sequence is not None:
+            expected_journal_sequence = orders.store.current_journal_sequence()
+
+def _apply_due_simulation_settlements(
+    settlements: DurableSettlementBook,
+    artifacts: ArtifactStore,
+    provider: SimulatedProvider,
+    *,
+    point: datetime,
+    committed_at: str,
+) -> tuple[str, ...]:
+    """Apply only provider settlement evidence that is causally available by point."""
+
+    fills = {
+        item["provider_execution_id"]: item
+        for item in provider.activity_fills()
+    }
+    already_settled = settlements.settled_obligation_evidence
+    applied: list[str] = []
+    for obligation in settlements.obligations:
+        if obligation.obligation_id in already_settled:
+            continue
+        fill = fills.get(obligation.cause_event_id)
+        if fill is None:
+            raise ValueError(
+                "settlement obligation lacks its canonical simulated provider fill"
+            )
+        trade_point = datetime.fromisoformat(
+            fill["trade_time"].replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+        observed_at = trade_point - timedelta(microseconds=1) + timedelta(
+            seconds=_SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS
+        )
+        if observed_at > point:
+            continue
+        evidence = _simulation_settlement_completion(
+            artifacts,
+            obligation,
+            observed_at=observed_at,
+        )
+        command_id = _uuid(
+            "loop-settlement-completion",
+            obligation.obligation_id,
+        )
+        settlements.apply_settlement(
+            evidence,
+            as_of=point.date(),
+            command_id=command_id,
+            idempotency_key=command_id,
+            committed_at=committed_at,
+        )
+        applied.append(obligation.obligation_id)
+    return tuple(applied)
 
 
 def run_autonomous_simulation(
     prices: list[str], state_dir: str | Path, *, run_id: str,
     now: str, stop_after_episodes: int | None = None,
     fault_at_episode: int | None = None, emergency_at_episode: int | None = None,
+    execution_profile: str = "IMMEDIATE",
+    target_quantity: str = "1",
     partial_fills: bool = False,
     should_pause=None,
 ) -> dict[str, object]:
@@ -1542,12 +1911,26 @@ def run_autonomous_simulation(
         raise ValueError("run_id must be canonical nonempty text")
     if type(prices) is not list or not 1 <= len(prices) <= 10000:
         raise ValueError("price stream must contain 1 to 10000 observations")
-    if type(partial_fills) is not bool:
-        raise TypeError("partial_fills must be boolean")
     values = _prices(prices)
     timestamp = _now(now)
+    if type(partial_fills) is not bool:
+        raise TypeError("partial_fills must be boolean")
+    if should_pause is not None and not callable(should_pause):
+        raise TypeError("should_pause must be callable or None")
+    if type(execution_profile) is not str or execution_profile not in {
+        "IMMEDIATE", "TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"
+    }:
+        raise ValueError("unsupported frozen simulation execution profile")
+    if partial_fills:
+        execution_profile = "PARTIAL_THEN_FULL_V1"
     instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
     instrument = instrument_registry.require_tradable(INSTRUMENT_ID, datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
+    if type(target_quantity) is not str:
+        raise TypeError("frozen target quantity must be exact decimal text")
+    target = parse_bounded_exact_decimal(target_quantity)
+    instrument.validate_quantity(target)
+    if execution_profile in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
+        instrument.validate_quantity(exact_multiply(target, Decimal("0.5")))
     for price in values:
         instrument.validate_price(price)
     for name, value in (("stop_after_episodes", stop_after_episodes),
@@ -1559,26 +1942,35 @@ def run_autonomous_simulation(
     # once so preflight and journal registration cannot select different limits.
     selected_policy = canonical_risk_policy(_risk_policy())
     protocol = {
-        "protocol": _LOOP_PROTOCOL, "run_id": run_id,
+        "protocol": _LOOP_PROTOCOL,
+        "execution_profile": execution_profile,
+        "target_quantity": canonical_decimal_text(target),
+        "clock_order": "SETTLEMENT_AT_EVENT_TIME_THEN_DECISION_PLUS_1US", "run_id": run_id,
         "source_build_identity": _simulation_build_identity(),
         "account": ACCOUNT, "provider": PROVIDER, "environment": ENVIRONMENT,
         "strategy_parameters": {"fast": 2, "slow": 3},
         "prices": [canonical_decimal_text(v) for v in values], "start_time": timestamp,
         "risk_policy": "canonical-provider-free-risk-v1",
         "risk_policy_digest": risk_policy_digest(selected_policy),
-        "strategy": "moving-average-2-3-long-only-target-1",
+        "strategy": "moving-average-2-3-long-only-target-" + canonical_decimal_text(target),
         "fee_rate": canonical_decimal_text(FEE_RATE), "initial_cash": canonical_decimal_text(INITIAL_CASH),
+        "settlement_policy": {
+            "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
+            "rule_version": _SIMULATION_SETTLEMENT_RULE_VERSION,
+            "contractual_cycle": "SAME_DAY",
+            "provider_evidence_delay_seconds": _SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS,
+        },
         "fault_at_episode": fault_at_episode, "emergency_at_episode": emergency_at_episode,
         "instrument": instrument.to_contract_dict(),
     }
-    if partial_fills:
-        protocol["execution_profile"] = "PARTIAL_THEN_FULL_V1"
     root = Path(state_dir)
     if any((root / name).exists() for name in ("checkpoint.json", "learning-evidence.jsonl")):
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
     with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
-        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy, should_pause)
+        return _run_autonomous_locked(
+            root, values, protocol, stop_after_episodes, selected_policy, should_pause
+        )
 
 
 def _autonomous_reconciliation(
@@ -1746,7 +2138,7 @@ def _recover_autonomous_zero_wire_completion(
         raise ValueError("zero-wire autonomous episode is invalid")
     if decision not in {"HOLD", "NO_TRADE"}:
         raise ValueError("autonomous episode is not proven zero-wire")
-    protocol_digest = payload_digest(protocol)
+    protocol_digest = autonomous_protocol_digest(protocol)
     if active["protocol_digest"] != protocol_digest:
         raise ValueError("zero-wire autonomous protocol identity differs")
     financial_cut = active["financial_cut"]
@@ -1762,7 +2154,7 @@ def _recover_autonomous_zero_wire_completion(
     key = f"{run_id}:{episode}"
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1)
+        + timedelta(seconds=episode - 1, microseconds=1)
     ).isoformat().replace("+00:00", "Z")
 
     # The Started cut is the last admissible pre-completion mutation point for
@@ -1842,7 +2234,7 @@ def _recover_autonomous_zero_wire_completion(
     if (
         any(record.state == "UNKNOWN" or any(value > 0 for value in record.remaining.values())
             for record in reservations.active())
-        or reservations.version != len(provider.orders) + len(provider.activity_fills())
+        or reservations.version != 2 * len(provider.activity_fills())
     ):
         raise ValueError(
             "zero-wire autonomous reservation history changed after start"
@@ -1936,40 +2328,6 @@ def _recover_autonomous_zero_wire_completion(
         )
 
 
-def _commit_autonomous_fills(store, orders, economic, reservations, *, key, order_id,
-                             reservation_id, fills, timestamp, expected_cut=None):
-    for index, fill in enumerate(fills):
-        fill_key = key if len(fills) == 1 else f"{key}:slice:{index + 1}"
-        quantity = parse_bounded_exact_decimal(fill["last_quantity"]["value"])
-        price = parse_bounded_exact_decimal(fill["last_price"])
-        fee = parse_bounded_exact_decimal(fill["fees"][0]["amount"])
-        usage = exact_add(exact_multiply(quantity, price), fee) if fill["side"] == "BUY" else fee
-        commit_order_fill_with_reservation_consumption(
-            orders, economic, reservations, order_event_key=f"{fill_key}:fill",
-            client_order_id=order_id, fill_id=fill["provider_execution_id"],
-            provider_execution_id=fill["provider_execution_id"],
-            quantity=quantity, price=price, order_evidence_refs=fill["evidence"],
-            command_id=_uuid("loop-fill-command", fill_key),
-            idempotency_key=_uuid("loop-fill-command", fill_key), reservation_id=reservation_id,
-            usage={"CASH:USD": usage}, transactions=(book_equity_fill(
-                transaction_id=_uuid("loop-fill-transaction", fill_key),
-                cause_event_id=fill["provider_execution_id"], instrument=INSTRUMENT,
-                settlement_currency="USD", side=fill["side"], quantity=quantity,
-                price=price, fee=fee, fee_currency="USD",
-                **({"economic_effective_at": timestamp, "economic_order_key": "simulation:execution:" + fill["provider_execution_id"],
-                    "observed_at": timestamp} if len(fills) == 2 else {})),), committed_at=timestamp,
-            **({"expected_journal_sequence": expected_cut} if expected_cut is not None else {}))
-        if expected_cut is not None:
-            expected_cut = store.current_journal_sequence()
-
-    if len(fills) == 2:
-        from .simulation_settlement import settle_simulated_transactions
-        artifacts = ArtifactStore(Path(store.path).parent / "artifacts")
-        settle_simulated_transactions(store, economic, artifacts,
-            transaction_ids=[_uuid("loop-fill-transaction", f"{key}:slice:{index + 1}") for index in range(len(fills))],
-            timestamp=timestamp)
-
-
 def _recover_autonomous_observed_fill(
     store: JournalStore,
     root: Path,
@@ -1995,15 +2353,13 @@ def _recover_autonomous_observed_fill(
     if type(episode) is not int or episode < 1:
         raise ValueError("retained fill episode is invalid")
     key = f"{run_id}:{episode}"
-    protocol_digest = payload_digest(protocol)
+    protocol_digest = autonomous_protocol_digest(protocol)
+    retained_fills = _retained_autonomous_fills(observed, protocol)
     if (
-        set(observed)
-        != {"episode", "protocol_digest", "provider_state", "fill"}
-        or observed["episode"] != episode
+        observed["episode"] != episode
         or observed["protocol_digest"] != protocol_digest
         or active.get("protocol_digest") != protocol_digest
         or type(observed["provider_state"]) is not dict
-        or type(observed["fill"]) is not dict
     ):
         raise ValueError("retained fill observation identity differs")
 
@@ -2013,14 +2369,14 @@ def _recover_autonomous_observed_fill(
     if decision not in {"BUY", "REDUCE"}:
         raise ValueError("retained fill lacks a trade decision")
     side = "BUY" if decision == "BUY" else "SELL"
-    target = Decimal("1") if side == "BUY" else Decimal("0")
+    target = parse_bounded_exact_decimal(protocol["target_quantity"]) if side == "BUY" else Decimal("0")
     prior_position = before.positions.get(INSTRUMENT, Decimal("0"))
     delta = exact_subtract(target, prior_position)
     quantity = exact_abs(delta)
     price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
     timestamp = (
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
-        + timedelta(seconds=episode - 1)
+        + timedelta(seconds=episode - 1, microseconds=1)
     ).isoformat().replace("+00:00", "Z")
     intent_id = _uuid("loop-intent", key)
     attempt_id = _uuid("loop-attempt", key)
@@ -2039,8 +2395,7 @@ def _recover_autonomous_observed_fill(
         fill for fill in fills if fill["order_ref"] == order.provider_order_id
     ]
     if (
-        len(selected) != (2 if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1" else 1)
-        or selected[-1] != observed["fill"]
+        tuple(selected) != retained_fills
         or tuple(
             fill
             for fill in fills
@@ -2057,16 +2412,18 @@ def _recover_autonomous_observed_fill(
     ):
         raise ValueError("retained simulator history differs")
 
-    fill = selected[-1]
-    slice_quantity = exact_multiply(quantity, Decimal("0.5")) if len(selected) == 2 else quantity
-    fee = exact_multiply(exact_multiply(quantity, price), FEE_RATE)
-    for part in selected:
-        if (part["instrument_version"] != INSTRUMENT or part["side"] != side
-            or parse_bounded_exact_decimal(part["last_quantity"]["value"]) != slice_quantity
-            or parse_bounded_exact_decimal(part["last_price"]) != price
-            or part["trade_time"] != timestamp
-            or part["fees"] != [{"amount": canonical_decimal_text(
-                exact_multiply(exact_multiply(slice_quantity, price), FEE_RATE)), "currency": "USD"}]):
+    part_quantity = exact_multiply(quantity, Decimal("0.5")) if len(selected) == 2 else quantity
+    for index, fill in enumerate(selected, 1):
+        fee = exact_multiply(exact_multiply(part_quantity, price), FEE_RATE)
+        if (
+            fill["instrument_version"] != INSTRUMENT or fill["side"] != side
+            or parse_bounded_exact_decimal(fill["last_quantity"]["value"]) != part_quantity
+            or parse_bounded_exact_decimal(fill["last_price"]) != price
+            or fill["trade_time"] != timestamp
+            or fill["fees"] != [{"amount": canonical_decimal_text(fee), "currency": "USD"}]
+            or (len(selected) == 2 and fill["provider_execution_id"] !=
+                _uuid("loop-partial-execution", f"{key}:part:{index}"))
+        ):
             raise ValueError("retained fill economics differ from frozen request")
 
     intent_hash = payload_digest(
@@ -2119,7 +2476,7 @@ def _recover_autonomous_observed_fill(
         "price": canonical_decimal_text(price),
         "now": timestamp,
     }
-    if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1":
+    if len(selected) == 2:
         request["fill_immediately"] = False
     replay = GuardedDispatcher(
         store,
@@ -2163,26 +2520,42 @@ def _recover_autonomous_observed_fill(
         provider.cash,
         provider.positions.get(INSTRUMENT, Decimal("0")),
     )
-    prefixes = [before_financial]
-    for part in selected:
-        q = parse_bounded_exact_decimal(part["last_quantity"]["value"])
-        cost = exact_multiply(q, price)
-        part_fee = parse_bounded_exact_decimal(part["fees"][0]["amount"])
-        old_cash, old_position = prefixes[-1]
-        prefixes.append((exact_subtract(old_cash, exact_add(cost, part_fee)) if side == "BUY"
-                         else exact_add(old_cash, exact_subtract(cost, part_fee)),
-                         exact_add(old_position, q) if side == "BUY" else exact_subtract(old_position, q)))
-    if financial_state not in prefixes or prefixes[-1] != after_financial:
+    expected_causes = {
+        _uuid("loop-seed-cause", run_id),
+        *(
+            prior_fill["provider_execution_id"]
+            for prior_fill in before.activity_fills()
+        ),
+    }
+    recorded_causes = {transaction.cause_event_id for transaction in economic.transactions}
+    projected_cash, projected_position = before_financial
+    valid_financial_state = financial_state == before_financial
+    valid_prefix = (financial_state == before_financial and recorded_causes == expected_causes
+                    and len(economic.transactions) == len(expected_causes))
+    for fill in selected:
+        fill_quantity = parse_bounded_exact_decimal(fill["last_quantity"]["value"])
+        notional = exact_multiply(fill_quantity, price)
+        fee = exact_multiply(notional, FEE_RATE)
+        signed_quantity = fill_quantity if side == "BUY" else exact_subtract(Decimal("0"), fill_quantity)
+        cash_delta = exact_subtract(Decimal("0"), exact_add(notional, fee)) if side == "BUY" else exact_subtract(notional, fee)
+        projected_cash = exact_add(projected_cash, cash_delta)
+        projected_position = exact_add(projected_position, signed_quantity)
+        valid_financial_state = valid_financial_state or financial_state == (projected_cash, projected_position)
+        expected_causes.add(fill["provider_execution_id"])
+        valid_prefix = valid_prefix or (
+            financial_state == (projected_cash, projected_position)
+            and recorded_causes == expected_causes and len(economic.transactions) == len(expected_causes))
+    if (projected_cash, projected_position) != after_financial or not valid_financial_state:
         raise ValueError("retained fill conflicts with canonical economic state")
-    prefix_index = prefixes.index(financial_state)
-    expected_causes = {_uuid("loop-seed-cause", run_id),
-        *(part["provider_execution_id"] for part in before.activity_fills()),
-        *(part["provider_execution_id"] for part in selected[:prefix_index])}
-    if (len(economic.transactions) != len(expected_causes)
-        or {transaction.cause_event_id for transaction in economic.transactions} != expected_causes):
+    if not valid_prefix:
         raise ValueError("retained fill conflicts with canonical economic history")
 
     artifacts = ArtifactStore(root / "artifacts")
+    settlements = DurableSettlementBook(
+        store, provider_id=PROVIDER, account_id=ACCOUNT,
+        environment=ENVIRONMENT, provider_environment=ENVIRONMENT,
+        evidence_artifact_root=root / "artifacts", evidence_artifact_store=artifacts,
+    )
     reservations = DurableReservationBook(
         store,
         environment=ENVIRONMENT,
@@ -2204,9 +2577,8 @@ def _recover_autonomous_observed_fill(
         )
 
     fill_id = fill["provider_execution_id"]
-    _commit_autonomous_fills(store, orders, economic, reservations,
-        key=key, order_id=order_id, reservation_id=reservation_id,
-        fills=selected, timestamp=timestamp, expected_cut=proof_cut)
+    _commit_autonomous_fill_batch(orders, economic, reservations, settlements, artifacts,
+        tuple(selected), key, order_id, reservation_id, timestamp, expected_journal_sequence=proof_cut)
     if (
         economic.cash("USD"),
         economic.position(INSTRUMENT),
@@ -2259,7 +2631,9 @@ def _recover_autonomous_observed_fill(
         )
 
 
-def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy, should_pause=None):
+def _run_autonomous_locked(
+    root, values, protocol, stop_after_episodes, selected_policy, should_pause=None
+):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_abs, exact_subtract, exact_sum, as_fraction, round_fraction_to_quantum
@@ -2269,7 +2643,28 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     store = JournalStore(root / "journal.sqlite3")
     run_id = protocol["run_id"]
     events = store.load_events(_LOOP_AGGREGATE, run_id)
-    protocol_digest = payload_digest(protocol)
+    from .simulation_runtime_checkpoint import (
+        _issue_autonomous_runtime_authority_key,
+        _require_autonomous_runtime_authority_key,
+    )
+    protocol = dict(protocol)
+    if not events:
+        key_identity = _issue_autonomous_runtime_authority_key(root)
+        protocol["runtime_authority_key_sha256"] = key_identity
+    else:
+        first = events[0]
+        if (
+            first["event_type"] != "AutonomousSimulationStarted"
+            or type(first.get("payload")) is not dict
+            or type(first["payload"].get("protocol")) is not dict
+        ):
+            raise ValueError("autonomous simulation start authority is invalid")
+        key_identity = first["payload"]["protocol"].get(
+            "runtime_authority_key_sha256"
+        )
+        _require_autonomous_runtime_authority_key(root, key_identity)
+        protocol["runtime_authority_key_sha256"] = key_identity
+    protocol_digest = autonomous_protocol_digest(protocol)
     started_at = datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
     instruments = _loop_instrument(started_at)
     if instruments.require_tradable(INSTRUMENT_ID, started_at).to_contract_dict() != protocol["instrument"]:
@@ -2283,7 +2678,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "provider_state": provider.export_state(),
         }, protocol["start_time"])
         events = store.load_events(_LOOP_AGGREGATE, run_id)
-    if events[0]["event_type"] != "AutonomousSimulationStarted" or events[0]["payload"]["protocol_digest"] != protocol_digest:
+    if (
+        events[0]["event_type"] != "AutonomousSimulationStarted"
+        or events[0]["payload"]["protocol_digest"] != protocol_digest
+        or events[0]["payload"]["protocol"] != protocol
+    ):
         raise ValueError("autonomous simulation protocol/input identity changed")
     completed = []
     active = None
@@ -2308,7 +2707,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         elif event["event_type"] == "AutonomousEpisodeCompleted":
             if active is None or payload["episode"] != active["episode"]:
                 raise ValueError("autonomous completion lacks matching start")
-            completed.append(payload)
+            completed.append({k: v for k, v in payload.items()
+                              if k != "runtime_checkpoint_completion_receipt"})
             active = None
             observed = None
         else:
@@ -2328,6 +2728,15 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 observed,
                 prior_state,
             )
+            recovered_completed = [{k: v for k, v in event["payload"].items()
+                                    if k != "runtime_checkpoint_completion_receipt"}
+                                   for event in store.load_events(_LOOP_AGGREGATE, run_id)
+                                   if event["event_type"] == "AutonomousEpisodeCompleted"]
+            from .simulation_runtime_checkpoint import persist_autonomous_runtime_checkpoint
+            persist_autonomous_runtime_checkpoint(
+                root, store, protocol=protocol, authority_key_identity=key_identity,
+                completed=recovered_completed,
+            )
             return _run_autonomous_locked(
                 root,
                 values,
@@ -2344,6 +2753,15 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 active,
                 prior_state,
             )
+            recovered_completed = [{k: v for k, v in event["payload"].items()
+                                    if k != "runtime_checkpoint_completion_receipt"}
+                                   for event in store.load_events(_LOOP_AGGREGATE, run_id)
+                                   if event["event_type"] == "AutonomousEpisodeCompleted"]
+            from .simulation_runtime_checkpoint import persist_autonomous_runtime_checkpoint
+            persist_autonomous_runtime_checkpoint(
+                root, store, protocol=protocol, authority_key_identity=key_identity,
+                completed=recovered_completed,
+            )
             return _run_autonomous_locked(
                 root,
                 values,
@@ -2356,19 +2774,62 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
                 "reason": "unfinished_episode_requires_reconciliation", "resumed": True}
+    if completed:
+        from .simulation_runtime_checkpoint import repair_autonomous_completion_checkpoint
+        repair_autonomous_completion_checkpoint(root, store, protocol=protocol, completed=completed)
+    if completed:
+        # Missing, malformed or causally stale checkpoint bytes are rejected
+        # before rebuilding any provider projection.  Full cross-authority
+        # equality is checked below after owner-specific recovery diagnostics.
+        from .simulation_runtime_checkpoint import preflight_autonomous_runtime_checkpoint
+        preflight_autonomous_runtime_checkpoint(
+            root,
+            protocol=protocol,
+            authority_key_identity=key_identity,
+            completed_episodes=len(completed),
+        )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
     provider = SimulatedProvider.from_state(state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
     economic.append(book_external_cash_flow(
         transaction_id=_uuid("loop-seed-transaction", run_id), cause_event_id=_uuid("loop-seed-cause", run_id),
-        currency="USD", amount=protocol["initial_cash"]))
+        currency="USD", amount=protocol["initial_cash"]), committed_at=protocol["start_time"])
     if provider.cash != economic.cash("USD") or provider.positions.get(INSTRUMENT, Decimal("0")) != economic.position(INSTRUMENT):
         raise ValueError("simulator snapshot conflicts with canonical economic state")
     artifacts = ArtifactStore(root / "artifacts")
+    settlements = DurableSettlementBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_environment=ENVIRONMENT,
+        evidence_artifact_root=root / "artifacts",
+        evidence_artifact_store=artifacts,
+    )
     reservations = DurableReservationBook(store, environment=ENVIRONMENT, account_id=ACCOUNT,
         resolution_artifact_store=artifacts, resolution_artifact_root=root / "artifacts")
     orders = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
         environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    if completed:
+        # Preserve the owning authorities' more specific fail-closed diagnoses
+        # before applying the cross-authority common-cut gate.  These reads do
+        # not expose another market event or permit a send.
+        if any(
+            record.state == "UNKNOWN"
+            or any(value > 0 for value in record.remaining.values())
+            for record in reservations.active()
+        ):
+            raise ValueError("pending/UNKNOWN reservations block a new financial cut")
+        if any(order.state != "FILLED" for order in orders.snapshots):
+            raise ValueError("pending/UNKNOWN OMS obligations block a new financial cut")
+        from .simulation_runtime_checkpoint import verify_autonomous_runtime_checkpoint
+        verify_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            authority_key_identity=key_identity,
+            completed=completed,
+        )
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
     registry = DurableRiskPolicyRegistry(store)
     policy = selected_policy
@@ -2391,6 +2852,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             key,
         )
 
+    authority = None
     for index in range(len(completed), end):
         if should_pause is not None and should_pause():
             break
@@ -2399,8 +2861,15 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         point = started_at + timedelta(seconds=index)
         instrument = instruments.require_tradable(INSTRUMENT_ID, point)
         instrument.validate_price(values[index])
-        timestamp = point.isoformat().replace("+00:00", "Z")
+        timestamp = (point + timedelta(microseconds=1)).isoformat().replace("+00:00", "Z")
         future = (point + timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
+        _apply_due_simulation_settlements(
+            settlements,
+            artifacts,
+            provider,
+            point=point,
+            committed_at=point.isoformat().replace("+00:00", "Z"),
+        )
         if any(record.state == "UNKNOWN" or any(value > 0 for value in record.remaining.values())
                for record in reservations.active()):
             raise ValueError("pending/UNKNOWN reservations block a new financial cut")
@@ -2423,18 +2892,26 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         valuations.record(mark)
         position = economic.position(INSTRUMENT)
         cash = economic.cash("USD")
+        available_cash = settlements.project(economic).available_to_spend("USD")
         price = mark.mark
         equity = exact_add(cash, exact_multiply(position, price))
         peak = max([INITIAL_CASH, equity, *previous_equities])
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
-        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], Decimal("1"))
+        frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
+        proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
         proposal_side = proposal.side
-        if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1":
+        if protocol["execution_profile"] == "PARTIAL_THEN_FULL_V1":
             from .product_agent import decide
-            proposal_side = decide(store, protocol, episode=episode, strategy_side=proposal.side,
-                position=position, timestamp=timestamp)
-        target_quantity = Decimal("1") if proposal_side == "BUY" else Decimal("0") if proposal_side == "SELL" else position
+            proposal_side = decide(
+                store,
+                protocol,
+                episode=episode,
+                strategy_side=proposal.side,
+                position=position,
+                timestamp=timestamp,
+            )
+        target_quantity = frozen_target if proposal_side == "BUY" else Decimal("0") if proposal_side == "SELL" else position
         decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal_side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
         if emergency:
@@ -2444,7 +2921,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             desired_notional=exact_multiply(target_quantity, price), price=price, lot_size=instrument.quantity_step,
             current_quantity=position, cost_rate=FEE_RATE, turnover_cost_rate=FEE_RATE,
             holding_cost_rate="0", max_executable_notional="1000"),),
-            AllocationPolicy.create(cash_available=exact_subtract(cash, reservations.total_reserved("CASH:USD")),
+            AllocationPolicy.create(cash_available=exact_subtract(available_cash, reservations.total_reserved("CASH:USD")),
                 max_gross_notional="1000", max_net_notional="1000", max_symbol_notional="1000",
                 max_total_cost="10", max_stress_loss="500", max_turnover_notional="1000"),
             stress_evidence=(StressScenarioEvidence.create(name="adverse-quarter", shocks={INSTRUMENT: "-0.25"},
@@ -2498,7 +2975,18 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     authority_policy_version=request.authority_policy_version, evaluated_at=request.evaluated_at,
                     valid_until=future, evidence_refs=refs)
 
-            authority = AuthorityService(store, risk_policy_scope=scope, risk_authority_resolver=resolve_risk)
+            if authority is None:
+                authority = AuthorityService(
+                    store,
+                    risk_policy_scope=scope,
+                    risk_authority_resolver=resolve_risk,
+                    settlement_book=settlements,
+                    economic_book=economic,
+                )
+            else:
+                # Resolver injection is already a SIMULATION-only composition
+                # seam; keep the sealed store/capital authority unchanged.
+                authority.risk_authority_resolver = resolve_risk
             policy_id = _uuid("loop-authority-policy", key)
             authority.register_policy(AuthorityPolicy.create(policy_id=policy_id, account_id=ACCOUNT,
                 environments={ENVIRONMENT}, instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
@@ -2518,7 +3006,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     instrument_type="EQUITY", reduce_only=side == "SELL", action="REDUCE" if side == "SELL" else "TRADE"),
                 risk_context=context, risk_policy=policy, risk_valid_until=future, reservation_book=reservations,
                 reservation_id=reservation_id, reservation_requirements={resource: required},
-                reservation_available={resource: cash},
+                reservation_available={resource: account_snapshot["balances"][0]["available"]},
                 reservation_checkpoint_event_id=checkpoint["event_id"], reservation_provider_id=PROVIDER,
                 reservation_max_age_seconds="60", now=timestamp)
             if admission.outcome != "ADMITTED":
@@ -2533,7 +3021,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     expected_cut=JournalStore.whole_store_state_cut(store))
                 request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
                     "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price), "now": timestamp}
-                if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1":
+                if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
                     request["fill_immediately"] = False
                 frozen_request = dict(request)
 
@@ -2557,16 +3045,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                     return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO", "run_id": run_id,
                             "completed_episodes": len(completed), "unresolved_episode": episode,
                             "new_outbound_requests": provider.outbound_request_count - count_before, "resumed": bool(completed)}
-                if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1":
-                    half = exact_multiply(exact_abs(quantity), Decimal("0.5"))
-                    for slice_index in (1, 2):
-                        provider.record_fill(client_order_id=order_id,
-                            provider_execution_id=_uuid("loop-partial-fill", f"{key}:{slice_index}"),
-                            quantity=half, price=price, now=timestamp)
                 # Acknowledgement has only changed OMS acceptance. Fill history owns quantity.
+                if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
+                    part_quantity = exact_multiply(exact_abs(quantity), Decimal("0.5"))
+                    instrument.validate_quantity(part_quantity)
+                    for part in (1, 2):
+                        provider.record_fill(client_order_id=order_id,
+                            provider_execution_id=_uuid("loop-partial-execution", f"{key}:part:{part}"),
+                            quantity=part_quantity, now=timestamp, price=price)
                 fresh_fills = [f for f in provider.activity_fills() if f["order_ref"] == dispatched.response["provider_order_id"]]
-                expected_fills = 2 if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1" else 1
-                if len(fresh_fills) != expected_fills:
+                if len(fresh_fills) != (2 if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"} else 1):
                     raise ValueError("ACK is not fill evidence")
                 fill = fresh_fills[-1]
                 fill_id = fill["provider_execution_id"]
@@ -2579,13 +3067,12 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                         "episode": episode,
                         "protocol_digest": protocol_digest,
                         "provider_state": provider.export_state(),
-                        "fill": fill,
+                        **({"fills": fresh_fills} if len(fresh_fills) == 2 else {"fill": fill}),
                     },
                     timestamp,
                 )
-                _commit_autonomous_fills(store, orders, economic, reservations,
-                    key=key, order_id=order_id, reservation_id=reservation_id,
-                    fills=fresh_fills, timestamp=timestamp)
+                _commit_autonomous_fill_batch(orders, economic, reservations, settlements, artifacts,
+                    tuple(fresh_fills), key, order_id, reservation_id, timestamp)
                 if orders.order(order_id).state != "FILLED":
                     raise ValueError("canonical OMS has not confirmed complete fill")
                 status = "FILLED"
@@ -2600,6 +3087,17 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         for item in store.pending_outbox(limit=1000):
             store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         completed.append(result)
+        # Persist only after the durable episode and every publication in this
+        # terminal cut are complete.  A crash before this point leaves the
+        # prior checkpoint and therefore fails closed on restart.
+        from .simulation_runtime_checkpoint import persist_autonomous_runtime_checkpoint
+        persist_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            authority_key_identity=key_identity,
+            completed=completed,
+        )
         previous_equities.append(equity)
     return {"status": "COMPLETED" if len(completed) == len(values) else "PAUSED", "environment": ENVIRONMENT,
         "mode": "ZERO", "run_id": run_id, "protocol_digest": protocol_digest,

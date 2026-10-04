@@ -7,6 +7,8 @@ not a market mark. Cash reconciliation alone cannot supply portfolio P&L.
 
 from __future__ import annotations
 
+from .simulation_runtime_checkpoint import autonomous_protocol_digest
+
 from pathlib import Path
 from decimal import Context, Decimal, localcontext, InvalidOperation, DivisionByZero, Overflow, Inexact, Rounded
 from contextlib import closing
@@ -607,7 +609,7 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
     if any(event["aggregate_id"] != run_id or event.get("environment") != ENVIRONMENT for event in loops):
         raise ValueError("autonomous simulation scope conflicts")
     protocol = first["payload"]["protocol"]
-    if protocol["protocol"] != _LOOP_PROTOCOL or payload_digest(protocol) != first["payload"]["protocol_digest"]:
+    if protocol["protocol"] != _LOOP_PROTOCOL or autonomous_protocol_digest(protocol) != first["payload"]["protocol_digest"]:
         raise ValueError("autonomous frozen protocol identity differs")
     if protocol.get("source_build_identity") != _simulation_build_identity():
         raise ValueError("autonomous source/build identity differs")
@@ -632,14 +634,16 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             # not for every already-completed retained observation.
             if (
                 set(payload)
-                != {"episode", "protocol_digest", "provider_state", "fill"}
+                != {"episode", "protocol_digest", "provider_state",
+                    "fills" if protocol.get("execution_profile") == "TWO_EQUAL_PARTIALS" else "fill"}
                 or type(payload.get("provider_state")) is not dict
-                or type(payload.get("fill")) is not dict
             ):
                 raise ValueError(
                     "autonomous retained fill observation is malformed"
                 )
             observed_fill = payload
+            from .simulation_session import _retained_autonomous_fills
+            _retained_autonomous_fills(payload, protocol)
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
             active = None
@@ -650,7 +654,8 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         retained = SimulatedProvider.from_state(
             observed_fill["provider_state"]
         )
-        if observed_fill["fill"] not in retained.activity_fills():
+        from .simulation_session import _retained_autonomous_fills
+        if any(fill not in retained.activity_fills() for fill in _retained_autonomous_fills(observed_fill, protocol)):
             raise ValueError(
                 "autonomous retained fill observation conflicts with provider state"
             )
@@ -699,8 +704,39 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         equity = exact_sum((cash, exact_multiply(position, price)))
         if _decimal(latest["equity"]) != equity:
             raise ValueError("autonomous portfolio valuation differs")
+        from .accounting import EconomicBook, project_equity_position
+        from .durable_settlement import DurableSettlementBook
+        from research.autotrade_research.artifacts.store import ArtifactStore
+        root = Path(store.store_identity.canonical_path).parent
+        settlement_owner = DurableSettlementBook(
+            store, provider_id=PROVIDER, account_id=ACCOUNT,
+            environment=ENVIRONMENT, provider_environment=ENVIRONMENT,
+            evidence_artifact_root=root / "artifacts",
+            evidence_artifact_store=ArtifactStore(root / "artifacts"),
+        )
+        settlement_projection = settlement_owner.project(economic)
+        buckets = settlement_projection.snapshot("USD")
+        if buckets.economic_cash != cash:
+            raise ValueError("autonomous settlement cash differs from economic cash")
+        reserved_cash = reservations.total_reserved("CASH:USD")
+        pnl = project_equity_position(EconomicBook(economic.transactions),
+            instrument=INSTRUMENT, settlement_currency="USD", mark_price=price)
+        net_pnl = exact_subtract(equity, _decimal(protocol["initial_cash"]))
+        if exact_subtract(exact_sum((pnl.realized_pnl, pnl.unrealized_pnl)),
+                          economic.fee_expense("USD")) != net_pnl:
+            raise ValueError("autonomous P&L does not conserve financial equity")
         report = {"evidence_class": "SIMULATION", "final_equity": canonical_decimal_text(equity),
-            "net_pnl": canonical_decimal_text(exact_subtract(equity, _decimal(protocol["initial_cash"]))),
+            "net_pnl": canonical_decimal_text(net_pnl),
+            "realized_pnl": canonical_decimal_text(pnl.realized_pnl),
+            "unrealized_pnl": canonical_decimal_text(pnl.unrealized_pnl),
+            "open_cost_basis": canonical_decimal_text(pnl.open_cost_basis),
+            "financial_equality_verified": True,
+            "cash_buckets": {"currency": "USD", "account_cash": canonical_decimal_text(cash),
+                "settled_cash": canonical_decimal_text(buckets.settled_cash),
+                "unsettled_receivable": canonical_decimal_text(buckets.unsettled_receivable),
+                "unsettled_payable": canonical_decimal_text(buckets.unsettled_payable),
+                "reserved_cash": canonical_decimal_text(reserved_cash),
+                "available_cash": canonical_decimal_text(settlement_projection.available_to_spend("USD", reserve=reserved_cash))},
             "total_fees": canonical_decimal_text(economic.fee_expense("USD")),
             "turnover": canonical_decimal_text(exact_sum(exact_multiply(_decimal(f["last_quantity"]["value"]), _decimal(f["last_price"]))
                                                        for f in provider.activity_fills())),

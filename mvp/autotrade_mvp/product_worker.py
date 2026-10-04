@@ -6,6 +6,7 @@ from threading import Thread
 from pathlib import Path
 from .authority import AuthorityService
 from .persistence import JournalStore, payload_digest
+from .simulation_runtime_checkpoint import autonomous_protocol_digest
 from .simulation_commands import (
     _protocol,
     _require_explicit_recovery_for_unknown_start,
@@ -121,7 +122,7 @@ def main():
     )
     if (
         action_payload.get('command_id') != args.command_id
-        or action_payload.get('protocol_digest') != payload_digest(protocol)
+        or action_payload.get('protocol_digest') != autonomous_protocol_digest(protocol)
         or action_payload.get('stop_after_episodes') != args.stop
     ):
         raise ValueError('worker invocation differs from durable lifecycle contract')
@@ -134,7 +135,9 @@ def main():
     result = run_autonomous_simulation(protocol['prices'], root, run_id=protocol['run_id'],
         now=protocol['start_time'], stop_after_episodes=args.stop,
         fault_at_episode=protocol['fault_at_episode'], emergency_at_episode=protocol['emergency_at_episode'],
-        partial_fills=protocol.get('execution_profile') == 'PARTIAL_THEN_FULL_V1', should_pause=pause_requested)
+        execution_profile=protocol.get('execution_profile', 'IMMEDIATE'),
+        target_quantity=protocol.get('target_quantity', '1'),
+        should_pause=pause_requested)
     print(json.dumps({k: v for k, v in result.items() if k != 'decisions'}))
     return 2 if result['status'] == 'UNKNOWN' else 0
 

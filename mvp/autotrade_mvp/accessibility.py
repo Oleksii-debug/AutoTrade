@@ -509,6 +509,24 @@ def format_accessible_status(
             )
             if canonical_report_readable and valuation_status == "MARK_UNAVAILABLE":
                 lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
+            cash_buckets = economic_report.get("cash_buckets")
+            if (
+                canonical_report_readable
+                and _has_exact_text_keys(cash_buckets)
+                and is_valid_common_scalar("CurrencyId", cash_buckets.get("currency"))
+            ):
+                lines.extend(
+                    [
+                        f"Account cash ({cash_buckets['currency']}): {_canonical_decimal_value(cash_buckets, 'account_cash')}",
+                        f"Settled cash: {_canonical_decimal_value(cash_buckets, 'settled_cash')}",
+                        f"Unsettled receivable: {_canonical_decimal_value(cash_buckets, 'unsettled_receivable')}",
+                        f"Unsettled payable: {_canonical_decimal_value(cash_buckets, 'unsettled_payable')}",
+                        f"Reserved cash: {_canonical_decimal_value(cash_buckets, 'reserved_cash')}",
+                        f"Available cash: {_canonical_decimal_value(cash_buckets, 'available_cash')}",
+                        f"Realized profit or loss: {_canonical_decimal_value(economic_report, 'realized_pnl')}",
+                        f"Unrealized profit or loss: {_canonical_decimal_value(economic_report, 'unrealized_pnl')}",
+                    ]
+                )
 
     lines.append("Economic edge: unproven")
     return "\n".join(lines)

@@ -6,6 +6,7 @@ accepted here. The journal-frozen simulation protocol selects every run input.
 from pathlib import Path
 from uuid import UUID, NAMESPACE_URL, uuid5
 from .persistence import JournalStore, payload_digest
+from .simulation_runtime_checkpoint import autonomous_protocol_digest
 
 SIMULATION_ACTIONS = frozenset({'START_SIMULATION', 'RECOVER_SIMULATION', 'BACKUP_SIMULATION'})
 _RECEIPT_TYPE = 'simulation_operator_receipt'
@@ -46,6 +47,8 @@ def _protocol(journal):
     protocol = starts[0]['payload']['protocol']
     if protocol['account'] != ACCOUNT or protocol['environment'] != ENVIRONMENT:
         raise ValueError('simulation scope differs')
+    if starts[0]['payload'].get('protocol_digest') != autonomous_protocol_digest(protocol):
+        raise ValueError('frozen simulation protocol digest differs')
     return protocol
 
 
@@ -62,7 +65,7 @@ def canonical_simulation_payload(journal, action, raw, command, account, environ
         raise ValueError('stop must be a frozen observation index')
     UUID(command)
     return {'schema_version': 1, 'command_id': command, 'account_id': account,
-            'environment': environment, 'protocol_digest': payload_digest(protocol),
+            'environment': environment, 'protocol_digest': autonomous_protocol_digest(protocol),
             'stop_after_episodes': stop}
 
 
@@ -197,7 +200,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         return existing
     protocol = _protocol(journal)
     _require_explicit_recovery_for_unknown_start(journal, action)
-    if payload_digest(protocol) != payload['protocol_digest']:
+    if autonomous_protocol_digest(protocol) != payload['protocol_digest']:
         raise ValueError('frozen simulation identity changed')
     root = Path(journal.path).parent
     verified_journal_cut = None

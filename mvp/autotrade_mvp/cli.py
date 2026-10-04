@@ -116,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-after-episodes", type=int, help="Pause the autonomous stream after this many observations")
     parser.add_argument("--fault-episode", type=int, help="Inject ambiguous internal send at this frozen episode")
     parser.add_argument("--emergency-episode", type=int, help="Enter frozen emergency NO_TRADE state at this episode")
+    parser.add_argument("--execution-profile", choices=("IMMEDIATE", "TWO_EQUAL_PARTIALS"), default="IMMEDIATE",
+                        help="Frozen ZERO execution: one full fill or two equal partial fills")
+    parser.add_argument("--target-quantity", default="1", help="Exact frozen ZERO target quantity in instrument units")
     parser.add_argument("--episode-id", default="episode-1", help="Stable canonical simulation episode identity")
     parser.add_argument("--at", help="Optional ISO timestamp for deterministic simulation evidence")
     parser.add_argument("--fault-after-send", action="store_true", help="Inject an ambiguous simulated send, which will never be retried")
@@ -130,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--fault-after-send requires --canonical-simulation")
     if any(value is not None for value in (args.stop_after_episodes, args.fault_episode, args.emergency_episode)) and not args.autonomous_simulation:
         parser.error("episode controls require --autonomous-simulation")
+    if (args.execution_profile != "IMMEDIATE" or args.target_quantity != "1") and not args.autonomous_simulation:
+        parser.error("execution controls require --autonomous-simulation")
     try:
         return _execute(args)
     except SimulationStateChanging:
@@ -146,7 +151,8 @@ def _execute(args) -> int:
     if args.autonomous_simulation:
         result = run_autonomous_simulation(args.prices.split(","), args.state_dir,
             run_id=args.episode_id, now=args.at, stop_after_episodes=args.stop_after_episodes,
-            fault_at_episode=args.fault_episode, emergency_at_episode=args.emergency_episode)
+            fault_at_episode=args.fault_episode, emergency_at_episode=args.emergency_episode,
+            execution_profile=args.execution_profile, target_quantity=args.target_quantity)
         print(json.dumps(result, indent=2))
         return 2 if result["status"] == "UNKNOWN" else 0
     if args.canonical_simulation:

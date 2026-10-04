@@ -753,6 +753,13 @@ class LearningWavePersistenceTests(unittest.TestCase):
 
             self.assertEqual(payload["artifact_kind"], "LEARNING_WAVE_RESOLUTION")
             self.assertEqual(payload["wave_id"], wave.wave_id)
+            self.assertEqual(payload["policy"]["policy_hash"], wave.policy_hash)
+            self.assertEqual(payload["policy"]["max_trades"], 20)
+            self.assertEqual(
+                payload["pause_reasons"],
+                ["LEARNING_WAVE.TRADE_THRESHOLD"],
+            )
+            self.assertEqual(payload["resolved_at"], RESOLUTION_TIME.isoformat())
             self.assertEqual(payload["candidate_artifact_hash"], wave.candidate_artifact_hash)
             self.assertEqual(
                 payload["resolution"]["resolution_hash"],

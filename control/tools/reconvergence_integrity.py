@@ -318,19 +318,30 @@ def assess_reconvergence(
     )
 
 
-def _git_lines(
+def _git_paths_z(
     *args: str,
     cwd: str | Path | None = None,
 ) -> tuple[str, ...]:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", *args, "-z"],
         cwd=cwd,
         check=True,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return tuple(completed.stdout.splitlines())
+    raw = completed.stdout
+    if not raw:
+        return ()
+    if not raw.endswith(b"\x00"):
+        raise ValueError("Malformed NUL-delimited Git path stream")
+    result: list[str] = []
+    for token in raw[:-1].split(b"\x00"):
+        try:
+            path = token.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Git paths must be canonical UTF-8") from error
+        result.append(_validated_repo_path(path, name="Git path"))
+    return tuple(result)
 
 
 def _git_name_status(
@@ -400,7 +411,7 @@ def assess_git_revisions(
     """
 
     base_is_ancestor = _git_is_ancestor(base, head, cwd=cwd)
-    base_paths = _git_lines("ls-tree", "-r", "--name-only", base, cwd=cwd)
+    base_paths = _git_paths_z("ls-tree", "-r", "--name-only", base, cwd=cwd)
     changes = _git_name_status(base, head, cwd=cwd)
     return assess_reconvergence(
         base_paths=base_paths,

@@ -82,12 +82,26 @@ def candidate(*, provider_environment="TESTNET", package_digest=PACKAGE_DIGEST):
     )
 
 
-def accepted_spot_q(*, ordinal=40, unsupported=(), include_read_rule=True):
+def accepted_spot_q(
+    *,
+    ordinal=40,
+    unsupported=(),
+    include_read_rule=True,
+    extra_route_semantics=None,
+):
     protocol = _protocol()
     raw_ref = _raw_ref(100 + ordinal)
     payload = _campaign_payload(raw_ref=raw_ref)
     payload["product_family"] = "SPOT"
     payload["unsupported_features"] = sorted(unsupported)
+    if extra_route_semantics is not None:
+        if type(extra_route_semantics) is not dict or any(
+            type(key) is not str or type(value) is not str
+            for key, value in extra_route_semantics.items()
+        ):
+            raise TypeError("extra_route_semantics must be exact string mapping")
+        payload["route_semantics"].update(extra_route_semantics)
+        payload["route_semantics"] = dict(sorted(payload["route_semantics"].items()))
     if include_read_rule:
         claim_key, claim_digest = qualified_read_route_semantic_claim(
             provider_id="BYBIT",
@@ -160,7 +174,13 @@ def accepted_spot_q(*, ordinal=40, unsupported=(), include_read_rule=True):
 
 
 class ProviderSelectionTests(unittest.TestCase):
-    def authorities(self, directory: str, *, unsupported=()):
+    def authorities(
+        self,
+        directory: str,
+        *,
+        unsupported=(),
+        extra_route_semantics=None,
+    ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
@@ -180,7 +200,10 @@ class ProviderSelectionTests(unittest.TestCase):
             evidence_store=evidence,
             evidence_root=evidence_root,
         )
-        record, receipt, protocol = accepted_spot_q(unsupported=unsupported)
+        record, receipt, protocol = accepted_spot_q(
+            unsupported=unsupported,
+            extra_route_semantics=extra_route_semantics,
+        )
         harness.register(
             protocol_key=protocol.key,
             record=record,

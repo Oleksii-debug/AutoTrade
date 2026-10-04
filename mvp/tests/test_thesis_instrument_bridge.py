@@ -201,5 +201,20 @@ class ThesisInstrumentBridgeTests(unittest.TestCase):
             self.candidate(instrument=derived)
 
 
+    def test_provider_identity_is_preserved_across_bridge(self):
+        candidate = self.candidate(
+            instrument=self.instrument(provider_id="Provider-X"),
+        )
+        self.assertEqual(candidate.provider_id, "Provider-X")
+
+    def test_mutated_whitespace_identity_is_not_laundered_by_bridge(self):
+        instrument = self.instrument()
+        object.__setattr__(instrument, "provider_id", " SIMULATED")
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "canonical non-empty text",
+        ):
+            self.candidate(instrument=instrument)
+
 if __name__ == "__main__":
     unittest.main()

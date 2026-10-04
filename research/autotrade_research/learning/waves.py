@@ -194,6 +194,11 @@ class MarketWaveSnapshot:
         )
         object.__setattr__(
             self,
+            "champion_artifact_hash",
+            _digest(self.champion_artifact_hash, name="champion_artifact_hash"),
+        )
+        object.__setattr__(
+            self,
             "source_cut_hash",
             _digest(self.source_cut_hash, name="source_cut_hash"),
         )
@@ -236,6 +241,7 @@ class MarketWaveSnapshot:
 class PauseDecision:
     wave_id: str
     policy_hash: str
+    champion_artifact_hash: str
     source_cut_hash: str
     should_pause: bool
     reasons: tuple[str, ...]
@@ -316,6 +322,7 @@ def evaluate_pause(
     return PauseDecision(
         wave_id=snapshot.wave_id,
         policy_hash=policy.policy_hash,
+        champion_artifact_hash=snapshot.champion_artifact_hash,
         source_cut_hash=snapshot.source_cut_hash,
         should_pause=bool(reasons),
         reasons=tuple(reasons),
@@ -363,6 +370,7 @@ class EvidencePopulation:
 @dataclass(frozen=True, slots=True)
 class CandidateWave:
     wave_id: str
+    policy: LearningWavePolicy
     policy_hash: str
     champion_artifact_hash: str
     candidate_id: str
@@ -370,6 +378,8 @@ class CandidateWave:
     candidate_created_at: datetime
     pause_decision_hash: str
     paused_source_cut_hash: str
+    error_analysis_hash: str
+    change_summary: str
     training_population: EvidencePopulation
     validation_population: EvidencePopulation
     validation_opened_at: datetime
@@ -377,11 +387,12 @@ class CandidateWave:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _text(self.wave_id, name="wave_id"))
-        object.__setattr__(
-            self,
-            "policy_hash",
-            _digest(self.policy_hash, name="policy_hash"),
-        )
+        if not isinstance(self.policy, LearningWavePolicy):
+            raise TypeError("policy must be LearningWavePolicy")
+        policy_hash = _digest(self.policy_hash, name="policy_hash")
+        if self.policy.policy_hash != policy_hash:
+            raise ValueError("candidate policy does not match bound policy hash")
+        object.__setattr__(self, "policy_hash", policy_hash)
         champion = _digest(
             self.champion_artifact_hash,
             name="champion_artifact_hash",
@@ -415,6 +426,16 @@ class CandidateWave:
             name="paused_source_cut_hash",
         )
         object.__setattr__(self, "paused_source_cut_hash", paused_cut)
+        object.__setattr__(
+            self,
+            "error_analysis_hash",
+            _digest(self.error_analysis_hash, name="error_analysis_hash"),
+        )
+        object.__setattr__(
+            self,
+            "change_summary",
+            _text(self.change_summary, name="change_summary"),
+        )
         if not isinstance(self.training_population, EvidencePopulation):
             raise TypeError("training_population must be EvidencePopulation")
         if not isinstance(self.validation_population, EvidencePopulation):
@@ -432,10 +453,9 @@ class CandidateWave:
         )
         if overlap:
             raise ValueError("validation observations must be disjoint from candidate training")
-        mode = _text(self.promotion_mode, name="promotion_mode")
-        if mode not in {"AUTO", "CONFIRMATION"}:
-            raise ValueError("promotion_mode must be AUTO or CONFIRMATION")
-        object.__setattr__(self, "promotion_mode", mode)
+    @property
+    def promotion_mode(self) -> str:
+        return self.policy.promotion_mode
 
     @classmethod
     def from_pause(
@@ -447,6 +467,8 @@ class CandidateWave:
         candidate_id: str,
         candidate_artifact_hash: str,
         candidate_created_at: datetime,
+        error_analysis_hash: str,
+        change_summary: str,
         training_population: EvidencePopulation,
         validation_population: EvidencePopulation,
         validation_opened_at: datetime,
@@ -459,19 +481,24 @@ class CandidateWave:
             raise TypeError("policy must be LearningWavePolicy")
         if policy.policy_hash != pause.policy_hash:
             raise ValueError("policy does not match the exact pause decision")
+        champion = _digest(champion_artifact_hash, name="champion_artifact_hash")
+        if champion != pause.champion_artifact_hash:
+            raise ValueError("champion does not match the exact pause decision")
         return cls(
             wave_id=pause.wave_id,
+            policy=policy,
             policy_hash=pause.policy_hash,
-            champion_artifact_hash=champion_artifact_hash,
+            champion_artifact_hash=champion,
             candidate_id=candidate_id,
             candidate_artifact_hash=candidate_artifact_hash,
             candidate_created_at=candidate_created_at,
             pause_decision_hash=pause.decision_hash,
             paused_source_cut_hash=pause.source_cut_hash,
+            error_analysis_hash=error_analysis_hash,
+            change_summary=change_summary,
             training_population=training_population,
             validation_population=validation_population,
             validation_opened_at=validation_opened_at,
-            promotion_mode=policy.promotion_mode,
         )
 
 
@@ -552,6 +579,8 @@ def resolve_candidate(
         raise TypeError("wave must be CandidateWave")
     if not isinstance(evaluation, CandidateEvaluation):
         raise TypeError("evaluation must be CandidateEvaluation")
+    if wave.policy.policy_hash != wave.policy_hash:
+        raise ValueError("bound learning-wave policy changed after candidate creation")
     if evaluation.candidate_artifact_hash != wave.candidate_artifact_hash:
         raise ValueError("evaluation does not bind this candidate artifact")
 
@@ -584,6 +613,8 @@ def resolve_candidate(
         "candidate_id": wave.candidate_id,
         "candidate_artifact_hash": wave.candidate_artifact_hash,
         "pause_decision_hash": wave.pause_decision_hash,
+        "error_analysis_hash": wave.error_analysis_hash,
+        "change_summary": wave.change_summary,
         "training_population_root": wave.training_population.root_hash,
         "validation_population_root": wave.validation_population.root_hash,
         "validation_opened_at": wave.validation_opened_at.isoformat(),

@@ -87,6 +87,7 @@ class ProviderQualificationIdentity:
     evidence_set_digest: str
     chronology_digest: str
     lineage_digest: str
+    acceptance_metadata_digest: str
     attestation_digest: str
     trust_policy_digest: str
     issuer_identity_digest: str
@@ -143,6 +144,7 @@ class ProviderQualificationIdentity:
             "evidence_set_digest",
             "chronology_digest",
             "lineage_digest",
+            "acceptance_metadata_digest",
             "attestation_digest",
             "trust_policy_digest",
             "issuer_identity_digest",
@@ -170,6 +172,7 @@ class ProviderQualificationIdentity:
             "evidence_set_digest": self.evidence_set_digest,
             "chronology_digest": self.chronology_digest,
             "lineage_digest": self.lineage_digest,
+            "acceptance_metadata_digest": self.acceptance_metadata_digest,
             "attestation_digest": self.attestation_digest,
             "trust_policy_digest": self.trust_policy_digest,
             "issuer_identity_digest": self.issuer_identity_digest,

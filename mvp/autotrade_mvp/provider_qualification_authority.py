@@ -29,19 +29,23 @@ from research.autotrade_research.artifacts import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
-from .persistence import JournalStore, canonical_json, payload_digest
+import mvp.autotrade_mvp.qualification_attestation as qualification_attestation_module
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_domain import ProviderFinancialScope
 from .provider_qualification_identity import ProviderQualificationIdentity
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
     QualificationAttestation,
-    QualificationTrustError,
     SignedQualificationAttestation,
     parse_signed_qualification_attestation,
-    verify_canonical_qualification_attestation,
 )
-from .store_identity import require_exact_journal_store_identity
 
 
 _AUTHORITY_SCHEMA_VERSION = "1.0.0"
@@ -87,6 +91,7 @@ class AcceptedProviderQualification:
     """Detached current-Q snapshot reconstructed from durable trusted evidence."""
 
     identity: ProviderQualificationIdentity
+    signed_at: str
     authority_event_id: str
     authority_journal_sequence: int
     store_identity_digest: str
@@ -99,6 +104,7 @@ class AcceptedProviderQualification:
 @dataclass(frozen=True, slots=True)
 class _DerivedProviderQualification:
     identity: ProviderQualificationIdentity
+    signed_at: str
     receipt_record: Mapping[str, object]
     campaign_artifact_id: str
 
@@ -142,13 +148,15 @@ def _exact_mapping(value: object, *, name: str) -> dict[str, object]:
     return dict(value)
 
 
-def _store_identity_digest(store: JournalStore) -> str:
-    if type(store) is not JournalStore:
-        raise TypeError("store must be exact JournalStore")
-    identity = require_exact_journal_store_identity(
-        JournalStore.store_identity.__get__(store, JournalStore),
-        subject="provider qualification JournalStore identity",
+def _selected_store_identity(store: JournalStore):
+    return require_exact_journal_store_authority(
+        store,
+        subject="provider qualification JournalStore",
     )
+
+
+def _store_identity_digest(store: JournalStore) -> str:
+    identity = _selected_store_identity(store)
     return payload_digest(
         {
             "canonical_path": identity.canonical_path,
@@ -382,7 +390,7 @@ def _derive_verified_provider_qualification(
             "signed qualification source does not match adapter source"
         )
 
-    accepted = verify_canonical_qualification_attestation(
+    accepted = qualification_attestation_module.verify_canonical_qualification_attestation(
         detached,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
@@ -443,10 +451,6 @@ def _derive_verified_provider_qualification(
         raise ProviderQualificationAuthorityError(
             "provider campaign artifact cannot self-satisfy a support role"
         )
-    # Hold each support artifact exactly once in this composition and rehash its
-    # returned bytes.  Canonical attestation verification independently proves
-    # signer/root authorization; these held reads establish the values consumed
-    # to derive the accepted Q identity.
     for ref in support_refs:
         _read_ref(read_snapshot, ref)
 
@@ -484,6 +488,7 @@ def _derive_verified_provider_qualification(
     )
     return _DerivedProviderQualification(
         identity=identity,
+        signed_at=detached.attestation.signed_at,
         receipt_record=receipt_record,
         campaign_artifact_id=campaign_ref.artifact_id,
     )
@@ -530,6 +535,7 @@ def _aggregate_id_for_expected_scope(
 def _accepted_from_event(
     *,
     identity: ProviderQualificationIdentity,
+    signed_at: str,
     event: Mapping[str, object],
     store_identity_digest: str,
 ) -> AcceptedProviderQualification:
@@ -545,10 +551,17 @@ def _accepted_from_event(
         )
     return AcceptedProviderQualification(
         identity=identity,
+        signed_at=signed_at,
         authority_event_id=event_id,
         authority_journal_sequence=sequence,
         store_identity_digest=store_identity_digest,
     )
+
+
+def _load_authority_events(store: JournalStore, aggregate_id: str):
+    selected_identity = _selected_store_identity(store)
+    with journal_store_authority_scope(store, selected_identity):
+        return JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
 
 
 def _replay_authority(
@@ -558,10 +571,8 @@ def _replay_authority(
     evidence_store: ArtifactStore,
     evidence_root: str | Path,
 ) -> _ReplayState:
-    if type(store) is not JournalStore:
-        raise TypeError("store must be exact JournalStore")
     expected_store_digest = _store_identity_digest(store)
-    events = JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
+    events = _load_authority_events(store, aggregate_id)
     current: AcceptedProviderQualification | None = None
     revoked = False
     for expected_version, event in enumerate(events, start=1):
@@ -589,6 +600,7 @@ def _replay_authority(
                 "store_identity_digest",
                 "qualification_id",
                 "identity_payload",
+                "signed_at",
                 "receipt",
                 "campaign_artifact_id",
                 "supersedes_qualification_id",
@@ -616,26 +628,40 @@ def _replay_authority(
                 raise ProviderQualificationAuthorityError(
                     "provider qualification durable identity conflicts with trusted evidence"
                 )
+            if payload.get("signed_at") != derived.signed_at:
+                raise ProviderQualificationAuthorityError(
+                    "provider qualification signed chronology conflicts with trusted evidence"
+                )
             if payload.get("campaign_artifact_id") != derived.campaign_artifact_id:
                 raise ProviderQualificationAuthorityError(
                     "provider qualification campaign binding conflicts with trusted evidence"
                 )
             supersedes = payload.get("supersedes_qualification_id")
-            if event_type == _EVENT_SUPERSEDED:
-                if current is None or revoked:
+            if event_type == _EVENT_ACCEPTED:
+                if current is not None or supersedes is not None:
                     raise ProviderQualificationAuthorityError(
-                        "provider qualification supersession has no current predecessor"
+                        "provider qualification acceptance illegally resets existing history"
+                    )
+            else:
+                if current is None:
+                    raise ProviderQualificationAuthorityError(
+                        "provider qualification supersession has no predecessor"
                     )
                 if supersedes != current.qualification_id:
                     raise ProviderQualificationAuthorityError(
                         "provider qualification supersession predecessor conflicts"
                     )
-            elif supersedes is not None:
-                raise ProviderQualificationAuthorityError(
-                    "initial provider qualification acceptance cannot claim supersession"
-                )
+                if identity.content_digest == current.qualification_id:
+                    raise ProviderQualificationAuthorityError(
+                        "provider qualification supersession cannot resurrect the same Q"
+                    )
+                if derived.signed_at <= current.signed_at:
+                    raise ProviderQualificationAuthorityError(
+                        "provider qualification signed chronology regressed during supersession"
+                    )
             current = _accepted_from_event(
                 identity=identity,
+                signed_at=derived.signed_at,
                 event=event,
                 store_identity_digest=expected_store_digest,
             )
@@ -673,6 +699,12 @@ def _event_id(aggregate_id: str, version: int, action: str, qualification_id: st
     return "provider-qualification-authority-" + sha256(material.encode("utf-8")).hexdigest()
 
 
+def _append_authority_event(store: JournalStore, envelope: dict[str, object]) -> None:
+    selected_identity = _selected_store_identity(store)
+    with journal_store_authority_scope(store, selected_identity):
+        JournalStore.append_event(store, envelope)
+
+
 def accept_provider_qualification(
     store: JournalStore,
     *,
@@ -686,8 +718,7 @@ def accept_provider_qualification(
 ) -> AcceptedProviderQualification:
     """Verify trusted campaign evidence and durably make its exact Q current."""
 
-    if type(store) is not JournalStore:
-        raise TypeError("store must be exact JournalStore")
+    _selected_store_identity(store)
     derived = _derive_verified_provider_qualification(
         receipt=receipt,
         evidence_store=evidence_store,
@@ -705,14 +736,22 @@ def accept_provider_qualification(
         evidence_store=evidence_store,
         evidence_root=evidence_root,
     )
-    if state.current is not None and not state.revoked:
-        if state.current.qualification_id == identity.content_digest:
-            return state.current
-        event_type = _EVENT_SUPERSEDED
-        supersedes: str | None = state.current.qualification_id
-    else:
+    if state.current is None:
         event_type = _EVENT_ACCEPTED
-        supersedes = None
+        supersedes: str | None = None
+    elif not state.revoked and state.current.qualification_id == identity.content_digest:
+        return state.current
+    else:
+        if state.current.qualification_id == identity.content_digest:
+            raise ProviderQualificationAuthorityError(
+                "revoked provider qualification cannot be reaccepted from the same Q evidence"
+            )
+        if derived.signed_at <= state.current.signed_at:
+            raise ProviderQualificationAuthorityError(
+                "provider qualification supersession must advance signed chronology"
+            )
+        event_type = _EVENT_SUPERSEDED
+        supersedes = state.current.qualification_id
 
     version = state.event_count + 1
     store_digest = _store_identity_digest(store)
@@ -721,6 +760,7 @@ def accept_provider_qualification(
         "store_identity_digest": store_digest,
         "qualification_id": identity.content_digest,
         "identity_payload": identity.payload(),
+        "signed_at": derived.signed_at,
         "receipt": dict(derived.receipt_record),
         "campaign_artifact_id": derived.campaign_artifact_id,
         "supersedes_qualification_id": supersedes,
@@ -737,7 +777,7 @@ def accept_provider_qualification(
         "committed_at": _now(),
     }
     try:
-        JournalStore.append_event(store, envelope)
+        _append_authority_event(store, envelope)
     except ValueError as error:
         raise ProviderQualificationAuthorityError(
             "provider qualification currentness changed during acceptance"
@@ -768,8 +808,7 @@ def require_current_provider_qualification(
 ) -> AcceptedProviderQualification:
     """Require one exact expected Q to remain current; never substitute a newer Q."""
 
-    if type(store) is not JournalStore:
-        raise TypeError("store must be exact JournalStore")
+    _selected_store_identity(store)
     if type(expected_provider_scope) is not ProviderFinancialScope:
         raise TypeError("expected_provider_scope must be exact ProviderFinancialScope")
     expected_qualification_id = _exact_text(
@@ -877,7 +916,7 @@ def revoke_provider_qualification(
         "committed_at": _now(),
     }
     try:
-        JournalStore.append_event(store, envelope)
+        _append_authority_event(store, envelope)
     except ValueError as error:
         raise ProviderQualificationAuthorityError(
             "provider qualification currentness changed during revocation"

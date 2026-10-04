@@ -22,6 +22,7 @@ from .exact_decimal import (
     as_fraction,
     bounded_fraction,
     canonical_decimal_text as _shared_canonical_decimal_text,
+    parse_bounded_exact_decimal,
     exact_abs,
     exact_add,
     exact_multiply,
@@ -42,21 +43,14 @@ _ZERO = Decimal("0")
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
-    if isinstance(value, Decimal) and type(value) is not Decimal:
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(
+            f"{name} must use Decimal, string or integer input"
+        )
     try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    try:
-        as_fraction(result)
+        return parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:
-        raise ValueError(f"{name} exceeds the exact Decimal resource envelope") from error
-    return result
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _exact_ratio(numerator: Decimal, denominator: Decimal, *, name: str) -> Fraction:
@@ -94,16 +88,27 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _identity_key(value, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} keys must be non-empty strings")
     return value.strip()
 
 
+def _exact_sequence_snapshot(values, *, name: str) -> tuple[object, ...]:
+    """Hold one built-in sequence cut before risk-policy/context normalization."""
+
+    if type(values) is tuple:
+        return values
+    if type(values) is list:
+        return tuple(list.copy(values))
+    raise TypeError(f"{name} must be a sequence backed by an exact list or tuple")
+
+
 def _normalize_mapping(values, *, name: str, parser) -> dict[str, Decimal]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
+    if type(values) is not dict:
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, Decimal] = {}
-    for raw_key, raw_value in values.items():
+    for raw_key, raw_value in snapshot.items():
         key = _identity_key(raw_key, name=name)
         if key in normalized:
             raise ValueError(f"{name} keys must be unique after normalization")
@@ -132,25 +137,37 @@ def normalize_reservation_requirements(
 def reservation_requirements_payload(
     values: tuple[tuple[str, Decimal], ...] | Mapping[str, object],
 ) -> dict[str, str]:
-    if isinstance(values, Mapping):
+    if type(values) is dict:
         normalized = normalize_reservation_requirements(values)
-    else:
-        if (
-            not isinstance(values, tuple)
-            or not values
-            or any(
-                not isinstance(item, tuple) or len(item) != 2
-                for item in values
-            )
-        ):
+    elif type(values) is tuple:
+        if not values:
             raise TypeError(
-                "reservation requirements must be a canonical tuple or mapping"
+                "reservation requirements must be a non-empty canonical tuple"
             )
-        normalized = normalize_reservation_requirements(dict(values))
+        canonical_items: dict[str, Decimal] = {}
+        for item in values:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError(
+                    "reservation requirements must be a canonical tuple or exact dict"
+                )
+            resource = _identity_key(item[0], name="reservation_requirements")
+            if resource in canonical_items:
+                raise ValueError(
+                    "reservation_requirements keys must be unique after normalization"
+                )
+            canonical_items[resource] = _positive(
+                item[1],
+                name=f"reservation_requirements[{resource}]",
+            )
+        normalized = tuple(sorted(canonical_items.items()))
         if normalized != values:
             raise ValueError(
                 "reservation requirements tuple is not canonical"
             )
+    else:
+        raise TypeError(
+            "reservation requirements must be a canonical tuple or exact dict"
+        )
     return {
         resource: _canonical_decimal_text(amount)
         for resource, amount in normalized
@@ -158,10 +175,11 @@ def reservation_requirements_payload(
 
 
 def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
+    if type(values) is not dict:
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
-    for raw_key, raw_value in values.items():
+    for raw_key, raw_value in snapshot.items():
         key = _identity_key(raw_key, name=name)
         if key in normalized:
             raise ValueError(f"{name} keys must be unique after normalization")
@@ -170,11 +188,10 @@ def _normalize_text_mapping(values, *, name: str) -> dict[str, str]:
 
 
 def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
-        raise TypeError(f"{name} must be a sequence of action names")
+    snapshot = _exact_sequence_snapshot(values, name=name)
     normalized: list[str] = []
-    for value in values:
-        if not isinstance(value, str) or not value.strip():
+    for value in snapshot:
+        if type(value) is not str or not value.strip():
             raise ValueError(f"{name} values must be non-empty strings")
         action = value.strip().upper()
         if action not in RISK_ACTIONS:
@@ -188,11 +205,10 @@ def _normalize_actions(values, *, name: str) -> tuple[str, ...]:
 
 
 def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
-        raise TypeError(f"{name} must be a sequence of labels")
+    snapshot = _exact_sequence_snapshot(values, name=name)
     normalized: list[str] = []
-    for value in values:
-        if not isinstance(value, str) or not value.strip():
+    for value in snapshot:
+        if type(value) is not str or not value.strip():
             raise ValueError(f"{name} values must be non-empty strings")
         label = value.strip()
         if label in normalized:
@@ -202,10 +218,11 @@ def _normalize_labels(values, *, name: str) -> tuple[str, ...]:
 
 
 def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decimal]]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
+    if type(values) is not dict:
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, dict[str, Decimal]] = {}
-    for raw_key, raw_value in values.items():
+    for raw_key, raw_value in snapshot.items():
         key = _identity_key(raw_key, name=name)
         if key in normalized:
             raise ValueError(f"{name} keys must be unique after normalization")
@@ -252,9 +269,8 @@ def tail_scenario_set_digest(
 ) -> str:
     """Order-independent multiset identity for an equal-weight tail distribution."""
 
-    if not isinstance(scenarios, Sequence) or isinstance(scenarios, (str, bytes)):
-        raise TypeError("tail scenarios must be a sequence of mappings")
-    scenario_digests = sorted(stress_scenario_digest(item) for item in scenarios)
+    snapshot = _exact_sequence_snapshot(scenarios, name="tail scenarios")
+    scenario_digests = sorted(stress_scenario_digest(item) for item in snapshot)
     encoded = json.dumps(
         scenario_digests,
         ensure_ascii=True,
@@ -268,14 +284,15 @@ def _normalize_scenario_digests(
     *,
     name: str,
 ) -> tuple[tuple[str, str], ...]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
+    if type(values) is not dict:
+        raise TypeError(f"{name} must be a mapping backed by an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
-    for raw_label, raw_digest in values.items():
+    for raw_label, raw_digest in snapshot.items():
         label = _identity_key(raw_label, name=name)
         if label in normalized:
             raise ValueError(f"{name} keys must be unique after normalization")
-        if not isinstance(raw_digest, str):
+        if type(raw_digest) is not str:
             raise TypeError(f"{name}[{label}] must be a SHA-256 string")
         digest = raw_digest.strip()
         if (
@@ -292,19 +309,48 @@ def _normalize_scenario_digests(
     return tuple(sorted(normalized.items()))
 
 
+def _canonical_scenario_digest_mapping(
+    values: tuple[tuple[str, str], ...] | None,
+) -> dict[str, str] | None:
+    """Rehydrate only the canonical tuple shape stored by RiskPolicy.create()."""
+
+    if values is None:
+        return None
+    if type(values) is not tuple:
+        raise TypeError(
+            "required_stress_scenario_digests must be a canonical exact tuple"
+        )
+    result: dict[str, str] = {}
+    for item in values:
+        if type(item) is not tuple or len(item) != 2:
+            raise TypeError(
+                "required_stress_scenario_digests must contain exact pairs"
+            )
+        label, digest = item
+        if type(label) is not str or type(digest) is not str:
+            raise TypeError(
+                "required_stress_scenario_digests pairs must contain exact strings"
+            )
+        if label in result:
+            raise ValueError(
+                "required_stress_scenario_digests contains duplicate labels"
+            )
+        result[label] = digest
+    return result
+
 
 RISK_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ValueError(
+            f"{name} must use an exact datetime with a built-in timezone"
+        )
+    if datetime.utcoffset(value) is None:
         raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _utc_text(value: datetime) -> str:
@@ -349,11 +395,7 @@ class LiquidationHeadroomEvidence:
     sha256: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.state_version, int)
-            or isinstance(self.state_version, bool)
-            or self.state_version < 0
-        ):
+        if type(self.state_version) is not int or self.state_version < 0:
             raise ValueError("liquidation evidence state_version must be non-negative")
         scope = LiquidationScope(
             provider_id=self.provider_id,
@@ -366,6 +408,8 @@ class LiquidationHeadroomEvidence:
         expires = _utc(self.expires_at, name="liquidation evidence expires_at")
         if expires <= observed:
             raise ValueError("liquidation evidence expires_at must follow observed_at")
+        if type(self.artifact_id) is not str:
+            raise ValueError("liquidation evidence artifact_id must be a UUID")
         try:
             artifact_id = str(UUID(self.artifact_id))
         except (ValueError, TypeError, AttributeError) as error:
@@ -408,8 +452,8 @@ class LiquidationHeadroomEvidence:
 def liquidation_evidence_payload(
     evidence: LiquidationHeadroomEvidence,
 ) -> dict[str, object]:
-    if not isinstance(evidence, LiquidationHeadroomEvidence):
-        raise TypeError("evidence must be LiquidationHeadroomEvidence")
+    if type(evidence) is not LiquidationHeadroomEvidence:
+        raise TypeError("evidence must be exact LiquidationHeadroomEvidence")
     return {
         "artifact_kind": "LIQUIDATION_HEADROOM_EVIDENCE",
         "schema_version": 1,
@@ -455,7 +499,7 @@ def _verify_liquidation_headroom_evidence(
         manifest, raw = authenticated_read(evidence.artifact_id)
     except Exception:
         return False
-    if type(manifest) is not dict or not isinstance(raw, bytes):
+    if type(manifest) is not dict or type(raw) is not bytes:
         return False
     actual = "sha256:" + sha256(raw).hexdigest()
     if (
@@ -504,23 +548,23 @@ class RiskIntent:
         action: str = "TRADE",
         instrument_type: str = "GENERIC",
     ) -> "RiskIntent":
-        if not isinstance(symbol, str) or not symbol.strip():
+        if type(symbol) is not str or not symbol.strip():
             raise ValueError("symbol is required")
-        normalized_side = side.upper() if isinstance(side, str) else ""
+        normalized_side = side.upper() if type(side) is str else ""
         if normalized_side not in {"BUY", "SELL"}:
             raise ValueError("side must be BUY or SELL")
-        if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool) or expected_state_version < 0:
+        if type(expected_state_version) is not int or expected_state_version < 0:
             raise ValueError("expected_state_version must be a non-negative integer")
-        if not isinstance(reduce_only, bool):
+        if type(reduce_only) is not bool:
             raise TypeError("reduce_only must be a boolean")
-        if not isinstance(action, str) or not action.strip():
+        if type(action) is not str or not action.strip():
             raise ValueError("action is required")
         normalized_action = action.strip().upper()
         if normalized_action not in RISK_ACTIONS:
             raise ValueError(f"Unsupported risk action: {normalized_action}")
         if normalized_action in {"REDUCE", "FLATTEN"} and not reduce_only:
             raise ValueError(f"{normalized_action} action requires reduce_only")
-        if not isinstance(instrument_type, str) or not instrument_type.strip():
+        if type(instrument_type) is not str or not instrument_type.strip():
             raise ValueError("instrument_type is required")
         normalized_instrument_type = instrument_type.strip().upper()
         if normalized_instrument_type not in RISK_INSTRUMENT_TYPES:
@@ -688,7 +732,7 @@ class RiskPolicy:
 
         normalized_tail_set_digest = None
         if required_tail_scenario_set_digest is not None:
-            if not isinstance(required_tail_scenario_set_digest, str):
+            if type(required_tail_scenario_set_digest) is not str:
                 raise TypeError(
                     "required_tail_scenario_set_digest must be a SHA-256 string"
                 )
@@ -753,9 +797,9 @@ class RiskPolicy:
             if allowed_actions is None
             else _normalize_actions(allowed_actions, name="allowed_actions")
         )
-        if not isinstance(require_settlement_evidence, bool):
+        if type(require_settlement_evidence) is not bool:
             raise TypeError("require_settlement_evidence must be a boolean")
-        if not isinstance(require_option_exercise_evidence, bool):
+        if type(require_option_exercise_evidence) is not bool:
             raise TypeError("require_option_exercise_evidence must be a boolean")
         delivery_headroom = (
             None
@@ -860,7 +904,7 @@ class RiskContext:
         equivalent_exposure_per_unit: Mapping[str, object] | None = None,
         instrument_types: Mapping[str, str] | None = None,
     ) -> "RiskContext":
-        if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
+        if type(state_version) is not int or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
         normalized_positions = _normalize_mapping(
             positions,
@@ -873,7 +917,7 @@ class RiskContext:
             parser=lambda value, key: _positive(value, name=f"mark {key}"),
         )
         normalized_reserved = _normalize_mapping(
-            reserved_position_delta or {},
+            {} if reserved_position_delta is None else reserved_position_delta,
             name="reserved_position_delta",
             parser=lambda value, key: _decimal(
                 value,
@@ -881,7 +925,7 @@ class RiskContext:
             ),
         )
         normalized_fx = _normalize_mapping(
-            fx_age_seconds or {},
+            {} if fx_age_seconds is None else fx_age_seconds,
             name="fx_age_seconds",
             parser=lambda value, key: _positive(
                 value,
@@ -890,15 +934,15 @@ class RiskContext:
             ),
         )
         normalized_asset_buckets = _normalize_text_mapping(
-            asset_buckets or {},
+            {} if asset_buckets is None else asset_buckets,
             name="asset_buckets",
         )
         normalized_venues = _normalize_text_mapping(
-            venues or {},
+            {} if venues is None else venues,
             name="venues",
         )
         normalized_instrument_types = _normalize_text_mapping(
-            instrument_types or {},
+            {} if instrument_types is None else instrument_types,
             name="instrument_types",
         )
         normalized_instrument_types = {
@@ -918,7 +962,7 @@ class RiskContext:
                 + ", ".join(invalid_instrument_types)
             )
         normalized_liquidity = _normalize_mapping(
-            liquidity_capacity or {},
+            {} if liquidity_capacity is None else liquidity_capacity,
             name="liquidity_capacity",
             parser=lambda value, key: _positive(
                 value,
@@ -927,11 +971,11 @@ class RiskContext:
             ),
         )
         normalized_factor_loadings = _normalize_nested_mapping(
-            factor_loadings or {},
+            {} if factor_loadings is None else factor_loadings,
             name="factor_loadings",
         )
         normalized_spread = _normalize_mapping(
-            spread_fraction or {},
+            {} if spread_fraction is None else spread_fraction,
             name="spread_fraction",
             parser=lambda value, key: _positive(
                 value,
@@ -940,7 +984,7 @@ class RiskContext:
             ),
         )
         normalized_slippage = _normalize_mapping(
-            slippage_fraction or {},
+            {} if slippage_fraction is None else slippage_fraction,
             name="slippage_fraction",
             parser=lambda value, key: _positive(
                 value,
@@ -976,7 +1020,7 @@ class RiskContext:
             )
         )
         normalized_delivery_headroom = _normalize_mapping(
-            futures_delivery_headroom_seconds or {},
+            {} if futures_delivery_headroom_seconds is None else futures_delivery_headroom_seconds,
             name="futures_delivery_headroom_seconds",
             parser=lambda value, key: _decimal(
                 value,
@@ -984,7 +1028,7 @@ class RiskContext:
             ),
         )
         normalized_equivalent_exposure = _normalize_mapping(
-            equivalent_exposure_per_unit or {},
+            {} if equivalent_exposure_per_unit is None else equivalent_exposure_per_unit,
             name="equivalent_exposure_per_unit",
             parser=lambda value, key: _decimal(
                 value,
@@ -993,11 +1037,10 @@ class RiskContext:
         )
         if any(value == 0 for value in normalized_equivalent_exposure.values()):
             raise ValueError("equivalent exposure per unit cannot be zero")
-        if not isinstance(stress_scenarios, Sequence) or isinstance(
+        stress_snapshot = _exact_sequence_snapshot(
             stress_scenarios,
-            (str, bytes),
-        ):
-            raise TypeError("stress_scenarios must be a sequence of mappings")
+            name="stress_scenarios",
+        )
         scenarios = tuple(
             _normalize_mapping(
                 scenario,
@@ -1007,7 +1050,7 @@ class RiskContext:
                     name=f"stress shock {key}",
                 ),
             )
-            for index, scenario in enumerate(stress_scenarios)
+            for index, scenario in enumerate(stress_snapshot)
         )
         normalized_stress_labels = _normalize_labels(
             stress_scenario_labels,
@@ -1017,11 +1060,10 @@ class RiskContext:
             raise ValueError(
                 "stress_scenario_labels must align one-to-one with stress_scenarios"
             )
-        if not isinstance(tail_scenarios, Sequence) or isinstance(
+        tail_snapshot = _exact_sequence_snapshot(
             tail_scenarios,
-            (str, bytes),
-        ):
-            raise TypeError("tail_scenarios must be a sequence of mappings")
+            name="tail_scenarios",
+        )
         normalized_tail_scenarios = tuple(
             _normalize_mapping(
                 scenario,
@@ -1031,7 +1073,7 @@ class RiskContext:
                     name=f"tail return {key}",
                 ),
             )
-            for index, scenario in enumerate(tail_scenarios)
+            for index, scenario in enumerate(tail_snapshot)
         )
         normalized_liquidation_headroom = (
             None
@@ -1042,10 +1084,10 @@ class RiskContext:
             )
         )
 
-        if liquidation_scope is not None and not isinstance(
-            liquidation_scope, LiquidationScope
-        ):
-            raise TypeError("liquidation_scope must be LiquidationScope or None")
+        if liquidation_scope is not None and type(liquidation_scope) is not LiquidationScope:
+            raise TypeError(
+                "liquidation_scope must be exact LiquidationScope or None"
+            )
         normalized_scope = (
             None
             if liquidation_scope is None
@@ -1057,11 +1099,12 @@ class RiskContext:
                 risk_tier_version=liquidation_scope.risk_tier_version,
             )
         )
-        if liquidation_headroom_evidence is not None and not isinstance(
-            liquidation_headroom_evidence, LiquidationHeadroomEvidence
+        if (
+            liquidation_headroom_evidence is not None
+            and type(liquidation_headroom_evidence) is not LiquidationHeadroomEvidence
         ):
             raise TypeError(
-                "liquidation_headroom_evidence must be "
+                "liquidation_headroom_evidence must be exact "
                 "LiquidationHeadroomEvidence or None"
             )
         normalized_liquidation_evidence = (
@@ -1115,17 +1158,17 @@ class RiskContext:
         )
         if normalized_drawdown > 1:
             raise ValueError("drawdown_fraction cannot exceed 1")
-        if not isinstance(fx_required, bool):
+        if type(fx_required) is not bool:
             raise TypeError("fx_required must be a boolean")
-        if not isinstance(capability_allowed, bool):
+        if type(capability_allowed) is not bool:
             raise TypeError("capability_allowed must be a boolean")
-        if borrow_available is not None and not isinstance(borrow_available, bool):
+        if borrow_available is not None and type(borrow_available) is not bool:
             raise TypeError("borrow_available must be a boolean or None")
-        if settlement_allowed is not None and not isinstance(settlement_allowed, bool):
+        if settlement_allowed is not None and type(settlement_allowed) is not bool:
             raise TypeError("settlement_allowed must be a boolean or None")
         if (
             option_deliverable_verified is not None
-            and not isinstance(option_deliverable_verified, bool)
+            and type(option_deliverable_verified) is not bool
         ):
             raise TypeError("option_deliverable_verified must be a boolean or None")
         return cls(
@@ -1198,20 +1241,20 @@ class RiskDecision:
 
 
 def _fingerprint_value(value):
-    if isinstance(value, Decimal):
+    if type(value) is Decimal:
         return _canonical_decimal_text(value)
-    if isinstance(value, datetime):
+    if type(value) is datetime:
         return _utc_text(value)
-    if hasattr(value, "__dataclass_fields__"):
+    if type(value) in {LiquidationScope, LiquidationHeadroomEvidence}:
         return _fingerprint_value(vars(value))
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         return {
-            str(key): _fingerprint_value(item)
+            key: _fingerprint_value(item)
             for key, item in value.items()
         }
-    if isinstance(value, (tuple, list)):
+    if type(value) in {tuple, list}:
         return [_fingerprint_value(item) for item in value]
-    if value is None or isinstance(value, (str, int, bool)):
+    if value is None or type(value) in {str, int, bool}:
         return value
     raise TypeError(
         f"Unsupported normalized risk fingerprint value: {type(value).__name__}"
@@ -1224,6 +1267,7 @@ def _risk_input_fingerprint(
     policy: RiskPolicy,
 ) -> str:
     payload = {
+        "arithmetic_policy_id": RISK_ARITHMETIC_POLICY_ID,
         "intent": _fingerprint_value(vars(intent)),
         "context": _fingerprint_value(vars(context)),
         "policy": _fingerprint_value(vars(policy)),
@@ -1237,9 +1281,63 @@ def _risk_input_fingerprint(
     return sha256(encoded).hexdigest()
 
 
+def _validate_risk_decision_shape(decision: RiskDecision) -> None:
+    """Reject caller-controlled subclasses before risk evidence is fingerprinted."""
+
+    if type(decision) is not RiskDecision:
+        raise TypeError("decision must be an exact RiskDecision")
+    if type(decision.admitted) is not bool:
+        raise TypeError("risk decision admitted must be an exact boolean")
+    for name in (
+        "resulting_position",
+        "gross_leverage",
+        "net_leverage",
+        "worst_stress_loss",
+    ):
+        if type(getattr(decision, name)) is not Decimal:
+            raise TypeError(f"risk decision {name} must be an exact Decimal")
+    if type(decision.input_fingerprint) is not str:
+        raise TypeError("risk decision input_fingerprint must be an exact string")
+    if type(decision.rules) is not tuple:
+        raise TypeError("risk decision rules must be an exact tuple")
+    for item in decision.rules:
+        if type(item) is not RiskRuleResult:
+            raise TypeError("risk decision rules must contain exact RiskRuleResult values")
+        if (
+            type(item.rule) is not str
+            or type(item.passed) is not bool
+            or type(item.observed) is not str
+            or type(item.limit) is not str
+            or type(item.reason) is not str
+        ):
+            raise TypeError("risk decision rule fields must use exact scalar types")
+    for name in (
+        "arithmetic_policy_id",
+        "decision_id",
+        "intent_hash",
+        "capability_snapshot_id",
+        "authoritative_risk_snapshot_id",
+        "evaluated_at",
+        "valid_until",
+    ):
+        value = getattr(decision, name)
+        if value is not None and type(value) is not str:
+            raise TypeError(f"risk decision {name} must be an exact string or None")
+    for name in ("state_version", "policy_version", "reservation_version"):
+        value = getattr(decision, name)
+        if value is not None and type(value) is not int:
+            raise TypeError(f"risk decision {name} must be an exact integer or None")
+    if (
+        decision.reservation_requirements is not None
+        and type(decision.reservation_requirements) is not tuple
+    ):
+        raise TypeError(
+            "risk decision reservation_requirements must be an exact tuple or None"
+        )
+
+
 def risk_decision_fingerprint(decision: RiskDecision) -> str:
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("decision must be a RiskDecision")
+    _validate_risk_decision_shape(decision)
     payload = {
         "admitted": decision.admitted,
         "resulting_position": _canonical_decimal_text(decision.resulting_position),
@@ -1311,7 +1409,7 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
 
 
 def _risk_binding_instant(value: str, *, name: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -1323,7 +1421,7 @@ def _risk_binding_instant(value: str, *, name: str) -> datetime:
 
 
 def _risk_binding_text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -1343,8 +1441,7 @@ def bind_risk_decision(
 ) -> RiskDecision:
     """Bind a deterministic risk result to immutable admission evidence."""
 
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("decision must be a RiskDecision")
+    _validate_risk_decision_shape(decision)
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
         raise ValueError("risk decision must use the current exact arithmetic policy")
     ihash = _risk_binding_text(intent_hash, name="intent_hash")
@@ -1360,20 +1457,17 @@ def bind_risk_decision(
         )
     )
     if (
-        not isinstance(state_version, int)
-        or isinstance(state_version, bool)
+        type(state_version) is not int
         or state_version < 0
     ):
         raise ValueError("state_version must be a non-negative integer")
     if (
-        not isinstance(policy_version, int)
-        or isinstance(policy_version, bool)
+        type(policy_version) is not int
         or policy_version < 1
     ):
         raise ValueError("policy_version must be a positive integer")
     if (
-        not isinstance(reservation_version, int)
-        or isinstance(reservation_version, bool)
+        type(reservation_version) is not int
         or reservation_version < 0
     ):
         raise ValueError("reservation_version must be a non-negative integer")
@@ -1405,8 +1499,7 @@ def bind_risk_decision(
 
 
 def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
-    if not isinstance(decision, RiskDecision):
-        raise TypeError("risk_decision must be a RiskDecision")
+    _validate_risk_decision_shape(decision)
     if decision.decision_id is None:
         raise ValueError("risk_decision must be bound before admission")
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
@@ -1473,12 +1566,12 @@ def evaluate_risk(
     *,
     evidence_store: object | None = None,
 ) -> RiskDecision:
-    if not isinstance(intent, RiskIntent):
-        raise TypeError("intent must be RiskIntent")
-    if not isinstance(context, RiskContext):
-        raise TypeError("context must be RiskContext")
-    if not isinstance(policy, RiskPolicy):
-        raise TypeError("policy must be RiskPolicy")
+    if type(intent) is not RiskIntent:
+        raise TypeError("intent must be RiskIntent; exact RiskIntent type required")
+    if type(context) is not RiskContext:
+        raise TypeError("context must be RiskContext; exact RiskContext type required")
+    if type(policy) is not RiskPolicy:
+        raise TypeError("policy must be RiskPolicy; exact RiskPolicy type required")
 
     intent = RiskIntent.create(
         symbol=intent.symbol,
@@ -1541,10 +1634,8 @@ def evaluate_risk(
         expected_shortfall_tail_fraction=policy.expected_shortfall_tail_fraction,
         min_liquidation_headroom=policy.min_liquidation_headroom,
         required_stress_scenario_labels=policy.required_stress_scenario_labels,
-        required_stress_scenario_digests=(
-            None
-            if policy.required_stress_scenario_digests is None
-            else dict(policy.required_stress_scenario_digests)
+        required_stress_scenario_digests=_canonical_scenario_digest_mapping(
+            policy.required_stress_scenario_digests
         ),
         required_tail_scenario_set_digest=policy.required_tail_scenario_set_digest,
         max_asset_concentration_fraction=policy.max_asset_concentration_fraction,
@@ -2407,7 +2498,7 @@ def evaluate_risk(
         policy.min_futures_delivery_headroom_seconds is not None
         and intent.instrument_type == "FUTURE"
     ):
-        delivery_headroom = (context.futures_delivery_headroom_seconds or {}).get(
+        delivery_headroom = (context.futures_delivery_headroom_seconds if context.futures_delivery_headroom_seconds is not None else {}).get(
             intent.symbol
         )
         delivery_ok = protective_reduction or (

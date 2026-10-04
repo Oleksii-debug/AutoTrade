@@ -359,13 +359,43 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 del kwargs
                 return trusted
 
-            evidence = _probe(
-                vault=vault,
-                handle=handle,
-                wire_query=trusted_wire,
-            )
-            self.assertTrue(evidence.provider_transport_confirmed)
-            self.assertEqual(evidence.classification.value, "REJECTED_EXACT_DOMAIN")
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=trusted_wire,
+                )
+
+        forged_success = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {"apiKey": "probe-key", "secret": ""},
+            },
+            api_key_echo_confirmed=True,
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+            _provider_echo_attestation=probe_module._PROVIDER_ECHO_ATTESTATION,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def forged_success_wire(**kwargs):
+                del kwargs
+                return forged_success
+
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=forged_success_wire,
+                )
 
     def test_polymorphic_header_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileHeaders(_headers())

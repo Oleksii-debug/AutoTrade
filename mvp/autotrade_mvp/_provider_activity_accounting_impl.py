@@ -24,11 +24,13 @@ from uuid import NAMESPACE_URL, uuid5
 from .accounting import (
     AccountingConflict,
     EconomicBook,
+    EquityPositionProjection,
     JournalTransaction,
     Posting,
     ScopedEconomicBook,
     book_external_cash_flow,
     canonical_transaction,
+    project_equity_position,
     transaction_digest,
 )
 from .exact_decimal import exact_sum
@@ -2256,6 +2258,41 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             book_digest=resulting,
             aggregate_version=verified.aggregate_version,
         )
+
+    def project_historical_equity_position(
+        self,
+        cut: ProviderEconomicCut,
+        *,
+        expected_visibility_journal_sequence: int,
+        instrument: str,
+        settlement_currency: str,
+    ) -> EquityPositionProjection:
+        """Project exact realized FIFO economics from one verified historical cut.
+
+        The mark is deliberately absent: this seam owns only realized economics
+        already represented by canonical provider fills.  Fees and other costs
+        remain separate economic operands, and an external/current price cannot
+        be smuggled into a historical utility value through this API.
+        """
+
+        historical = self.read_historical_cut(
+            cut,
+            expected_visibility_journal_sequence=(
+                expected_visibility_journal_sequence
+            ),
+        )
+        exact_book = EconomicBook(historical.transactions)
+        projected = project_equity_position(
+            exact_book,
+            instrument=instrument,
+            settlement_currency=settlement_currency,
+            mark_price=None,
+        )
+        if projected.unrealized_pnl is not None or projected.mark_price is not None:
+            raise AccountingConflict(
+                "historical realized projection unexpectedly contains mark authority"
+            )
+        return projected
 
     def resolve_historical_cut(
         self,

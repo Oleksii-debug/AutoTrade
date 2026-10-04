@@ -206,6 +206,40 @@ class DurableFillAccountingTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["event_type"], "EconomicTransactionBatchBooked")
 
+    def test_verified_pre_correction_cut_keeps_realized_fifo_history_frozen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = durable_book(JournalStore(path))
+            buy = root_buy()
+            sell = later_sell()
+            corrected = correction_one()
+
+            book_fill(book, buy, observed_at="2026-01-01T10:00:01Z")
+            book_fill(book, sell, observed_at="2026-01-02T10:00:01Z")
+            pre_correction = book.resolve_historical_cut(2)
+
+            correct(
+                book,
+                buy,
+                corrected,
+                observed_at="2026-01-03T10:00:00Z",
+            )
+            self.assertEqual(projection(book).realized_pnl, Decimal("9"))
+
+            historical = book.project_historical_equity_position(
+                pre_correction,
+                expected_visibility_journal_sequence=(
+                    pre_correction.visibility_journal_sequence
+                ),
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+            self.assertEqual(historical.quantity, Decimal("1"))
+            self.assertEqual(historical.open_cost_basis, Decimal("100"))
+            self.assertEqual(historical.realized_pnl, Decimal("10"))
+            self.assertIsNone(historical.unrealized_pnl)
+            self.assertIsNone(historical.mark_price)
+
     def test_correction_batch_reopens_with_effective_time_fifo_restatement(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

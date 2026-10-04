@@ -3,7 +3,9 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import gc
 import unittest
+import weakref
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.authority as authority_module
@@ -275,6 +277,28 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_capital_binding_releases_retained_books_when_service_dies(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(store, directory)
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority_ref = weakref.ref(authority)
+            settlement_ref = weakref.ref(settlement)
+            economic_ref = weakref.ref(economic)
+
+            del authority
+            del settlement
+            del economic
+            gc.collect()
+
+            self.assertIsNone(authority_ref())
+            self.assertIsNone(settlement_ref())
+            self.assertIsNone(economic_ref())
+
     def test_configured_settlement_capital_clamps_provider_cash(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

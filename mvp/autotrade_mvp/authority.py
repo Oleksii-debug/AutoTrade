@@ -629,18 +629,33 @@ def _authority_service_capital_operations():
                 )
 
         object_id = id(service)
+
+        def cleanup(ref: weakref.ReferenceType) -> None:
+            # The registry intentionally retains the selected capital books while
+            # the service is live. Release that authority graph when its owning
+            # service dies, but never let a late callback erase an id-reused
+            # service's newer binding.
+            with lock:
+                current = states.get(object_id)
+                if current is not None and current[0] is ref:
+                    states.pop(object_id, None)
+
+        service_ref = weakref.ref(service, cleanup)
         with lock:
             current = states.get(object_id)
-            if current is not None and current[0]() is service:
-                raise AuthorityConflict(
-                    "AuthorityService capital composition is already initialized"
-                )
-            if current is not None and current[0]() is not None:
-                raise AuthorityConflict(
-                    "AuthorityService capital binding identity collision"
-                )
+            if current is not None:
+                current_service = current[0]()
+                if current_service is service:
+                    raise AuthorityConflict(
+                        "AuthorityService capital composition is already initialized"
+                    )
+                if current_service is not None:
+                    raise AuthorityConflict(
+                        "AuthorityService capital binding identity collision"
+                    )
+                states.pop(object_id, None)
             states[object_id] = (
-                weakref.ref(service),
+                service_ref,
                 settlement_book,
                 economic_book,
             )

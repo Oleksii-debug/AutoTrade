@@ -579,6 +579,76 @@ class AuthorityTests(unittest.TestCase):
                 result.risk_decision_id,
             )
 
+    def test_confirmation_absence_replays_exactly(self):
+        cases = (
+            (None, "confirmation_required"),
+            ("unknown-confirmation", "confirmation_missing"),
+        )
+        for confirmation_id, expected_reason in cases:
+            with self.subTest(reason=expected_reason), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority = authority_service(store)
+                item = policy(environments={"SIMULATION"})
+                authority.register_policy(item)
+                reservations = DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                )
+                kwargs = dict(
+                    command_id=f"cmd-{expected_reason}",
+                    idempotency_key=f"idem-{expected_reason}",
+                    admission_id=f"admission-{expected_reason}",
+                    policy_id=item.policy_id,
+                    intent_id=f"intent-{expected_reason}",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_id=f"reservation-{expected_reason}",
+                    confirmation_id=confirmation_id,
+                    **public_financial_kwargs(store),
+                )
+                result = authority.admit(
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+                self.assertEqual(result.outcome, "REJECTED")
+                self.assertEqual(result.reason, expected_reason)
+                self.assertIsNone(result.confirmation_id)
+                self.assertEqual(
+                    result.requested_confirmation_id,
+                    confirmation_id,
+                )
+                self.assertEqual(
+                    reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
+                retry = authority.admit(
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+                self.assertEqual(retry, result)
+
+                restarted = authority_service(store)
+                restored = restarted._admissions[result.admission_id]
+                self.assertEqual(
+                    restored.requested_confirmation_id,
+                    confirmation_id,
+                )
+                historical = (
+                    restarted._validate_historical_financial_retry_evidence(
+                        restored,
+                        restarted._policies[item.policy_id],
+                    )
+                )
+                self.assertEqual(
+                    historical["decision_id"],
+                    result.risk_decision_id,
+                )
+
     def test_durable_financial_binding_rejects_legacy_confirmation(self):
         service = AuthorityService()
         item = policy()

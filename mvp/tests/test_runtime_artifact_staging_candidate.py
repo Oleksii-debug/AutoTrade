@@ -40,6 +40,10 @@ class NeutralRuntimeInstalledCandidateTests(unittest.TestCase):
             root = Path(directory)
             staging = root / "staging"
             staging.mkdir()
+            # The shared POSIX publisher deliberately requires nested parents
+            # to exist before it acquires root authority. Build the private
+            # layout before staging; never weaken that publication fence.
+            (staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
             composition = root / "composition.json"
             composition.write_text(
                 json.dumps(

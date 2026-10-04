@@ -18,6 +18,7 @@ from typing import Mapping, Sequence
 
 from .exact_decimal import (
     ExactDecimalError,
+    exact_multiply,
     exact_sum,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
@@ -920,6 +921,26 @@ def provider_fills_from_execution_frame(
             raise KrakenSpotStreamError(
                 "Kraken trade fee array is empty; canonical provider fill "
                 "fee currency is unproven"
+            )
+
+        if report.margin_borrow is not False:
+            raise KrakenSpotStreamError(
+                "Kraken trade cannot bridge to canonical cash fill unless "
+                "margin_borrow=false is provider-evidenced"
+            )
+        try:
+            expected_cost = exact_multiply(
+                report.last_qty,
+                report.last_price,
+            )
+        except ExactDecimalError as error:
+            raise KrakenSpotStreamError(
+                "Kraken trade cost cross-check exceeds exact resource authority"
+            ) from error
+        if report.cost != expected_cost:
+            raise KrakenSpotStreamError(
+                "Kraken trade cost differs from exact last_qty * last_price; "
+                "canonical provider fill cannot discard provider cost"
             )
 
         instrument = instruments.get(report.symbol)

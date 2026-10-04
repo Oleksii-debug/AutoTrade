@@ -734,6 +734,67 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 pagination_complete=False,
             )
 
+
+    def test_provider_fill_bridge_requires_proven_cash_semantics(self):
+        for margin_value in (None, True):
+            with self.subTest(margin_borrow=margin_value):
+                frame = parse_execution_frame(
+                    frame_bytes(
+                        frame_type="update",
+                        sequence=52,
+                        reports=[
+                            {
+                                "order_id": "O-MARGIN-BRIDGE",
+                                "cl_ord_id": "client-margin-bridge",
+                                "exec_id": "E-MARGIN-BRIDGE",
+                                "exec_type": "trade",
+                                "order_status": "partially_filled",
+                                "margin_borrow": margin_value,
+                            }
+                        ],
+                    ),
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                )
+                with self.assertRaisesRegex(
+                    KrakenSpotStreamError,
+                    "margin_borrow=false is provider-evidenced",
+                ):
+                    provider_fills_from_execution_frame(
+                        frame,
+                        instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                    )
+
+    def test_provider_fill_bridge_rejects_cost_not_exactly_represented_by_qty_and_price(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=53,
+                reports=[
+                    {
+                        "order_id": "O-COST-BRIDGE",
+                        "cl_ord_id": "client-cost-bridge",
+                        "exec_id": "E-COST-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "last_qty": 2,
+                        "last_price": 25000,
+                        "cost": 49999,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            r"cost differs from exact last_qty \* last_price",
+        ):
+            provider_fills_from_execution_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
         huge_integer = b"9" * 1000
         raw_sequence = (

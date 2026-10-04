@@ -15,7 +15,7 @@ ticks, strikes, fees, currency conversion, funding, liquidity and execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import re
@@ -656,3 +656,322 @@ def blind_dataset(
         events=events_tuple,
         blinded_dataset_sha256=digest,
     )
+
+
+
+_VIEW_SCHEMA_VERSION = 1
+_CHECKPOINT_SCHEMA_VERSION = 1
+
+
+def _signed_int(value: int, *, name: str) -> int:
+    if type(value) is not int:
+        raise BlindingError(f"{name} must be an exact integer")
+    return value
+
+
+def _blinded_prefix_digest(events: tuple[BlindedEvent, ...], cursor: int) -> str:
+    if type(cursor) is not int or cursor < 0 or cursor > len(events):
+        raise BlindingError("cursor is outside blinded event range")
+    return "sha256:" + sha256(
+        _canonical_bytes([item.digest for item in events[:cursor]])
+    ).hexdigest()
+
+
+def _source_anchor(dataset: CausalDataset, profile: BlindingProfile) -> datetime:
+    if type(dataset) is not CausalDataset:
+        raise TypeError("dataset must be exact CausalDataset")
+    snapshot = CausalDataset.create(
+        manifest_sha256=dataset.manifest_sha256,
+        events=dataset.events,
+    )
+    if snapshot.dataset_sha256 != dataset.dataset_sha256:
+        raise BlindingError("source dataset content no longer matches its committed digest")
+    if not snapshot.events:
+        raise BlindingError("blinded replay requires at least one causal event")
+    calendar_values: list[datetime] = []
+    for event in snapshot.events:
+        for field in profile.calendar_fields:
+            present, value = _lookup(event.payload, field.path)
+            if not present:
+                if field.required:
+                    raise BlindingError(
+                        f"required calendar path {'.'.join(field.path)} is missing"
+                    )
+                continue
+            calendar_values.append(
+                _calendar_value(value, path=".".join(field.path))
+            )
+    return min([event.event_time for event in snapshot.events] + calendar_values)
+
+
+@dataclass(frozen=True, slots=True)
+class BlindedDataView:
+    """Strategy-facing causal prefix using only relative time."""
+
+    simulation_time_us: int
+    events: tuple[BlindedEvent, ...]
+
+    def __post_init__(self) -> None:
+        simulation = _signed_int(self.simulation_time_us, name="simulation_time_us")
+        if type(self.events) is not tuple or any(type(item) is not BlindedEvent for item in self.events):
+            raise TypeError("events must be an exact tuple of exact BlindedEvent")
+        seen: set[str] = set()
+        for item in self.events:
+            if item.available_at_us > simulation:
+                raise BlindingError("blinded view contains a future event")
+            if item.event_id in seen:
+                raise BlindingError("blinded view contains duplicate event identity")
+            seen.add(item.event_id)
+        object.__setattr__(self, "simulation_time_us", simulation)
+
+    def by_kind(self, kind: str) -> tuple[BlindedEvent, ...]:
+        target = _text(kind, name="kind").upper()
+        return tuple(item for item in self.events if item.kind == target)
+
+
+@dataclass(frozen=True, slots=True)
+class BlindedInputEvidence:
+    """Content-addressed evidence for one blinded causal strategy cutoff."""
+
+    schema_version: int
+    simulation_time_us: int
+    blinded_dataset_sha256: str
+    published_prefix_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != _VIEW_SCHEMA_VERSION:
+            raise BlindingError("unsupported blinded input evidence schema_version")
+        object.__setattr__(
+            self, "simulation_time_us",
+            _signed_int(self.simulation_time_us, name="simulation_time_us"),
+        )
+        object.__setattr__(
+            self, "blinded_dataset_sha256",
+            _digest(self.blinded_dataset_sha256, name="blinded_dataset_sha256"),
+        )
+        object.__setattr__(
+            self, "published_prefix_sha256",
+            _digest(self.published_prefix_sha256, name="published_prefix_sha256"),
+        )
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + sha256(
+            _canonical_bytes(
+                {
+                    "schema_version": self.schema_version,
+                    "simulation_time_us": self.simulation_time_us,
+                    "blinded_dataset_sha256": self.blinded_dataset_sha256,
+                    "published_prefix_sha256": self.published_prefix_sha256,
+                }
+            )
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BlindedFeederCheckpoint:
+    """Restart cursor without absolute calendar or raw identities."""
+
+    schema_version: int
+    source_dataset_sha256: str
+    blinded_dataset_sha256: str
+    experiment_id: str
+    profile_sha256: str
+    simulation_time_us: int
+    cursor: int
+    published_prefix_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != _CHECKPOINT_SCHEMA_VERSION:
+            raise BlindingError("unsupported blinded checkpoint schema_version")
+        object.__setattr__(
+            self, "source_dataset_sha256",
+            _digest(self.source_dataset_sha256, name="source_dataset_sha256"),
+        )
+        object.__setattr__(
+            self, "blinded_dataset_sha256",
+            _digest(self.blinded_dataset_sha256, name="blinded_dataset_sha256"),
+        )
+        object.__setattr__(
+            self, "profile_sha256",
+            _digest(self.profile_sha256, name="profile_sha256"),
+        )
+        object.__setattr__(self, "experiment_id", _text(self.experiment_id, name="experiment_id"))
+        object.__setattr__(
+            self, "simulation_time_us",
+            _signed_int(self.simulation_time_us, name="simulation_time_us"),
+        )
+        if type(self.cursor) is not int or self.cursor < 0:
+            raise BlindingError("cursor must be a non-negative exact integer")
+        object.__setattr__(
+            self, "published_prefix_sha256",
+            _digest(self.published_prefix_sha256, name="published_prefix_sha256"),
+        )
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_dataset_sha256": self.source_dataset_sha256,
+            "blinded_dataset_sha256": self.blinded_dataset_sha256,
+            "experiment_id": self.experiment_id,
+            "profile_sha256": self.profile_sha256,
+            "simulation_time_us": self.simulation_time_us,
+            "cursor": self.cursor,
+            "published_prefix_sha256": self.published_prefix_sha256,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> "BlindedFeederCheckpoint":
+        if not isinstance(record, Mapping):
+            raise TypeError("checkpoint record must be a mapping")
+        required = {
+            "schema_version",
+            "source_dataset_sha256",
+            "blinded_dataset_sha256",
+            "experiment_id",
+            "profile_sha256",
+            "simulation_time_us",
+            "cursor",
+            "published_prefix_sha256",
+        }
+        if set(record) != required:
+            raise BlindingError("blinded checkpoint record keys mismatch")
+        return cls(
+            schema_version=record["schema_version"],
+            source_dataset_sha256=record["source_dataset_sha256"],
+            blinded_dataset_sha256=record["blinded_dataset_sha256"],
+            experiment_id=record["experiment_id"],
+            profile_sha256=record["profile_sha256"],
+            simulation_time_us=record["simulation_time_us"],
+            cursor=record["cursor"],
+            published_prefix_sha256=record["published_prefix_sha256"],
+        )
+
+
+class BlindedCausalFeeder:
+    """Privileged feeder that never publishes the full historical future to strategy code."""
+
+    def __init__(
+        self,
+        *,
+        dataset: CausalDataset,
+        start_time: datetime | str,
+        experiment_id: str,
+        shuffle_key_sha256: str,
+        profile: BlindingProfile,
+        training_cutoff_uncertainty: str,
+    ) -> None:
+        # Import locally to keep blinding data types independent from feeder internals.
+        from .feeder import CausalFeeder
+
+        if type(profile) is not BlindingProfile:
+            raise TypeError("profile must be exact BlindingProfile")
+        self._blinded = blind_dataset(
+            dataset=dataset,
+            experiment_id=experiment_id,
+            shuffle_key_sha256=shuffle_key_sha256,
+            profile=profile,
+            training_cutoff_uncertainty=training_cutoff_uncertainty,
+        )
+        self._anchor = _source_anchor(dataset, profile)
+        self._source = CausalFeeder(dataset, start_time=start_time)
+        if self._source.published_count > len(self._blinded.events):
+            raise BlindingError("causal source cursor exceeds blinded event set")
+
+    @property
+    def published_count(self) -> int:
+        return self._source.published_count
+
+    @property
+    def simulation_time_us(self) -> int:
+        return _microseconds(self._source.simulation_time - self._anchor)
+
+    @property
+    def blinded_dataset_sha256(self) -> str:
+        return self._blinded.blinded_dataset_sha256
+
+    def advance_to(self, target_time: datetime | str) -> tuple[BlindedEvent, ...]:
+        start = self._source.published_count
+        self._source.advance_to(target_time)
+        end = self._source.published_count
+        return self._blinded.events[start:end]
+
+    def advance_next_time(self) -> tuple[BlindedEvent, ...]:
+        start = self._source.published_count
+        self._source.advance_next_time()
+        end = self._source.published_count
+        return self._blinded.events[start:end]
+
+    def view(self) -> BlindedDataView:
+        cursor = self._source.published_count
+        return BlindedDataView(
+            simulation_time_us=self.simulation_time_us,
+            events=self._blinded.events[:cursor],
+        )
+
+    def input_evidence(self) -> BlindedInputEvidence:
+        cursor = self._source.published_count
+        return BlindedInputEvidence(
+            schema_version=_VIEW_SCHEMA_VERSION,
+            simulation_time_us=self.simulation_time_us,
+            blinded_dataset_sha256=self._blinded.blinded_dataset_sha256,
+            published_prefix_sha256=_blinded_prefix_digest(
+                self._blinded.events, cursor
+            ),
+        )
+
+    def checkpoint(self) -> BlindedFeederCheckpoint:
+        cursor = self._source.published_count
+        return BlindedFeederCheckpoint(
+            schema_version=_CHECKPOINT_SCHEMA_VERSION,
+            source_dataset_sha256=self._blinded.source_dataset_sha256,
+            blinded_dataset_sha256=self._blinded.blinded_dataset_sha256,
+            experiment_id=self._blinded.experiment_id,
+            profile_sha256=self._blinded.profile_sha256,
+            simulation_time_us=self.simulation_time_us,
+            cursor=cursor,
+            published_prefix_sha256=_blinded_prefix_digest(
+                self._blinded.events, cursor
+            ),
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        dataset: CausalDataset,
+        checkpoint: BlindedFeederCheckpoint,
+        experiment_id: str,
+        shuffle_key_sha256: str,
+        profile: BlindingProfile,
+        training_cutoff_uncertainty: str,
+    ) -> "BlindedCausalFeeder":
+        if type(checkpoint) is not BlindedFeederCheckpoint:
+            raise TypeError("checkpoint must be exact BlindedFeederCheckpoint")
+        checkpoint = BlindedFeederCheckpoint.from_record(checkpoint.to_record())
+        anchor = _source_anchor(dataset, profile)
+        start_time = anchor + timedelta(microseconds=checkpoint.simulation_time_us)
+        feeder = cls(
+            dataset=dataset,
+            start_time=start_time,
+            experiment_id=experiment_id,
+            shuffle_key_sha256=shuffle_key_sha256,
+            profile=profile,
+            training_cutoff_uncertainty=training_cutoff_uncertainty,
+        )
+        if checkpoint.source_dataset_sha256 != feeder._blinded.source_dataset_sha256:
+            raise BlindingError("checkpoint source dataset does not match")
+        if checkpoint.blinded_dataset_sha256 != feeder._blinded.blinded_dataset_sha256:
+            raise BlindingError("checkpoint blinded dataset does not match")
+        if checkpoint.experiment_id != feeder._blinded.experiment_id:
+            raise BlindingError("checkpoint experiment does not match")
+        if checkpoint.profile_sha256 != feeder._blinded.profile_sha256:
+            raise BlindingError("checkpoint profile does not match")
+        if checkpoint.cursor != feeder.published_count:
+            raise BlindingError("checkpoint cursor is not the complete causal prefix")
+        expected_prefix = _blinded_prefix_digest(
+            feeder._blinded.events, feeder.published_count
+        )
+        if checkpoint.published_prefix_sha256 != expected_prefix:
+            raise BlindingError("checkpoint blinded prefix digest is invalid")
+        return feeder

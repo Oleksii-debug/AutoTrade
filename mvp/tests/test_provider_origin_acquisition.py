@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp.provider_origin as provider_origin_module
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
@@ -267,6 +268,33 @@ class ProviderOriginAcquisitionBindingTests(unittest.TestCase):
                     account_acquisition_authority=authority,
                     account_acquisition=acquisition,
                 )
+
+    def test_late_binding_cannot_upgrade_historical_unbound_origin(self):
+        with TemporaryDirectory() as directory:
+            journal, origin, authority, acquisition, _q1, binding = self._fixture(directory)
+            attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+            original = origin._record_provider_origin(
+                attempt_id, binding, http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=NOW, _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            self.assertIsNone(original.account_acquisition_id)
+            provider_origin_module._append_provider_origin_account_acquisition_binding(
+                journal,
+                attempt_id=attempt_id,
+                query_binding=binding,
+                account_acquisition=provider_origin_module._account_acquisition_snapshot(
+                    authority=authority,
+                    acquisition=acquisition,
+                    store=journal,
+                    query_binding=binding,
+                ),
+                committed_at=NOW.isoformat().replace("+00:00", "Z"),
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError, "must precede Prepared"
+            ):
+                origin.load_response_binding(attempt_id, binding)
 
     def test_generic_origin_remains_explicitly_unbound(self):
         with TemporaryDirectory() as directory:

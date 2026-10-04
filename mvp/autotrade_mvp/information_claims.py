@@ -477,14 +477,14 @@ class InformationSnapshot:
     def __post_init__(self) -> None:
         cutoff = _time(self.cutoff, name="cutoff")
         object.__setattr__(self, "cutoff", cutoff)
-        if not isinstance(self.claims, tuple):
-            raise ValueError("claims must be a tuple")
+        if type(self.claims) is not tuple:
+            raise ValueError("claims must be an exact tuple")
+        claims = tuple(_reseal_information_claim(claim) for claim in self.claims)
+        object.__setattr__(self, "claims", claims)
 
         seen: set[str] = set()
         seen_syndication: set[str] = set()
-        for claim in self.claims:
-            if not isinstance(claim, InformationClaim):
-                raise ValueError("snapshot claims must be InformationClaim values")
+        for claim in claims:
             if claim.available_at > cutoff or claim.ingested_at > cutoff:
                 raise ValueError("snapshot cannot contain future claims")
             if claim.claim_id in seen:

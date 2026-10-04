@@ -118,6 +118,28 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             blockers = dotnet_lock_content_blockers(root, project)
             self.assertTrue(any('DOTNET_PROJECT_LOCK_RESOLVED_MISMATCH:' in item for item in blockers))
 
+    def test_requested_range_must_bind_declared_project_version(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            write_lock(project)
+            lock = project.parent / 'packages.lock.json'
+            payload = json.loads(lock.read_text(encoding='utf-8'))
+            payload['dependencies']['net10.0-windows7.0'][
+                'Microsoft.Web.WebView2'
+            ]['requested'] = '[0.0.0, )'
+            lock.write_text(json.dumps(payload), encoding='utf-8')
+
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith('DOTNET_PROJECT_LOCK_REQUESTED_MISMATCH:')
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, 'does not match project'):
+                dotnet_locked_dependency_graph(root, [project])
+
     def test_content_hash_must_be_base64_sha512(self):
         bad_hashes = ('', 'not-base64', base64.b64encode(b'short').decode('ascii'), None)
         for value in bad_hashes:

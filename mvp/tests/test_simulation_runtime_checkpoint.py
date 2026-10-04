@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -111,6 +112,26 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ValueError,
                     "does not match current authorities",
+                ):
+                    run(directory)
+            self.assertEqual(store.whole_store_state_cut(), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission semantics only")
+    def test_broadened_runtime_authority_key_permissions_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=3)
+            key_path = Path(directory) / ".autonomous-runtime-authority.key"
+            os.chmod(key_path, 0o644)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            before = store.whole_store_state_cut()
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("broad key permissions cannot send"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "permissions are too broad",
                 ):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), before)

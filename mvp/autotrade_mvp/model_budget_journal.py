@@ -497,14 +497,10 @@ class DurableModelBudget:
             raise TypeError("policy must be exact RoutingPolicy")
         if type(request) is not ModelRequest:
             raise TypeError("request must be exact ModelRequest")
-        materialized = tuple(descriptors)
-        if any(type(item) is not ModelDescriptor for item in materialized):
-            raise TypeError("descriptors must contain exact ModelDescriptor values")
 
         # Caller-owned frozen dataclasses remain mutable through object.__setattr__
         # and may be changed by another thread while journal reads occur below.
-        # Detach the complete routing graph once, then use only these copies for
-        # both durable routing identity and the actual admission decision.
+        # Detach scalar routing authority before touching optional model inventory.
         policy = RoutingPolicy(
             mode=policy.mode,
             allowed_model_ids=policy.allowed_model_ids,
@@ -521,6 +517,21 @@ class DurableModelBudget:
             deadline_utc=request.deadline_utc,
             cancelled=request.cancelled,
         )
+        now = _route_now(now_utc)
+
+        # Preserve the pure router's inventory-free short circuits end-to-end.
+        # These outcomes cannot reserve cost, so descriptor and reservation
+        # context are semantically irrelevant and must not be enumerated.
+        if (
+            request.cancelled
+            or now >= request.deadline_utc
+            or getattr(policy.mode, "value", None) == "ZERO"
+        ):
+            return route_model(policy, request, (), now_utc=now)
+
+        materialized = tuple(descriptors)
+        if any(type(item) is not ModelDescriptor for item in materialized):
+            raise TypeError("descriptors must contain exact ModelDescriptor values")
         materialized = tuple(
             ModelDescriptor(
                 model_id=item.model_id,
@@ -539,25 +550,6 @@ class DurableModelBudget:
             materialized,
             reservation_context=reservation_context,
         )
-        now = _route_now(now_utc)
-        if request.cancelled:
-            return RouteDecision(
-                RouteStatus.REJECTED,
-                None,
-                None,
-                None,
-                Decimal("0"),
-                "request_cancelled",
-            )
-        if now >= request.deadline_utc:
-            return RouteDecision(
-                RouteStatus.REJECTED,
-                None,
-                None,
-                None,
-                Decimal("0"),
-                "deadline_expired",
-            )
         idempotency_key = _idempotency_key(
             budget_id=self.budget_id,
             action="route_reserve",

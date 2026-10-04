@@ -1292,13 +1292,33 @@ class DurableModelCallOrchestrator:
                 decision=None,
             )
 
+        first = existing[0] if existing else None
+        if first is None and (
+            request.cancelled or getattr(policy.mode, "value", None) == "ZERO"
+        ):
+            decision = self.budget.admit_route(
+                policy,
+                request,
+                (),
+                now_utc=now_utc,
+            )
+            if decision.status is RouteStatus.ADMITTED:
+                raise ModelCallError(
+                    "inventory-free route unexpectedly admitted a model"
+                )
+            return ModelCallOutcome(
+                decision.status.value,
+                attempt_id,
+                decision,
+                decision.reason,
+            )
+
         materialized = tuple(descriptors)
         if any(type(item) is not ModelDescriptor for item in materialized):
             raise TypeError("descriptors must be exact ModelDescriptor values")
         materialized = tuple(ModelDescriptor(**{
             field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
         }) for item in materialized)
-        first = existing[0] if existing else None
         pricing: PricingEvidenceSnapshot | None = None
 
         if first is not None:

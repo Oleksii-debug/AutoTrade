@@ -36,13 +36,14 @@ def open_budget(root, *, ceiling="1", budget_id="policy-1", environment="SIMULAT
 ROUTE_NOW = datetime(2026, 9, 24, 21, 45, tzinfo=timezone.utc)
 
 
-def route_request(request_id, *, budget="100"):
+def route_request(request_id, *, budget="100", cancelled=False):
     return ModelRequest(
         request_id=request_id,
         allowed_model_ids=("local",),
         privacy_remote_allowed=False,
         budget_remaining=budget,
         deadline_utc=ROUTE_NOW + timedelta(minutes=5),
+        cancelled=cancelled,
     )
 
 
@@ -336,6 +337,47 @@ class DurableModelBudgetTests(unittest.TestCase):
                     now_utc=ROUTE_NOW,
                 )
             self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_inventory_free_route_outcomes_do_not_enumerate_descriptors(self):
+        class ExplodingInventory:
+            def __iter__(self):
+                raise AssertionError("descriptor inventory must not be touched")
+
+        cases = (
+            (
+                RoutingPolicy(RoutingMode.ZERO, maximum_cost="0"),
+                route_request("route-zero-no-inventory"),
+                RouteStatus.NO_MODEL,
+                "zero_model_policy",
+            ),
+            (
+                route_policy(),
+                route_request("route-cancel-no-inventory", cancelled=True),
+                RouteStatus.REJECTED,
+                "request_cancelled",
+            ),
+        )
+        for policy, request, expected_status, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason), TemporaryDirectory() as directory:
+                journal, budget = open_budget(directory, ceiling="1")
+                decision = budget.admit_route(
+                    policy,
+                    request,
+                    ExplodingInventory(),
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": "unused"},
+                )
+                self.assertEqual(decision.status, expected_status)
+                self.assertEqual(decision.reason, expected_reason)
+                self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+                self.assertEqual(
+                    [
+                        event["event_type"]
+                        for event in journal.load_events("model_budget", "policy-1")
+                        if event["event_type"] == "ModelRouteReserved"
+                    ],
+                    [],
+                )
 
     def test_route_rejects_descriptor_subclass_before_financial_identity_read(self):
         class DerivedModelDescriptor(ModelDescriptor):

@@ -893,6 +893,65 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 ["ModelCallPrepared", "ModelCallNotSent"],
             )
 
+    def test_zero_and_cancelled_new_attempts_never_touch_model_inventory(self):
+        class ExplodingInventory:
+            def __iter__(self):
+                raise AssertionError("model inventory must not be touched")
+
+        cases = (
+            (
+                RoutingPolicy(
+                    mode=RoutingMode.ZERO,
+                    maximum_cost=Decimal("2"),
+                ),
+                False,
+                "NO_MODEL",
+                "zero_model_policy",
+            ),
+            (
+                fixed_policy(),
+                True,
+                "REJECTED",
+                "request_cancelled",
+            ),
+        )
+        for policy, cancelled, expected_status, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason), TemporaryDirectory() as directory:
+                _journal, budget = open_budget(directory)
+                orchestrator = orchestrator_for(
+                    budget=budget,
+                    clock=MutableClock(),
+                    pricing_evidence_resolver=lambda *_args: self.fail(
+                        "inventory-free route must not resolve pricing evidence"
+                    ),
+                )
+                call_spec = spec()
+                outcome = orchestrator.execute(
+                    spec=call_spec,
+                    policy=policy,
+                    request=request_for(
+                        orchestrator,
+                        call_spec,
+                        cancelled=cancelled,
+                    ),
+                    descriptors=ExplodingInventory(),
+                    call=lambda *_args: self.fail(
+                        "inventory-free route must not cross inference boundary"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+                self.assertEqual(outcome.status, expected_status)
+                self.assertEqual(outcome.reason, expected_reason)
+                self.assertEqual(
+                    orchestrator._events(outcome.attempt_id),
+                    [],
+                )
+                self.assertIsNone(
+                    budget.active_reservation(outcome.attempt_id)
+                )
+                self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_zero_mode_never_calls_and_creates_no_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

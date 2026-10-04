@@ -17,7 +17,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
     private readonly Task _stderrDrain;
     public Uri Origin => _session.Origin;
     public string DataDirectory { get; }
-    public string CookieToken => _session.Token;
+    public string SessionToken => _session.Token;
     public IEmergencyHostClient Client { get; }
 
     private OwnedProviderFreeRuntime(Process process, HttpClient http, EmergencyHostSession session, string data,
@@ -101,7 +101,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
             if (!cookie.StartsWith(cookieName, StringComparison.Ordinal))
                 throw new InvalidOperationException("Host pairing did not return the expected session cookie.");
             string token = cookie[cookieName.Length..cookie.IndexOf(';')];
-            // The reusable token stays in process memory and WebView's HttpOnly cookie.
+            // The reusable token stays only in this owned WPF process; the embedded WebView receives it only on exact admitted Host API requests.
             return new(process, http, new EmergencyHostSession("local-owner", token, origin), data,
                 stdoutDrain, stderrDrain);
         }

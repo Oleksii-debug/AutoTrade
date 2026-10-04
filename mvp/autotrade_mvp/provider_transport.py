@@ -30,7 +30,7 @@ import weakref
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -4701,7 +4701,17 @@ def _install_authenticated_read_execution_receipt_authority():
     binance_read_sign = BinanceSpotAuthenticatedReadSigner.sign
     bybit_read_sign = BybitV5AuthenticatedReadSigner.sign
     kraken_read_sign = KrakenSpotAuthenticatedReadSigner.sign
-    kraken_credential_parse = KrakenSpotCredential.parse
+    kraken_credential_parse = KrakenSpotCredential.__dict__["parse"].__func__
+    binance_read_sign_code = binance_read_sign.__code__
+    bybit_read_sign_code = bybit_read_sign.__code__
+    kraken_read_sign_code = kraken_read_sign.__code__
+    kraken_credential_parse_code = kraken_credential_parse.__code__
+    direct_client_init_code = direct_client_init.__code__
+    direct_client_send_code = direct_client_send.__code__
+    canonical_observe_code = canonical_observe.__code__
+    direct_build_opener_code = direct_build_opener.__code__
+    direct_response_limiter_code = direct_response_limiter.__code__
+    direct_redirect_code = direct_redirect_handler.redirect_request.__code__
 
     def prune() -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
@@ -4721,6 +4731,12 @@ def _install_authenticated_read_execution_receipt_authority():
             or ProxyHandler is not direct_proxy_handler
             or _NoRedirectHandler is not direct_redirect_handler
             or require_provider_response_bytes is not direct_response_limiter
+            or direct_client_init.__code__ is not direct_client_init_code
+            or direct_client_send.__code__ is not direct_client_send_code
+            or canonical_observe.__code__ is not canonical_observe_code
+            or direct_build_opener.__code__ is not direct_build_opener_code
+            or direct_response_limiter.__code__ is not direct_response_limiter_code
+            or _NoRedirectHandler.redirect_request.__code__ is not direct_redirect_code
         ):
             raise ProviderTransportError(
                 "authenticated-read direct transport dependency authority changed"
@@ -4894,6 +4910,42 @@ def _install_authenticated_read_execution_receipt_authority():
                 "direct authenticated-read signed request escaped exact provider policy"
             )
 
+    def require_signed_query_scope(
+        request: AuthenticatedReadHttpRequest,
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> None:
+        if request.method == "GET":
+            encoded = urlsplit(request.url).query
+        else:
+            if type(request.body) is not bytes:
+                raise ProviderTransportError(
+                    "direct authenticated-read request body is not exact bytes"
+                )
+            try:
+                encoded = request.body.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise ProviderTransportError(
+                    "direct authenticated-read form body is not ASCII"
+                ) from error
+        try:
+            pairs = parse_qsl(
+                encoded,
+                keep_blank_values=True,
+                strict_parsing=False,
+            )
+        except ValueError as error:
+            raise ProviderTransportError(
+                "direct authenticated-read signed query is invalid"
+            ) from error
+        for key, expected_value in query_binding.query.items():
+            values = [value for observed_key, value in pairs if observed_key == key]
+            if values != [expected_value]:
+                raise ProviderTransportError(
+                    "direct authenticated-read signed query changed exact prepared parameter "
+                    + key
+                )
+
     def direct_execute_observe(
         *,
         request: AuthenticatedReadHttpRequest,
@@ -4992,7 +5044,10 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Binance authenticated-read network policy is not canonical"
             )
-        if BinanceSpotAuthenticatedReadSigner.sign is not binance_read_sign:
+        if (
+            BinanceSpotAuthenticatedReadSigner.sign is not binance_read_sign
+            or binance_read_sign.__code__ is not binance_read_sign_code
+        ):
             raise ProviderTransportError(
                 "direct Binance authenticated-read signer authority changed"
             )
@@ -5043,6 +5098,10 @@ def _install_authenticated_read_execution_receipt_authority():
                 policy=canonical_policy,
                 query_binding=query_binding,
             )
+            require_signed_query_scope(
+                signed,
+                query_binding=query_binding,
+            )
             return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
@@ -5077,7 +5136,10 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Bybit authenticated-read network policy is not canonical"
             )
-        if BybitV5AuthenticatedReadSigner.sign is not bybit_read_sign:
+        if (
+            BybitV5AuthenticatedReadSigner.sign is not bybit_read_sign
+            or bybit_read_sign.__code__ is not bybit_read_sign_code
+        ):
             raise ProviderTransportError(
                 "direct Bybit authenticated-read signer authority changed"
             )
@@ -5129,6 +5191,10 @@ def _install_authenticated_read_execution_receipt_authority():
                 policy=canonical_policy,
                 query_binding=query_binding,
             )
+            require_signed_query_scope(
+                signed,
+                query_binding=query_binding,
+            )
             return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
@@ -5164,9 +5230,17 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Kraken authenticated-read network policy is not canonical"
             )
+        current_kraken_parse = KrakenSpotCredential.__dict__.get("parse")
+        current_kraken_parse_func = (
+            current_kraken_parse.__func__
+            if isinstance(current_kraken_parse, classmethod)
+            else None
+        )
         if (
             KrakenSpotAuthenticatedReadSigner.sign is not kraken_read_sign
-            or KrakenSpotCredential.parse is not kraken_credential_parse
+            or kraken_read_sign.__code__ is not kraken_read_sign_code
+            or current_kraken_parse_func is not kraken_credential_parse
+            or kraken_credential_parse.__code__ is not kraken_credential_parse_code
         ):
             raise ProviderTransportError(
                 "direct Kraken authenticated-read signer authority changed"
@@ -5200,7 +5274,8 @@ def _install_authenticated_read_execution_receipt_authority():
             provider_api_key = None
             try:
                 provider_api_key = kraken_credential_parse(
-                    credential_plaintext
+                    KrakenSpotCredential,
+                    credential_plaintext,
                 ).api_key
                 nonce_domain = self.nonce_allocator.for_provider_api_key(
                     provider_api_key
@@ -5218,6 +5293,10 @@ def _install_authenticated_read_execution_receipt_authority():
                     require_direct_request_scope(
                         signed,
                         policy=canonical_policy,
+                        query_binding=query_binding,
+                    )
+                    require_signed_query_scope(
+                        signed,
                         query_binding=query_binding,
                     )
                     return direct_execute_observe(

@@ -674,6 +674,10 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             registry = ScientificRegistry(path)
             registered = registry.register_protocol(protocol())
+            identity_hash = registry.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             connection = sqlite3.connect(path)
             try:
                 with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
@@ -684,6 +688,17 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                 with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
                     connection.execute(
                         "DELETE FROM protocols WHERE protocol_id=?",
+                        (registered.protocol_id,),
+                    )
+                with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
+                    connection.execute(
+                        "UPDATE protocol_locked_holdouts "
+                        "SET holdout_identity_hash=? WHERE protocol_id=?",
+                        (identity_hash, registered.protocol_id),
+                    )
+                with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
+                    connection.execute(
+                        "DELETE FROM protocol_locked_holdouts WHERE protocol_id=?",
                         (registered.protocol_id,),
                     )
             finally:

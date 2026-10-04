@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_research.artifacts import ArtifactStore
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
 from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_qualification import (

@@ -530,6 +530,7 @@ class KrakenSpotExecutionReport:
     last_price: Decimal | None = None
     cost: Decimal | None = None
     fees: tuple[KrakenSpotExecutionFee, ...] = ()
+    fees_reported: bool = False
     event_time: str | None = None
     trade_id: int | None = None
     margin_borrow: bool | None = None
@@ -598,13 +599,22 @@ class KrakenSpotExecutionReport:
             raise TypeError(
                 "fees must contain KrakenSpotExecutionFee"
             )
-
-        if self.event_time is not None:
-            object.__setattr__(
-                self,
-                "event_time",
-                _rfc3339_text(self.event_time, name="timestamp"),
+        if type(self.fees_reported) is not bool:
+            raise TypeError("fees_reported must be an exact boolean")
+        if self.fees and not self.fees_reported:
+            raise KrakenSpotStreamError(
+                "fee components require fees_reported=true"
             )
+
+        if self.event_time is None:
+            raise KrakenSpotStreamError(
+                "Kraken execution report timestamp is required"
+            )
+        object.__setattr__(
+            self,
+            "event_time",
+            _rfc3339_text(self.event_time, name="timestamp"),
+        )
 
         if self.trade_id is not None:
             if (
@@ -619,40 +629,37 @@ class KrakenSpotExecutionReport:
                 "margin_borrow must be an exact boolean when present"
             )
 
-        if exec_type == "trade":
-            missing: list[str] = []
-            for field_name in (
-                "exec_id",
-                "symbol",
-                "side",
-                "last_qty",
-                "last_price",
-                "cost",
-                "event_time",
-                "trade_id",
-            ):
-                if getattr(self, field_name) is None:
-                    missing.append(field_name)
-            if not self.fees:
-                missing.append("fees")
-            if missing:
-                raise KrakenSpotStreamError(
-                    "Kraken trade report lacks complete fill economics: "
-                    + ", ".join(missing)
-                )
-        elif (
+        if exec_type != "trade" and (
             self.exec_id is not None
             or self.ext_exec_id is not None
             or self.last_qty is not None
             or self.last_price is not None
             or self.cost is not None
             or self.fees
+            or self.fees_reported
             or self.trade_id is not None
             or self.margin_borrow is not None
         ):
             raise KrakenSpotStreamError(
                 "Kraken non-trade report contains trade-only economics"
             )
+
+    @property
+    def trade_economics_complete(self) -> bool:
+        """Whether this trade report carries the full immediate economics slice."""
+
+        if self.exec_type != "trade":
+            return False
+        return (
+            self.exec_id is not None
+            and self.symbol is not None
+            and self.side is not None
+            and self.last_qty is not None
+            and self.last_price is not None
+            and self.cost is not None
+            and self.trade_id is not None
+            and self.fees_reported
+        )
 
 
 @dataclass(frozen=True)
@@ -784,13 +791,19 @@ def parse_execution_frame(
             raise KrakenSpotStreamError(
                 f"Kraken executions data[{index}] lacks exec_type"
             )
+        if raw_report.get("timestamp") is None:
+            raise KrakenSpotStreamError(
+                f"Kraken executions data[{index}] lacks timestamp"
+            )
         if (
             type(exec_type) is str
             and exec_type in _ALLOWED_EXEC_TYPES
             and exec_type != "trade"
         ):
             trade_only_fields = sorted(
-                _TRADE_ONLY_EXECUTION_FIELDS.intersection(raw_report)
+                field_name
+                for field_name in _TRADE_ONLY_EXECUTION_FIELDS
+                if raw_report.get(field_name) is not None
             )
             if trade_only_fields:
                 raise KrakenSpotStreamError(
@@ -838,6 +851,7 @@ def parse_execution_frame(
                 last_price=raw_report.get("last_price"),
                 cost=raw_report.get("cost"),
                 fees=fees,
+                fees_reported=raw_fees is not None,
                 event_time=raw_report.get("timestamp"),
                 trade_id=raw_report.get("trade_id"),
                 margin_borrow=raw_report.get("margin_borrow"),

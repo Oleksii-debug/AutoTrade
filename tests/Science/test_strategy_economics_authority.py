@@ -185,6 +185,18 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             "provider_scope_binding",
             assessment.unresolved_owners,
         )
+        self.assertIn(
+            "instrument_registry_authority",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "instrument_registry_shape",
+            assessment.verified_owners,
+        )
+        self.assertNotIn(
+            "instrument_registry",
+            assessment.verified_owners,
+        )
         with self.assertRaisesRegex(
             StrategyEconomicsAuthorityError,
             "terminal strategy economics is INCONCLUSIVE",
@@ -216,6 +228,33 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
         self.assertIn(
             "capacity_evidence_authority",
+            assessment.unresolved_owners,
+        )
+
+    def test_public_registry_exact_rebind_cannot_redirect_assessment(self):
+        item = _proposal()
+        binding = _binding(item)
+        original = InstrumentRegistry.exact
+        calls = []
+
+        def hostile_exact(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("rebound public registry lookup executed")
+
+        InstrumentRegistry.exact = hostile_exact
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                binding,
+                instrument_registry=_registry(),
+            )
+        finally:
+            InstrumentRegistry.exact = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(assessment.instrument_version, INSTRUMENT_VERSION)
+        self.assertIn(
+            "instrument_registry_authority",
             assessment.unresolved_owners,
         )
 
@@ -271,7 +310,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 instrument_version=INSTRUMENT_VERSION,
                 instrument_provider_id="SIMULATED",
                 verified_owners=(
-                    "instrument_registry",
+                    "instrument_registry_shape",
                 ),
                 unresolved_owners=(),
                 provider_economic_cut_digest=None,
@@ -305,7 +344,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             "positive strategy economics issuance is unavailable on current main",
         ):
             require_qualified_strategy_economics(assessment)
-
 
     def test_unknown_instrument_fails_before_assessment_issuance(self):
         item = _proposal()

@@ -163,8 +163,6 @@ class _ProductionBybitSecretResolver:
         "__credential_identity_reader",
         "__credential_identity_reader_code",
         "__session_token",
-        "__clock_utc",
-        "__clock_utc_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -395,6 +393,8 @@ class ProductionBybitOrderSender:
         "__credential_identity_reader",
         "__credential_identity_reader_code",
         "__session_token",
+        "__clock_utc",
+        "__clock_utc_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:

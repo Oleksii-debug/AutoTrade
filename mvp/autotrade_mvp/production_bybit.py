@@ -140,6 +140,8 @@ class _ProductionBybitSecretResolver:
         "__security_boundary",
         "__security_lease",
         "__security_lease_code",
+        "__security_lease_generator",
+        "__security_lease_generator_code",
         "__recovery",
         "__dispatcher",
         "__owner",
@@ -188,6 +190,13 @@ class _ProductionBybitSecretResolver:
             raise TypeError("production host SecurityBoundary authority is not exact")
         security_lease = SecurityBoundary.lease_for_execution
         security_lease_code = security_lease.__code__
+        security_lease_generator = getattr(security_lease, "__wrapped__", None)
+        if (
+            not callable(security_lease_generator)
+            or not hasattr(security_lease_generator, "__code__")
+        ):
+            raise TypeError("production credential lease implementation is not canonical")
+        security_lease_generator_code = security_lease_generator.__code__
         recovery = runtime.recovery_controller
         if type(recovery) is not RecoveryController:
             raise TypeError("production recovery authority is not exact")
@@ -211,6 +220,8 @@ class _ProductionBybitSecretResolver:
         self.__security_boundary = security_boundary
         self.__security_lease = security_lease
         self.__security_lease_code = security_lease_code
+        self.__security_lease_generator = security_lease_generator
+        self.__security_lease_generator_code = security_lease_generator_code
         self.__recovery = recovery
         self.__dispatcher = dispatcher
         self.__owner = owner
@@ -245,6 +256,18 @@ class _ProductionBybitSecretResolver:
             raise PermissionError("production credential lease authority changed")
         if security_lease.__code__ is not self.__security_lease_code:
             raise PermissionError("production credential lease authority code changed")
+        if (
+            getattr(security_lease, "__wrapped__", None)
+            is not self.__security_lease_generator
+        ):
+            raise PermissionError("production credential lease implementation changed")
+        if (
+            self.__security_lease_generator.__code__
+            is not self.__security_lease_generator_code
+        ):
+            raise PermissionError(
+                "production credential lease implementation code changed"
+            )
         if runtime.recovery_controller is not self.__recovery:
             raise PermissionError("production recovery controller authority changed")
         if runtime.financial_dispatcher is not self.__dispatcher:

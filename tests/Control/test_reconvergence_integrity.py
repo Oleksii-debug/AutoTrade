@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -11,6 +12,7 @@ from control.tools.reconvergence_integrity import (
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_name_status_z,
 )
 
 
@@ -311,6 +313,191 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
+
+
+    def test_ordinary_protected_sentinel_modification_requires_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        base = [sentinel, "README.md"]
+
+        unauthorized = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+        )
+        directory_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+        )
+        exact_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+
+        self.assertFalse(unauthorized.allowed)
+        self.assertFalse(directory_scope.allowed)
+        self.assertIn("content change without exact authorization", unauthorized.reasons[0])
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+
+    def test_change_validation_rejects_unsupported_status_and_noncanonical_path(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Git name-status"):
+            parse_name_status(["U\tREADME.md"])
+        with self.assertRaisesRegex(ValueError, "canonical repository-relative path"):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="../README.md")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_validation_rejects_synthetic_missing_base_source(self):
+        with self.assertRaisesRegex(ValueError, "absent from the base tree"):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="not-in-base.py")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_nul_name_status_parser_is_unambiguous_and_fail_closed(self):
+        self.assertEqual(
+            parse_name_status_z(b"M\x00README.md\x00A\x00new file.txt\x00"),
+            (
+                Change(status="M", path="README.md"),
+                Change(status="A", path="new file.txt"),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "Malformed NUL-delimited"):
+            parse_name_status_z(b"M\x00README.md")
+        with self.assertRaisesRegex(ValueError, "canonical UTF-8"):
+            parse_name_status_z(b"A\x00bad-\xff\x00")
+
+    def test_public_module_entrypoint_assesses_real_git_candidate(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-entry@example.invalid")
+            git("config", "user.name", "Guard Entry")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / "README.md").write_text("child\n", encoding="utf-8")
+            git("commit", "-am", "child")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Reconvergence tree guard passed.", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_modified_trust_root_without_exact_scope(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        sentinel = "control/tools/reconvergence_integrity.py"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "control" / "tools").mkdir(parents=True)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-trust@example.invalid")
+            git("config", "user.name", "Guard Trust")
+            (root / sentinel).write_text("BASE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / sentinel).write_text("BASE = 2\n", encoding="utf-8")
+            git("commit", "-am", "modify guard")
+            head_sha = git("rev-parse", "HEAD")
+
+            common = [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--repo",
+                str(root),
+                "--base",
+                base_sha,
+                "--head",
+                head_sha,
+            ]
+            blocked = subprocess.run(
+                common,
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            authorized = subprocess.run(
+                [*common, "--allowed-scope", sentinel],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("content change without exact authorization", blocked.stdout)
+        self.assertEqual(authorized.returncode, 0, authorized.stderr)
+
+    def test_public_module_help_bootstraps_from_repository_root(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--help",
+            ],
+            cwd=repository_root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--allowed-scope", completed.stdout)
+        self.assertIn("--repo", completed.stdout)
 
 
 

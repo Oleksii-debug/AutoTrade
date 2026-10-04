@@ -31,7 +31,7 @@ from autotrade_numeric.exact_decimal import (
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.io.strict_json import strict_json_loads
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -1401,6 +1401,99 @@ class AblationQualificationAuthority:
         return population, outcomes
 
 
+_ABLATION_AUTHORITY_STATE_FIELDS = frozenset(
+    {
+        "scientific_registry",
+        "experience_memory",
+        "artifact_store",
+        "protocol_id",
+        "protocol_hash",
+        "source_revision",
+        "causal_cutoff",
+        "granted_permissions",
+        "task",
+        "instrument_family",
+    }
+)
+
+
+def _registered_policy_context(
+    authority: object,
+) -> tuple[ScientificRegistry, str, str]:
+    """Read only the exact registry/protocol binding from an issued authority.
+
+    This is deliberately narrower than outcome/economic resolution.  Until
+    utility/cost projection owners are available, policy preflight may select
+    the preregistered decision geometry but must not read candidate outcomes.
+    """
+
+    if type(authority) is not AblationQualificationAuthority:
+        raise ProtocolViolation("ablation qualification authority type is invalid")
+    try:
+        state = object.__getattribute__(authority, "__dict__")
+    except AttributeError as error:
+        raise ProtocolViolation(
+            "ablation qualification authority state is unavailable"
+        ) from error
+    if type(state) is not dict or set(state) != _ABLATION_AUTHORITY_STATE_FIELDS:
+        raise ProtocolViolation(
+            "ablation qualification authority state is unavailable"
+        )
+
+    scientific_registry = state["scientific_registry"]
+    protocol_id = state["protocol_id"]
+    protocol_hash = state["protocol_hash"]
+    if type(scientific_registry) is not ScientificRegistry:
+        raise ProtocolViolation(
+            "ablation qualification authority registry is not canonical"
+        )
+    if (
+        type(protocol_id) is not str
+        or not protocol_id
+        or protocol_id != protocol_id.strip()
+    ):
+        raise ProtocolViolation(
+            "ablation qualification authority protocol_id is not canonical"
+        )
+    if type(protocol_hash) is not str:
+        raise ProtocolViolation(
+            "ablation qualification authority protocol_hash is not canonical"
+        )
+    try:
+        exact_hash = _digest(protocol_hash, "protocol_hash")
+    except ValueError as error:
+        raise ProtocolViolation(
+            "ablation qualification authority protocol_hash is not canonical"
+        ) from error
+    return scientific_registry, protocol_id, exact_hash
+
+
+def _registered_decision_policy(authority: object):
+    registry, protocol_id, protocol_hash = _registered_policy_context(authority)
+    policy = ScientificRegistry.ablation_decision_policy(registry, protocol_id)
+    if (
+        policy.protocol_id != protocol_id
+        or policy.protocol_hash != protocol_hash
+    ):
+        raise ProtocolViolation(
+            "registered ablation decision policy does not match qualification binding"
+        )
+    return policy
+
+
+def _registered_value_policy(authority: object):
+    registry, protocol_id, protocol_hash = _registered_policy_context(authority)
+    policy = ScientificRegistry.ablation_value_policy(registry, protocol_id)
+    if (
+        policy.protocol_id != protocol_id
+        or policy.protocol_hash != protocol_hash
+    ):
+        raise ProtocolViolation(
+            "registered ablation value policy does not match qualification binding"
+        )
+    return policy
+
+
 def _qualified_inconclusive(
     *,
     target_component: str,
@@ -1460,19 +1553,6 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        if (
-            not isinstance(minimum_pairs, int)
-            or isinstance(minimum_pairs, bool)
-            or minimum_pairs < 2
-        ):
-            raise ValueError("minimum_pairs must be an integer >= 2")
-        required = _decimal(required_lower_bound, "required_lower_bound")
-        multiplier = _decimal(
-            uncertainty_multiplier,
-            "uncertainty_multiplier",
-        )
-        if multiplier < 0:
-            raise ValueError("uncertainty_multiplier must be non-negative")
         target = (
             target_component.strip()
             if isinstance(target_component, str)
@@ -1480,11 +1560,59 @@ def evaluate_qualified_incremental_value(
         )
         _validate_pairs(target, selected_input)
 
-        # #718/#1097: the current authority can authenticate the outcome envelope
-        # but cannot independently resolve utility, cost, correction lineage, and
-        # one immutable historical economic cut from their canonical owners.
-        # Do not execute a caller-selected persistent authority and then treat
-        # hash-shaped fields in that envelope as terminal economic evidence.
+        # Caller thresholds are API-compatibility inputs only on the trusted
+        # path. Terminal scientific geometry must be fixed by the append-only
+        # protocol before any candidate outcome artifact can be consulted.
+        try:
+            registered_decision = _registered_decision_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("0"),
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+        required = _decimal(
+            registered_decision.required_lower_bound,
+            "registered required_lower_bound",
+        )
+        multiplier = _decimal(
+            registered_decision.uncertainty_multiplier,
+            "registered uncertainty_multiplier",
+        )
+        if registered_decision.decision_rule != _ABLATION_DECISION_RULE:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_rule_unsupported",
+            )
+        if (
+            type(registered_decision.minimum_pairs) is not int
+            or registered_decision.minimum_pairs < 2
+        ):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+
+        try:
+            _registered_value_policy(authority)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_value_policy_unavailable",
+            )
+
+        # #718/#1097: policy selection is now preregistered, but the project still
+        # lacks an independent authenticated utility scorer/projection issuer and
+        # a terminal resolver that composes it with the canonical historical
+        # economic cut. Never read candidate outcomes merely because their digest
+        # strings are well formed, and never reopen PASS/FAIL from these policies.
         return _qualified_inconclusive(
             target_component=target,
             required_lower_bound=required,

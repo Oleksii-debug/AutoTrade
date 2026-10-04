@@ -251,6 +251,7 @@ class DecisionTraceStore:
         refs = trace["evidence_refs"]
         if (
             not isinstance(refs, list)
+            or not refs
             or any(
                 not isinstance(item, str)
                 or not item.strip()
@@ -258,7 +259,9 @@ class DecisionTraceStore:
                 for item in refs
             )
         ):
-            raise ValueError("evidence_refs must contain canonical non-empty strings")
+            raise ValueError(
+                "evidence_refs must contain at least one canonical non-empty string"
+            )
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must not contain duplicates")
 
@@ -356,8 +359,19 @@ class DecisionTraceStore:
             )
         return _semantic_payload(record)
 
-    def accessible_export(self, trace_id: str) -> str:
-        """Return a linear, screen-reader-friendly view of one verified trace."""
+    def accessible_export(
+        self,
+        trace_id: str,
+        *,
+        available_event_ids: Iterable[str] | None = None,
+        available_evidence_ids: Iterable[str] | None = None,
+    ) -> str:
+        """Return a linear view that never presents unchecked links as verified evidence."""
+
+        if (available_event_ids is None) != (available_evidence_ids is None):
+            raise ValueError(
+                "available_event_ids and available_evidence_ids must be supplied together"
+            )
 
         record = next(
             (item for item in self.records() if item.get("trace_id") == trace_id),
@@ -366,8 +380,26 @@ class DecisionTraceStore:
         if record is None:
             raise KeyError(trace_id)
 
+        if available_event_ids is None:
+            evidence_status = "UNVERIFIED"
+            evidence_note = (
+                "Explanation is diagnostic only; linked evidence availability was not checked."
+            )
+        else:
+            self.reconstruct(
+                trace_id,
+                available_event_ids=available_event_ids,
+                available_evidence_ids=available_evidence_ids or (),
+            )
+            evidence_status = "VERIFIED"
+            evidence_note = (
+                "All linked durable events and evidence were available at export time."
+            )
+
         lines = [
             f"Decision trace: {record['trace_id']}",
+            f"Evidence status: {evidence_status}",
+            evidence_note,
             f"Strategy: {record['strategy_version']}",
             f"Decision: {record['decision']}",
             f"Reason: {record['decision_reason']}",
@@ -382,7 +414,7 @@ class DecisionTraceStore:
         lines.extend(f"- {item}" for item in event_ids) if event_ids else lines.append("- none")
 
         lines.append("Evidence:")
-        lines.extend(f"- {item}" for item in record["evidence_refs"]) if record["evidence_refs"] else lines.append("- none")
+        lines.extend(f"- {item}" for item in record["evidence_refs"])
 
         lines.append("Attributes:")
         attributes = record.get("attributes", {})

@@ -177,6 +177,40 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     )
                 prepare_direct.assert_not_called()
 
+    def test_direct_origin_rejects_wrong_qualification_registry_type_before_prepare(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                _qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "qualification_registry must be exact DurableProviderQualificationRegistry",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=object(),
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+
     def test_direct_origin_rejects_c_q_store_split_before_prepare_or_transport(self):
         with TemporaryDirectory() as directory:
             (

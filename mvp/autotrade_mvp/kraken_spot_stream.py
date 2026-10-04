@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
+import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -189,6 +190,22 @@ _ALLOWED_ORDER_STATUSES = frozenset(
 )
 _TERMINAL_ORDER_STATUSES = frozenset({"filled", "canceled", "expired"})
 _MAX_FRAME_BYTES = 4 * 1024 * 1024
+_RFC3339_TIMESTAMP = re.compile(
+    r"\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:Z|[+-]\\d{2}:\\d{2})\\Z",
+    re.ASCII,
+)
+_TRADE_ONLY_EXECUTION_FIELDS = frozenset(
+    {
+        "cost",
+        "exec_id",
+        "ext_exec_id",
+        "fees",
+        "last_price",
+        "last_qty",
+        "margin_borrow",
+        "trade_id",
+    }
+)
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -430,6 +447,10 @@ def _bounded_decimal(
 
 def _rfc3339_text(value: object, *, name: str) -> str:
     text = _canonical_text(value, name=name)
+    if _RFC3339_TIMESTAMP.fullmatch(text) is None:
+        raise KrakenSpotStreamError(
+            f"{name} must be an RFC3339 timestamp"
+        )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except (ValueError, OverflowError) as error:
@@ -472,6 +493,7 @@ class KrakenSpotExecutionReport:
     order_status: str | None
     client_order_id: str | None = None
     exec_id: str | None = None
+    ext_exec_id: str | None = None
     symbol: str | None = None
     side: str | None = None
     last_qty: Decimal | None = None
@@ -504,7 +526,12 @@ class KrakenSpotExecutionReport:
                 )
             object.__setattr__(self, "order_status", status)
 
-        for field_name in ("client_order_id", "exec_id", "symbol"):
+        for field_name in (
+            "client_order_id",
+            "exec_id",
+            "ext_exec_id",
+            "symbol",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(
@@ -585,6 +612,7 @@ class KrakenSpotExecutionReport:
                 )
         elif (
             self.exec_id is not None
+            or self.ext_exec_id is not None
             or self.last_qty is not None
             or self.last_price is not None
             or self.cost is not None
@@ -726,6 +754,19 @@ def parse_execution_frame(
             raise KrakenSpotStreamError(
                 f"Kraken executions data[{index}] lacks exec_type"
             )
+        if (
+            type(exec_type) is str
+            and exec_type in _ALLOWED_EXEC_TYPES
+            and exec_type != "trade"
+        ):
+            trade_only_fields = sorted(
+                _TRADE_ONLY_EXECUTION_FIELDS.intersection(raw_report)
+            )
+            if trade_only_fields:
+                raise KrakenSpotStreamError(
+                    "Kraken non-trade report contains trade-only economics: "
+                    + ", ".join(trade_only_fields)
+                )
         raw_fees = raw_report.get("fees")
         fees: tuple[KrakenSpotExecutionFee, ...] = ()
         if raw_fees is not None:
@@ -760,6 +801,7 @@ def parse_execution_frame(
                 order_status=raw_report.get("order_status"),
                 client_order_id=raw_report.get("cl_ord_id"),
                 exec_id=raw_report.get("exec_id"),
+                ext_exec_id=raw_report.get("ext_exec_id"),
                 symbol=raw_report.get("symbol"),
                 side=raw_report.get("side"),
                 last_qty=raw_report.get("last_qty"),

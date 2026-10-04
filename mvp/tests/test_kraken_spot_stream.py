@@ -322,6 +322,110 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 connection_generation=1,
             )
 
+    def test_trade_frame_retains_optional_external_execution_identity(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-EXT",
+                    "exec_id": "E-EXT",
+                    "ext_exec_id": "00000000-0000-0000-0000-000000000042",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                }
+            ],
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+        self.assertEqual(
+            report.ext_exec_id,
+            "00000000-0000-0000-0000-000000000042",
+        )
+
+    def test_non_trade_rejects_trade_only_keys_even_when_null(self):
+        for field_name in (
+            "cost",
+            "ext_exec_id",
+            "fees",
+            "last_price",
+            "last_qty",
+            "margin_borrow",
+            "trade_id",
+        ):
+            with self.subTest(field_name=field_name):
+                raw = frame_bytes(
+                    reports=[
+                        {
+                            "order_id": "O-STATUS-NULL",
+                            "exec_type": "status",
+                            "order_status": "new",
+                            field_name: None,
+                        }
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    KrakenSpotStreamError,
+                    "non-trade report contains trade-only economics",
+                ):
+                    parse_execution_frame(
+                        raw,
+                        account_id="spot-live-1",
+                        connection_generation=1,
+                    )
+
+    def test_trade_timestamp_requires_rfc3339_lexical_form(self):
+        invalid = (
+            "2026-10-04 05:00:00+00:00",
+            "2026-10-04T05:00:00",
+            "2026-10-04T05:00:00z",
+        )
+        for timestamp in invalid:
+            with self.subTest(timestamp=timestamp):
+                raw = frame_bytes(
+                    reports=[
+                        {
+                            "order_id": "O-TIME",
+                            "exec_id": "E-TIME",
+                            "exec_type": "trade",
+                            "order_status": "partially_filled",
+                            "timestamp": timestamp,
+                        }
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    KrakenSpotStreamError,
+                    "timestamp must be an RFC3339 timestamp",
+                ):
+                    parse_execution_frame(
+                        raw,
+                        account_id="spot-live-1",
+                        connection_generation=1,
+                    )
+
+    def test_trade_timestamp_accepts_rfc3339_offset(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-OFFSET",
+                    "exec_id": "E-OFFSET",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "timestamp": "2026-10-04T07:00:00+02:00",
+                }
+            ],
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+        self.assertEqual(
+            report.event_time,
+            "2026-10-04T07:00:00+02:00",
+        )
+
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
         huge_integer = b"9" * 1000
         raw_sequence = (

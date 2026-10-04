@@ -7,10 +7,12 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.recovery_dispatch import (
     RecoveryIssuedDispatcher,
     build_recovery_issued_dispatcher,
 )
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 class RecoveryIssuedDispatcherTests(unittest.TestCase):
@@ -24,6 +26,37 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
         )
         recovery.start("host-a")
         return recovery
+
+    def _mark_ready(
+        self,
+        recovery: RecoveryController,
+        journal: JournalStore,
+        *,
+        provider_id: str = "BYBIT",
+        reconciliation_id: str = "issued-dispatcher-ready",
+    ) -> None:
+        owner = recovery.owner
+        self.assertIsNotNone(owner)
+        result = reconciliation(
+            provider_id=provider_id,
+            account_id="acct",
+            environment="PAPER",
+        )
+        record_reconciliation_checkpoint(
+            journal,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-10-04T00:59:59Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            account_id="acct",
+            environment="PAPER",
+        )
+        self.assertIs(recovery.state, HostState.READY)
 
     def test_issued_dispatcher_ignores_hostile_legacy_sender_callback(self):
         with TemporaryDirectory() as directory:
@@ -129,6 +162,83 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 [event["event_type"] for event in events],
             )
 
+    def test_same_process_unknown_reopens_reconciliation_gate_before_next_send(self):
+        with TemporaryDirectory() as directory:
+            journal = self._journal(directory)
+            recovery = self._recovery(journal)
+            dispatcher = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            self._mark_ready(recovery, journal)
+
+            first_wire = []
+
+            def ambiguous_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                first_wire.append("wire")
+                raise RuntimeError("ambiguous provider timeout")
+
+            first = dispatcher.dispatch(
+                attempt_id="attempt-unknown-1",
+                intent_id="intent-unknown-1",
+                intent_hash="intent-hash-unknown-1",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-10-04T01:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=ambiguous_transport,
+            )
+            self.assertEqual(first.status, "UNKNOWN")
+            self.assertEqual(first_wire, ["wire"])
+            # GuardedDispatcher owns durable send chronology; the production
+            # facade must rehydrate this fact before the next final barrier.
+            self.assertIs(recovery.state, HostState.READY)
+
+            second_wire = []
+
+            def second_transport(_client_order_id, _request, final_guard):
+                final_guard()
+                second_wire.append("wire")
+                return {"ok": True}
+
+            second = dispatcher.dispatch(
+                attempt_id="attempt-unknown-2",
+                intent_id="intent-unknown-2",
+                intent_hash="intent-hash-unknown-2",
+                provider="BYBIT",
+                request={"symbol": "ETHUSDT"},
+                now="2026-10-04T01:00:01Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=second_transport,
+            )
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertIn("sender_fence_rejected:PermissionError", second.reason)
+            self.assertEqual(second_wire, [])
+            self.assertIs(recovery.state, HostState.DEGRADED)
+            self.assertFalse(recovery.provider_reconciled)
+            self.assertIn("attempt-unknown-1", recovery.unresolved_attempts)
+            events = JournalStore.load_events_by_aggregate_type(
+                journal,
+                "submission_attempt",
+            )
+            by_attempt = {}
+            for event in events:
+                payload = event.get("payload", {})
+                by_attempt.setdefault(payload.get("attempt_id"), []).append(
+                    event["event_type"]
+                )
+            self.assertEqual(
+                by_attempt["attempt-unknown-1"],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                by_attempt["attempt-unknown-2"],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_final_guard_rereads_durable_owner_and_blocks_stale_issued_dispatcher(self):
         with TemporaryDirectory() as directory:
             journal = self._journal(directory)
@@ -140,12 +250,9 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
                 account_id="acct",
             )
 
-            # Make the process-local readiness bit permissive so this test
-            # specifically falsifies stale durable owner authority. The durable
-            # owner journal is then advanced behind the issued dispatcher's back.
-            recovery.state = HostState.READY
-            recovery.provider_reconciled = True
-            recovery.reason_codes.clear()
+            # Establish real owner-bound journal readiness first so this test
+            # isolates stale durable owner authority rather than missing evidence.
+            self._mark_ready(recovery, journal)
             successor_payload = {
                 "owner_id": "host-b",
                 "owner_epoch": "2",

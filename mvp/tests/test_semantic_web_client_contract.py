@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[2]
 INDEX = ROOT / "web" / "src" / "index.html"
 APP = ROOT / "web" / "src" / "app.js"
 CSS = ROOT / "web" / "src" / "styles.css"
+HOST_NETWORK = ROOT / "mvp" / "autotrade_mvp" / "host_network.py"
+DURABLE_HOST_API = ROOT / "mvp" / "autotrade_mvp" / "durable_host_api.py"
 
 
 class _ElementParser(HTMLParser):
@@ -726,6 +728,96 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "Terminal operation cannot retain unresolved uncertainty",
             js,
         )
+
+    def test_fresh_auth_rejection_discards_only_definitively_unaccepted_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        classifier = js[
+            js.index("function isCommandAuthRejection"):
+            js.index("function reportSnapshotBusy")
+        ]
+        self.assertIn("error.status === 403", classifier)
+        self.assertIn(
+            'error.code === "AUTHENTICATION_OR_AUTHORIZATION_FAILED"',
+            classifier,
+        )
+        self.assertNotIn("error.status === 401", classifier)
+
+        transport = js[
+            js.index("async function submitCanonicalCommand"):
+            js.index("function text(")
+        ]
+        self.assertIn('contentType.includes("application/json")', transport)
+        self.assertIn("errorBody = await response.json()", transport)
+        self.assertIn("error.code = errorBody.error", transport)
+
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        catch = submit.index("} catch (error) {")
+        definitive = submit.index(
+            "if (!recovering && isCommandAuthRejection(error))",
+            catch,
+        )
+        clear = submit.index("clearConfirmedCommand(payload)", definitive)
+        ambiguous = submit.index(
+            "could not be confirmed. Its original command_id and idempotency_key "
+            "are retained for exact retry",
+            definitive,
+        )
+        self.assertLess(definitive, clear)
+        self.assertLess(clear, ambiguous)
+        self.assertIn(
+            "was not accepted because the authenticated host session was rejected "
+            "before command acceptance",
+            submit[definitive:ambiguous],
+        )
+        self.assertIn(
+            "A retry is different: its prior attempt may already be durable",
+            submit[definitive:ambiguous],
+        )
+
+    def test_canonical_host_auth_failure_is_pre_accept_and_machine_identified(self):
+        network = HOST_NETWORK.read_text(encoding="utf-8")
+        dispatch = network[
+            network.index("    def dispatch("):
+            network.index("class _HostRequestHandler")
+        ]
+        principal = dispatch.index(
+            "principal, authenticated_role = self._principal(normalized_headers)"
+        )
+        actor_check = dispatch.index(
+            'if command.get("actor") != principal.actor:'
+        )
+        session_check = dispatch.index(
+            'if command.get("session") != principal.session:'
+        )
+        submit = dispatch.index("result = self.store.submit(command)")
+        auth_error = dispatch.index(
+            'return _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")'
+        )
+        self.assertLess(principal, actor_check)
+        self.assertLess(actor_check, session_check)
+        self.assertLess(session_check, submit)
+        self.assertGreater(auth_error, submit)
+
+        durable = DURABLE_HOST_API.read_text(encoding="utf-8")
+        store_submit = durable[
+            durable.index("    def submit(self, command: Mapping[str, object]) -> CommandResult:"):
+            durable.index("    def execute_authority_operation(", durable.index(
+                "    def submit(self, command: Mapping[str, object]) -> CommandResult:"
+            ))
+        ]
+        origin = store_submit.index("request_origin = self._request_origin_provider()")
+        session_validation = store_submit.index(
+            "if not self._session_validator(session, actor, request_origin.strip(), action):"
+        )
+        durable_lookup = store_submit.index("accepted_event = self._journal.get_event(event_id)")
+        commit = store_submit.index("self._journal.commit_command(")
+        self.assertLess(origin, session_validation)
+        self.assertLess(session_validation, durable_lookup)
+        self.assertLess(durable_lookup, commit)
+        self.assertEqual(store_submit.count("raise PermissionError("), 2)
 
     def test_ambiguous_command_keeps_exact_identity_for_retry(self):
         js = APP.read_text(encoding="utf-8")

@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.execution_oracle import (
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     LiquidityObservation,
+    SimulatedExecution,
     SimulatedOrder,
     simulate_execution,
 )
@@ -63,6 +64,61 @@ def observation(**overrides):
 
 
 class ExecutionOracleTests(unittest.TestCase):
+    def test_oracle_rejects_domain_subclasses_before_economic_checks(self):
+        class DerivedOrder(SimulatedOrder):
+            pass
+
+        class DerivedObservation(LiquidityObservation):
+            pass
+
+        class DerivedModel(ExecutionModel):
+            pass
+
+        class DerivedExecution(SimulatedExecution):
+            pass
+
+        exact_order = order()
+        exact_observation = observation()
+        exact_model = model()
+        exact_result = simulate_execution(
+            exact_order,
+            exact_observation,
+            exact_model,
+        )
+        derived_order = DerivedOrder(**exact_order.__dict__)
+        derived_observation = DerivedObservation(**exact_observation.__dict__)
+        derived_model = DerivedModel(**exact_model.__dict__)
+        derived_result = DerivedExecution(**exact_result.__dict__)
+
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            assert_conservative_execution(
+                order=derived_order,
+                observation=exact_observation,
+                model=exact_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=derived_observation,
+                model=exact_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=derived_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact SimulatedExecution"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=exact_model,
+                result=derived_result,
+            )
+
     def test_existing_conservative_market_fill_passes_independent_oracle(self):
         o = order()
         q = observation()

@@ -880,6 +880,33 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     **conflicting,
                 )
 
+    def test_direct_wire_claim_rejects_terminal_time_after_observation_before_append(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.sqlite3")
+            kwargs = {
+                "attempt_id": "provider-read:" + "d" * 32,
+                "qualified_query_digest": "sha256:" + "1" * 64,
+                "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+                "http_status": 200,
+                "response_sha256": "sha256:" + "3" * 64,
+                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                "wire_request_sha256": "sha256:" + "4" * 64,
+                "wire_request_semantics_sha256": "sha256:" + "5" * 64,
+                "terminal_authority_journal_sequence_cut": 0,
+                "terminal_authority_verified_at": (
+                    NOW + timedelta(seconds=1)
+                ).isoformat().replace("+00:00", "Z"),
+            }
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "verification follows response observation",
+            ):
+                provider_origin_module._claim_direct_wire_execution(
+                    journal,
+                    **kwargs,
+                )
+            self.assertEqual(journal.current_journal_sequence(), 0)
+
     def test_direct_wire_claim_rejects_future_terminal_cut_before_append(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.sqlite3")

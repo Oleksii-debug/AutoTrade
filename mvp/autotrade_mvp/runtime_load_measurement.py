@@ -57,6 +57,30 @@ def _non_negative_int(value: object, *, name: str) -> int:
     return value
 
 
+def _snapshot_kwdefaults(
+    value: object,
+    *,
+    name: str,
+) -> tuple[tuple[str, object], ...] | None:
+    """Freeze keyword defaults without invoking caller-defined equality."""
+
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise RuntimeLoadMeasurementError(
+            f"{name} must be an exact dict or None"
+        )
+    keys: list[str] = []
+    for key in value:
+        if type(key) is not str:
+            raise RuntimeLoadMeasurementError(
+                f"{name} keys must be exact strings"
+            )
+        keys.append(key)
+    keys.sort()
+    return tuple((key, value[key]) for key in keys)
+
+
 def _expected_for_id(
     plan: DeclaredRuntimeEventPlan,
     event_id: str,
@@ -351,9 +375,10 @@ def measure_declared_financial_operation(
             function.__code__,
             function.__defaults__,
             function.__kwdefaults__,
-            None
-            if function.__kwdefaults__ is None
-            else tuple(sorted(function.__kwdefaults__.items())),
+            _snapshot_kwdefaults(
+                function.__kwdefaults__,
+                name=f"{name}.__kwdefaults__",
+            ),
         )
         for name, function in (
             ("JournalStore.get_event", get_event),
@@ -409,8 +434,21 @@ def measure_declared_financial_operation(
                 or function.__defaults__ is not defaults
                 or function.__kwdefaults__ is not kwdefaults
                 or (
-                    kwdefaults is not None
-                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                    kwdefault_items is None
+                    and function.__kwdefaults__ is not None
+                )
+                or (
+                    kwdefault_items is not None
+                    and (
+                        type(function.__kwdefaults__) is not dict
+                        or tuple(sorted(function.__kwdefaults__)) != tuple(
+                            key for key, _expected in kwdefault_items
+                        )
+                        or any(
+                            function.__kwdefaults__[key] is not expected
+                            for key, expected in kwdefault_items
+                        )
+                    )
                 )
             ):
                 raise error_type(

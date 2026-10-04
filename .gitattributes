@@ -2,3 +2,4 @@
 provenance/** text eol=lf
 requirements-dev.txt text eol=lf
 global.json text eol=lf
+research/pyproject.toml text eol=lf

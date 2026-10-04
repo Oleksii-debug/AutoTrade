@@ -50,11 +50,50 @@ PROTECTED_SENTINELS = frozenset(
 )
 
 
+def _change_kind(status: str) -> str:
+    if type(status) is not str:
+        raise TypeError("Git change status must be exact text")
+    if status in {"A", "D", "M", "T"}:
+        return status
+    kind = status[:1]
+    score = status[1:]
+    if (
+        kind in {"R", "C"}
+        and 1 <= len(score) <= 3
+        and score.isascii()
+        and score.isdigit()
+        and 0 <= int(score) <= 100
+    ):
+        return kind
+    raise ValueError(f"unsupported or unmerged Git change status: {status!r}")
+
+
+def _validate_repo_path(path: str, *, name: str) -> None:
+    if type(path) is not str or not path:
+        raise ValueError(f"{name} must be non-empty exact text")
+    if path.startswith("/") or "\\" in path:
+        raise ValueError(f"{name} must be a canonical repository-relative path")
+    if any(ord(character) < 32 or ord(character) == 127 for character in path):
+        raise ValueError(f"{name} contains a forbidden control character")
+    if any(part in {"", ".", ".."} for part in path.split("/")):
+        raise ValueError(f"{name} must be a canonical repository-relative path")
+
+
 @dataclass(frozen=True)
 class Change:
     status: str
     path: str
     previous_path: str | None = None
+
+    def __post_init__(self) -> None:
+        kind = _change_kind(self.status)
+        _validate_repo_path(self.path, name="changed path")
+        if kind in {"R", "C"}:
+            if self.previous_path is None:
+                raise ValueError("rename/copy change requires previous_path")
+            _validate_repo_path(self.previous_path, name="previous changed path")
+        elif self.previous_path is not None:
+            raise ValueError("previous_path is only valid for rename/copy changes")
 
 
 @dataclass(frozen=True)
@@ -78,7 +117,7 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
             continue
         parts = line.split("\t")
         status = parts[0]
-        kind = status[:1]
+        kind = _change_kind(status)
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
@@ -108,9 +147,22 @@ def assess_reconvergence(
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
     normalized_base = tuple(dict.fromkeys(base_paths))
+    for path in normalized_base:
+        _validate_repo_path(path, name="base tree path")
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
+
+    for change in changes:
+        if type(change) is not Change:
+            raise TypeError("changes must contain exact Change values")
+        # Revalidate here as well so hand-built/synthetic Change values cannot
+        # bypass the same status/path authority enforced by the Git parser.
+        Change.__post_init__(change)
+
+    normalized_scopes: tuple[str, ...] | None = None
+    if allowed_scopes is not None:
+        normalized_scopes = _normalized_scopes(allowed_scopes)
 
     deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
@@ -118,7 +170,7 @@ def assess_reconvergence(
 
     protected_damage: set[str] = set(protected)
     for change in changes:
-        kind = change.status[:1]
+        kind = _change_kind(change.status)
         if (
             kind == "R"
             and change.previous_path in protected_sentinels
@@ -129,11 +181,18 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
+        if (
+            kind == "M"
+            and change.path in protected_sentinels
+            and (
+                normalized_scopes is None
+                or change.path not in normalized_scopes
+            )
+        ):
+            protected_damage.add(
+                f"{change.path} (modified without exact-path authorization)"
+            )
     protected_violations = tuple(sorted(protected_damage))
-
-    normalized_scopes: tuple[str, ...] | None = None
-    if allowed_scopes is not None:
-        normalized_scopes = _normalized_scopes(allowed_scopes)
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:

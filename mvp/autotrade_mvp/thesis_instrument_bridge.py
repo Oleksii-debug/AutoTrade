@@ -48,6 +48,7 @@ def _thesis_snapshot(value: object) -> MarketThesis:
         as_of=value.as_of,
         horizon_end=value.horizon_end,
         required_notional=value.required_notional,
+        notional_currency=value.notional_currency,
     )
 
 
@@ -68,6 +69,7 @@ def candidate_from_instrument_version(
     leverage_ratio: Decimal | str | int,
     liquidation_risk: Decimal | str | int,
     liquidity_capacity: Decimal | str | int,
+    liquidity_currency: str,
 ) -> ImplementationCandidate:
     """Create one detached proposal candidate from canonical instrument facts.
 
@@ -139,5 +141,6 @@ def candidate_from_instrument_version(
         leverage_ratio=leverage_ratio,
         liquidation_risk=liquidation_risk,
         liquidity_capacity=liquidity_capacity,
+        liquidity_currency=liquidity_currency,
         tradable_until=tradable_until,
     )

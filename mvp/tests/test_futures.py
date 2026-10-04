@@ -825,7 +825,7 @@ class FuturesLifecycleTests(unittest.TestCase):
         ):
             require_open_for_new_exposure(contract, utc(29, 12))
 
-    def test_standalone_contract_mutation_cannot_reopen_delivery(self):
+    def test_standalone_contract_cannot_establish_lifecycle_authority(self):
         source = self._linear_contract(settlement_method="PHYSICAL")
         contract = FuturesContract(
             instrument=source.instrument,
@@ -840,6 +840,11 @@ class FuturesLifecycleTests(unittest.TestCase):
             price_base_currency=source.price_base_currency,
         )
 
+        with self.assertRaisesRegex(
+            FuturesError, "requires exact canonical InstrumentVersion"
+        ):
+            lifecycle_gate(contract, utc(29, 12))
+
         object.__setattr__(contract, "settlement_method", "CASH")
         object.__setattr__(
             contract,
@@ -853,7 +858,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(
-            FuturesError, "no longer matches construction authority"
+            FuturesError, "requires exact canonical InstrumentVersion"
         ):
             lifecycle_gate(contract, utc(29, 12))
 
@@ -877,7 +882,7 @@ class FuturesLifecycleTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(
-            FuturesError, "lifecycle authority is not established"
+            FuturesError, "requires exact canonical InstrumentVersion"
         ):
             lifecycle_gate(forged, utc(29, 12))
 

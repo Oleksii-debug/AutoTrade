@@ -5,7 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    submission_attempt_aggregate_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
@@ -119,7 +122,10 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
                 reconciliation_id="ready",
                 provider_id="SIMULATED",
             )
-            self.assertEqual((result.target_owner.owner_id, result.target_owner.epoch), ("host-b", 2))
+            self.assertEqual(
+                (result.target_owner.owner_id, result.target_owner.epoch),
+                ("host-b", 2),
+            )
 
             stale_dispatcher = GuardedDispatcher(
                 store,
@@ -150,8 +156,16 @@ class CompletedTakeoverStaleSenderTests(unittest.TestCase):
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertIn("Sender fence mismatch", outcome.reason)
             self.assertEqual(wire_calls, [])
-            attempt = store.load_events("submission_attempt", "submission-attempt:stale-after-takeover")
-            self.assertNotIn("SubmissionSending", [event["event_type"] for event in attempt])
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="PAPER",
+                account_id="paper-1",
+                attempt_id="stale-after-takeover",
+            )
+            attempt = store.load_events("submission_attempt", aggregate_id)
+            self.assertNotIn(
+                "SubmissionSending",
+                [event["event_type"] for event in attempt],
+            )
 
 
 if __name__ == "__main__":

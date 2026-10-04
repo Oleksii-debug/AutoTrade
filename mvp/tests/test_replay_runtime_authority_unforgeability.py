@@ -337,10 +337,49 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             RuntimeStateAuthority.seal_checkpoint(
                 authority,
                 snapshot,
+                verifier=_trusted_verifier(),
                 build_sha="b" * 40,
                 protocol_ref="protocol:mutated-seal",
             )
         self.assertFalse(hostile.touched)
+
+    def test_checkpoint_sealer_rejects_caller_constructed_snapshot_before_signing(self):
+        signer_calls = []
+
+        def counted_signer(material):
+            signer_calls.append(material)
+            return _signer(_TRUSTED_SECRET)(material)
+
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=counted_signer,
+            cut_resolver=lambda: (
+                "cut:unused",
+                self._checkpoint_value(),
+                _components(),
+            ),
+        )
+        forged = RuntimeStateSnapshot(
+            cut_id="cut:forged-signing-oracle",
+            replay=self._checkpoint_value(),
+            runtime_components=_components(forged_rng=True),
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            authority_seal="a" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "snapshot authority signature mismatch",
+        ):
+            RuntimeStateAuthority.seal_checkpoint(
+                authority,
+                forged,
+                verifier=_trusted_verifier(),
+                build_sha="b" * 40,
+                protocol_ref="protocol:forged-signing-oracle",
+            )
+        self.assertEqual(signer_calls, [])
 
     def test_composite_schema_version_rejects_text_subclass(self):
         hostile = _HostileText("4.0.0")

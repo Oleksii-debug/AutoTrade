@@ -714,6 +714,7 @@ class RuntimeStateAuthority:
         self,
         snapshot: RuntimeStateSnapshot,
         *,
+        verifier: RuntimeStateVerifier,
         build_sha: str,
         protocol_ref: str,
     ) -> str:
@@ -721,7 +722,12 @@ class RuntimeStateAuthority:
             raise ReplayError(
                 "runtime state authority requires canonical RuntimeStateSnapshot"
             )
+        if type(verifier) is not RuntimeStateVerifier:
+            raise TypeError(
+                "runtime state checkpoint sealing requires canonical RuntimeStateVerifier"
+            )
         snapshot = _canonical_runtime_snapshot(snapshot)
+        RuntimeStateVerifier.verify_snapshot(verifier, snapshot)
         if snapshot.authority_id != self.authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
         return _sign_runtime_authority_material(
@@ -1219,6 +1225,7 @@ class CausalReplay:
         checkpoint_seal = RuntimeStateAuthority.seal_checkpoint(
             runtime_state_authority,
             snapshot,
+            verifier=runtime_state_verifier,
             build_sha=build_sha,
             protocol_ref=protocol_ref,
         )
@@ -1282,6 +1289,7 @@ def resume_from_composite_checkpoint(
     current_seal = RuntimeStateAuthority.seal_checkpoint(
         runtime_state_authority,
         snapshot,
+        verifier=runtime_state_verifier,
         build_sha=build_sha,
         protocol_ref=protocol_ref,
     )

@@ -352,15 +352,43 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
         ):
             raise BackupIntegrityError("source_owner_epoch is invalid")
 
+    runtime_evidence_fields = {
+        "runtime_checkpoint_evidence",
+        "runtime_checkpoint_reconstitution_required",
+        "runtime_checkpoint_evidence_sha256",
+    }
+    runtime_fields_present = runtime_evidence_fields.intersection(marker)
+    if runtime_fields_present and runtime_fields_present != runtime_evidence_fields:
+        raise BackupIntegrityError(
+            "Restore runtime checkpoint evidence binding is partial"
+        )
+
+    evidence_path = root / _safe_relative_path(
+        _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+    )
+    if not runtime_fields_present:
+        # Restore markers emitted before portable checkpoint schema v2 did not
+        # carry this binding. They are safe to continue only when no
+        # quarantined checkpoint evidence exists at the now-reserved path.
+        # Normalize the legacy marker in memory so the next durable completion
+        # rewrite upgrades it; never infer resume authority from absence.
+        if evidence_path.exists() or evidence_path.is_symlink():
+            raise BackupIntegrityError(
+                "Legacy restore marker cannot coexist with runtime checkpoint evidence"
+            )
+        marker = {
+            **marker,
+            "runtime_checkpoint_evidence": "UNAVAILABLE_LEGACY_BACKUP",
+            "runtime_checkpoint_reconstitution_required": False,
+            "runtime_checkpoint_evidence_sha256": None,
+        }
+
     runtime_evidence = marker.get("runtime_checkpoint_evidence")
     reconstitution_required = marker.get(
         "runtime_checkpoint_reconstitution_required"
     )
     runtime_evidence_sha256 = marker.get(
         "runtime_checkpoint_evidence_sha256"
-    )
-    evidence_path = root / _safe_relative_path(
-        _RUNTIME_CHECKPOINT_EVIDENCE_PATH
     )
     if runtime_evidence == "QUARANTINED":
         if reconstitution_required is not True:

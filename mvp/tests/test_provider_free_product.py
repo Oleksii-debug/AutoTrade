@@ -198,6 +198,60 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_state_http_recovers_from_repeated_cross_thread_journal_races(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            writer = JournalStore(data / 'state' / 'journal.sqlite3')
+            original_snapshot = client.runtime.application._snapshot_provider
+            calls = {'count': 0}
+            requests = 12
+            try:
+                with ThreadPoolExecutor(max_workers=1) as writers:
+                    def first_attempt_race(durable, principal):
+                        calls['count'] += 1
+                        value = original_snapshot(durable, principal)
+                        # Every request is expected to need exactly two
+                        # projections: force an independent SQLite writer to
+                        # advance the first cut, then leave the retry stable.
+                        if calls['count'] % 2 == 1:
+                            sequence = (calls['count'] + 1) // 2
+                            payload = {
+                                'reason': 'product-state-repeated-concurrent-race',
+                                'request': sequence,
+                            }
+                            future = writers.submit(
+                                writer.append_event,
+                                {
+                                    'event_id': f'product-state-repeated-race-{sequence}',
+                                    'event_type': 'ProductStateRaceInjected',
+                                    'aggregate_type': 'product_state_race_test',
+                                    'aggregate_id': f'repeated-{sequence}',
+                                    'aggregate_version': '1',
+                                    'payload': payload,
+                                    'payload_hash': payload_digest(payload),
+                                    'committed_at': '2026-10-04T00:00:00Z',
+                                },
+                            )
+                            future.result(timeout=5)
+                        return value
+
+                    with patch.object(
+                        client.runtime.application,
+                        '_snapshot_provider',
+                        first_attempt_race,
+                    ):
+                        for _ in range(requests):
+                            status, state, _ = client.request('GET', '/api/v1/state')
+                            self.assertEqual(status, 200)
+                            self.assertEqual(
+                                state['reason_codes'],
+                                ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN'],
+                            )
+                self.assertEqual(calls['count'], requests * 2)
+            finally:
+                client.close()
+
     def test_host_backpressure_rejects_before_admission_and_keeps_retry_identity(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

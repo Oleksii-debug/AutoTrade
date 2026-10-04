@@ -97,6 +97,50 @@ def sender_authority_gate_path(store: JournalStore, *, owner_scope: str) -> Path
     )
 
 
+def _assert_posix_gate_binding(descriptor: int, lock_path: Path) -> None:
+    """Prove the held POSIX lock still names the canonical gate pathname."""
+
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise SenderAuthorityError(
+            "sender authority gate requires no-follow pathname verification"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow
+    verification_descriptor = None
+    try:
+        held = os.fstat(descriptor)
+        path_state = os.stat(lock_path, follow_symlinks=False)
+        verification_descriptor = os.open(lock_path, flags)
+        current = os.fstat(verification_descriptor)
+    except OSError as error:
+        raise SenderAuthorityError(
+            "sender authority gate pathname changed while lock was held"
+        ) from error
+    finally:
+        if verification_descriptor is not None:
+            try:
+                os.close(verification_descriptor)
+            except OSError as error:
+                raise SenderAuthorityError(
+                    "sender authority gate verification handle could not close"
+                ) from error
+
+    for observed in (held, path_state, current):
+        if not stat.S_ISREG(observed.st_mode) or int(observed.st_nlink) != 1:
+            raise SenderAuthorityError(
+                "sender authority gate must retain one ordinary pathname"
+            )
+    if (
+        int(held.st_dev) != int(path_state.st_dev)
+        or int(held.st_ino) != int(path_state.st_ino)
+        or int(held.st_dev) != int(current.st_dev)
+        or int(held.st_ino) != int(current.st_ino)
+    ):
+        raise SenderAuthorityError(
+            "sender authority gate pathname changed while lock was held"
+        )
+
+
 def _lease(
     *, owner_scope: str, journal_path: Path, gate_path: Path
 ) -> SenderAuthorityLease:
@@ -323,7 +367,11 @@ def _sender_authority_window(
 
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
             try:
-                yield prepare_lease()
+                _assert_posix_gate_binding(stream.fileno(), lock_path)
+                try:
+                    yield prepare_lease()
+                finally:
+                    _assert_posix_gate_binding(stream.fileno(), lock_path)
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     finally:

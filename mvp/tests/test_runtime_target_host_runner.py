@@ -290,6 +290,41 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             self.assertEqual(result.campaign_evidence.reconnect_backlog_remaining, 1)
             self.assertEqual(result.measurement.financial_event_ids, ("fin-1",))
 
+    def test_research_callback_cannot_rewrite_future_financial_operation_code(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+
+            def financial_operation() -> None:
+                append_expected(journal, "fin-1")
+
+            original_code = financial_operation.__code__
+
+            def poisoned_financial_operation() -> None:
+                raise AssertionError("rewritten financial operation executed")
+
+            def rewrite_future_operation() -> None:
+                financial_operation.__code__ = poisoned_financial_operation.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "financial operation fin-1 executable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": financial_operation},
+                        clock=clock,
+                        research=(("rewrite-future-operation", rewrite_future_operation),),
+                    )
+            finally:
+                financial_operation.__code__ = original_code
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_research_callback_cannot_replace_terminal_budget_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

@@ -23,6 +23,12 @@ def _text(value: object, fallback: str = "Unavailable") -> str:
     return fallback
 
 
+def _has_exact_text_keys(value: object) -> bool:
+    """Inspect exact dict keys without invoking caller-owned key methods."""
+
+    return type(value) is dict and all(type(key) is str for key in value)
+
+
 def _canonical_sequence_text(value: object) -> str | None:
     """Return the canonical host sequence representation or fail closed."""
 
@@ -68,7 +74,7 @@ def render_semantic_page(
 ) -> str:
     """Render a complete document that remains understandable without CSS or script."""
 
-    if type(snapshot) is not dict:
+    if not _has_exact_text_keys(snapshot):
         snapshot = {}
 
     canonical_state_version = _canonical_sequence_text(snapshot.get("state_version"))
@@ -146,7 +152,7 @@ def render_semantic_page(
 def command_result_message(result: Mapping[str, object]) -> str:
     """Plain-language command result for a live region."""
 
-    if type(result) is not dict:
+    if not _has_exact_text_keys(result):
         return "Command result is unavailable because the result shape is malformed."
 
     status = _text(result.get("status", "UNKNOWN"), "UNKNOWN")

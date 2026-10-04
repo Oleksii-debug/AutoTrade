@@ -189,6 +189,46 @@ class SemanticWebSurfaceTests(unittest.TestCase):
         self.assertIn("Command cmd-1 was not accepted", message)
         self.assertIn("Reasons: none.", message)
 
+    def test_hostile_top_level_mapping_keys_cannot_execute_lookup_callbacks(self):
+        touched = []
+
+        class HostileKey:
+            def __init__(self, target):
+                self.target = target
+
+            def __hash__(self):
+                return hash(self.target)
+
+            def __eq__(self, other):
+                touched.append(("eq", other))
+                raise AssertionError("hostile mapping key equality")
+
+        snapshot_key = HostileKey("state_version")
+        snapshot = {
+            snapshot_key: "7",
+            "state_version": "8",
+        }
+        # Remove the ordinary key without probing the hostile target afterward.
+        del snapshot["state_version"]
+        touched.clear()
+        html = render_semantic_page(snapshot, status_text="Running")
+        self.assertEqual(touched, [])
+        self.assertIn("State version</dt><dd>Unavailable", html)
+        self.assertIn("Commands are unavailable", html)
+
+        result_key = HostileKey("status")
+        result = {
+            result_key: "ACCEPTED",
+            "command_id": "cmd-1",
+        }
+        touched.clear()
+        message = command_result_message(result)
+        self.assertEqual(touched, [])
+        self.assertEqual(
+            message,
+            "Command result is unavailable because the result shape is malformed.",
+        )
+
     def test_command_form_carries_exact_state_version(self):
         html = render_semantic_page(self.snapshot(), status_text="Ready")
         self.assertIn(

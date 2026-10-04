@@ -37,6 +37,12 @@ def _safe_text(value: Any, default: str = "Unavailable") -> str:
     return default
 
 
+def _has_exact_text_keys(value: Any) -> bool:
+    """Inspect exact dict keys without invoking caller-owned key methods."""
+
+    return type(value) is dict and all(type(key) is str for key in value)
+
+
 def _reservation_resource_text(value: Any) -> str:
     if type(value) is not str or not value or value != value.strip():
         return ""
@@ -119,7 +125,7 @@ def format_accessible_status(
 ) -> str:
     """Render a stable, copyable, screen-reader-friendly status summary."""
 
-    if type(status) is not dict:
+    if not _has_exact_text_keys(status):
         status = {"status": "corrupt"}
     has_state_format = "state_format" in status
     state_format = (
@@ -209,7 +215,7 @@ def format_accessible_status(
             valid_reservations = 0
             reservation_lines: list[str] = []
             for item in reservations:
-                if type(item) is not dict:
+                if not _has_exact_text_keys(item):
                     malformed_reservations = True
                     reservation_lines.append(
                         "Reservation detail: unavailable; malformed state"
@@ -265,7 +271,7 @@ def format_accessible_status(
             lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
 
     if economic_report is not None:
-        if type(economic_report) is not dict:
+        if not _has_exact_text_keys(economic_report):
             lines.append("Economic report: unavailable; malformed state")
         else:
             canonical_report_readable = (

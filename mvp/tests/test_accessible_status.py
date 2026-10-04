@@ -532,6 +532,80 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("Journal sequence:", text)
         self.assertIn("Economic edge: unproven", text)
 
+    def test_hostile_mapping_keys_fail_closed_before_dict_lookup_callbacks(self):
+        touched = []
+
+        class HostileKey:
+            def __init__(self, target):
+                self.target = target
+
+            def __hash__(self):
+                return hash(self.target)
+
+            def __eq__(self, other):
+                touched.append(("eq", other))
+                raise AssertionError("hostile mapping key equality")
+
+        top_key = HostileKey("state_format")
+        status = {
+            top_key: "malformed",
+            "status": "running",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+        }
+        touched.clear()
+        text = format_accessible_status(status)
+        self.assertEqual(touched, [])
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertNotIn("Initial capital: 1000", text)
+
+        report_key = HostileKey("valuation_status")
+        report = {
+            report_key: "CASH_ONLY",
+            "final_equity": "999991",
+            "net_pnl": "999992",
+            "total_fees": "0",
+            "turnover": "999993",
+            "reconciled": True,
+        }
+        touched.clear()
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [],
+            },
+            report,
+        )
+        self.assertEqual(touched, [])
+        self.assertIn("Economic report: unavailable; malformed state", text)
+        self.assertNotIn("999991", text)
+        self.assertNotIn("999992", text)
+        self.assertNotIn("999993", text)
+
+        reservation_key = HostileKey("remaining")
+        reservation = {
+            reservation_key: {"USD": "999994"},
+            "state": "WORKING",
+        }
+        touched.clear()
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [reservation],
+            }
+        )
+        self.assertEqual(touched, [])
+        self.assertIn("Reservation detail: unavailable; malformed state", text)
+        self.assertNotIn("999994", text)
+
     def test_hostile_nested_status_containers_fail_closed_without_execution(self):
         class HostileDict(dict):
             def __len__(self):

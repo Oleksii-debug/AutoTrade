@@ -38,6 +38,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         return RuntimeBudgetSpec(**values)
 
     def observation(self, **overrides):
+        event_ids = [f"financial-{index}" for index in range(20)]
         values = dict(
             scenario_id="declared-host-load-a",
             spec_digest=self.spec().digest,
@@ -52,6 +53,9 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             reconnect_backlog_remaining=0,
             declared_duration_us=1_000_000,
             observed_duration_us=900_000,
+            recovered_financial_event_ids=event_ids,
+            financial_latency_event_ids=event_ids,
+            financial_staleness_event_ids=event_ids,
         )
         values.update(overrides)
         return RuntimeLoadObservation.create(**values)
@@ -77,6 +81,56 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertEqual(decision.scenario_id, "declared-host-load-a")
         self.assertEqual(decision.reasons, ())
         self.assertEqual(decision.metrics["p95_financial_latency_us"], 100_000)
+        self.assertEqual(decision.metrics["recovered_financial_event_identity_count"], 20)
+
+    def test_anonymous_legacy_measurements_cannot_qualify(self):
+        observation = self.observation(
+            recovered_financial_event_ids=(),
+            financial_latency_event_ids=(),
+            financial_staleness_event_ids=(),
+        )
+        decision = evaluate_runtime_budget(self.spec(), observation)
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn(
+            "incomplete_recovered_financial_event_identity",
+            decision.reasons,
+        )
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+        self.assertNotIn("max_financial_staleness_us", decision.metrics)
+
+    def test_equal_count_duplicate_latency_identity_cannot_hide_omission(self):
+        event_ids = [f"financial-{index}" for index in range(20)]
+        duplicate_and_omit = event_ids[:-1] + [event_ids[0]]
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(financial_latency_event_ids=duplicate_and_omit),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("duplicate_financial_latency_event_ids", decision.reasons)
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
+    def test_foreign_latency_identity_cannot_substitute_for_recovered_event(self):
+        event_ids = [f"financial-{index}" for index in range(20)]
+        substituted = event_ids[:-1] + ["foreign-financial-event"]
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(financial_latency_event_ids=substituted),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("unknown_financial_latency_event_ids", decision.reasons)
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+
+    def test_missing_staleness_identity_binding_cannot_qualify(self):
+        event_ids = [f"financial-{index}" for index in range(20)]
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(financial_staleness_event_ids=event_ids[:-1]),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("unbound_financial_staleness_samples", decision.reasons)
+        self.assertIn("incomplete_financial_staleness_coverage", decision.reasons)
+        self.assertNotIn("max_financial_staleness_us", decision.metrics)
 
     def test_declared_throughput_must_be_measured_and_met(self):
         missing = self.observation(
@@ -215,6 +269,8 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             self.observation(host_fingerprint="host")
         with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
             self.observation(spec_digest="budget-v1")
+        with self.assertRaisesRegex(RuntimeBudgetError, "canonical non-empty event ids"):
+            self.observation(financial_latency_event_ids=[" financial-0"] * 20)
 
     def test_real_journal_burst_probe_recovers_every_financial_event(self):
         # This is wiring evidence only. The generous thresholds deliberately do
@@ -245,6 +301,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 (perf_counter_ns() - campaign_started + 999) // 1_000,
             )
             recovered = store.load_events("PERFORMANCE_PROBE", "burst-a")
+            recovered_ids = tuple(str(event["event_id"]) for event in recovered)
             budget_spec = RuntimeBudgetSpec(
                 scenario_id="journal-wiring-ci",
                 release_sha=RELEASE_SHA,
@@ -271,6 +328,9 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 reconnect_backlog_remaining=0,
                 declared_duration_us=60_000_000,
                 observed_duration_us=campaign_duration_us,
+                recovered_financial_event_ids=recovered_ids,
+                financial_latency_event_ids=recovered_ids,
+                financial_staleness_event_ids=recovered_ids,
             )
             decision = evaluate_runtime_budget(
                 budget_spec,

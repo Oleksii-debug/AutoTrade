@@ -7,7 +7,6 @@ import argparse
 from functools import partial
 from hashlib import sha256
 from http.cookies import SimpleCookie
-import json
 import os
 from pathlib import Path
 import secrets
@@ -19,7 +18,13 @@ from urllib.parse import urlsplit
 import webbrowser
 
 from .embedded_web import EmbeddedWebHostApplication, ImmutableWebAsset, ImmutableWebAssetBundle, HOST_API_CONTRACT_VERSION
-from .host_network import HostPrincipal, TransportResponse, public_session_reference, header_principal_resolver
+from .host_network import (
+    HostPrincipal,
+    TransportResponse,
+    _headers,
+    public_session_reference,
+    header_principal_resolver,
+)
 from .production_host import ProductionHostConfig, build_production_host
 from .security import SecurityBoundary
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
@@ -77,13 +82,16 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
 
     def dispatch(self, *, method, target, headers, body=b''):
         if target == '/api/v1/session' and method == 'POST':
-            normalized = {k.lower(): v for k, v in headers.items()}
-            if (normalized.get('origin') != self._origin
-                or normalized.get('content-type') != 'application/json'
-                or len(body) > 256 or self._pairing_code is None):
-                return TransportResponse(403, 'application/json', b'{"error":"PAIRING_REJECTED"}')
             try:
-                request = json.loads(body)
+                normalized = _headers(headers)
+                if (normalized.get('origin') != self._origin
+                    or normalized.get('content-type') != 'application/json'
+                    or len(body) > 256 or self._pairing_code is None):
+                    raise ValueError()
+                # Pairing is the only unauthenticated API transition. Reuse the
+                # canonical strict JSON ingress so duplicate keys and non-finite
+                # constants cannot acquire owner-session authority.
+                request = self._parse_body(body, normalized)
                 if set(request) != {'pairing_code'} or type(request['pairing_code']) is not str:
                     raise ValueError()
                 if not secrets.compare_digest(request['pairing_code'], self._pairing_code):

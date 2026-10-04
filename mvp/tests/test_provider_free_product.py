@@ -219,6 +219,57 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     build_product(directory, port=client.port + 1)
             finally: client.close()
 
+    def test_pairing_rejects_duplicate_json_keys_without_consuming_code(self):
+        with TemporaryDirectory() as directory:
+            probe = socket.socket(); probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]; probe.close()
+            origin = f'http://127.0.0.1:{port}'
+            runtime, url = build_product(directory, port=port)
+            worker = Thread(target=runtime.serve_forever)
+            worker.start()
+            pairing_code = url.split('#pair=')[1]
+            try:
+                body = (
+                    '{"pairing_code":"attacker-shadow","pairing_code":'
+                    + json.dumps(pairing_code)
+                    + '}'
+                )
+                connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+                try:
+                    connection.request(
+                        'POST',
+                        '/api/v1/session',
+                        body,
+                        {'Origin': origin, 'Content-Type': 'application/json'},
+                    )
+                    response = connection.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, 403)
+                    self.assertIsNone(response.getheader('Set-Cookie'))
+                finally:
+                    connection.close()
+
+                # Rejection must not consume the one-time code.
+                connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+                try:
+                    valid = json.dumps({'pairing_code': pairing_code})
+                    connection.request(
+                        'POST',
+                        '/api/v1/session',
+                        valid,
+                        {'Origin': origin, 'Content-Type': 'application/json'},
+                    )
+                    response = connection.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn('AutoTradeSession=', response.getheader('Set-Cookie'))
+                finally:
+                    connection.close()
+            finally:
+                runtime.close()
+                worker.join(timeout=10)
+                self.assertFalse(worker.is_alive())
+
     def test_pairing_and_commands_fail_closed_without_owner_session(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

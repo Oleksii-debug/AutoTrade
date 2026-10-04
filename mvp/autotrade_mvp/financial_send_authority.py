@@ -234,7 +234,6 @@ class FinancialSendAuthority:
         "__intent_id",
         "__intent_hash",
         "__action",
-        "__authority_check",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -249,7 +248,6 @@ class FinancialSendAuthority:
         intent_id: str,
         intent_hash: str,
         action: str,
-        authority_check: Callable[[str, str], tuple[bool, str]],
         _factory_token: object = None,
     ) -> None:
         if _factory_token is not _CAPABILITY_FACTORY_TOKEN:
@@ -258,15 +256,12 @@ class FinancialSendAuthority:
             )
         if type(binding) is not FinancialRequestBindingMaterial:
             raise TypeError("binding must be exact FinancialRequestBindingMaterial")
-        if not callable(authority_check):
-            raise TypeError("authority_check must be callable")
         self.__issuer_identity = issuer_identity
         self.__binding = binding
         self.__admission_id = _exact_text(admission_id, name="admission_id")
         self.__intent_id = _exact_text(intent_id, name="intent_id")
         self.__intent_hash = _exact_text(intent_hash, name="intent_hash")
         self.__action = _exact_text(action, name="action").upper()
-        self.__authority_check = authority_check
 
     @property
     def binding(self) -> FinancialRequestBindingMaterial:
@@ -288,17 +283,15 @@ class FinancialSendAuthority:
     def intent_hash(self) -> str:
         return self.__intent_hash
 
+    @property
+    def action(self) -> str:
+        return self.__action
+
     def _require_issuer(self, issuer_identity: object) -> None:
         if issuer_identity is not self.__issuer_identity:
             raise FinancialSendAuthorityError(
                 "financial send capability belongs to another authority issuer"
             )
-
-    def _check(self, intent_hash: str, now: str) -> tuple[bool, str]:
-        if intent_hash != self.__intent_hash:
-            return False, "financial_send_intent_hash_changed"
-        return self.__authority_check(intent_hash, now)
-
 
 class FinancialSendAuthorityIssuer:
     """Product-owned bridge from AuthorityService to exact send capabilities."""
@@ -408,16 +401,6 @@ class FinancialSendAuthorityIssuer:
             raise FinancialSendAuthorityError(
                 "financial send intent id differs from durable admission"
             )
-        guard = self.__dispatch_guard_function(
-            self.__service,
-            admission_id,
-            account_id=binding.account_id,
-            environment=binding.runtime_environment,
-            instrument_id=binding.instrument_id,
-            instrument_version=binding.instrument_version,
-            action=action,
-            capability_snapshot_id=binding.capability_snapshot_id,
-        )
         return FinancialSendAuthority(
             issuer_identity=self.__issuer_identity,
             binding=binding,
@@ -425,7 +408,6 @@ class FinancialSendAuthorityIssuer:
             intent_id=canonical_intent_id,
             intent_hash=intent_hash,
             action=action,
-            authority_check=guard,
             _factory_token=_CAPABILITY_FACTORY_TOKEN,
         )
 
@@ -436,6 +418,37 @@ class FinancialSendAuthorityIssuer:
                 "send requires exact FinancialSendAuthority capability"
             )
         authority._require_issuer(self.__issuer_identity)
+
+    def _dispatch_guard_for(
+        self,
+        authority: FinancialSendAuthority,
+    ) -> Callable[[str, str], tuple[bool, str]]:
+        """Re-derive the terminal guard from canonical durable authority."""
+
+        self._require_capability(authority)
+        binding = authority.binding
+        admission = _require_binding_matches_durable_admission(
+            service=self.__service,
+            journal=self.__journal,
+            admission_id=authority.admission_id,
+            intent_hash=authority.intent_hash,
+            action=authority.action,
+            binding=binding,
+        )
+        if admission.get("intent_id") != authority.intent_id:
+            raise FinancialSendAuthorityError(
+                "financial send intent id differs from durable admission"
+            )
+        return self.__dispatch_guard_function(
+            self.__service,
+            authority.admission_id,
+            account_id=binding.account_id,
+            environment=binding.runtime_environment,
+            instrument_id=binding.instrument_id,
+            instrument_version=binding.instrument_version,
+            action=authority.action,
+            capability_snapshot_id=binding.capability_snapshot_id,
+        )
 
 
 def build_financial_send_authority_issuer(
@@ -504,7 +517,7 @@ class FinanciallyBoundBybitOrderSender:
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
         issuer = self.__issuer
-        issuer._require_capability(authority)
+        authority_check = issuer._dispatch_guard_for(authority)
         if issuer.runtime is not self.__runtime:
             raise FinancialSendAuthorityError("financial issuer production host changed")
         if authority.intent_id != intent_id or authority.intent_hash != intent_hash:
@@ -523,7 +536,7 @@ class FinanciallyBoundBybitOrderSender:
             intent_hash=intent_hash,
             request=request,
             now=now,
-            authority_check=authority._check,
+            authority_check=authority_check,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
             final_barrier_clock=final_barrier_clock,

@@ -190,7 +190,21 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 intent_id="intent-1",
                 intent_hash="intent-hash-1",
                 action="TRADE",
+            )
+
+    def test_importable_factory_token_cannot_inject_authority_callback(self):
+        from mvp.autotrade_mvp import financial_send_authority as module
+
+        with self.assertRaises(TypeError):
+            FinancialSendAuthority(
+                issuer_identity=object(),
+                binding=binding(),
+                admission_id="admission-1",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                action="TRADE",
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                _factory_token=module._CAPABILITY_FACTORY_TOKEN,
             )
 
 

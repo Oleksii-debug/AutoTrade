@@ -916,6 +916,57 @@ class ProviderOriginJournalTests(unittest.TestCase):
             ):
                 origin.recover_response_binding(attempt_id, binding)
 
+    def test_direct_record_seams_require_canonical_execute_before_observation_dispatch(self):
+        class HostileObservation:
+            reads = 0
+
+            def __getattribute__(self, name):
+                type(self).reads += 1
+                raise AssertionError("provider observation must not be inspected")
+
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+            hostile = HostileObservation()
+
+            callers = (
+                (
+                    "public",
+                    lambda: origin.record_direct_provider_origin_observation(
+                        attempt_id,
+                        binding,
+                        provider_observation=hostile,
+                    ),
+                ),
+                (
+                    "private",
+                    lambda: origin._record_provider_origin(
+                        attempt_id,
+                        binding,
+                        provider_observation=hostile,
+                    ),
+                ),
+            )
+            for label, caller in callers:
+                with self.subTest(seam=label):
+                    with self.assertRaisesRegex(
+                        ProviderOriginError,
+                        "canonical execute authority",
+                    ):
+                        caller()
+
+            self.assertEqual(HostileObservation.reads, 0)
+            events = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared"],
+            )
+
     def test_private_record_seam_rejects_caller_without_transport_receipt(self):
         with TemporaryDirectory() as directory:
             _fixture, journal, *_rest, binding = self._route_fixture(directory)

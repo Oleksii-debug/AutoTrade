@@ -172,6 +172,10 @@ def _filled_resolution_evidence(request: Mapping[str, object]) -> str:
         raise ReservationConflict("order_fill_event_id must be a canonical UUID") from error
     if canonical_event_id != event_id:
         raise ReservationConflict("order_fill_event_id must be a canonical UUID")
+    payload_hash = _canonical_sha256(
+        request.get("order_fill_payload_hash"),
+        name="order_fill_payload_hash",
+    )
     snapshot_digest = _canonical_sha256(
         request.get("order_fill_snapshot_digest"),
         name="order_fill_snapshot_digest",
@@ -180,8 +184,16 @@ def _filled_resolution_evidence(request: Mapping[str, object]) -> str:
         request.get("order_fill_mutation_hash"),
         name="order_fill_mutation_hash",
     )
+    _text(request.get("order_fill_provider_id"), name="order_fill_provider_id")
+    _text(request.get("order_fill_client_order_id"), name="order_fill_client_order_id")
+    _text(request.get("order_fill_fill_id"), name="order_fill_fill_id")
+    _text(
+        request.get("order_fill_provider_execution_id"),
+        name="order_fill_provider_execution_id",
+    )
     return (
         f"journal:order-fill:{canonical_event_id}"
+        f"@payload:{payload_hash}"
         f"@snapshot:{snapshot_digest}"
         f"@mutation:{mutation_hash}"
     )
@@ -664,7 +676,7 @@ class DurableReservationBook:
         self,
         request: Mapping[str, object],
     ) -> str:
-        """Verify the referenced exact OMS RECORD_FILL is durable and FILLED."""
+        """Verify the exact referenced OMS RECORD_FILL is durable and terminal."""
 
         expected_evidence = _filled_resolution_evidence(request)
         event_id = _text(
@@ -689,7 +701,11 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "referenced OMS fill event payload is invalid"
             )
-        if payload_digest(payload) != order_event.get("payload_hash"):
+        actual_payload_hash = payload_digest(payload)
+        if (
+            actual_payload_hash != order_event.get("payload_hash")
+            or actual_payload_hash != request.get("order_fill_payload_hash")
+        ):
             raise ReservationConflict(
                 "referenced OMS fill event payload hash is invalid"
             )
@@ -699,6 +715,7 @@ class DurableReservationBook:
         evidence_refs = order_event.get("evidence_refs")
         if (
             type(scope) is not dict
+            or scope.get("provider_id") != request.get("order_fill_provider_id")
             or scope.get("account_id") != self.account_id
             or scope.get("environment") != self.environment
             or payload.get("operation") != "RECORD_FILL"
@@ -710,6 +727,31 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "referenced OMS fill event is not an exact terminal fill for this scope"
             )
+        try:
+            open_quantity = _decimal(
+                order_snapshot.get("open_quantity"),
+                name="OMS fill open_quantity",
+            )
+        except (TypeError, ValueError) as error:
+            raise ReservationConflict(
+                "referenced OMS fill open quantity is invalid"
+            ) from error
+        if open_quantity != 0:
+            raise ReservationConflict(
+                "referenced OMS FILLED snapshot must have zero open quantity"
+            )
+        if (
+            order_request.get("client_order_id")
+            != request.get("order_fill_client_order_id")
+            or order_request.get("fill_id") != request.get("order_fill_fill_id")
+            or order_request.get("provider_execution_id")
+            != request.get("order_fill_provider_execution_id")
+            or order_snapshot.get("client_order_id")
+            != request.get("order_fill_client_order_id")
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill identity differs from reservation authority"
+            )
         request_hash = _text(
             payload.get("request_hash"),
             name="OMS fill request_hash",
@@ -719,10 +761,7 @@ class DurableReservationBook:
                 "referenced OMS fill request hash is invalid"
             )
         actual_snapshot_digest = payload_digest(order_snapshot)
-        if (
-            actual_snapshot_digest
-            != request.get("order_fill_snapshot_digest")
-        ):
+        if actual_snapshot_digest != request.get("order_fill_snapshot_digest"):
             raise ReservationConflict(
                 "referenced OMS fill snapshot differs from reservation authority"
             )
@@ -874,9 +913,26 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "idempotency_key was already used for a different reservation request"
                 )
-            snapshot = candidate.get(request["reservation_id"])
+            matching_indexes = tuple(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event.get("payload"), dict)
+                and event["payload"].get("idempotency_key") == key
+                and event["payload"].get("operation") == "CONSUME"
+            )
+            if len(matching_indexes) != 1:
+                raise ReservationConflict(
+                    "committed reservation consumption identity is ambiguous"
+                )
+            matching_index = matching_indexes[0]
+            matching_event = events[matching_index]
+            historical_book, _ = self._replay(events[: matching_index + 1])
+            snapshot = historical_book.get(request["reservation_id"])
             snapshot_value = _snapshot_payload(snapshot)
-            if snapshot_value != existing[1]:
+            if (
+                snapshot_value != existing[1]
+                or snapshot_value != matching_event["payload"].get("snapshot")
+            ):
                 raise ReservationConflict(
                     "committed reservation consumption snapshot does not match replayed state"
                 )
@@ -886,11 +942,7 @@ class DurableReservationBook:
                 envelope=None,
                 idempotency_key=key,
                 request=request,
-                aggregate_version=(
-                    0
-                    if not events
-                    else int(events[-1]["aggregate_version"])
-                ),
+                aggregate_version=int(matching_event["aggregate_version"]),
                 already_committed=True,
             )
 
@@ -947,8 +999,13 @@ class DurableReservationBook:
         reservation_id: str,
         usage: Mapping[str, object],
         order_fill_event_id: str,
+        order_fill_payload_hash: str,
         order_fill_snapshot_digest: str,
         order_fill_mutation_hash: str,
+        order_fill_provider_id: str,
+        order_fill_client_order_id: str,
+        order_fill_fill_id: str,
+        order_fill_provider_execution_id: str,
         committed_at: str,
         expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
@@ -972,6 +1029,10 @@ class DurableReservationBook:
                 order_fill_event_id,
                 name="order_fill_event_id",
             ),
+            "order_fill_payload_hash": _canonical_sha256(
+                order_fill_payload_hash,
+                name="order_fill_payload_hash",
+            ),
             "order_fill_snapshot_digest": _canonical_sha256(
                 order_fill_snapshot_digest,
                 name="order_fill_snapshot_digest",
@@ -979,6 +1040,22 @@ class DurableReservationBook:
             "order_fill_mutation_hash": _canonical_sha256(
                 order_fill_mutation_hash,
                 name="order_fill_mutation_hash",
+            ),
+            "order_fill_provider_id": _text(
+                order_fill_provider_id,
+                name="order_fill_provider_id",
+            ),
+            "order_fill_client_order_id": _text(
+                order_fill_client_order_id,
+                name="order_fill_client_order_id",
+            ),
+            "order_fill_fill_id": _text(
+                order_fill_fill_id,
+                name="order_fill_fill_id",
+            ),
+            "order_fill_provider_execution_id": _text(
+                order_fill_provider_execution_id,
+                name="order_fill_provider_execution_id",
             ),
         }
         # Validate the composed evidence string before any candidate mutation.
@@ -1010,8 +1087,20 @@ class DurableReservationBook:
                 stored_operation == "CONSUME"
                 and existing[0] == payload_digest(legacy_request)
             ):
-                replay_request = legacy_request
-            elif (
+                legacy_plan = self.prepare_consume_mutation(
+                    event_key=event_key,
+                    idempotency_key=key,
+                    reservation_id=legacy_request["reservation_id"],
+                    usage=legacy_request["usage"],
+                    committed_at=committed_at,
+                    expected_snapshot_digest=None,
+                )
+                if not legacy_plan.already_committed:
+                    raise ReservationConflict(
+                        "historical reservation CONSUME did not resolve as committed"
+                    )
+                return legacy_plan
+            if (
                 stored_operation == "CONSUME_AND_MARK_FILLED"
                 and existing[0] == payload_digest(request)
             ):

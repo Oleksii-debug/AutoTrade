@@ -8,6 +8,7 @@ from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
+import mvp.autotrade_mvp.execution_qualification as execution_qualification_module
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
@@ -138,6 +139,276 @@ class ExecutionQualificationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FILLED")
         self.assertGreater(result.fill_price, Decimal("101"))
+
+    def test_qualification_text_subclass_is_rejected_before_normalization(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile qualification text normalization")
+
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "qualification_id is required",
+        ):
+            ExecutionModelQualification(
+                qualification_id=HostileText("q-1"),
+                asset_class="EQUITY",
+                data_fidelity="TOP_OF_BOOK",
+                scenario="BASE",
+                purpose="REPLAY",
+                model_fingerprint=CALIBRATION,
+                calibration_sha256=CALIBRATION,
+                protocol_sha256=PROTOCOL,
+                evidence_artifact_id=ARTIFACT_ID,
+                evidence_sha256=EVIDENCE,
+                instrument_version="ABC@v1",
+            )
+        self.assertEqual(touched, [])
+
+    def test_domain_subclasses_are_rejected_before_authority_field_reads(self):
+        exec_model = model()
+
+        class HostileModel(ExecutionModel):
+            armed = False
+            reads = []
+
+            def __getattribute__(self, name):
+                if type(self).armed and name in {
+                    "data_fidelity",
+                    "scenario",
+                    "fingerprint",
+                    "calibration_sha256",
+                }:
+                    type(self).reads.append(name)
+                    raise AssertionError("hostile model field read")
+                return super().__getattribute__(name)
+
+        hostile_model = HostileModel(**vars(exec_model))
+        HostileModel.armed = True
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    model=hostile_model,
+                )
+            )
+        self.assertEqual(HostileModel.reads, [])
+
+        base_qualification = qualification(exec_model)
+
+        class HostileQualification(ExecutionModelQualification):
+            armed = False
+            reads = []
+
+            def __getattribute__(self, name):
+                if type(self).armed and name in {
+                    "asset_class",
+                    "data_fidelity",
+                    "scenario",
+                    "purpose",
+                }:
+                    type(self).reads.append(name)
+                    raise AssertionError("hostile qualification field read")
+                return super().__getattribute__(name)
+
+        hostile_qualification = HostileQualification(
+            qualification_id=base_qualification.qualification_id,
+            asset_class=base_qualification.asset_class,
+            data_fidelity=base_qualification.data_fidelity,
+            scenario=base_qualification.scenario,
+            purpose=base_qualification.purpose,
+            model_fingerprint=base_qualification.model_fingerprint,
+            calibration_sha256=base_qualification.calibration_sha256,
+            protocol_sha256=base_qualification.protocol_sha256,
+            evidence_artifact_id=base_qualification.evidence_artifact_id,
+            evidence_sha256=base_qualification.evidence_sha256,
+            instrument_version=base_qualification.instrument_version,
+        )
+        HostileQualification.armed = True
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ExecutionModelQualification",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    qualification=hostile_qualification,
+                )
+            )
+        self.assertEqual(HostileQualification.reads, [])
+
+    def test_simulation_rejects_order_and_observation_subclasses_before_reads(self):
+        exec_model = model()
+        base_order = order()
+        base_observation = observation()
+
+        class HostileOrder(SimulatedOrder):
+            armed = False
+            reads = []
+
+            def __getattribute__(self, name):
+                if type(self).armed and name == "instrument_version":
+                    type(self).reads.append(name)
+                    raise AssertionError("hostile order field read")
+                return super().__getattribute__(name)
+
+        hostile_order = HostileOrder(**vars(base_order))
+        HostileOrder.armed = True
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            simulate_qualified_execution(
+                order=hostile_order,
+                observation=base_observation,
+                model=exec_model,
+                qualification=qualification(exec_model),
+                asset_class="EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+            )
+        self.assertEqual(HostileOrder.reads, [])
+
+        class HostileObservation(LiquidityObservation):
+            armed = False
+            reads = []
+
+            def __getattribute__(self, name):
+                if type(self).armed and name == "instrument_version":
+                    type(self).reads.append(name)
+                    raise AssertionError("hostile observation field read")
+                return super().__getattribute__(name)
+
+        hostile_observation = HostileObservation(**vars(base_observation))
+        HostileObservation.armed = True
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            simulate_qualified_execution(
+                order=base_order,
+                observation=hostile_observation,
+                model=exec_model,
+                qualification=qualification(exec_model),
+                asset_class="EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+            )
+        self.assertEqual(HostileObservation.reads, [])
+
+    def test_validation_uses_one_authenticated_snapshot_not_legacy_split_reads(self):
+        exec_model = model()
+        with (
+            patch.object(
+                ArtifactStore,
+                "load_manifest",
+                side_effect=AssertionError("legacy manifest read must not run"),
+            ),
+            patch.object(
+                ArtifactStore,
+                "read_bytes",
+                side_effect=AssertionError("legacy object read must not run"),
+            ),
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model)
+            )
+
+    def test_artifact_store_instance_snapshot_shadow_is_not_authority(self):
+        exec_model = model()
+        self.store.read_authenticated_snapshot = lambda _artifact_id: (
+            {"sha256": "0" * 64, "manifest_hash": "shadow"},
+            b"shadow evidence",
+        )
+
+        validate_execution_qualification(
+            **self.validation_kwargs(exec_model)
+        )
+
+    def test_artifact_store_class_snapshot_replacement_is_not_authority(self):
+        exec_model = model()
+        with patch.object(
+            ArtifactStore,
+            "read_authenticated_snapshot",
+            side_effect=AssertionError(
+                "public class snapshot replacement must not become authority"
+            ),
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model)
+            )
+
+    def test_caller_poisoned_artifact_root_cannot_redirect_evidence_authority(self):
+        exec_model = model()
+        original_root = object.__getattribute__(self.store, "root")
+        with TemporaryDirectory() as directory:
+            attacker = ArtifactStore(Path(directory) / "attacker-artifacts")
+            attacker.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["protocol:wp13"],
+                metadata={"kind": "execution-qualification-evidence"},
+            )
+            object.__setattr__(
+                self.store,
+                "root",
+                object.__getattribute__(attacker, "root"),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ExecutionQualificationError,
+                    "artifact cannot be verified",
+                ):
+                    validate_execution_qualification(
+                        **self.validation_kwargs(exec_model)
+                    )
+            finally:
+                object.__setattr__(self.store, "root", original_root)
+
+    def test_artifact_store_subclass_cannot_supply_execution_evidence_authority(self):
+        class DerivedArtifactStore(ArtifactStore):
+            pass
+
+        exec_model = model()
+        with TemporaryDirectory() as directory:
+            derived = DerivedArtifactStore(Path(directory) / "artifacts")
+            derived.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["protocol:wp13"],
+                metadata={"kind": "execution-qualification-evidence"},
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical ArtifactStore",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(
+                        exec_model,
+                        artifact_store=derived,
+                    )
+                )
+
+    def test_authenticated_snapshot_bytes_are_rehashed_against_manifest_digest(self):
+        exec_model = model()
+        manifest = self.store.load_manifest(ARTIFACT_ID)
+        with patch.object(
+            execution_qualification_module,
+            "_CANONICAL_TRUSTED_AUTHENTICATED_READER",
+            return_value=lambda _artifact_id: (
+                manifest,
+                b"different execution evidence bytes",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ExecutionQualificationError,
+                "bytes do not match immutable artifact digest",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(exec_model)
+                )
 
     def test_cost_assumption_change_invalidates_qualification(self):
         qualified = model(slippage_bps="5")

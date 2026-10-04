@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import gc
 import unittest
 import weakref
 
@@ -7,6 +8,7 @@ from mvp.autotrade_mvp import durable_reservations as reservation_authority
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import ReservationConflict
+from research.autotrade_research.artifacts import ArtifactStore
 
 
 class DurableReservationStoreAuthorityTests(unittest.TestCase):
@@ -108,6 +110,35 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
 
             self.assertIs(vars(book)["store"], selected)
             book._reload()
+
+    def test_destroyed_book_releases_selected_authorities_without_next_bind(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "selected.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            book = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="acct-reservation-authority",
+                resolution_artifact_store=artifacts,
+                resolution_artifact_root=root / "artifacts",
+            )
+
+            book_ref = weakref.ref(book)
+            store_ref = weakref.ref(store)
+            artifacts_ref = weakref.ref(artifacts)
+            reader_ref = weakref.ref(vars(book)["_resolution_artifact_reader"])
+
+            del book
+            gc.collect()
+            self.assertIsNone(book_ref())
+            self.assertIsNone(reader_ref())
+
+            del store
+            del artifacts
+            gc.collect()
+            self.assertIsNone(store_ref())
+            self.assertIsNone(artifacts_ref())
 
     def test_reinitialization_cannot_retarget_reservation_authority(self):
         with TemporaryDirectory() as directory:

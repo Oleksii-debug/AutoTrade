@@ -250,7 +250,6 @@ class RawMarketUpdate:
     revision: int
     payload: Mapping[str, Any]
     raw_evidence_ref: Mapping[str, object]
-    _identity_material: str
     source_sequence: int | None = None
     stream_generation: int | None = None
     sequence_stream: str | None = None
@@ -391,6 +390,7 @@ class NormalizedMarketEvent:
     payload_json: str
     quality_flags: tuple[str, ...]
     raw_evidence_ref: Mapping[str, object]
+    _identity_material: str
     source_sequence: int | None = None
     stream_generation: int | None = None
 

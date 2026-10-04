@@ -23,7 +23,7 @@ import stat
 import sys
 from typing import Iterator
 
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
 
 
 class SenderAuthorityError(PermissionError):
@@ -32,7 +32,12 @@ class SenderAuthorityError(PermissionError):
 
 _LEASE_FACTORY = object()
 _TAKEOVER_AGGREGATE_TYPE = "recovery_takeover"
-_TAKEOVER_COMPLETE_EVENT_TYPE = "RecoveryTakeoverOwnerCommitted"
+_TAKEOVER_EVENT_TYPES = (
+    "RecoveryTakeoverStarted",
+    "RecoveryTakeoverEvidenceIssued",
+    "RecoveryTakeoverOwnerCommitted",
+)
+_TAKEOVER_COMPLETE_EVENT_TYPE = _TAKEOVER_EVENT_TYPES[-1]
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,109 @@ def _lease(
     )
 
 
+def _validate_completed_takeover(
+    store: JournalStore,
+    *,
+    owner_scope: str,
+    aggregate_id: str,
+    events: list[dict[str, object]],
+) -> None:
+    """Prove a completed takeover really advanced the durable owner chain.
+
+    The normal sender path does not possess the credential-vault protector and
+    therefore cannot independently reverify the sealed credential evidence.
+    It can, however, require the exact takeover journal sequence and the exact
+    RecoveryOwnerChanged event named by the completion. That is sufficient for
+    sender safety: a stale source sender will fail its mandatory durable owner
+    validation before it can append SubmissionSending or emit provider bytes.
+    """
+
+    if len(events) != len(_TAKEOVER_EVENT_TYPES):
+        raise SenderAuthorityError(
+            "sender authority is suspended by incomplete durable takeover"
+        )
+    for version, (event, expected_type) in enumerate(
+        zip(events, _TAKEOVER_EVENT_TYPES),
+        start=1,
+    ):
+        payload = event.get("payload")
+        if (
+            event.get("aggregate_id") != aggregate_id
+            or event.get("event_type") != expected_type
+            or event.get("aggregate_version") != version
+            or type(payload) is not dict
+            or payload.get("owner_scope") != owner_scope
+            or payload_digest(payload) != event.get("payload_hash")
+        ):
+            raise SenderAuthorityError("durable takeover journal sequence is invalid")
+
+    started, evidence, completed = events
+    started_payload = started["payload"]
+    evidence_payload = evidence["payload"]
+    completion_payload = completed["payload"]
+    identity_fields = (
+        "takeover_id",
+        "source_owner_id",
+        "source_owner_epoch",
+        "target_owner_id",
+        "target_owner_epoch",
+    )
+    for field_name in identity_fields:
+        if (
+            evidence_payload.get(field_name) != started_payload.get(field_name)
+            or completion_payload.get(field_name) != started_payload.get(field_name)
+        ):
+            raise SenderAuthorityError("durable takeover identity changed across events")
+    if completion_payload.get("takeover_evidence_event_id") != evidence.get("event_id"):
+        raise SenderAuthorityError("durable takeover completion evidence link is invalid")
+    if (
+        completion_payload.get("credential_transition_receipt_id")
+        != evidence_payload.get("credential_transition_receipt_id")
+    ):
+        raise SenderAuthorityError(
+            "durable takeover completion credential link is invalid"
+        )
+
+    target_owner_id = completion_payload.get("target_owner_id")
+    target_owner_epoch = completion_payload.get("target_owner_epoch")
+    owner_event_id = completion_payload.get("recovery_owner_event_id")
+    owner_payload_hash = completion_payload.get("recovery_owner_payload_hash")
+    owner_journal_sequence = completion_payload.get("recovery_owner_journal_sequence")
+    if (
+        type(target_owner_id) is not str
+        or not target_owner_id
+        or type(target_owner_epoch) is not int
+        or target_owner_epoch < 1
+        or type(owner_event_id) is not str
+        or not owner_event_id
+        or type(owner_payload_hash) is not str
+        or not owner_payload_hash
+        or type(owner_journal_sequence) is not int
+        or owner_journal_sequence < 1
+    ):
+        raise SenderAuthorityError("durable takeover completion owner identity is invalid")
+
+    owner_events = JournalStore.load_events(store, "recovery_owner", owner_scope)
+    if len(owner_events) < target_owner_epoch:
+        raise SenderAuthorityError("durable takeover target owner event is missing")
+    owner_event = owner_events[target_owner_epoch - 1]
+    owner_payload = owner_event.get("payload")
+    if (
+        owner_event.get("event_id") != owner_event_id
+        or owner_event.get("event_type") != "RecoveryOwnerChanged"
+        or owner_event.get("aggregate_version") != target_owner_epoch
+        or owner_event.get("journal_sequence") != owner_journal_sequence
+        or type(owner_payload) is not dict
+        or owner_payload.get("owner_id") != target_owner_id
+        or owner_payload.get("owner_epoch") != str(target_owner_epoch)
+        or payload_digest(owner_payload) != owner_payload_hash
+        or owner_event.get("payload_hash") != owner_payload_hash
+    ):
+        raise SenderAuthorityError(
+            "durable takeover completion does not match committed recovery owner"
+        )
+
+
 def _assert_no_pending_takeover(store: JournalStore, *, owner_scope: str) -> None:
     """Fail closed while a crash-resumable takeover is not durably complete."""
 
@@ -111,7 +219,7 @@ def _assert_no_pending_takeover(store: JournalStore, *, owner_scope: str) -> Non
         store,
         _TAKEOVER_AGGREGATE_TYPE,
     )
-    latest_by_aggregate: dict[str, dict[str, object]] = {}
+    grouped: dict[str, list[dict[str, object]]] = {}
     for event in events:
         if type(event) is not dict:
             raise SenderAuthorityError("sender takeover journal event is invalid")
@@ -130,13 +238,19 @@ def _assert_no_pending_takeover(store: JournalStore, *, owner_scope: str) -> Non
         if type(durable_scope) is not str or not durable_scope:
             raise SenderAuthorityError("sender takeover journal scope is invalid")
         if durable_scope == scope:
-            latest_by_aggregate[aggregate_id] = event
+            grouped.setdefault(aggregate_id, []).append(event)
 
-    for event in latest_by_aggregate.values():
-        if event.get("event_type") != _TAKEOVER_COMPLETE_EVENT_TYPE:
+    for aggregate_id, aggregate_events in grouped.items():
+        if aggregate_events[-1].get("event_type") != _TAKEOVER_COMPLETE_EVENT_TYPE:
             raise SenderAuthorityError(
                 "sender authority is suspended by pending durable takeover"
             )
+        _validate_completed_takeover(
+            store,
+            owner_scope=scope,
+            aggregate_id=aggregate_id,
+            events=aggregate_events,
+        )
 
 
 @contextmanager

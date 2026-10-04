@@ -11,10 +11,16 @@ from mvp.autotrade_mvp.provider_account_acquisition import (
     ProviderAccountAcquisitionError,
     SerializedProviderAccountAcquisition,
 )
+from mvp.autotrade_mvp.provider_account_cut import ProviderAccountCutIdentity
 from mvp.autotrade_mvp.provider_domain import ProviderFinancialScope
 
 
 NOW = datetime(2026, 10, 4, 1, 0, tzinfo=timezone.utc)
+D1 = "sha256:" + "1" * 64
+D2 = "sha256:" + "2" * 64
+D3 = "sha256:" + "3" * 64
+D4 = "sha256:" + "4" * 64
+Q1 = "provider-qualification:sha256:" + "1" * 64
 
 
 def scope(provider_environment: str = "TESTNET") -> ProviderFinancialScope:
@@ -24,6 +30,31 @@ def scope(provider_environment: str = "TESTNET") -> ProviderFinancialScope:
         provider_environment=provider_environment,
         entity_policy_id="LINEAR_ACCOUNT_V1",
     )
+
+
+def account_cut_for(
+    acquisition: SerializedProviderAccountAcquisition,
+    **overrides,
+) -> ProviderAccountCutIdentity:
+    values = {
+        "provider_scope": acquisition.provider_scope,
+        "account_id": acquisition.account_id,
+        "acquisition_mode": "SERIALIZED_ACQUISITION_GENERATION",
+        "acquisition_id": acquisition.acquisition_id,
+        "acquisition_generation": acquisition.acquisition_generation,
+        "acquisition_journal_sequence_cut":
+            acquisition.acquisition_journal_sequence_cut,
+        "qualification_identity_digest": Q1,
+        "consistency_method_id": "snapshot-readback-v1",
+        "consistency_method_version": 1,
+        "origin_binding_set_digest": D1,
+        "stream_binding_set_digest": D2,
+        "backfill_binding_set_digest": D3,
+        "coverage_window_digest": D4,
+        "provider_native_generation_token": None,
+    }
+    values.update(overrides)
+    return ProviderAccountCutIdentity(**values)
 
 
 def unrelated_event(version: int = 1) -> dict:
@@ -303,6 +334,90 @@ class DurableProviderAccountAcquisitionAuthorityTests(unittest.TestCase):
                     committed_at=NOW,
                 )
             self.assertEqual(issued.acquisition_generation, 1)
+
+    def test_account_cut_must_bind_exact_current_durable_acquisition(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            issued = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-1",
+                committed_at=NOW,
+            )
+            cut = account_cut_for(issued)
+
+            self.assertEqual(
+                authority.require_account_cut_acquisition(cut),
+                issued,
+            )
+
+    def test_stale_account_cut_cannot_survive_newer_acquisition(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            first = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-1",
+                committed_at=NOW,
+            )
+            stale_cut = account_cut_for(first)
+            authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-2",
+                committed_at=NOW,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "acquisition_id is not current",
+            ):
+                authority.require_account_cut_acquisition(stale_cut)
+
+    def test_account_cut_cannot_self_author_forged_acquisition_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            issued = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-1",
+                committed_at=NOW,
+            )
+            forged = account_cut_for(
+                issued,
+                acquisition_id="self-authored-acquisition",
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "acquisition_id is not current",
+            ):
+                authority.require_account_cut_acquisition(forged)
+
+    def test_provider_native_account_cut_is_not_serialized_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            issued = authority.issue_serialized(
+                provider_scope=scope(),
+                account_id="account-1",
+                acquisition_request_id="read-cycle-1",
+                committed_at=NOW,
+            )
+            native = account_cut_for(
+                issued,
+                acquisition_mode="PROVIDER_NATIVE_GENERATION",
+                provider_native_generation_token="provider-token-1",
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "does not use serialized",
+            ):
+                authority.require_account_cut_acquisition(native)
 
     def test_noncanonical_request_and_boolean_generation_fail_closed(self):
         with self.assertRaises(ProviderAccountAcquisitionError):

@@ -6,9 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
-from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.replay import CompositeReplayCheckpoint, REQUIRED_RUNTIME_COMPONENTS
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
 from mvp.autotrade_mvp.simulation_runtime_checkpoint import checkpoint_path
@@ -121,23 +119,31 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), before)
 
-    def test_foreign_financial_journal_mutation_invalidates_checkpoint_before_restore(self):
+    def test_foreign_durable_journal_mutation_invalidates_checkpoint_before_restore(self):
         with TemporaryDirectory() as directory:
             run(directory, stop_after_episodes=3)
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            economic = DurableProviderEconomicBook(
-                store,
-                provider_id=PROVIDER,
-                account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-            )
-            economic.append(
-                book_external_cash_flow(
-                    transaction_id="wp12-foreign-transaction",
-                    cause_event_id="wp12-foreign-cause",
-                    currency="USD",
-                    amount="1",
-                )
+            payload = {"probe": "post-checkpoint-durable-mutation"}
+            store.append_event(
+                {
+                    "event_id": "wp12-post-checkpoint-probe",
+                    "event_type": "Wp12DurableMutationProbe",
+                    "schema_version": "1.0.0",
+                    "aggregate_type": "wp12_test_probe",
+                    "aggregate_id": "probe",
+                    "aggregate_version": "1",
+                    "host_id": "test",
+                    "owner_epoch": "1",
+                    "environment": ENVIRONMENT,
+                    "occurred_at": NOW,
+                    "observed_at": NOW,
+                    "committed_at": NOW,
+                    "correlation_id": "wp12-probe",
+                    "causation_id": None,
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "evidence_refs": [],
+                }
             )
             mutated = store.whole_store_state_cut()
             with patch.object(

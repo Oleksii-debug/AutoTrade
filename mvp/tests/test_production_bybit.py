@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -29,9 +29,13 @@ from mvp.autotrade_mvp.production_financial_host import compose_financial_author
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+from mvp.tests.test_security import DeterministicProtector
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
@@ -60,6 +64,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         environment: str = "PAPER",
         host_id: str = "host-a",
         journal: JournalStore | None = None,
+        security_boundary: SecurityBoundary | None = None,
     ):
         journal = journal or JournalStore(Path(root) / "financial-host.sqlite")
         config = ProductionHostConfig(
@@ -71,7 +76,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             bind_port=18765,
             public_origin="http://127.0.0.1:18765",
         )
-        boundary = object.__new__(SecurityBoundary)
+        boundary = security_boundary or object.__new__(SecurityBoundary)
         application = object.__new__(AuthenticatedHostApplication)
         application.security_boundary = boundary
         host = ProductionHostRuntime(
@@ -111,6 +116,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         capability_registry: CapabilityRegistry | None = None,
         capability_snapshot_id: str = "capability-1",
         wire_client=None,
+        session_token: str = "session-1",
     ) -> ProductionBybitOrderSender:
         return _build_production_bybit_order_sender(
             runtime,
@@ -118,11 +124,42 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             capability_snapshot_id=capability_snapshot_id,
             capability_registry=capability_registry or CapabilityRegistry(),
             credential_handle=credential_handle or self._handle(),
-            session_token="session-1",
+            session_token=session_token,
             clock_millis=lambda: 1_700_000_000_000,
             clock_utc=lambda: _NOW,
             wire_client=wire_client,
         )
+
+    def _mark_ready(
+        self,
+        runtime,
+        *,
+        provider_id: str = "BYBIT",
+        reconciliation_id: str = "production-bybit-ready",
+    ) -> None:
+        recovery = runtime.recovery_controller
+        owner = recovery.owner
+        self.assertIsNotNone(owner)
+        result = reconciliation(
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        record_reconciliation_checkpoint(
+            runtime.journal,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-10-04T01:59:59Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        self.assertIs(recovery.state, HostState.READY)
 
     def test_raw_sender_direct_construction_is_not_a_product_surface(self) -> None:
         with self.assertRaisesRegex(
@@ -291,7 +328,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     PermissionError,
-                    "does not match production host authority",
+                    "production credential lease authority changed",
                 ):
                     with resolver.lease_for_execution(
                         "session-1",
@@ -368,7 +405,24 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1"}}'
         )
         with TemporaryDirectory() as root:
-            runtime, _host, _boundary = self._runtime(root)
+            boundary = SecurityBoundary(
+                allowed_origins={"http://127.0.0.1:18765"},
+                credential_vault=ProtectedCredentialVault(
+                    Path(root) / "credentials.json", protector=DeterministicProtector(),
+                ),
+                session_authorizer=lambda _subject, _role, _origin: True,
+                now=lambda: 1000.0,
+            )
+            runtime, _host, _boundary = self._runtime(root, security_boundary=boundary)
+            session = boundary.create_session(
+                subject="test-owner", role="OWNER", origin=runtime.config.public_origin,
+            )
+            credential_handle = boundary.register_secret(
+                session.token, origin=runtime.config.public_origin,
+                owner_identity=runtime.financial_dispatcher.owner.owner_id,
+                account_id="account-1", provider="BYBIT", environment="PAPER",
+                provider_environment="TESTNET", purpose="TRADE", secret_value=credential,
+            )
             capability = write_capability(
                 family="LINEAR_DERIVATIVES",
                 position_mode="HEDGE",
@@ -377,6 +431,8 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 instrument_version="BTCUSDT@1",
                 permission_scope="BYBIT.LINEAR.ORDER.WRITE",
                 additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
             )
             registry = CapabilityRegistry()
             registry.add(capability)
@@ -391,7 +447,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             )
             prepared = prepare_order_submission(
                 capability=capability,
-                at=READ_AT,
+                at=_NOW,
                 provider_environment="TESTNET",
                 product_family="LINEAR_DERIVATIVES",
                 symbol="BTCUSDT",
@@ -411,46 +467,30 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 capability_registry=registry,
                 capability_snapshot_id=capability.snapshot_id,
                 wire_client=wire,
+                credential_handle=credential_handle,
+                session_token=session.token,
             )
-            recovery = runtime.recovery_controller
-            recovery.provider_reconciled = True
-            recovery.reason_codes.clear()
-            recovery.state = HostState.READY
-            lease_calls = []
+            self._mark_ready(runtime)
+            authority_calls = []
 
-            @contextmanager
-            def fake_lease(_self, token, **kwargs):
-                lease_calls.append((token, kwargs))
-                yield credential
+            def authority_check(intent_hash: str, at: str):
+                authority_calls.append((intent_hash, at))
+                return True, "authorized"
 
-            original = SecurityBoundary.lease_for_execution
-            SecurityBoundary.lease_for_execution = fake_lease
-            try:
-                authority_calls = []
-
-                def authority_check(intent_hash: str, at: str):
-                    authority_calls.append((intent_hash, at))
-                    return True, "authorized"
-
-                dispatch_now = READ_AT.isoformat().replace("+00:00", "Z")
-                outcome = sender.dispatch(
-                    attempt_id="attempt-e2e",
-                    intent_id=intent_id,
-                    intent_hash="sha256:" + "2" * 64,
-                    request=guarded_order_projection(prepared),
-                    now=dispatch_now,
-                    authority_check=authority_check,
-                    final_barrier_clock=lambda: dispatch_now,
-                )
-            finally:
-                SecurityBoundary.lease_for_execution = original
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            outcome = sender.dispatch(
+                attempt_id="attempt-e2e", intent_id=intent_id,
+                intent_hash="sha256:" + "2" * 64,
+                request=guarded_order_projection(prepared), now=dispatch_now,
+                authority_check=authority_check,
+                final_barrier_clock=lambda: dispatch_now,
+            )
 
             self.assertEqual(outcome.status, "SENT")
             self.assertEqual(outcome.reason, "sent_confirmed")
             self.assertEqual(outcome.response["retCode"], 0)
             self.assertEqual(outcome.response["result"]["orderId"], "provider-1")
             self.assertEqual(len(wire.requests), 1)
-            self.assertEqual(len(lease_calls), 1)
             self.assertEqual(len(authority_calls), 2)
             events = runtime.journal.load_events_by_aggregate_type("submission_attempt")
             self.assertEqual(

@@ -17,6 +17,10 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
     RiskAuthorityRequest,
 )
+from mvp.autotrade_mvp.authority_persistence import (
+    persist_authority_snapshot,
+    restore_authority_snapshot,
+)
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -855,6 +859,72 @@ class AuthorityTests(unittest.TestCase):
             restored._admissions[rejected.admission_id],
             rejected,
         )
+
+    def test_rejected_confirmation_survives_canonical_snapshot_seal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_confirmation(
+                confirmation_id="sealed-requested-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            rejected = authority.admit(
+                command_id="cmd-sealed-requested-confirmation",
+                idempotency_key="idem-sealed-requested-confirmation",
+                admission_id="admission-sealed-requested-confirmation",
+                policy_id=item.policy_id,
+                intent_id="intent-sealed-requested-confirmation",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-sealed-requested-confirmation",
+                confirmation_id="sealed-requested-confirmation",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(
+                rejected.reason,
+                "confirmation_financial_binding_missing",
+            )
+            persist_authority_snapshot(
+                store,
+                authority,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-requested-confirmation",
+                committed_at="2026-09-24T18:00:01Z",
+            )
+            restored = restore_authority_snapshot(
+                store,
+                authority_id="runtime-authority",
+            )
+            restored_record = restored._admissions[rejected.admission_id]
+            self.assertIsNone(restored_record.confirmation_id)
+            self.assertEqual(
+                restored_record.requested_confirmation_id,
+                "sealed-requested-confirmation",
+            )
+            self.assertEqual(
+                restored_record.request_fingerprint,
+                rejected.request_fingerprint,
+            )
 
     def test_admitted_snapshot_keeps_legacy_confirmation_shape(self):
         service = AuthorityService()

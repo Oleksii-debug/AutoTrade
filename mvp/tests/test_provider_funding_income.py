@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import timedelta
+from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -16,7 +17,9 @@ from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_core import Surface
 from mvp.autotrade_mvp.provider_funding_income import (
     ProviderFundingIncomeError,
+    ProviderFundingIncomeObservation,
     bybit_funding_income_observations,
+    require_provider_funding_income_authority,
 )
 from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginJournal,
@@ -330,17 +333,35 @@ class ProviderFundingIncomeTests(unittest.TestCase):
             observations = bybit_funding_income_observations(origin)
             self.assertEqual(len(observations), 1)
             funding = observations[0]
+            self.assertIs(require_provider_funding_income_authority(funding), funding)
             self.assertEqual(funding.provider_transaction_id, "592324_XRPUSDT_161440249321")
             self.assertEqual(funding.instrument_id, "XRPUSDT")
             self.assertEqual(funding.settlement_currency, "USDT")
             self.assertEqual(str(funding.funding_amount), "-0.003676")
-            self.assertEqual(str(funding.position_size), "100")
             self.assertEqual(funding.provider_environment, "TESTNET")
             self.assertEqual(funding.origin_ref, origin.origin_ref)
             self.assertEqual(funding.qualified_evidence_ref, origin.qualified_evidence_ref)
+            self.assertFalse(hasattr(funding, "position_size"))
             self.assertFalse(hasattr(funding, "funding_rate"))
             self.assertFalse(hasattr(funding, "mark_price"))
             self.assertTrue(funding.evidence_ref.startswith("sha256:"))
+
+    def test_projected_income_constructor_and_post_issue_mutation_are_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "must come from qualified provider-origin bytes",
+        ):
+            ProviderFundingIncomeObservation()
+
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(directory, self._body())
+            funding = bybit_funding_income_observations(origin)[0]
+            object.__setattr__(funding, "funding_amount", Decimal("999"))
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "changed after qualified origin projection",
+            ):
+                require_provider_funding_income_authority(funding)
 
     def test_wrong_qualified_parser_identity_cannot_mint_funding_income(self):
         with TemporaryDirectory() as directory:

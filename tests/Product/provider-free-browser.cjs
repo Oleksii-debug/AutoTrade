@@ -115,11 +115,11 @@ async function exercisePortfolioTableTools(page) {
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
     const rows = [...document.querySelectorAll('#portfolio-body tr[data-filterable-row="true"]')];
-    return status.includes("match the current filter") && rows.some(row => !row.hidden);
+    return status.includes("matching rows") && rows.some(row => !row.hidden);
   });
   await page.waitForFunction(() =>
     (document.querySelector("#polite-status")?.textContent || "").includes(
-      "rows match the current filter."));
+      "matching rows"));
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-copy");
@@ -135,8 +135,75 @@ async function exercisePortfolioTableTools(page) {
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");
   await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => {
+    const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
+    return status.includes("Page 1 of ") && status.includes("Sort: host order.");
+  });
+}
+
+async function exercisePortfolioPagingAndSort(page) {
+  stage = "portfolio paged reading and stable sort";
+  await page.evaluate(() => {
+    const body = document.querySelector("#portfolio-body");
+    for (let index = 0; index < 30; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      const row = document.createElement("tr");
+      row.dataset.filterableRow = "true";
+      row.dataset.selectionKey = "paging-fixture:" + suffix;
+      row.dataset.selectionExact = "true";
+      const header = document.createElement("th");
+      header.scope = "row";
+      header.textContent = "paging-fixture-" + suffix;
+      const cell = document.createElement("td");
+      cell.textContent = "fixture-value-" + suffix;
+      row.append(header, cell);
+      body.appendChild(row);
+    }
+    const filter = document.querySelector("#portfolio-filter");
+    filter.value = "paging-fixture-";
+    filter.dispatchEvent(new Event("input", {bubbles: true}));
+  });
   await page.waitForFunction(() =>
-    (document.querySelector("#portfolio-filter-status")?.textContent || "").endsWith(" rows shown."));
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Rows 1-25 of 30 matching rows shown. Page 1 of 2. Sort: host order."));
+  assert.equal(
+    await page.locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])').count(),
+    25,
+    "first bounded page exposes exactly 25 matching rows");
+
+  await page.locator("#portfolio-next").click();
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Rows 26-30 of 30 matching rows shown. Page 2 of 2. Sort: host order."));
+  assert.equal(
+    await page.locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])').count(),
+    5,
+    "second bounded page exposes the remaining five rows");
+
+  await page.selectOption("#portfolio-sort", "text-desc");
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Page 1 of 2. Sort: rendered text descending."));
+  const firstVisible = await page
+    .locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])')
+    .first()
+    .innerText();
+  assert.match(firstVisible, /paging-fixture-29/,
+    "descending rendered-text sort is deterministic and restarts at page one");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    filter.value = "";
+    filter.dispatchEvent(new Event("input", {bubbles: true}));
+    const sort = document.querySelector("#portfolio-sort");
+    sort.value = "host";
+    sort.dispatchEvent(new Event("change", {bubbles: true}));
+    document.querySelector("#refresh-state").click();
+  });
+  await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
+  await page.waitForFunction(() =>
+    document.querySelector("#portfolio-body").textContent.includes("895.696") &&
+    !document.querySelector("#portfolio-body").textContent.includes("paging-fixture-"));
 }
 
 async function exerciseSnapshotSelectionPreservation(page) {
@@ -330,6 +397,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
   await exercisePortfolioTableTools(page);
+  await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);

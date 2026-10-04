@@ -11,7 +11,12 @@ class TerminalQualificationHermeticImportTests(unittest.TestCase):
     def test_terminal_qualification_surfaces_import_without_research_package(self):
         script = r'''
 import importlib.abc
+from pathlib import Path
 import sys
+
+
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
 
 
 class BlockResearch(importlib.abc.MetaPathFinder):
@@ -56,7 +61,7 @@ if leaked:
     raise AssertionError(f"terminal qualification imported research package: {leaked}")
 '''
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-I", "-S", "-c", script, str(ROOT)],
             cwd=ROOT,
             capture_output=True,
             text=True,

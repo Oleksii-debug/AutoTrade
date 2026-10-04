@@ -14,6 +14,7 @@ public partial class MainWindow : Window
         Interval = TimeSpan.FromSeconds(10),
     };
     private bool _hostRefreshInProgress;
+    private bool _announceHostRefreshCompletion;
     private HostDisplayFreshness? _lastDisplayedFreshness;
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
@@ -79,12 +80,27 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
-        if (_hostRefreshInProgress || _lifetime.IsCancellationRequested)
+        if (_lifetime.IsCancellationRequested)
         {
             return;
         }
 
+        if (_hostRefreshInProgress)
+        {
+            if (announce)
+            {
+                // A manual request coalesced onto a quiet heartbeat still owns
+                // an accessible completion announcement from that in-flight call.
+                _announceHostRefreshCompletion = true;
+                SetLiveRegionText(
+                    HostStatusAnnouncement,
+                    "Host status refresh is already in progress. The current request will update this status when it finishes.");
+            }
+            return;
+        }
+
         _hostRefreshInProgress = true;
+        _announceHostRefreshCompletion = false;
         // Only an explicit keyboard/button invocation owns the button state.
         // Periodic refresh must not disable a focusable control every ten
         // seconds, because doing so can evict keyboard/NVDA focus.
@@ -97,7 +113,9 @@ public partial class MainWindow : Window
         try
         {
             EmergencyHostStatus status = await _hostClient.GetStatusAsync(_lifetime.Token);
-            ApplyHostStatus(status, announce);
+            ApplyHostStatus(
+                status,
+                announce || _announceHostRefreshCompletion);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -108,7 +126,7 @@ public partial class MainWindow : Window
             ApplyHostStatus(
                 EmergencyHostStatus.Disconnected(
                     "Host refresh failed. No new host evidence was accepted."),
-                announce);
+                announce || _announceHostRefreshCompletion);
         }
         finally
         {
@@ -116,6 +134,7 @@ public partial class MainWindow : Window
             {
                 RefreshStatusButton.IsEnabled = true;
             }
+            _announceHostRefreshCompletion = false;
             _hostRefreshInProgress = false;
             if (returnFocus && IsLoaded)
             {

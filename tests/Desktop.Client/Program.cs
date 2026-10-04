@@ -1224,10 +1224,84 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void ManualRefreshDuringAutomaticRefreshIsAnnouncedTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                int transportCalls = 0;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object[] { client },
+                    null)!;
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+
+                client.OnGetStatus = () =>
+                {
+                    transportCalls++;
+                    // The automatic request is already inside its transport call.
+                    // Invoke the same path as an explicit keyboard/button action:
+                    // it must coalesce without a second transport call, announce
+                    // immediately, and promote the in-flight completion to an
+                    // accessible result announcement.
+                    Task overlap =
+                        (Task)refresh.Invoke(window, new object[] { true, true })!;
+                    overlap.GetAwaiter().GetResult();
+                    Check.True(
+                        announcement.Text.StartsWith(
+                            "Host status refresh is already in progress.",
+                            StringComparison.Ordinal),
+                        "manual refresh overlap was silent to keyboard/NVDA users");
+                };
+
+                Task automatic =
+                    (Task)refresh.Invoke(window, new object[] { false, false })!;
+                automatic.GetAwaiter().GetResult();
+
+                Check.True(
+                    transportCalls == 1,
+                    "manual refresh overlap started a second host request");
+                Check.True(
+                    announcement.Text.Contains(
+                        "Inspecting status client is intentionally disconnected.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh did not announce the in-flight request result");
+                Check.True(
+                    !announcement.Text.StartsWith(
+                        "Host status refresh is already in progress.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh left only the interim announcement");
+                Check.True(
+                    button.IsEnabled,
+                    "manual refresh overlap disabled the focusable refresh button");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
         AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
+        ManualRefreshDuringAutomaticRefreshIsAnnouncedTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();

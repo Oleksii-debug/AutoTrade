@@ -106,7 +106,7 @@ def _entry_digest(entry: dict[str, object]) -> str:
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
-class AcceptedProviderAccountOriginSet:
+class ProviderAccountOriginBindingSet:
     """Sealed set of exact direct provider origins for one current acquisition."""
 
     account_id: str
@@ -121,7 +121,7 @@ class AcceptedProviderAccountOriginSet:
 
     def __init__(self, *_args, **_kwargs) -> None:
         raise ProviderAccountOriginSetError(
-            "AcceptedProviderAccountOriginSet must come from canonical issuer"
+            "ProviderAccountOriginBindingSet must come from canonical issuer"
         )
 
     @property
@@ -170,10 +170,10 @@ class AcceptedProviderAccountOriginSet:
 def _install_origin_set_authority():
     states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
 
-    def snapshot(value: AcceptedProviderAccountOriginSet) -> tuple[object, ...]:
-        if type(value) is not AcceptedProviderAccountOriginSet:
+    def snapshot(value: ProviderAccountOriginBindingSet) -> tuple[object, ...]:
+        if type(value) is not ProviderAccountOriginBindingSet:
             raise ProviderAccountOriginSetError(
-                "exact AcceptedProviderAccountOriginSet is required"
+                "exact ProviderAccountOriginBindingSet is required"
             )
         return (
             value.account_id,
@@ -191,7 +191,7 @@ def _install_origin_set_authority():
             if ref() is None:
                 states.pop(object_id, None)
 
-    def register(value: AcceptedProviderAccountOriginSet) -> None:
+    def register(value: ProviderAccountOriginBindingSet) -> None:
         prune()
         object_id = id(value)
         state = snapshot(value)
@@ -202,7 +202,7 @@ def _install_origin_set_authority():
             )
         states[object_id] = (weakref.ref(value), state)
 
-    def require(value: AcceptedProviderAccountOriginSet) -> AcceptedProviderAccountOriginSet:
+    def require(value: ProviderAccountOriginBindingSet) -> ProviderAccountOriginBindingSet:
         prune()
         state = snapshot(value)
         expected = states.get(id(value))
@@ -232,7 +232,7 @@ def issue_provider_account_origin_set(
     account_acquisition: SerializedProviderAccountAcquisition,
     response_bindings: tuple[AuthenticatedReadResponseBinding, ...],
     at: datetime,
-) -> AcceptedProviderAccountOriginSet:
+) -> ProviderAccountOriginBindingSet:
     """Seal exact current Q + acquisition + direct origin bindings, and nothing more."""
 
     if type(qualification_registry) is not DurableProviderQualificationRegistry:
@@ -340,7 +340,7 @@ def issue_provider_account_origin_set(
     for entry in entries:
         normalized.append({**entry, "entry_digest": _entry_digest(entry)})
     entries_json = canonical_json(normalized)
-    value = object.__new__(AcceptedProviderAccountOriginSet)
+    value = object.__new__(ProviderAccountOriginBindingSet)
     object.__setattr__(value, "account_id", current_acquisition.account_id)
     object.__setattr__(
         value,

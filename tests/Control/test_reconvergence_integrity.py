@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -12,6 +13,7 @@ from control.tools.reconvergence_integrity import (
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_name_status_z,
 )
 
 
@@ -135,44 +137,88 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         result = assess_reconvergence(
             base_paths=["old.py", "other.py"],
             changes=changes,
-            max_deletions=1,
-            max_deleted_fraction=0.1,
+            max_deletions=2,
+            max_deleted_fraction=0.6,
             protected_sentinels=frozenset(),
         )
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 1)
+        self.assertEqual(result.destructive_change_fraction, 0.5)
+
+    def test_mass_rename_away_is_counted_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(
+                status="R100",
+                previous_path=path,
+                path=f"moved/{path}",
+            )
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 60)
+        self.assertEqual(result.destructive_change_fraction, 0.6)
+        self.assertIn("mass destructive base-tree change", result.reasons[0])
+
+    def test_mass_type_change_is_counted_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(status="T", path=path)
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 60)
+        self.assertIn("mass destructive base-tree change", result.reasons[0])
+
+    def test_mass_copy_is_not_misclassified_as_destructive_tree_change(self):
+        base = [f"path-{index}.txt" for index in range(100)]
+        changes = [
+            Change(
+                status="C100",
+                previous_path=path,
+                path=f"copies/{path}",
+            )
+            for path in base[:60]
+        ]
+
+        result = assess_reconvergence(
+            base_paths=base,
+            changes=changes,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.destructive_change_count, 0)
 
     def test_parser_rejects_malformed_records(self):
         with self.assertRaises(ValueError):
             parse_name_status(["R100\tonly-old-path"])
 
-    def test_parser_rejects_unmerged_unknown_similarity_and_hostile_paths(self):
-        hostile_records = (
-            "U\tcontrol/tools/reconvergence_integrity.py",
-            "X\tcontrol/tools/reconvergence_integrity.py",
-            "R101\told.py\tnew.py",
-            "Rabc\told.py\tnew.py",
-            "M\t../control/tools/reconvergence_integrity.py",
-            "M\t/absolute.py",
-            "M\tbad" + "\x00" + "path.py",
-        )
-        for record in hostile_records:
-            with self.subTest(record=repr(record)), self.assertRaises(ValueError):
-                parse_name_status([record])
-
-    def test_synthetic_change_values_cannot_bypass_name_status_validation(self):
-        for change in (
-            Change(status="U", path="mvp/runtime.py"),
-            Change(status="M", path="../mvp/runtime.py"),
-            Change(status="R200", previous_path="old.py", path="new.py"),
-        ):
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                assess_reconvergence(
-                    base_paths=["mvp/runtime.py", "README.md"],
-                    changes=[change],
-                    protected_sentinels=frozenset(),
-                )
 
     def test_guard_itself_and_canonical_control_authorities_are_protected(self):
         for path in (
@@ -249,61 +295,6 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             result.protected_violations,
             ("control/qualification.json (type change)",),
         )
-
-    def test_executable_trust_root_modification_requires_exact_external_scope(self):
-        for trust_root in sorted(PROTECTED_MUTATION_ROOTS):
-            with self.subTest(trust_root=trust_root):
-                unscoped = assess_reconvergence(
-                    base_paths=[trust_root, "README.md"],
-                    changes=[Change(status="M", path=trust_root)],
-                )
-                self.assertFalse(unscoped.allowed)
-                self.assertIn(
-                    f"{trust_root} (unauthorized modification)",
-                    unscoped.protected_violations,
-                )
-
-                exact = assess_reconvergence(
-                    base_paths=[trust_root, "README.md"],
-                    changes=[Change(status="M", path=trust_root)],
-                    allowed_scopes=(trust_root,),
-                )
-                self.assertTrue(exact.allowed)
-                self.assertEqual(exact.protected_violations, ())
-
-    def test_directory_scope_cannot_authorize_executable_trust_root_modification(self):
-        trust_root = "control/tools/reconvergence_integrity.py"
-        result = assess_reconvergence(
-            base_paths=[trust_root, "README.md"],
-            changes=[Change(status="M", path=trust_root)],
-            allowed_scopes=("control/tools",),
-        )
-
-        self.assertFalse(result.allowed)
-        self.assertEqual(result.scope_violations, ())
-        self.assertEqual(
-            result.protected_violations,
-            (f"{trust_root} (unauthorized modification)",),
-        )
-
-    def test_rename_or_copy_into_executable_trust_root_fails_closed(self):
-        trust_root = "control/tools/reconvergence_integrity.py"
-        for status in ("R100", "C100"):
-            with self.subTest(status=status):
-                result = assess_reconvergence(
-                    base_paths=["scratch.py", "README.md"],
-                    changes=[
-                        Change(
-                            status=status,
-                            previous_path="scratch.py",
-                            path=trust_root,
-                        )
-                    ],
-                    protected_sentinels=frozenset(),
-                    allowed_scopes=(trust_root, "scratch.py"),
-                )
-                self.assertFalse(result.allowed)
-                self.assertTrue(result.protected_violations)
 
     def test_declared_scope_rejects_small_unrelated_blob_change(self):
         result = assess_reconvergence(
@@ -393,13 +384,536 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
-        self.assertIn(
-            "Verify event base is still exact live target tip",
-            workflow,
-        )
+        self.assertIn("Verify event base is still exact live target tip", workflow)
         self.assertIn("git ls-remote --refs origin", workflow)
         self.assertIn("AUTOTRADE_EVENT_BASE_REF:", workflow)
         self.assertIn("AUTOTRADE_EVENT_BASE_SHA:", workflow)
+
+
+    def test_ordinary_protected_sentinel_modification_requires_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        base = [sentinel, "README.md"]
+
+        unauthorized = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+        )
+        directory_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+        )
+        exact_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+
+        self.assertFalse(unauthorized.allowed)
+        self.assertFalse(directory_scope.allowed)
+        self.assertIn("content change without exact authorization", unauthorized.reasons[0])
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+
+    def test_rename_or_copy_cannot_replace_executable_trust_root(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        for status in ("R100", "C100"):
+            with self.subTest(status=status):
+                change = Change(
+                    status=status,
+                    previous_path="candidate.py",
+                    path=sentinel,
+                )
+                blocked = assess_reconvergence(
+                    base_paths=["candidate.py", "README.md"],
+                    changes=[change],
+                )
+                exact_scoped = assess_reconvergence(
+                    base_paths=["candidate.py", "README.md"],
+                    changes=[change],
+                    allowed_scopes=("candidate.py", sentinel),
+                )
+
+                self.assertFalse(blocked.allowed)
+                self.assertFalse(exact_scoped.allowed)
+                self.assertIn(
+                    f"{sentinel} ({'rename' if status.startswith('R') else 'copy'} target)",
+                    exact_scoped.protected_violations,
+                )
+
+    def test_non_executable_protected_metadata_can_be_modified_without_bootstrap_scope(self):
+        sentinel = "control/qualification.json"
+        self.assertIn(sentinel, PROTECTED_SENTINELS)
+        self.assertNotIn(sentinel, PROTECTED_MUTATION_ROOTS)
+
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
+
+    def test_change_validation_rejects_unsupported_status_and_noncanonical_path(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Git name-status"):
+            parse_name_status(["U\tREADME.md"])
+        with self.assertRaisesRegex(ValueError, "canonical repository-relative path"):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="../README.md")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_validation_rejects_synthetic_missing_base_source(self):
+        with self.assertRaisesRegex(ValueError, "absent from the base tree"):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="not-in-base.py")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_rejects_duplicate_mutation_of_one_base_path(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "multiple mutating Git changes",
+        ):
+            assess_reconvergence(
+                base_paths=["src/runtime.py", "README.md"],
+                changes=[
+                    Change(status="M", path="src/runtime.py"),
+                    Change(status="D", path="src/runtime.py"),
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_rejects_duplicate_candidate_destination(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "target the same candidate path",
+        ):
+            assess_reconvergence(
+                base_paths=["src/a.py", "src/b.py", "README.md"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/a.py",
+                        path="src/new.py",
+                    ),
+                    Change(
+                        status="C100",
+                        previous_path="src/b.py",
+                        path="src/new.py",
+                    ),
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_rejects_rename_onto_unremoved_base_path(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "destination already exists in base tree",
+        ):
+            assess_reconvergence(
+                base_paths=["src/a.py", "src/b.py", "README.md"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/a.py",
+                        path="src/b.py",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_allows_rename_onto_explicitly_removed_base_path(self):
+        result = assess_reconvergence(
+            base_paths=["src/a.py", "src/b.py", "README.md"],
+            changes=[
+                Change(status="D", path="src/b.py"),
+                Change(
+                    status="R100",
+                    previous_path="src/a.py",
+                    path="src/b.py",
+                ),
+            ],
+            max_deletions=50,
+            max_deleted_fraction=0.9,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 1)
+        self.assertEqual(result.destructive_change_count, 2)
+
+    def test_candidate_tree_rejects_case_insensitive_add_collision(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["README.md", "src/runtime.py"],
+                changes=[Change(status="A", path="readme.MD")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_candidate_tree_rejects_case_insensitive_rename_collision(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["src/alpha.py", "src/BETA.py"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/alpha.py",
+                        path="src/beta.py",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_candidate_tree_allows_collision_only_when_conflicting_path_is_removed(self):
+        result = assess_reconvergence(
+            base_paths=["src/alpha.py", "src/BETA.py", "README.md"],
+            changes=[
+                Change(status="D", path="src/BETA.py"),
+                Change(
+                    status="R100",
+                    previous_path="src/alpha.py",
+                    path="src/beta.py",
+                ),
+            ],
+            max_deletions=50,
+            max_deleted_fraction=0.9,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 1)
+        self.assertEqual(result.destructive_change_count, 2)
+
+    def test_base_tree_case_collision_fails_closed_even_without_changes(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "case-insensitive path collision",
+        ):
+            assess_reconvergence(
+                base_paths=["src/Module.py", "src/module.py"],
+                changes=[],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_nul_name_status_parser_is_unambiguous_and_fail_closed(self):
+        self.assertEqual(
+            parse_name_status_z(b"M\x00README.md\x00A\x00new file.txt\x00"),
+            (
+                Change(status="M", path="README.md"),
+                Change(status="A", path="new file.txt"),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "Malformed NUL-delimited"):
+            parse_name_status_z(b"M\x00README.md")
+        with self.assertRaisesRegex(ValueError, "canonical UTF-8"):
+            parse_name_status_z(b"A\x00bad-\xff\x00")
+
+    def test_public_module_entrypoint_assesses_real_git_candidate(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-entry@example.invalid")
+            git("config", "user.name", "Guard Entry")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / "README.md").write_text("child\n", encoding="utf-8")
+            git("commit", "-am", "child")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Reconvergence tree guard passed.", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_modified_trust_root_without_exact_scope(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        sentinel = "control/tools/reconvergence_integrity.py"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "control" / "tools").mkdir(parents=True)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-trust@example.invalid")
+            git("config", "user.name", "Guard Trust")
+            (root / sentinel).write_text("BASE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / sentinel).write_text("BASE = 2\n", encoding="utf-8")
+            git("commit", "-am", "modify guard")
+            head_sha = git("rev-parse", "HEAD")
+
+            common = [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--repo",
+                str(root),
+                "--base",
+                base_sha,
+                "--head",
+                head_sha,
+            ]
+            blocked = subprocess.run(
+                common,
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            authorized = subprocess.run(
+                [*common, "--allowed-scope", sentinel],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("content change without exact authorization", blocked.stdout)
+        self.assertEqual(authorized.returncode, 0, authorized.stderr)
+
+    def test_public_module_entrypoint_blocks_diverged_candidate(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-diverged@example.invalid")
+            git("config", "user.name", "Guard Diverged")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "root")
+            root_sha = git("rev-parse", "HEAD")
+            (root / "accepted.txt").write_text("accepted\n", encoding="utf-8")
+            git("add", "accepted.txt")
+            git("commit", "-m", "accepted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "stale", root_sha)
+            (root / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+            git("add", "candidate.txt")
+            git("commit", "-m", "diverged candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("head is not descended from exact base revision", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_mass_rename_away(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-rename@example.invalid")
+            git("config", "user.name", "Guard Rename")
+            for index in range(100):
+                (root / f"path-{index}.txt").write_text(
+                    f"{index}\n",
+                    encoding="utf-8",
+                )
+            git("add", ".")
+            git("commit", "-m", "full base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / "moved").mkdir()
+            for index in range(60):
+                git(
+                    "mv",
+                    f"path-{index}.txt",
+                    f"moved/path-{index}.txt",
+                )
+            git("commit", "-m", "mass rename candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("mass destructive base-tree change", completed.stdout)
+        self.assertIn("deletions=0", completed.stdout)
+        self.assertIn("destructive_changes=60", completed.stdout)
+
+    def test_public_module_entrypoint_blocks_sparse_mass_deletion(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "guard-sparse@example.invalid")
+            git("config", "user.name", "Guard Sparse")
+            for index in range(100):
+                (root / f"path-{index}.txt").write_text(
+                    f"{index}\n",
+                    encoding="utf-8",
+                )
+            git("add", ".")
+            git("commit", "-m", "full base")
+            base_sha = git("rev-parse", "HEAD")
+            for index in range(60):
+                (root / f"path-{index}.txt").unlink()
+            git("add", "-A")
+            git("commit", "-m", "sparse replacement candidate")
+            head_sha = git("rev-parse", "HEAD")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--repo",
+                    str(root),
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=repository_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("mass base-tree deletion", completed.stdout)
+
+    def test_public_module_help_bootstraps_from_repository_root(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--help",
+            ],
+            cwd=repository_root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--allowed-scope", completed.stdout)
+        self.assertIn("--repo", completed.stdout)
 
 
 

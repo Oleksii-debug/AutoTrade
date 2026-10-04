@@ -63,6 +63,16 @@ class ProviderFinancialScope:
         object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(self, "entity_policy_id", entity_policy_id)
 
+    @property
+    def environment(self) -> str:
+        """Compatibility alias for consumers not yet renamed to runtime_environment."""
+        return self.runtime_environment
+
+    @property
+    def route_policy_id(self) -> str:
+        """Compatibility alias for the financially meaningful entity-policy id."""
+        return self.entity_policy_id
+
     def payload(self) -> dict[str, str]:
         return {
             "schema_version": _SCHEMA_VERSION,
@@ -93,6 +103,24 @@ class ProviderFinancialScope:
         )
         if candidate != self:
             raise ProviderDomainError("provider financial scope mismatch")
+
+
+def provider_financial_scope(
+    *,
+    provider_id: object,
+    environment: object,
+    provider_environment: object,
+    route_policy_id: object,
+) -> ProviderFinancialScope:
+    """Compatibility constructor delegating to the single canonical scope type."""
+
+    return ProviderFinancialScope(
+        provider_id=provider_id,
+        runtime_environment=environment,
+        provider_environment=provider_environment,
+        entity_policy_id=route_policy_id,
+    )
+
 
 _NORMALIZER_RUNTIME_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _BYBIT_PROVIDER_ENVIRONMENTS = frozenset({"MAINNET", "TESTNET", "DEMO"})

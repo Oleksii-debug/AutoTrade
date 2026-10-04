@@ -1038,9 +1038,42 @@ def lifecycle_gate(
         raise FuturesError(
             "futures lifecycle instrument is not selected by canonical InstrumentRegistry"
         ) from error
-    if type(selected_version) is not InstrumentVersion or selected_version != version:
+    if type(selected_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid InstrumentVersion authority"
+        )
+    selected_lifecycle = (
+        selected_version.instrument_id,
+        selected_version.version,
+        selected_version.asset_class,
+        selected_version.settlement_method,
+        selected_version.expiry,
+        selected_version.last_trade_at,
+        selected_version.delivery_cutoff,
+    )
+    supplied_lifecycle = (
+        version.instrument_id,
+        version.version,
+        version.asset_class,
+        version.settlement_method,
+        version.expiry,
+        version.last_trade_at,
+        version.delivery_cutoff,
+    )
+    if selected_lifecycle != supplied_lifecycle:
         raise FuturesError(
             "futures lifecycle InstrumentVersion differs from canonical registry selection"
+        )
+    if (
+        contract.instrument
+        != f"{selected_version.instrument_id}@{selected_version.version}"
+        or contract.expiry != selected_version.expiry
+        or contract.last_trade_at != selected_version.last_trade_at
+        or contract.delivery_cutoff != selected_version.delivery_cutoff
+        or contract.settlement_method != selected_version.settlement_method
+    ):
+        raise FuturesError(
+            "futures lifecycle contract differs from canonical registry selection"
         )
 
     point = _utc(at, "at")

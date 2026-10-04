@@ -292,6 +292,22 @@ def _require_provider_origin_causal_chronology(
         )
 
 
+def _require_direct_terminal_after_prepared_sequence(
+    *,
+    prepared_event: object,
+    terminal_cut: object,
+) -> None:
+    if type(prepared_event) is not dict:
+        raise ProviderOriginError("durable Prepared event is unavailable")
+    prepared_sequence = prepared_event.get("journal_sequence")
+    if type(prepared_sequence) is not int or prepared_sequence < 1:
+        raise ProviderOriginError("durable Prepared journal sequence is invalid")
+    if type(terminal_cut) is not int or terminal_cut < prepared_sequence:
+        raise ProviderOriginError(
+            "terminal direct-wire authority predates durable Prepared"
+        )
+
+
 def _response_artifact_id(
     *,
     attempt_id: str,
@@ -1074,6 +1090,10 @@ class ProviderOriginJournal:
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable Prepared query differs from exact qualified binding")
         if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=terminal_cut,
+            )
             try:
                 direct_receipt_snapshot = (
                     direct_authenticated_read_execution_receipt_snapshot(receipt)
@@ -1248,6 +1268,10 @@ class ProviderOriginJournal:
             claim = _load_direct_wire_execution_claim(
                 store,
                 attempt_id=attempt,
+            )
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=claim["terminal_authority_journal_sequence_cut"],
             )
             if (
                 claim["qualified_query_digest"]
@@ -1434,6 +1458,12 @@ class ProviderOriginJournal:
             observed_at=retained_payload.get("observed_at"),
         )
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=retained_payload.get(
+                    "terminal_authority_journal_sequence_cut"
+                ),
+            )
             _require_direct_wire_execution_claim(
                 store,
                 attempt_id=attempt,
@@ -1613,6 +1643,10 @@ class ProviderOriginJournal:
             observed_at=observed_text,
         )
         if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=terminal_cut,
+            )
             _require_direct_wire_execution_claim(
                 self._require_store(),
                 attempt_id=attempt,

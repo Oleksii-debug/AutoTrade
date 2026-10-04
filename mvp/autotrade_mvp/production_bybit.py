@@ -38,31 +38,6 @@ from .security import SecurityBoundary
 from .windows_secrets import PersistentCredentialHandle
 
 
-_BYBIT_POLICY_IDENTITIES: Mapping[str, tuple[object, ...]] = {
-    "MAINNET": (
-        "BYBIT",
-        "LIVE",
-        "https://api.bybit.com",
-        frozenset({"api.bybit.com"}),
-        15,
-    ),
-    "TESTNET": (
-        "BYBIT",
-        "PAPER",
-        "https://api-testnet.bybit.com",
-        frozenset({"api-testnet.bybit.com"}),
-        15,
-    ),
-    "DEMO": (
-        "BYBIT",
-        "PAPER",
-        "https://api-demo.bybit.com",
-        frozenset({"api-demo.bybit.com"}),
-        15,
-    ),
-}
-
-
 def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be canonical exact text")
@@ -76,8 +51,21 @@ def _bybit_policy_identity(
 ) -> tuple[object, ...]:
     if type(policy) is not ProviderEndpointPolicy:
         raise PermissionError("Bybit provider policy authority is not exact")
-    expected = _BYBIT_POLICY_IDENTITIES.get(provider_environment)
-    if expected is None:
+    if type(provider_environment) is not str:
+        raise PermissionError("Bybit provider environment authority is not canonical")
+    if provider_environment == "MAINNET":
+        expected_environment = "LIVE"
+        expected_base_url = "https://api.bybit.com"
+        expected_host = "api.bybit.com"
+    elif provider_environment == "TESTNET":
+        expected_environment = "PAPER"
+        expected_base_url = "https://api-testnet.bybit.com"
+        expected_host = "api-testnet.bybit.com"
+    elif provider_environment == "DEMO":
+        expected_environment = "PAPER"
+        expected_base_url = "https://api-demo.bybit.com"
+        expected_host = "api-demo.bybit.com"
+    else:
         raise PermissionError("Bybit provider environment authority is not canonical")
     state = vars(policy)
     if type(state) is not dict:
@@ -103,7 +91,14 @@ def _bybit_policy_identity(
         allowed_hosts,
         timeout_seconds,
     )
-    if identity != expected:
+    if (
+        provider_id != "BYBIT"
+        or environment != expected_environment
+        or base_url != expected_base_url
+        or len(allowed_hosts) != 1
+        or expected_host not in allowed_hosts
+        or timeout_seconds != 15
+    ):
         raise PermissionError("Bybit provider policy values changed")
     return identity
 

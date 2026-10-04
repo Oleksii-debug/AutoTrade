@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -302,6 +304,242 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 protected_sentinels=frozenset(),
                 allowed_scopes=("web/*",),
             )
+
+    def test_protected_sentinel_modification_requires_exact_path_authorization(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        base = [sentinel, "README.md"]
+
+        blocked = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.protected_violations,
+            (f"{sentinel} (modified without exact-path authorization)",),
+        )
+
+        directory_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("control/tools",),
+        )
+        self.assertFalse(directory_scope.allowed)
+        self.assertIn("modified without exact-path authorization", directory_scope.reasons[0])
+
+        exact_scope = assess_reconvergence(
+            base_paths=base,
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+
+    def test_exact_scope_never_authorizes_protected_sentinel_removal(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="D", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.protected_deletions, (sentinel,))
+
+    def test_change_rejects_unmerged_unknown_and_noncanonical_paths(self):
+        for status in ("U", "X", "B", "MM", "R", "R101", "C999"):
+            with self.subTest(status=status):
+                with self.assertRaises(ValueError):
+                    Change(status=status, path="owned/file.py")
+
+        for path in (
+            "",
+            "/absolute.py",
+            "../escape.py",
+            "owned/../escape.py",
+            "owned//file.py",
+            "owned\\file.py",
+            "owned/line\nfeed.py",
+            "owned/tab\tfile.py",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    Change(status="M", path=path)
+
+    def test_assessment_rejects_change_subclass_bypass(self):
+        class ForgedChange(Change):
+            pass
+
+        with self.assertRaises(TypeError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[ForgedChange(status="M", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_module_entrypoint_boots_from_repository_root(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--help",
+            ],
+            cwd=Path.cwd(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--base", completed.stdout)
+        self.assertIn("--head", completed.stdout)
+
+    def test_module_entrypoint_assesses_real_git_history_and_exact_trust_scope(self):
+        repository_root = Path.cwd().resolve()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-cli@example.invalid")
+            git("config", "user.name", "Reconvergence CLI Test")
+            sentinel = root / "control" / "tools" / "reconvergence_integrity.py"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("TRUST = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            (root / "README.md").write_text("child\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "ordinary child")
+            ordinary_head = git("rev-parse", "HEAD")
+
+            env = os.environ.copy()
+            python_path = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(repository_root)
+                if not python_path
+                else str(repository_root) + os.pathsep + python_path
+            )
+
+            ordinary = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    ordinary_head,
+                ],
+                cwd=root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(ordinary.returncode, 0, ordinary.stderr + ordinary.stdout)
+
+            protected_base = ordinary_head
+            sentinel.write_text("TRUST = 2\n", encoding="utf-8")
+            git("add", sentinel.relative_to(root).as_posix())
+            git("commit", "-m", "modify trust root")
+            protected_head = git("rev-parse", "HEAD")
+
+            blocked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    protected_base,
+                    "--head",
+                    protected_head,
+                ],
+                cwd=root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr + blocked.stdout)
+            self.assertIn("modified without exact-path authorization", blocked.stdout)
+
+            directory_scope = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    protected_base,
+                    "--head",
+                    protected_head,
+                    "--allowed-scope",
+                    "control/tools",
+                ],
+                cwd=root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(
+                directory_scope.returncode,
+                2,
+                directory_scope.stderr + directory_scope.stdout,
+            )
+
+            exact_scope = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    protected_base,
+                    "--head",
+                    protected_head,
+                    "--allowed-scope",
+                    "control/tools/reconvergence_integrity.py",
+                ],
+                cwd=root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(
+                exact_scope.returncode,
+                0,
+                exact_scope.stderr + exact_scope.stdout,
+            )
+
+    def test_canonical_workflow_rejects_stale_target_branch_event_base(self):
+        workflow = Path(
+            ".github/workflows/reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Confirm event base is current target tip", workflow)
+        self.assertIn("BASE_REF:", workflow)
+        self.assertIn("EVENT_BASE_SHA:", workflow)
+        self.assertIn("refs/autotrade/reconvergence-target", workflow)
+        self.assertIn(
+            'test "$(git rev-parse "refs/autotrade/reconvergence-target^{commit}")" = "$EVENT_BASE_SHA"',
+            workflow,
+        )
 
     def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):
         workflow = Path(

@@ -1428,6 +1428,74 @@ del _bind_direct_authenticated_read_receipt_access
 del _direct_authenticated_read_execution_receipt_state
 
 
+def _prepare_terminal_authenticated_read_request(
+    request: AuthenticatedReadHttpRequest,
+    query_binding: AuthenticatedReadQueryBinding,
+    terminal_authority_factory: Callable[[AuthenticatedReadQueryBinding], object] | None,
+) -> bool:
+    if terminal_authority_factory is None:
+        return False
+    if not callable(terminal_authority_factory):
+        raise TypeError("terminal_authority_factory must be callable or None")
+    terminal_authority = terminal_authority_factory(query_binding)
+    if terminal_authority is None:
+        raise ProviderTransportError(
+            "terminal authenticated-read authority factory returned no proof"
+        )
+    object.__setattr__(
+        request,
+        "_terminal_qualified_read_authority",
+        terminal_authority,
+    )
+    return True
+
+
+def _observe_authenticated_read_wire_response(
+    *,
+    query_binding: AuthenticatedReadQueryBinding,
+    wire_response: AuthenticatedReadWireResponse,
+    observed_at: datetime,
+    require_direct_receipt: bool,
+) -> ProviderResponseObservation:
+    observation = observe_authenticated_json_response(
+        query_binding=query_binding,
+        http_status=wire_response.http_status,
+        response_bytes=wire_response.body,
+        observed_at=observed_at,
+    )
+    if require_direct_receipt:
+        receipt = direct_authenticated_read_execution_receipt(wire_response)
+        object.__setattr__(
+            observation,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+    return observation
+
+
+def provider_observation_direct_execution_receipt(
+    observation: ProviderResponseObservation,
+) -> DirectAuthenticatedReadExecutionReceipt:
+    if type(observation) is not ProviderResponseObservation:
+        raise ProviderTransportError(
+            "exact provider response observation is required"
+        )
+    receipt = getattr(
+        observation,
+        "_direct_authenticated_read_execution_receipt",
+        None,
+    )
+    snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
+    if (
+        snapshot["http_status"] != observation.http_status
+        or snapshot["response_sha256"] != observation.response_sha256
+    ):
+        raise ProviderTransportError(
+            "direct wire receipt differs from provider response observation"
+        )
+    return receipt
+
+
 def _exact_trading_response(
     value: object,
 ) -> ExactJsonTransportResponse:

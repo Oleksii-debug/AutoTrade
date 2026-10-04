@@ -12,11 +12,12 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 from uuid import UUID
 
-from .exact_decimal import canonical_decimal_text
+from .exact_decimal import canonical_decimal_text, parse_bounded_exact_decimal
 from .persistence import JournalStore, payload_digest
 from .risk import RiskIntent
 
@@ -51,6 +52,8 @@ _REGISTERED_KEYS = frozenset(
         "authority_policy_version",
         "instrument_id",
         "instrument_version",
+        "authority_action",
+        "notional",
         "risk_intent",
         "registered_at",
         "expires_at",
@@ -100,6 +103,20 @@ def _instrument_id(value: object) -> str:
     if raw.lower() != canonical:
         raise PendingIntentError("instrument_id must be a canonical UUID")
     return canonical
+
+
+def _notional(value: object) -> Decimal:
+    if type(value) not in {Decimal, str, int}:
+        raise PendingIntentError(
+            "notional must use exact Decimal, canonical string or integer input"
+        )
+    try:
+        amount = parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
+        raise PendingIntentError("notional must be a bounded finite decimal") from error
+    if amount < 0:
+        raise PendingIntentError("notional must be non-negative")
+    return amount
 
 
 def _utc(value: object, *, name: str) -> datetime:
@@ -198,6 +215,8 @@ def _intent_hash(
     authority_policy_version: int,
     instrument_id: str,
     instrument_version: int,
+    authority_action: str,
+    notional: Decimal,
     risk_intent_payload: dict[str, object],
 ) -> str:
     material = {
@@ -208,6 +227,8 @@ def _intent_hash(
         "authority_policy_version": authority_policy_version,
         "instrument_id": instrument_id,
         "instrument_version": instrument_version,
+        "authority_action": authority_action,
+        "notional": canonical_decimal_text(notional),
         "risk_intent": risk_intent_payload,
     }
     encoded = json.dumps(
@@ -231,6 +252,8 @@ class PendingFinancialIntent:
     authority_policy_version: int
     instrument_id: str
     instrument_version: int
+    authority_action: str
+    notional: Decimal
     risk_intent: RiskIntent
     registered_at: str
     expires_at: str
@@ -253,6 +276,10 @@ class PendingFinancialIntent:
         instrument_version = self.instrument_version
         if type(instrument_version) is not int or instrument_version < 1:
             raise PendingIntentError("instrument_version must be positive")
+        authority_action = _text(
+            self.authority_action, name="authority_action"
+        ).upper()
+        notional = _notional(self.notional)
         risk_payload = _risk_intent_payload(self.risk_intent)
         registered_at = _text(self.registered_at, name="registered_at")
         expires_at = _text(self.expires_at, name="expires_at")
@@ -267,6 +294,8 @@ class PendingFinancialIntent:
             authority_policy_version=version,
             instrument_id=instrument_id,
             instrument_version=instrument_version,
+            authority_action=authority_action,
+            notional=notional,
             risk_intent_payload=risk_payload,
         )
         if self.intent_hash != expected_hash:
@@ -276,6 +305,8 @@ class PendingFinancialIntent:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "policy_id", policy)
         object.__setattr__(self, "instrument_id", instrument_id)
+        object.__setattr__(self, "authority_action", authority_action)
+        object.__setattr__(self, "notional", notional)
 
 
 def _registered_payload(value: PendingFinancialIntent) -> dict[str, object]:
@@ -292,6 +323,8 @@ def _registered_payload(value: PendingFinancialIntent) -> dict[str, object]:
         "authority_policy_version": value.authority_policy_version,
         "instrument_id": value.instrument_id,
         "instrument_version": value.instrument_version,
+        "authority_action": value.authority_action,
+        "notional": canonical_decimal_text(value.notional),
         "risk_intent": risk_payload,
         "registered_at": value.registered_at,
         "expires_at": value.expires_at,
@@ -412,6 +445,8 @@ class DurablePendingIntentRegistry:
             authority_policy_version=registered_payload.get("authority_policy_version"),
             instrument_id=registered_payload.get("instrument_id"),
             instrument_version=registered_payload.get("instrument_version"),
+            authority_action=registered_payload.get("authority_action"),
+            notional=registered_payload.get("notional"),
             risk_intent=risk_intent,
             registered_at=registered_payload.get("registered_at"),
             expires_at=registered_payload.get("expires_at"),
@@ -449,6 +484,8 @@ class DurablePendingIntentRegistry:
         authority_policy_version: int,
         instrument_id: str,
         instrument_version: int,
+        authority_action: str,
+        notional,
         risk_intent: RiskIntent,
         registered_at: datetime,
         expires_at: datetime,
@@ -462,6 +499,8 @@ class DurablePendingIntentRegistry:
         canonical_instrument_id = _instrument_id(instrument_id)
         if type(instrument_version) is not int or instrument_version < 1:
             raise PendingIntentError("instrument_version must be positive")
+        canonical_action = _text(authority_action, name="authority_action").upper()
+        canonical_notional = _notional(notional)
         risk_payload = _risk_intent_payload(risk_intent)
         registered_text = _utc_text(registered_at, name="registered_at")
         expires_text = _utc_text(expires_at, name="expires_at")
@@ -476,6 +515,8 @@ class DurablePendingIntentRegistry:
             authority_policy_version=authority_policy_version,
             instrument_id=canonical_instrument_id,
             instrument_version=instrument_version,
+            authority_action=canonical_action,
+            notional=canonical_notional,
             risk_intent_payload=risk_payload,
         )
         value = PendingFinancialIntent(
@@ -486,6 +527,8 @@ class DurablePendingIntentRegistry:
             authority_policy_version=authority_policy_version,
             instrument_id=canonical_instrument_id,
             instrument_version=instrument_version,
+            authority_action=canonical_action,
+            notional=canonical_notional,
             risk_intent=risk_intent,
             registered_at=registered_text,
             expires_at=expires_text,

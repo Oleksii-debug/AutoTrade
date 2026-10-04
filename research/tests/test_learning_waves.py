@@ -9,9 +9,11 @@ import unittest
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.learning.champion import CandidateApproval
+from research.autotrade_research.learning.population_coverage import (
+    PopulationCoverageManifest,
+)
 from research.autotrade_research.learning.waves import (
     CandidateWave,
-    EvidencePopulation,
     LearningWavePolicy,
     MarketWaveSnapshot,
     evaluate_pause,
@@ -59,19 +61,59 @@ def snapshot(**overrides) -> MarketWaveSnapshot:
     return MarketWaveSnapshot(**values)
 
 
+def canonical_digest(value) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
 def population(
     name: str,
     *,
     causal_cut: str,
     available_at: datetime,
     observations: tuple[str, ...],
-) -> EvidencePopulation:
-    return EvidencePopulation(
-        population_id=name,
-        root_hash=digest(f"population:{name}"),
-        causal_cut_hash=causal_cut,
-        available_at=available_at,
-        observation_ids=observations,
+) -> PopulationCoverageManifest:
+    ids = tuple(sorted(observations))
+    episode_digests = tuple(
+        (episode_id, digest(f"{name}:episode:{episode_id}"))
+        for episode_id in ids
+    )
+    outcome_rows = (
+        ("POSITIVE", 0, digest(f"{name}:outcome:positive")),
+        ("NEGATIVE", len(ids), digest(f"{name}:outcome:negative")),
+        ("NULL", 0, digest(f"{name}:outcome:null")),
+        ("UNKNOWN", 0, digest(f"{name}:outcome:unknown")),
+        ("PENDING", 0, digest(f"{name}:outcome:pending")),
+    )
+    cutoff = available_at.astimezone(timezone.utc).isoformat()
+    body = {
+        "candidate_hash": digest("candidate"),
+        "frozen_protocol_hash": digest("protocol"),
+        "input_snapshot_hash": causal_cut,
+        "causal_cutoff": cutoff,
+        "permission_classes": ("research",),
+        "task": "research",
+        "instrument_family": "equity",
+        "eligible_episode_ids": ids,
+        "included_episode_ids": ids,
+        "exclusions": (),
+        "episode_digests": episode_digests,
+        "eligible_outcomes": outcome_rows,
+        "included_outcomes": outcome_rows,
+        "eligible_no_trade_count": 0,
+        "included_no_trade_count": 0,
+        "included_regime_counts": (("calm", len(ids)),),
+        "included_labels_complete_by_regime": (("calm", True),),
+    }
+    return PopulationCoverageManifest(
+        **body,
+        digest=canonical_digest(body),
     )
 
 
@@ -436,7 +478,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
             available_at=BASE,
             observations=("obs-2",),
         )
-        with self.assertRaisesRegex(ValueError, "paused causal cut"):
+        with self.assertRaisesRegex(ValueError, "paused canonical population root"):
             CandidateWave.from_pause(
                 pause=decision,
                 policy=p,
@@ -496,7 +538,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
             available_at=BASE,
             observations=("validation",),
         )
-        with self.assertRaisesRegex(ValueError, "independently identified causal cut"):
+        with self.assertRaisesRegex(ValueError, "independently identified population snapshot"):
             CandidateWave.from_pause(
                 pause=decision,
                 policy=p,
@@ -586,7 +628,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
             available_at=BASE + timedelta(minutes=30),
             observations=("validation",),
         )
-        with self.assertRaisesRegex(ValueError, "before it is available"):
+        with self.assertRaisesRegex(ValueError, "before its causal cutoff"):
             CandidateWave.from_pause(
                 pause=decision,
                 policy=p,
@@ -632,16 +674,8 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 validation_opened_at=BASE + timedelta(minutes=16),
             )
 
-    def test_population_identity_is_immutable_unique_tuple(self):
-        with self.assertRaisesRegex(TypeError, "immutable tuple"):
-            EvidencePopulation(
-                population_id="bad",
-                root_hash=digest("bad"),
-                causal_cut_hash=digest("cut"),
-                available_at=BASE,
-                observation_ids=["obs-1"],
-            )
-        with self.assertRaisesRegex(ValueError, "unique"):
+    def test_canonical_population_rejects_duplicate_episode_identity(self):
+        with self.assertRaisesRegex(ValueError, "sorted and unique"):
             population(
                 "duplicate",
                 causal_cut=digest("cut"),

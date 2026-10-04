@@ -713,6 +713,34 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             connection_generation=connection_generation,
         )
 
+    def test_recovery_handoff_retains_subscription_rate_and_warning_evidence(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        binding = subscription_binding(
+            connection_generation=generation,
+            req_id=77,
+        )
+        raw = (
+            b'{"method":"subscribe","req_id":77,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":240,"warnings":["schema change pending"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        recovery.apply_subscription_ack(acknowledgement)
+        evidence = recovery.evidence()
+        self.assertEqual(evidence.subscription_maxratecount, 240)
+        self.assertEqual(
+            evidence.subscription_warnings,
+            ("schema change pending",),
+        )
+        recovery.disconnect()
+        reset = recovery.evidence()
+        self.assertIsNone(reset.subscription_maxratecount)
+        self.assertEqual(reset.subscription_warnings, ())
+
     def test_generation_requires_fresh_snapshot_and_never_grants_ready(self):
         recovery = self.make_recovery()
         generation = recovery.begin_connection()

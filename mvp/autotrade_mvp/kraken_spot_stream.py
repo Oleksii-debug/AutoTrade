@@ -888,6 +888,8 @@ class KrakenSpotStreamRecoveryEvidence:
     phase: str
     subscription_binding_evidence_ref: str | None
     subscription_ack_evidence_ref: str | None
+    subscription_maxratecount: int | None
+    subscription_warnings: tuple[str, ...]
     snapshot_sequence: int | None
     last_sequence: int | None
     snapshot_evidence_ref: str | None
@@ -947,6 +949,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.DISCONNECTED
         self._subscription_binding_evidence_ref: str | None = None
         self._subscription_ack_evidence_ref: str | None = None
+        self._subscription_maxratecount: int | None = None
+        self._subscription_warnings: tuple[str, ...] = ()
         self._snapshot_sequence: int | None = None
         self._last_sequence: int | None = None
         self._snapshot_evidence_ref: str | None = None
@@ -966,6 +970,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.AWAITING_SUBSCRIPTION_ACK
         self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
+        self._subscription_maxratecount = None
+        self._subscription_warnings = ()
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -985,6 +991,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.DISCONNECTED
         self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
+        self._subscription_maxratecount = None
+        self._subscription_warnings = ()
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -1026,6 +1034,8 @@ class KrakenSpotExecutionStreamRecovery:
             acknowledgement.subscription_binding.evidence_ref
         )
         self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self._subscription_maxratecount = acknowledgement.maxratecount
+        self._subscription_warnings = acknowledgement.warnings
         self._crosscheck_evidence_refs.append(
             acknowledgement.subscription_binding.evidence_ref
         )
@@ -1208,6 +1218,8 @@ class KrakenSpotExecutionStreamRecovery:
                 self._subscription_binding_evidence_ref
             ),
             subscription_ack_evidence_ref=self._subscription_ack_evidence_ref,
+            subscription_maxratecount=self._subscription_maxratecount,
+            subscription_warnings=self._subscription_warnings,
             snapshot_sequence=self._snapshot_sequence,
             last_sequence=self._last_sequence,
             snapshot_evidence_ref=self._snapshot_evidence_ref,

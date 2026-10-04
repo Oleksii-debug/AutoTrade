@@ -659,6 +659,44 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
             render_blinded_news(item)
         self.assertEqual(calls, [])
 
+    def test_bundle_rejects_hostile_nested_containers_before_iteration(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile tuple callback executed")
+
+        source = self.bundle(revision())
+        object.__setattr__(
+            source.blinding_profile,
+            "identity_fields",
+            HostileTuple(source.blinding_profile.identity_fields),
+        )
+        with self.assertRaisesRegex(TypeError, "identity_fields must remain an exact tuple"):
+            NewsReplayBundle(
+                dataset=source.dataset,
+                blinding_profile=source.blinding_profile,
+                source_records_sha256=source.source_records_sha256,
+                contamination_notes_sha256=source.contamination_notes_sha256,
+            )
+        self.assertEqual(calls, [])
+
+        source = self.bundle(revision())
+        object.__setattr__(
+            source.dataset,
+            "events",
+            HostileTuple(source.dataset.events),
+        )
+        with self.assertRaisesRegex(TypeError, "events must remain an exact tuple"):
+            NewsReplayBundle(
+                dataset=source.dataset,
+                blinding_profile=source.blinding_profile,
+                source_records_sha256=source.source_records_sha256,
+                contamination_notes_sha256=source.contamination_notes_sha256,
+            )
+        self.assertEqual(calls, [])
+
     def test_binary_float_and_noncanonical_decimal_are_not_admitted(self):
         with self.assertRaisesRegex(NewsReplayError, "canonical decimal"):
             claim(magnitude="01.0")

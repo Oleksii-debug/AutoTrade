@@ -64,11 +64,11 @@ class RecoveryTakeoverSourceAttachmentTests(unittest.TestCase):
             recovery = self._controller(directory)
             recovery.attach_current_durable_owner_for_takeover()
 
-            wrong = OwnerFence(owner_id="host-new", epoch=old_owner.epoch + 2)
-            recovery.owner = wrong
+            # The source owner itself cannot release source-only mode.  A
+            # durable next-generation event must exist before activation.
             with self.assertRaisesRegex(
                 PermissionError,
-                "owner epoch is not the next generation",
+                "has not advanced the source owner",
             ):
                 recovery.activate_takeover_target_recovery()
             self.assertTrue(recovery.takeover_source_only)

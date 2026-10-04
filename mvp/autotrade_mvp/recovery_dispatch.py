@@ -401,6 +401,12 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
+        if recovery_state.get("_owner_store") is not self.__store:
+            raise PermissionError("recovery owner journal binding changed")
+        recovery_scope = recovery_state.get("_owner_scope")
+        expected_scope = f"{self.__environment}:{self.__account_id}"
+        if type(recovery_scope) is not str or recovery_scope != expected_scope:
+            raise PermissionError("recovery owner scope binding changed")
         source = recovery_state.get(_TAKEOVER_SOURCE_ATTR)
         if source is not None:
             if type(source) is not OwnerFence:

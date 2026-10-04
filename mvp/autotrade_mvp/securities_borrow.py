@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import weakref
 from typing import Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -29,7 +30,13 @@ from .exact_decimal import (
     exact_sum,
     parse_bounded_exact_decimal,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 
 
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
@@ -606,8 +613,257 @@ class BorrowRecallResolutionEvidence:
         return cls(**dict(payload))
 
 
+@dataclass(frozen=True)
+class _BorrowProjectionBinding:
+    store: JournalStore
+    store_identity: object
+    evidence_artifact_store: ArtifactStore
+    provider_id: str
+    account_id: str
+    environment: str
+    instrument_id: str
+    instrument_version: int
+    resource_key: str
+    aggregate_id: str
+
+
+def _build_borrow_projection_binding_accessors():
+    """Retain one immutable borrow projection composition outside caller state."""
+
+    bindings: dict[int, tuple[weakref.ReferenceType, _BorrowProjectionBinding]] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _binding) in bindings.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            bindings.pop(object_id, None)
+
+    def registered(value: object) -> _BorrowProjectionBinding | None:
+        entry = bindings.get(id(value))
+        if entry is None:
+            return None
+        value_ref, binding = entry
+        current = value_ref()
+        if current is value:
+            return binding
+        if current is None:
+            bindings.pop(id(value), None)
+            return None
+        raise BorrowRecallConflict("borrow projection binding identity collision")
+
+    def is_registered(value: object) -> bool:
+        prune_dead()
+        return registered(value) is not None
+
+    def initialize(
+        value: object,
+        store: JournalStore,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        evidence_artifact_store: ArtifactStore,
+    ) -> None:
+        if type(value) is not DurableBorrowRecallProjection:
+            raise TypeError(
+                "borrow recall projection must be exact DurableBorrowRecallProjection"
+            )
+        prune_dead()
+        if registered(value) is not None:
+            raise BorrowRecallConflict(
+                "borrow projection authority is already established"
+            )
+        try:
+            store_identity = require_exact_journal_store_authority(
+                store,
+                subject="securities-borrow JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise BorrowRecallConflict(
+                "securities-borrow JournalStore authority is invalid"
+            ) from error
+        if type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError(
+                "evidence_artifact_store must be the exact canonical ArtifactStore"
+            )
+
+        normalized_provider = _text(provider_id, name="provider_id").upper()
+        normalized_account = _text(account_id, name="account_id")
+        normalized_environment = _environment(environment)
+        normalized_instrument = _instrument_id(instrument_id)
+        normalized_version = _version(instrument_version)
+        resource_key = borrow_resource_key(
+            provider_id=normalized_provider,
+            account_id=normalized_account,
+            environment=normalized_environment,
+            instrument_id=normalized_instrument,
+            instrument_version=normalized_version,
+        )
+        aggregate_id = "borrow-recall:" + str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://events.autotrade.local/borrow-recall/" + resource_key,
+            )
+        )
+        for name, item in {
+            "store": store,
+            "evidence_artifact_store": evidence_artifact_store,
+            "provider_id": normalized_provider,
+            "account_id": normalized_account,
+            "environment": normalized_environment,
+            "instrument_id": normalized_instrument,
+            "instrument_version": normalized_version,
+            "resource_key": resource_key,
+            "aggregate_id": aggregate_id,
+            "_recalls": {},
+            "_resolved": {},
+            "_resolutions": {},
+        }.items():
+            object.__setattr__(value, name, item)
+
+        bindings[id(value)] = (
+            weakref.ref(value),
+            _BorrowProjectionBinding(
+                store=store,
+                store_identity=store_identity,
+                evidence_artifact_store=evidence_artifact_store,
+                provider_id=normalized_provider,
+                account_id=normalized_account,
+                environment=normalized_environment,
+                instrument_id=normalized_instrument,
+                instrument_version=normalized_version,
+                resource_key=resource_key,
+                aggregate_id=aggregate_id,
+            ),
+        )
+        try:
+            DurableBorrowRecallProjection._reload(value)
+        except Exception:
+            entry = bindings.get(id(value))
+            if entry is not None and entry[0]() is value:
+                bindings.pop(id(value), None)
+            raise
+
+    def require(value: object) -> _BorrowProjectionBinding:
+        if type(value) is not DurableBorrowRecallProjection:
+            raise TypeError(
+                "borrow recall projection must be exact DurableBorrowRecallProjection"
+            )
+        prune_dead()
+        binding = registered(value)
+        if binding is None:
+            raise BorrowRecallConflict(
+                "borrow projection authority is not established"
+            )
+        state = object.__getattribute__(value, "__dict__")
+        if any(type(name) is not str for name in state):
+            raise BorrowRecallConflict(
+                "borrow projection instance state keys must be exact str"
+            )
+        class_owned = {
+            name
+            for base in DurableBorrowRecallProjection.__mro__
+            for name in base.__dict__
+        }
+        if class_owned.intersection(state):
+            raise BorrowRecallConflict(
+                "borrow projection instance state shadows authority methods"
+            )
+        expected = {
+            "store": binding.store,
+            "evidence_artifact_store": binding.evidence_artifact_store,
+            "provider_id": binding.provider_id,
+            "account_id": binding.account_id,
+            "environment": binding.environment,
+            "instrument_id": binding.instrument_id,
+            "instrument_version": binding.instrument_version,
+            "resource_key": binding.resource_key,
+            "aggregate_id": binding.aggregate_id,
+        }
+        for name, item in expected.items():
+            actual = state.get(name)
+            if actual is not item and actual != item:
+                raise BorrowRecallConflict(
+                    "borrow projection authority state changed after construction"
+                )
+        try:
+            current_identity = require_exact_journal_store_authority(
+                binding.store,
+                subject="securities-borrow JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise BorrowRecallConflict(
+                "securities-borrow JournalStore authority changed"
+            ) from error
+        if current_identity != binding.store_identity:
+            raise BorrowRecallConflict(
+                "securities-borrow JournalStore generation changed"
+            )
+        return binding
+
+    return is_registered, initialize, require
+
+
+(
+    _borrow_projection_binding_registered,
+    _initialize_borrow_projection_binding,
+    _require_borrow_projection_binding,
+) = _build_borrow_projection_binding_accessors()
+del _build_borrow_projection_binding_accessors
+
+
+def _borrow_store_load_events(value: object) -> list[dict[str, object]]:
+    binding = _require_borrow_projection_binding(value)
+    with journal_store_authority_scope(binding.store, binding.store_identity):
+        return JournalStore.load_events(
+            binding.store,
+            _AGGREGATE_TYPE,
+            binding.aggregate_id,
+        )
+
+
+def _borrow_store_get_event(
+    value: object,
+    event_id: str,
+) -> dict[str, object] | None:
+    binding = _require_borrow_projection_binding(value)
+    with journal_store_authority_scope(binding.store, binding.store_identity):
+        return JournalStore.get_event(binding.store, event_id)
+
+
+def _borrow_store_append_event(
+    value: object,
+    envelope: Mapping[str, object],
+) -> None:
+    binding = _require_borrow_projection_binding(value)
+    with journal_store_authority_scope(binding.store, binding.store_identity):
+        JournalStore.append_event(binding.store, envelope)
+
+
 class DurableBorrowRecallProjection:
     """Append-only provider recall state for one canonical borrow resource."""
+
+    _BOUND_AUTHORITY_STATE = frozenset(
+        {
+            "store",
+            "evidence_artifact_store",
+            "provider_id",
+            "account_id",
+            "environment",
+            "instrument_id",
+            "instrument_version",
+            "resource_key",
+            "aggregate_id",
+            "_recalls",
+            "_resolved",
+            "_resolutions",
+        }
+    )
 
     def __init__(
         self,
@@ -620,33 +876,37 @@ class DurableBorrowRecallProjection:
         instrument_version: int,
         evidence_artifact_store: ArtifactStore,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        if type(evidence_artifact_store) is not ArtifactStore:
-            raise TypeError(
-                "evidence_artifact_store must be the exact canonical ArtifactStore"
+        _initialize_borrow_projection_binding(
+            self,
+            store,
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            evidence_artifact_store=evidence_artifact_store,
+        )
+
+    def __getattribute__(self, name: str):
+        if (
+            type(name) is str
+            and name != "__dict__"
+            and _borrow_projection_binding_registered(self)
+        ):
+            _require_borrow_projection_binding(self)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if _borrow_projection_binding_registered(self):
+            class_owned = any(
+                name in base.__dict__
+                for base in DurableBorrowRecallProjection.__mro__
             )
-        self.store = store
-        self.evidence_artifact_store = evidence_artifact_store
-        self.provider_id = _text(provider_id, name="provider_id").upper()
-        self.account_id = _text(account_id, name="account_id")
-        self.environment = _environment(environment)
-        self.instrument_id = _instrument_id(instrument_id)
-        self.instrument_version = _version(instrument_version)
-        self.resource_key = borrow_resource_key(
-            provider_id=self.provider_id,
-            account_id=self.account_id,
-            environment=self.environment,
-            instrument_id=self.instrument_id,
-            instrument_version=self.instrument_version,
-        )
-        self.aggregate_id = "borrow-recall:" + str(
-            uuid5(NAMESPACE_URL, "https://events.autotrade.local/borrow-recall/" + self.resource_key)
-        )
-        self._recalls: dict[str, BorrowRecallEvidence] = {}
-        self._resolved: dict[str, Decimal] = {}
-        self._resolutions: dict[str, BorrowRecallResolutionEvidence] = {}
-        self._reload()
+            if name in DurableBorrowRecallProjection._BOUND_AUTHORITY_STATE or class_owned:
+                raise BorrowRecallConflict(
+                    "borrow projection authority state is immutable"
+                )
+        object.__setattr__(self, name, value)
 
     def _scope_matches(self, evidence) -> bool:
         return (
@@ -659,7 +919,7 @@ class DurableBorrowRecallProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        return _borrow_store_load_events(self)
 
     def _reload(self) -> None:
         recalls: dict[str, BorrowRecallEvidence] = {}
@@ -710,15 +970,16 @@ class DurableBorrowRecallProjection:
                 resolutions[evidence.resolution_id] = evidence
             else:
                 raise BorrowRecallConflict("unsupported borrow recall event type")
-        self._recalls = recalls
-        self._resolved = resolved
-        self._resolutions = resolutions
+        object.__setattr__(self, "_recalls", recalls)
+        object.__setattr__(self, "_resolved", resolved)
+        object.__setattr__(self, "_resolutions", resolutions)
 
     @property
     def version(self) -> int:
         return len(self._events())
 
     def remaining(self, recall_id: str) -> Decimal:
+        DurableBorrowRecallProjection._reload(self)
         rid = _text(recall_id, name="recall_id")
         recall = self._recalls.get(rid)
         if recall is None:
@@ -727,7 +988,18 @@ class DurableBorrowRecallProjection:
 
     @property
     def active_quantity(self) -> Decimal:
-        return _exact(exact_sum, (self.remaining(rid) for rid in self._recalls))
+        DurableBorrowRecallProjection._reload(self)
+        return _exact(
+            exact_sum,
+            (
+                _exact(
+                    exact_subtract,
+                    recall.quantity,
+                    self._resolved.get(rid, Decimal("0")),
+                )
+                for rid, recall in self._recalls.items()
+            ),
+        )
 
     @property
     def active_recall_ids(self) -> tuple[str, ...]:
@@ -745,7 +1017,7 @@ class DurableBorrowRecallProjection:
                 + self.aggregate_id + "/" + event_type + "/" + identity,
             )
         )
-        existing = self.store.get_event(event_id)
+        existing = _borrow_store_get_event(self, event_id)
         if existing is not None:
             if existing.get("event_type") == event_type and existing.get("payload") == payload:
                 self._reload()
@@ -762,13 +1034,14 @@ class DurableBorrowRecallProjection:
             "committed_at": committed_at,
         }
         try:
-            self.store.append_event(envelope)
+            _borrow_store_append_event(self, envelope)
         except Exception as error:
             self._reload()
             raise BorrowRecallConflict("borrow recall journal changed concurrently") from error
         self._reload()
 
     def record_recall(self, evidence: BorrowRecallEvidence) -> Decimal:
+        DurableBorrowRecallProjection._reload(self)
         if type(evidence) is not BorrowRecallEvidence:
             raise TypeError("evidence must be exact BorrowRecallEvidence")
         evidence = replace(evidence)
@@ -792,6 +1065,7 @@ class DurableBorrowRecallProjection:
         return self.remaining(evidence.recall_id)
 
     def resolve_recall(self, evidence: BorrowRecallResolutionEvidence) -> Decimal:
+        DurableBorrowRecallProjection._reload(self)
         if type(evidence) is not BorrowRecallResolutionEvidence:
             raise TypeError("evidence must be exact BorrowRecallResolutionEvidence")
         evidence = replace(evidence)

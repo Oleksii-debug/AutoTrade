@@ -200,6 +200,65 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         values.update(overrides)
         return EvidencedBorrowRecallProjection(store or self.store, **values)
 
+    def test_projection_rejects_noncanonical_journal_store(self):
+        class JournalStoreSubclass(JournalStore):
+            pass
+
+        with self.assertRaisesRegex(
+            BorrowRecallConflict,
+            "JournalStore authority is invalid",
+        ):
+            DurableBorrowRecallProjection(
+                JournalStoreSubclass(self.path),
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                evidence_artifact_store=artifact_store_for(self.store),
+            )
+
+    def test_projection_rejects_store_retarget_or_method_shadow_before_read(self):
+        artifacts = artifact_store_for(self.store)
+        projection = DurableBorrowRecallProjection(
+            self.store,
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            evidence_artifact_store=artifacts,
+        )
+        other = JournalStore(f"{self.temp.name}/other.sqlite3")
+        object.__setattr__(projection, "store", other)
+        with self.assertRaisesRegex(
+            BorrowRecallConflict,
+            "authority state changed",
+        ):
+            _ = projection.active_quantity
+
+        clean = DurableBorrowRecallProjection(
+            self.store,
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            evidence_artifact_store=artifacts,
+        )
+        calls = []
+        object.__setattr__(
+            clean,
+            "_events",
+            lambda: calls.append("shadow") or [],
+        )
+        with self.assertRaisesRegex(
+            BorrowRecallConflict,
+            "shadows authority methods",
+        ):
+            _ = clean.active_quantity
+        self.assertEqual(calls, [])
+
     def test_recall_survives_restart_and_projects_existing_equity_state(self):
         projection = self.projection()
         self.assertEqual(projection.record_recall(recall()), Decimal("3"))

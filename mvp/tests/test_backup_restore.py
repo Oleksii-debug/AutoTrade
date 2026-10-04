@@ -428,6 +428,78 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_new_source_after_staging_fsync_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_fsync = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_add_source(stage_root):
+                nonlocal injected
+                result = original_fsync(stage_root)
+                if not injected:
+                    injected = True
+                    intents = state / "order-intents"
+                    intents.mkdir(parents=True, exist_ok=True)
+                    (intents / "late-concurrent.json").write_text(
+                        '{"intent_id":"late-concurrent"}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_add_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source inventory changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_existing_source_change_after_staging_fsync_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            self.assertTrue(checkpoint.is_file())
+            original_fsync = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_change_source(stage_root):
+                nonlocal injected
+                result = original_fsync(stage_root)
+                if not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_after_staging_fsync":true}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_change_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_partial_runtime_consistency_evidence_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

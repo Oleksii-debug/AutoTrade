@@ -35,6 +35,24 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertGreaterEqual(len(workflows), 10)
         self.assertEqual(workflows - WORKFLOW_AUTHORITY_ROOTS, set())
 
+    def test_trusted_workflow_persists_exact_head_guard_evidence(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            '--evidence-output "artifacts/reconvergence-integrity.json"',
+            workflow,
+        )
+        self.assertIn("Upload exact-head reconvergence evidence", workflow)
+        self.assertIn("if: always() && github.event_name == 'pull_request_target'", workflow)
+        self.assertIn(
+            "name: reconvergence-integrity-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}",
+            workflow,
+        )
+        self.assertIn("path: artifacts/reconvergence-integrity.json", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+
     def test_untrusted_modification_of_integration_workflow_authorities_fails_closed(self):
         for path in (
             ".github/workflows/baseline.yml",

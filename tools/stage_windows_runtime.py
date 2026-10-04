@@ -175,7 +175,13 @@ def stage_windows_runtime(
     composition_path: Path,
     source_root: Path = ROOT,
 ) -> tuple[dict[str, str], ...]:
-    """Stage the module-owned neutral runtime/artifact descriptor set."""
+    """Stage the module-owned neutral runtime/artifact descriptor set.
+
+    On POSIX, the caller must prepare ``autotrade_runtime/artifacts`` in
+    its private staging layout before publication. The canonical publisher
+    retains and verifies that namespace; it intentionally cannot create a
+    missing nested directory through a potentially detached descendant fd.
+    """
 
     return _stage_source_controlled_components(
         staging=staging,

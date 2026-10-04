@@ -210,6 +210,94 @@ class RecoveryIssuedDispatcherAuthorityIngressTests(unittest.TestCase):
 
             self.assertEqual(_FORGED_SNAPSHOT_CALLS, [])
 
+    def test_dispatch_time_authority_does_not_invoke_rebound_helper_aliases(self):
+        with TemporaryDirectory() as directory:
+            _journal, _recovery, dispatcher = self._authority(directory)
+            original_require = recovery_dispatch_module._require_executable_authority
+            original_trusted = recovery_dispatch_module._trusted_journal_authority_snapshot
+            helper_calls = []
+
+            def forged_require():
+                helper_calls.append("require")
+
+            def forged_trusted(_store):
+                helper_calls.append("trusted")
+                return None
+
+            recovery_dispatch_module._require_executable_authority = forged_require
+            recovery_dispatch_module._trusted_journal_authority_snapshot = forged_trusted
+            try:
+                dispatcher._require_issued_authority()
+            finally:
+                recovery_dispatch_module._require_executable_authority = original_require
+                recovery_dispatch_module._trusted_journal_authority_snapshot = original_trusted
+
+            self.assertEqual(helper_calls, [])
+
+    def test_permissive_helper_rebinding_cannot_mask_validator_retarget(self):
+        with TemporaryDirectory() as directory:
+            _journal, _recovery, dispatcher = self._authority(directory)
+            original_validator = RecoveryController.validate_sender
+            original_require = recovery_dispatch_module._require_executable_authority
+            helper_calls = []
+            forged_calls = []
+
+            def forged_validator(_self, _owner_id, _owner_epoch):
+                forged_calls.append("validator")
+
+            def forged_require():
+                helper_calls.append("require")
+
+            RecoveryController.validate_sender = forged_validator
+            recovery_dispatch_module._require_executable_authority = forged_require
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "validator authority changed",
+                ):
+                    dispatcher._require_issued_authority()
+            finally:
+                RecoveryController.validate_sender = original_validator
+                recovery_dispatch_module._require_executable_authority = original_require
+
+            self.assertEqual(helper_calls, [])
+            self.assertEqual(forged_calls, [])
+
+    def test_permissive_helpers_cannot_mask_journal_reader_retarget(self):
+        with TemporaryDirectory() as directory:
+            _journal, _recovery, dispatcher = self._authority(directory)
+            original_reader = recovery_dispatch_module._canonical_journal_authority_snapshot
+            original_require = recovery_dispatch_module._require_executable_authority
+            original_trusted = recovery_dispatch_module._trusted_journal_authority_snapshot
+            forged_calls = []
+
+            def forged_reader(_store):
+                forged_calls.append("reader")
+                return None
+
+            def forged_require():
+                forged_calls.append("require")
+
+            def forged_trusted(_store):
+                forged_calls.append("trusted")
+                return None
+
+            recovery_dispatch_module._canonical_journal_authority_snapshot = forged_reader
+            recovery_dispatch_module._require_executable_authority = forged_require
+            recovery_dispatch_module._trusted_journal_authority_snapshot = forged_trusted
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "journal snapshot authority changed",
+                ):
+                    dispatcher._require_issued_authority()
+            finally:
+                recovery_dispatch_module._canonical_journal_authority_snapshot = original_reader
+                recovery_dispatch_module._require_executable_authority = original_require
+                recovery_dispatch_module._trusted_journal_authority_snapshot = original_trusted
+
+            self.assertEqual(forged_calls, [])
+
     def test_mutated_owner_epoch_boolean_is_not_treated_as_canonical_generation(self):
         with TemporaryDirectory() as directory:
             _journal, recovery, dispatcher = self._authority(directory)

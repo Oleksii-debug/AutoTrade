@@ -86,6 +86,12 @@ _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
 )
 _CANONICAL_JOURNAL_GET_EVENT = JournalStore.get_event
 _CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR = (
+    record_current_trade_credential_transition_anchor
+)
+_CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR = (
+    require_current_trade_credential_transition_anchor
+)
 
 
 @dataclass(frozen=True)
@@ -760,6 +766,13 @@ def execute_durable_takeover(
 ) -> DurableTakeoverResult:
     """Issue or resume one freeze-first durable owner takeover."""
 
+    record_credential_transition_anchor = (
+        _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR
+    )
+    require_credential_transition_anchor = (
+        _CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR
+    )
+
     (
         store,
         owner_scope,
@@ -951,7 +964,7 @@ def execute_durable_takeover(
             receipt,
             started=started_payload,
         )
-        anchor = record_current_trade_credential_transition_anchor(
+        anchor = record_credential_transition_anchor(
             store,
             vault,
             receipt,
@@ -1033,7 +1046,7 @@ def execute_durable_takeover(
             raise DurableTakeoverError(
                 "issued takeover evidence does not match current vault receipt"
             )
-        anchor = require_current_trade_credential_transition_anchor(
+        anchor = require_credential_transition_anchor(
             store,
             vault,
             receipt,
@@ -1128,7 +1141,7 @@ def execute_durable_takeover(
             raise DurableTakeoverError(
                 "takeover evidence credential identity changed"
             )
-        anchor = require_current_trade_credential_transition_anchor(
+        anchor = require_credential_transition_anchor(
             store,
             vault,
             receipt,

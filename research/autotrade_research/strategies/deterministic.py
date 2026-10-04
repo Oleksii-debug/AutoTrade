@@ -244,6 +244,19 @@ class CausalObservation:
         )
 
 
+def _readmit_causal_observation(value: CausalObservation) -> CausalObservation:
+    """Reconstruct one exact observation before an authority-sensitive use."""
+
+    if type(value) is not CausalObservation:
+        raise TypeError("observation must be CausalObservation")
+    return CausalObservation(
+        event_id=value.event_id,
+        symbol=value.symbol,
+        available_at=value.available_at,
+        price=value.price,
+    )
+
+
 @dataclass(frozen=True)
 class DeterministicProposal:
     symbol: str
@@ -370,6 +383,31 @@ class DeterministicProposal:
                 )
 
 
+def _readmit_deterministic_proposal(
+    value: DeterministicProposal,
+) -> DeterministicProposal:
+    """Re-run proposal invariants and detach caller-owned object identity."""
+
+    if type(value) is not DeterministicProposal:
+        raise TypeError("proposal must be DeterministicProposal")
+    return DeterministicProposal(
+        symbol=value.symbol,
+        action=value.action,
+        quantity=value.quantity,
+        decision_time=value.decision_time,
+        evidence_event_ids=value.evidence_event_ids,
+        model_calls=value.model_calls,
+        economic_edge_claim=value.economic_edge_claim,
+        reason=value.reason,
+        information_cutoff=value.information_cutoff,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        strategy_version=value.strategy_version,
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+    )
+
+
 def _parse_utc_text(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     if not text.endswith("Z"):
@@ -382,8 +420,7 @@ def _parse_utc_text(value: str, *, name: str) -> datetime:
 
 
 def _proposal_document(proposal: DeterministicProposal) -> dict[str, object]:
-    if type(proposal) is not DeterministicProposal:
-        raise TypeError("proposal must be DeterministicProposal")
+    proposal = _readmit_deterministic_proposal(proposal)
     return {
         "symbol": proposal.symbol,
         "action": proposal.action,
@@ -471,12 +508,11 @@ class RegisteredStrategyRunReceipt:
         decision = _time(self.decision_time, name="decision_time")
         if type(self.observations) is not tuple:
             raise ValueError("registered run observations must be a tuple")
-        observations = tuple(self.observations)
+        observations = tuple(
+            _readmit_causal_observation(observation)
+            for observation in self.observations
+        )
         for observation in observations:
-            if type(observation) is not CausalObservation:
-                raise TypeError(
-                    "registered run observations must contain CausalObservation values"
-                )
             if observation.available_at > decision:
                 raise ValueError(
                     "registered run observation is not available at decision_time"
@@ -484,9 +520,7 @@ class RegisteredStrategyRunReceipt:
         event_ids = tuple(item.event_id for item in observations)
         if len(set(event_ids)) != len(event_ids):
             raise ValueError("registered run observations contain duplicate event_id")
-        if type(self.proposal) is not DeterministicProposal:
-            raise TypeError("registered run proposal must be DeterministicProposal")
-        proposal = self.proposal
+        proposal = _readmit_deterministic_proposal(self.proposal)
         descriptor = strategy.descriptor
         if proposal.symbol != symbol or proposal.decision_time != decision:
             raise ValueError("registered run proposal identity does not match receipt")
@@ -515,6 +549,7 @@ class RegisteredStrategyRunReceipt:
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "decision_time", decision)
         object.__setattr__(self, "observations", observations)
+        object.__setattr__(self, "proposal", proposal)
 
     def canonical_document(self) -> dict[str, object]:
         return {
@@ -589,16 +624,34 @@ class RegisteredStrategyRunReceipt:
         )
 
 
+def _readmit_registered_strategy_run_receipt(
+    value: RegisteredStrategyRunReceipt,
+) -> RegisteredStrategyRunReceipt:
+    """Detach a receipt and recursively re-run its exact value invariants."""
+
+    if type(value) is not RegisteredStrategyRunReceipt:
+        raise TypeError("receipt must be RegisteredStrategyRunReceipt")
+    return RegisteredStrategyRunReceipt(
+        strategy_snapshot=value.strategy_snapshot,
+        instrument_version=value.instrument_version,
+        symbol=value.symbol,
+        decision_time=value.decision_time,
+        observations=tuple(
+            _readmit_causal_observation(observation)
+            for observation in value.observations
+        ),
+        proposal=_readmit_deterministic_proposal(value.proposal),
+    )
+
+
 def verify_registered_strategy_run(
     proposal: DeterministicProposal,
     receipt: RegisteredStrategyRunReceipt,
 ) -> str:
     """Replay one receipt from pristine state and return its verified digest."""
 
-    if type(proposal) is not DeterministicProposal:
-        raise TypeError("proposal must be DeterministicProposal")
-    if type(receipt) is not RegisteredStrategyRunReceipt:
-        raise TypeError("receipt must be RegisteredStrategyRunReceipt")
+    proposal = _readmit_deterministic_proposal(proposal)
+    receipt = _readmit_registered_strategy_run_receipt(receipt)
     if receipt.proposal != proposal:
         raise ValueError(
             "registered run receipt proposal does not match supplied proposal"
@@ -847,14 +900,47 @@ class StrategyEconomicsBinding:
         ).hexdigest()
 
 
+def _readmit_strategy_economics_binding(
+    value: StrategyEconomicsBinding,
+) -> StrategyEconomicsBinding:
+    """Reconstruct public research economics before it can affect exposure."""
+
+    if type(value) is not StrategyEconomicsBinding:
+        raise TypeError("economics must be StrategyEconomicsBinding")
+    return StrategyEconomicsBinding(
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+        instrument_version=value.instrument_version,
+        information_cutoff=value.information_cutoff,
+        decision_time=value.decision_time,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        available_at=value.available_at,
+        input_manifest_refs=value.input_manifest_refs,
+        gross_return_distribution_sha256=value.gross_return_distribution_sha256,
+        after_cost_return_distribution_sha256=value.after_cost_return_distribution_sha256,
+        after_cost_lower_bound=value.after_cost_lower_bound,
+        execution_model_fingerprint=value.execution_model_fingerprint,
+        execution_calibration_sha256=value.execution_calibration_sha256,
+        execution_fidelity=value.execution_fidelity,
+        capacity_assessment_sha256=value.capacity_assessment_sha256,
+        max_feasible_quantity=value.max_feasible_quantity,
+        lot_size=value.lot_size,
+        registered_run_receipt_sha256=value.registered_run_receipt_sha256,
+        required_evidence_dimensions=value.required_evidence_dimensions,
+        dimension_evidence=value.dimension_evidence,
+        status=value.status,
+    )
+
+
 def _require_registered_economics_join(
     receipt: RegisteredStrategyRunReceipt,
     economics: StrategyEconomicsBinding,
 ) -> None:
     """Require one economics evidence chain to name the exact registered run."""
 
-    if type(receipt) is not RegisteredStrategyRunReceipt:
-        raise TypeError("registered run receipt must be canonical RegisteredStrategyRunReceipt")
+    receipt = _readmit_registered_strategy_run_receipt(receipt)
+    economics = _readmit_strategy_economics_binding(economics)
     receipt_digest = verify_registered_strategy_run(receipt.proposal, receipt)
     if economics.registered_run_receipt_sha256 != receipt_digest:
         raise ValueError(
@@ -988,10 +1074,12 @@ def bind_strategy_economics(
 ) -> EconomicsBoundProposal:
     """Bind frozen decision-time economics without expanding the gross signal."""
 
-    if type(proposal) is not DeterministicProposal:
-        raise TypeError("proposal must be DeterministicProposal")
-    if type(economics) is not StrategyEconomicsBinding:
-        raise TypeError("economics must be StrategyEconomicsBinding")
+    proposal = _readmit_deterministic_proposal(proposal)
+    economics = _readmit_strategy_economics_binding(economics)
+    if registered_run_receipt is not None:
+        registered_run_receipt = _readmit_registered_strategy_run_receipt(
+            registered_run_receipt
+        )
     instrument = _text(instrument_version, name="instrument_version")
     if (
         proposal.information_cutoff is None
@@ -1205,8 +1293,7 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
-        if type(observation) is not CausalObservation:
-            raise TypeError("observation must be CausalObservation")
+        observation = _readmit_causal_observation(observation)
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
@@ -1586,8 +1673,12 @@ def to_decision_proposal(
     financial authority and never consumes realized post-arrival liquidity.
     """
 
-    if type(proposal) is not DeterministicProposal:
-        raise TypeError("proposal must be DeterministicProposal")
+    proposal = _readmit_deterministic_proposal(proposal)
+    economics_binding = _readmit_strategy_economics_binding(economics_binding)
+    if registered_run_receipt is not None:
+        registered_run_receipt = _readmit_registered_strategy_run_receipt(
+            registered_run_receipt
+        )
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -1597,8 +1688,6 @@ def to_decision_proposal(
         or proposal.strategy_configuration_fingerprint is None
     ):
         raise ValueError("proposal lacks registered strategy/horizon metadata")
-    if type(economics_binding) is not StrategyEconomicsBinding:
-        raise TypeError("economics_binding must be canonical StrategyEconomicsBinding")
     try:
         normalized_proposal_id = str(UUID(_text(proposal_id, name="proposal_id")))
     except (ValueError, AttributeError) as error:
@@ -1626,6 +1715,9 @@ def to_decision_proposal(
         instrument_version=instrument,
         registered_run_receipt=registered_run_receipt,
     )
+    proposal = bound.gross_proposal
+    economics_binding = bound.economics
+    registered_run_receipt = bound.registered_run_receipt
     no_trade = bound.action == "HOLD"
     body: dict[str, object] = {
         "proposal_id": normalized_proposal_id,

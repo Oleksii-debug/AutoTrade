@@ -2038,5 +2038,139 @@ class DeterministicStrategyTests(unittest.TestCase):
             )
 
 
+    def test_ingest_detaches_observation_from_later_caller_mutation(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        first = obs(0, "100")
+        strategy.ingest(first, simulation_time=BASE)
+        object.__setattr__(first, "price", Decimal("999"))
+        strategy.ingest(
+            obs(1, "102"),
+            simulation_time=BASE + timedelta(minutes=1),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(strategy._history["AAA"][0].price, Decimal("100"))
+
+    def test_registered_receipt_detaches_nested_values_from_caller_mutation(self):
+        descriptor = self.descriptor()
+        first = obs(0, "100")
+        second = obs(1, "102")
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=descriptor,
+            ),
+            [first, second],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        original_fingerprint = receipt.fingerprint
+        object.__setattr__(first, "price", Decimal("999"))
+        object.__setattr__(proposal, "reason", "caller mutation")
+        self.assertEqual(receipt.fingerprint, original_fingerprint)
+        self.assertEqual(receipt.observations[0].price, Decimal("100"))
+        self.assertNotEqual(receipt.proposal.reason, "caller mutation")
+
+    def test_bind_rejects_post_construction_economics_mutation(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(economics, "after_cost_lower_bound", Decimal("-1"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "QUALIFIED economics binding requires positive",
+        ):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+
+    def test_bind_rejects_post_construction_proposal_mutation(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(proposal, "action", "HOLD")
+        with self.assertRaisesRegex(ValueError, "HOLD proposal quantity must be zero"):
+            bind_strategy_economics(
+                proposal,
+                economics,
+                instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+
+    def test_projection_uses_readmitted_canonical_economics_value(self):
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            max_feasible_quantity="1.0",
+            registered_run_receipt=receipt,
+        )
+        object.__setattr__(
+            economics,
+            "instrument_version",
+            " instrument:aaa@7 ",
+        )
+        body = to_decision_proposal(
+            proposal,
+            proposal_id="12345678-1234-5678-9234-567812345678",
+            instrument_version="instrument:aaa@7",
+            economics_binding=economics,
+            exit_policy_ref="exit-policy:v1",
+            compute_cost_currency="USD",
+            registered_run_receipt=receipt,
+        )
+        canonical = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@7",
+            max_feasible_quantity="1.0",
+            registered_run_receipt=receipt,
+        )
+        self.assertEqual(
+            body["confidence_basis"]["strategy_economics_binding_sha256"],
+            canonical.fingerprint,
+        )
+
 if __name__ == "__main__":
     unittest.main()

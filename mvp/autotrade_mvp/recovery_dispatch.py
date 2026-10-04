@@ -28,11 +28,13 @@ from .dispatch import (
     _canonical_journal_authority_snapshot,
 )
 from .persistence import JournalStore
-from .recovery import OwnerFence, RecoveryController
+from .reconciliation_journal import load_latest_reconciliation_checkpoint_for_scope
+from .recovery import HostState, OwnerFence, RecoveryController
 
 
 _ISSUANCE_TOKEN = object()
 _CANONICAL_VALIDATE_SENDER = RecoveryController.validate_sender
+_CANONICAL_LOAD_LATEST_RECONCILIATION = load_latest_reconciliation_checkpoint_for_scope
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
@@ -149,6 +151,64 @@ class RecoveryIssuedDispatcher:
         ):
             raise PermissionError("guarded dispatcher sender binding changed")
 
+    def _require_durable_reconciliation_authority(self, provider: str) -> None:
+        """Require current owner-bound journal truth before irreversible send."""
+
+        if type(provider) is not str or not provider.strip():
+            raise PermissionError("provider identity is required for durable readiness")
+        if (
+            self.__recovery.state is not HostState.READY
+            or self.__recovery.provider_reconciled is not True
+            or self.__recovery.unresolved_attempts
+        ):
+            raise PermissionError(
+                "production sender requires accepted durable reconciliation"
+            )
+
+        checkpoint = _CANONICAL_LOAD_LATEST_RECONCILIATION(
+            self.__store,
+            provider_id=provider.strip().upper(),
+            account_id=self.__account_id,
+            environment=self.__environment,
+        )
+        if checkpoint is None:
+            raise PermissionError(
+                "production sender requires a current durable reconciliation checkpoint"
+            )
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            raise PermissionError("durable reconciliation payload is invalid")
+        checkpoint_owner = payload.get("checkpoint_owner")
+        if (
+            not isinstance(checkpoint_owner, dict)
+            or checkpoint_owner.get("host_id") != self.__owner.owner_id
+            or checkpoint_owner.get("owner_epoch") != str(self.__owner.epoch)
+        ):
+            raise PermissionError(
+                "durable reconciliation is not bound to the current sender owner"
+            )
+        if (
+            payload.get("complete") is not True
+            or payload.get("snapshot_consistent") is not True
+            or payload.get("activity_coverage_complete") is not True
+        ):
+            raise PermissionError("durable reconciliation is incomplete")
+
+        blocking = payload.get("blocking_resources")
+        resolutions = payload.get("submission_resolutions")
+        if not isinstance(blocking, list) or not isinstance(resolutions, list):
+            raise PermissionError("durable reconciliation readiness fields are invalid")
+        if blocking:
+            raise PermissionError("durable reconciliation has blocking resources")
+        for resolution in resolutions:
+            if not isinstance(resolution, dict):
+                raise PermissionError("durable reconciliation resolution is invalid")
+            outcome = resolution.get("outcome")
+            if type(outcome) is not str or outcome.strip().upper() == "UNKNOWN":
+                raise PermissionError(
+                    "durable reconciliation contains unresolved submission truth"
+                )
+
     def dispatch(
         self,
         *,
@@ -175,6 +235,11 @@ class RecoveryIssuedDispatcher:
 
         del sender_check
         self._require_issued_authority()
+
+        def canonical_sender_check(owner_id: str, owner_epoch: int) -> None:
+            self.__sender_check(owner_id, owner_epoch)
+            self._require_durable_reconciliation_authority(provider)
+
         return self.__dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
@@ -187,7 +252,7 @@ class RecoveryIssuedDispatcher:
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
             final_barrier_clock=final_barrier_clock,
-            sender_check=self.__sender_check,
+            sender_check=canonical_sender_check,
             submission_scope=submission_scope,
         )
 

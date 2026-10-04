@@ -196,6 +196,50 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             {"symbol": "AAA"},
         )
 
+    def test_reachable_owner_class_cannot_inject_provenance_lookup_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        owner = evidence._payload_owners[-1]
+        owner_type = type(owner)
+        touched = []
+
+        def hostile_proxy(_self):
+            touched.append("proxy")
+            raise AssertionError("reachable owner descriptor executed")
+
+        owner_type.proxy = property(hostile_proxy)
+        try:
+            resolved = allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence.evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+            snapshot = allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            del owner_type.proxy
+
+        self.assertIs(resolved, evidence)
+        self.assertEqual(snapshot, {"symbol": "AAA"})
+        self.assertEqual(touched, [])
+
+    def test_tampered_owner_collection_fails_before_iterable_callbacks(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        hostile = _HostileMapping()
+        object.__setattr__(evidence, "_payload_owners", hostile)
+        hostile.calls.clear()
+
+        with self.assertRaisesRegex(ValueError, "payload provenance is not sealed"):
+            allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence.evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+
+        self.assertEqual(hostile.calls, [])
+
     def test_mappingproxy_over_hostile_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileMapping()
         proxy = MappingProxyType(hostile)

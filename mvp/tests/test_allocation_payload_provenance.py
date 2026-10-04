@@ -466,7 +466,6 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         evidence_type_dict = type.__getattribute__(evidence_type, "__dict__")
         self.assertNotIn("__getattribute__", evidence_type_dict)
         evidence_id = object.__getattribute__(evidence, "evidence_id")
-        original_getattribute = evidence_type.__getattribute__
         touched = []
 
         def forged_getattribute(self, name):
@@ -488,7 +487,7 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
                 "AAA",
             )
         finally:
-            evidence_type.__getattribute__ = original_getattribute
+            del evidence_type.__getattribute__
 
         self.assertEqual(touched, [])
 

@@ -3222,6 +3222,12 @@ def revalidate_evidence_bound_allocation(
     current_account_state_version: int,
     current_reservation_state_version: int,
     current_reservation_state_digest: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _verify_evidence=_verified_allocation_payload_owner,
+    _verify_evidence_code=getattr(_verified_allocation_payload_owner, "__code__", None),
+    _evidence_valid_at=_allocation_evidence_valid_at,
+    _evidence_valid_at_code=getattr(_allocation_evidence_valid_at, "__code__", None),
+    _getattribute=object.__getattribute__,
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
@@ -3247,6 +3253,15 @@ def revalidate_evidence_bound_allocation(
         current_capability_snapshot_ids,
         name="current_capability_snapshot_ids",
     )
+
+    if (
+        getattr(_verify_evidence, "__code__", None) is not _verify_evidence_code
+        or getattr(_evidence_valid_at, "__code__", None)
+        is not _evidence_valid_at_code
+    ):
+        raise ValueError(
+            "allocation admission evidence verifier executable changed after binding"
+        )
 
     if type(result) is not EvidenceBoundObjectiveAllocationResult:
         raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
@@ -3320,13 +3335,16 @@ def revalidate_evidence_bound_allocation(
 
     for evidence_id, digest in result.evidence_refs:
         evidence = resolved_evidence.get(evidence_id)
-        if not isinstance(evidence, ImmutableAllocationEvidence):
+        if type(evidence) is not _evidence_type:
             raise ValueError(f"allocation evidence {evidence_id} no longer resolves")
-        if evidence.digest != digest:
+        _verify_evidence(evidence)
+        evidence_digest = _getattribute(evidence, "digest")
+        evidence_environment = _getattribute(evidence, "environment")
+        if evidence_digest != digest:
             raise ValueError(f"allocation evidence {evidence_id} changed after proposal")
-        if evidence.environment != result.environment:
+        if evidence_environment != result.environment:
             raise ValueError(f"allocation evidence {evidence_id} environment changed")
-        if not evidence.valid_at(point):
+        if not _evidence_valid_at(evidence, point):
             raise ValueError(f"allocation evidence {evidence_id} is stale at admission")
 
     expected_digest = _allocation_decision_digest(

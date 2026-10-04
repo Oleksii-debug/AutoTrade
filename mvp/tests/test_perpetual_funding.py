@@ -275,6 +275,55 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 )
                 self.assertEqual(len(book.transactions), 1)
 
+    def test_paper_funding_rejects_polymorphic_evidence_ref_without_callback(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile evidence-ref callback executed")
+
+        evidence = sealed_funding()
+        with TemporaryDirectory() as directory:
+            touched = []
+
+            def resolver(_reference):
+                touched.append("called")
+                return evidence
+
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            seed_position(book)
+            authority = DurablePerpetualFundingAuthority(
+                store,
+                economic_book=book,
+                instrument_registry=InstrumentRegistry(
+                    versions=(perpetual_version(),)
+                ),
+                evidence_resolver=resolver,
+                funding_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+            with self.assertRaisesRegex(
+                PerpetualFundingError,
+                "evidence_ref is required",
+            ):
+                authority.apply(HostileText(evidence.evidence_ref))
+
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(touched, [])
+            self.assertEqual(
+                store.load_events_by_aggregate_type("perpetual_funding"),
+                [],
+            )
+            self.assertEqual(len(book.transactions), 1)
+
     def test_arbitrary_funding_normalizer_cannot_be_injected(self):
         evidence = sealed_funding()
         with TemporaryDirectory() as directory:

@@ -191,7 +191,6 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                         role='OWNER',
                         origin=self._origin,
                         ttl_seconds=3600,
-                        idle_timeout_seconds=3600,
                     )
                     try:
                         self._desktop_session_sink(

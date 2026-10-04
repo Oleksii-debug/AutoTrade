@@ -12,6 +12,7 @@ from tools.dotnet_lock import (
     dotnet_locked_dependency_graph,
     dotnet_project_package_references,
     dotnet_restore_command_tokens,
+    dotnet_restore_targets_project,
     dotnet_restore_tokens_are_locked,
 )
 
@@ -102,6 +103,41 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                     '-p:Other=x;RestoreLockedMode=true'
                 )
             )
+        )
+
+    def test_yaml_comment_cannot_mint_locked_restore_authority(self):
+        tokens = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj # --locked-mode'
+        )
+        self.assertFalse(dotnet_restore_tokens_are_locked(tokens))
+        self.assertTrue(
+            dotnet_restore_targets_project(tokens, 'src/App/App.csproj')
+        )
+
+    def test_restore_project_coverage_requires_first_positional_target(self):
+        canonical = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj --locked-mode'
+        )
+        self.assertTrue(
+            dotnet_restore_targets_project(canonical, 'src/App/App.csproj')
+        )
+
+        after_sentinel = dotnet_restore_command_tokens(
+            'run: dotnet restore src/Other/Other.csproj --locked-mode '
+            '-- src/App/App.csproj'
+        )
+        self.assertFalse(
+            dotnet_restore_targets_project(
+                after_sentinel,
+                'src/App/App.csproj',
+            )
+        )
+
+        option_value = dotnet_restore_command_tokens(
+            'run: dotnet restore --source src/App/App.csproj --locked-mode'
+        )
+        self.assertFalse(
+            dotnet_restore_targets_project(option_value, 'src/App/App.csproj')
         )
 
     def test_malformed_restore_command_fails_parsing(self):

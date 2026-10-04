@@ -108,6 +108,13 @@ def _snapshot_operations(
             "operations must be an exact dict keyed by durable planned event_id"
         )
     expected_ids = plan.expected_event_ids
+    # Validate mapping keys before any set/equality operation.  An exact dict can
+    # still contain caller-defined hashable objects whose __eq__ executes code;
+    # authority admission must not invoke those callbacks.
+    if any(type(key) is not str for key in operations):
+        raise RuntimeTargetHostRunnerError(
+            "operation keys must be exact strings"
+        )
     if set(operations) != set(expected_ids):
         raise RuntimeTargetHostRunnerError(
             "operation key set must exactly match the durable pre-run event plan"

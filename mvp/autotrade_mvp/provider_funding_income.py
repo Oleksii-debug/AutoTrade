@@ -358,7 +358,11 @@ def _parse_bybit_funding_income_rows(
     ):
         raise ProviderFundingIncomeError("Bybit transaction-log response is not successful")
     result = payload.get("result")
-    if type(result) is not dict or type(result.get("list")) is not list:
+    if (
+        type(result) is not dict
+        or type(result.get("list")) is not list
+        or type(result.get("nextPageCursor")) is not str
+    ):
         raise ProviderFundingIncomeError("Bybit transaction-log result shape is invalid")
 
     if (
@@ -392,14 +396,15 @@ def _parse_bybit_funding_income_rows(
             name="qualified query endTime",
         )
     )
-    if (
-        start_millis is not None
-        and end_millis is not None
-        and end_millis < start_millis
-    ):
-        raise ProviderFundingIncomeError(
-            "qualified funding query endTime precedes startTime"
-        )
+    if start_millis is not None and end_millis is not None:
+        if end_millis < start_millis:
+            raise ProviderFundingIncomeError(
+                "qualified funding query endTime precedes startTime"
+            )
+        if end_millis - start_millis > 7 * 24 * 60 * 60 * 1000:
+            raise ProviderFundingIncomeError(
+                "qualified funding query exceeds Bybit seven-day range"
+            )
 
     rows: list[_ParsedBybitFundingIncomeRow] = []
     seen_ids: set[str] = set()

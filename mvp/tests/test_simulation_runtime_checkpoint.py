@@ -148,8 +148,8 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             mutated = store.whole_store_state_cut()
             with patch.object(
                 SimulatedProvider,
-                "from_state",
-                side_effect=AssertionError("stale checkpoint cannot restore provider"),
+                "transport_send",
+                side_effect=AssertionError("stale checkpoint cannot send"),
             ):
                 with self.assertRaisesRegex(
                     ValueError,

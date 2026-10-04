@@ -46,9 +46,12 @@ _PURPOSES = {"RESEARCH", "REPLAY", "PROMOTION"}
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ExecutionQualificationError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ExecutionQualificationError(f"{name} is required")
+    return text
 
 
 def _uuid(value: object, *, name: str) -> str:

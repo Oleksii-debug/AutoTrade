@@ -76,6 +76,25 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
             candidates.update(source_root.rglob(pattern))
 
     blockers: list[str] = []
+
+    # The static release graph does not evaluate arbitrary explicit MSBuild
+    # imports. An imported file can inject PackageReference items from outside
+    # the root/src .props/.targets scan, so any explicit project Import is a
+    # dependency-authority boundary until evaluated MSBuild discovery exists.
+    source_root = root / 'src'
+    if source_root.is_dir():
+        for project in sorted(source_root.rglob('*.csproj')):
+            relative = project.relative_to(root).as_posix()
+            try:
+                tree = ET.parse(project)
+            except (OSError, ET.ParseError):
+                blockers.append(f'DOTNET_MSBUILD_PROJECT_INVALID:{relative}')
+                continue
+            if _xml_elements(tree, 'Import'):
+                blockers.append(
+                    f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
+                )
+
     for path in sorted(candidates):
         relative = path.relative_to(root).as_posix()
         try:

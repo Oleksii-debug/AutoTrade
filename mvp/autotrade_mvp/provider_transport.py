@@ -1726,37 +1726,147 @@ def _observe_authenticated_read_wire_response(
     return observation
 
 
-def provider_observation_direct_execution_material(
-    observation: ProviderResponseObservation,
-) -> tuple[DirectAuthenticatedReadExecutionReceipt, bytes]:
-    if type(observation) is not ProviderResponseObservation:
-        raise ProviderTransportError(
-            "exact provider response observation is required"
+def _install_direct_authenticated_read_observation_authority():
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            DirectAuthenticatedReadExecutionReceipt,
+            bytes,
+            object,
+            str,
+            int,
+            str,
+            str,
+            object,
+        ],
+    ] = {}
+
+    def prune() -> None:
+        for object_id, state in tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def require_core_authority(observation: object) -> ProviderResponseObservation:
+        if type(observation) is not ProviderResponseObservation:
+            raise ProviderTransportError(
+                "exact provider response observation is required"
+            )
+        try:
+            observation.provider_id
+        except Exception as error:
+            raise ProviderTransportError(
+                "provider response construction authority is unavailable"
+            ) from error
+        return observation
+
+    def register(observation: object) -> None:
+        value = require_core_authority(observation)
+        receipt = getattr(
+            value,
+            "_direct_authenticated_read_execution_receipt",
+            None,
         )
-    receipt = getattr(
-        observation,
-        "_direct_authenticated_read_execution_receipt",
-        None,
-    )
-    raw = getattr(
-        observation,
-        "_direct_authenticated_read_response_bytes",
-        None,
-    )
-    snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
-    if type(raw) is not bytes or not raw:
-        raise ProviderTransportError(
-            "direct provider response bytes are unavailable"
+        raw = getattr(
+            value,
+            "_direct_authenticated_read_response_bytes",
+            None,
         )
-    if (
-        snapshot["http_status"] != observation.http_status
-        or snapshot["response_sha256"] != observation.response_sha256
-        or snapshot["response_sha256"] != "sha256:" + sha256(raw).hexdigest()
-    ):
-        raise ProviderTransportError(
-            "direct wire receipt differs from provider response observation"
+        snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
+        if type(raw) is not bytes or not raw:
+            raise ProviderTransportError(
+                "direct provider response bytes are unavailable"
+            )
+        if (
+            snapshot["http_status"] != value.http_status
+            or snapshot["response_sha256"] != value.response_sha256
+            or snapshot["response_sha256"]
+            != "sha256:" + sha256(raw).hexdigest()
+        ):
+            raise ProviderTransportError(
+                "direct wire receipt differs from provider response observation"
+            )
+        prune()
+        object_id = id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderTransportError(
+                "direct provider observation authority identity collision"
+            )
+        states[object_id] = (
+            weakref.ref(value),
+            receipt,
+            raw,
+            value.query_binding,
+            value.observed_at,
+            value.http_status,
+            value.response_sha256,
+            value.evidence_ref,
+            value.payload,
         )
-    return receipt, raw
+        for name in (
+            "_direct_authenticated_read_execution_receipt",
+            "_direct_authenticated_read_response_bytes",
+        ):
+            try:
+                object.__delattr__(value, name)
+            except AttributeError:
+                raise ProviderTransportError(
+                    "direct provider observation transfer state is incomplete"
+                )
+
+    def material(
+        observation: ProviderResponseObservation,
+    ) -> tuple[DirectAuthenticatedReadExecutionReceipt, bytes]:
+        value = require_core_authority(observation)
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderTransportError(
+                "direct provider observation execution authority is unavailable"
+            )
+        (
+            _value_ref,
+            receipt,
+            raw,
+            query_binding,
+            observed_at,
+            http_status,
+            response_sha256,
+            evidence_ref,
+            payload,
+        ) = state
+        if (
+            value.query_binding is not query_binding
+            or value.observed_at != observed_at
+            or value.http_status != http_status
+            or value.response_sha256 != response_sha256
+            or value.evidence_ref != evidence_ref
+            or value.payload is not payload
+        ):
+            raise ProviderTransportError(
+                "direct provider observation changed after canonical transport"
+            )
+        snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
+        if (
+            snapshot["http_status"] != value.http_status
+            or snapshot["response_sha256"] != value.response_sha256
+            or snapshot["response_sha256"]
+            != "sha256:" + sha256(raw).hexdigest()
+        ):
+            raise ProviderTransportError(
+                "direct wire receipt differs from provider response observation"
+            )
+        return receipt, raw
+
+    return register, material
+
+
+(
+    _register_direct_authenticated_read_observation,
+    provider_observation_direct_execution_material,
+) = _install_direct_authenticated_read_observation_authority()
+del _install_direct_authenticated_read_observation_authority
 
 
 def _exact_trading_response(
@@ -5298,3 +5408,36 @@ class BinanceSpotAuthenticatedReadTransport:
                 observed_at=observed_at,
                 require_direct_receipt=requires_direct_receipt,
             )
+
+def _bind_direct_authenticated_read_observation_transport(
+    call_impl,
+    register_observation,
+):
+    def __call__(self, *args, **kwargs):
+        observation = call_impl(self, *args, **kwargs)
+        if getattr(
+            observation,
+            "_direct_authenticated_read_execution_receipt",
+            None,
+        ) is not None:
+            register_observation(observation)
+        return observation
+
+    return __call__
+
+
+for _direct_read_transport_type in (
+    BinanceSpotAuthenticatedReadTransport,
+    BybitV5AuthenticatedReadTransport,
+    KrakenSpotAuthenticatedReadTransport,
+):
+    _direct_read_transport_type.__call__ = (
+        _bind_direct_authenticated_read_observation_transport(
+            _direct_read_transport_type.__call__,
+            _register_direct_authenticated_read_observation,
+        )
+    )
+
+del _direct_read_transport_type
+del _bind_direct_authenticated_read_observation_transport
+del _register_direct_authenticated_read_observation

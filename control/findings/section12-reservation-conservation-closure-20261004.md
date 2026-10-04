@@ -34,3 +34,20 @@ Section 12 is DONE only if exact-head qualification confirms:
 9. merge and post-merge readback confirm accepted source identity.
 
 No provider/PAPER/LIVE, profitability, release or NVDA qualification is implied.
+
+## Follow-up source review: terminal fill-bust blocker
+
+Section 12 is not yet honestly closed for the full fill lifecycle.
+
+The current restoration authority deliberately rejects restore_consumption on terminal reservations. The regression test for a provider bust arriving after a reservation was durably marked FILLED confirms that the atomic bust fails closed without partial OMS/economic mutation. That behavior is safer than silently reopening capital, but it does not prove reservation conservation after a late provider correction:
+
+- FILLED is a TERMINAL_STATE;
+- mark_terminal zeros remaining while retaining consumed history;
+- total_reserved excludes terminal reservations;
+- a later provider bust cannot currently move the consumed amount back into held capacity.
+
+Therefore the candidate proves active-reservation bust restoration, restart/idempotency and fail-closed terminal behavior, but not terminal FILLED -> corrected/busted capital re-reservation.
+
+Do not implement this by simply changing FILLED back to ACTIVE/UNKNOWN. A correct continuation must first bind one authoritative post-bust OMS order state, settlement/clearing compensation state where applicable, and the exact capital reservation that must again be held. That transition must be one atomic/restart-safe authority decision so an unrelated or already-settled fill cannot mint/free capacity.
+
+Until that contract is implemented and qualified, keep Section 12 DRAFT and do not claim complete reservation conservation across terminal provider corrections.

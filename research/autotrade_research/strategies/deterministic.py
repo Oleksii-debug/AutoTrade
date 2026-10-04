@@ -837,6 +837,11 @@ class ReturnThresholdBaseline:
             raise ValueError("proposal_quantity must be positive")
         if descriptor is not None:
             descriptor = _readmit_strategy_descriptor(descriptor)
+            expected_family = _threshold_family_for_type(type(self))
+            if descriptor.family != expected_family:
+                raise ValueError(
+                    f"descriptor family must be {expected_family} for this strategy implementation"
+                )
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
             bounds = {name: (Decimal(minimum), Decimal(maximum)) for name, minimum, maximum in descriptor.parameter_bounds}
@@ -930,21 +935,16 @@ class ReturnThresholdBaseline:
                 ),
             )
         window = eligible[-self.lookback:]
-        first = window[0].price
-        last = window[-1].price
-        change = (last / first) - Decimal("1")
-        if change > self.threshold:
-            action = "BUY"
-            quantity = self.proposal_quantity
-            reason = "registered deterministic return threshold exceeded"
-        elif change < -self.threshold:
-            action = "SELL"
-            quantity = self.proposal_quantity
-            reason = "registered deterministic negative return threshold exceeded"
-        else:
-            action = "HOLD"
-            quantity = Decimal("0")
-            reason = "registered deterministic threshold not exceeded"
+        action, reason = _threshold_signal(
+            type(self),
+            window,
+            self.threshold,
+        )
+        quantity = (
+            self.proposal_quantity
+            if action in {"BUY", "SELL"}
+            else Decimal("0")
+        )
         return DeterministicProposal(
             symbol=name,
             action=action,
@@ -966,7 +966,8 @@ class ReturnThresholdBaseline:
 
     def snapshot(self) -> str:
         payload = {
-            "schema_version": 5,
+            "schema_version": 6,
+            "strategy_family": _threshold_family_for_type(type(self)),
             "lookback": self.lookback,
             "threshold": str(self.threshold),
             "proposal_quantity": str(self.proposal_quantity),
@@ -1005,22 +1006,40 @@ class ReturnThresholdBaseline:
 
     @classmethod
     def restore(cls, snapshot: str) -> "ReturnThresholdBaseline":
+        if cls not in (
+            ReturnThresholdBaseline,
+            MeanReversionThresholdBaseline,
+            BreakoutThresholdBaseline,
+        ):
+            raise TypeError("unsupported threshold strategy restore type")
         try:
             payload = json.loads(snapshot)
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("strategy snapshot is invalid") from error
-        if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2, 3, 4, 5}:
+        if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2, 3, 4, 5, 6}:
             raise ValueError("unsupported strategy snapshot")
         version = payload["schema_version"]
+        if version < 6 and cls is not ReturnThresholdBaseline:
+            raise ValueError(
+                "legacy strategy snapshot can only restore ReturnThresholdBaseline"
+            )
+        if version == 6:
+            family = _text(payload.get("strategy_family"), name="strategy_family")
+            if family != _threshold_family_for_type(cls):
+                raise ValueError(
+                    "strategy snapshot family does not match restore implementation"
+                )
         expected = {"schema_version", "lookback", "threshold", "proposal_quantity", "history"}
-        if version in {2, 3, 4, 5}:
+        if version in {2, 3, 4, 5, 6}:
             expected.add("seen_events")
-        if version in {3, 4, 5}:
+        if version in {3, 4, 5, 6}:
             expected.add("descriptor")
-        if version in {4, 5}:
+        if version in {4, 5, 6}:
             expected.add("descriptor_fingerprint")
-        if version == 5:
+        if version in {5, 6}:
             expected.add("configuration_fingerprint")
+        if version == 6:
+            expected.add("strategy_family")
         if set(payload) != expected or not isinstance(payload["history"], dict):
             raise ValueError("strategy snapshot structure is invalid")
         if version in {2, 3, 4, 5} and not isinstance(payload["seen_events"], dict):
@@ -1158,6 +1177,68 @@ class ReturnThresholdBaseline:
         return strategy
 
 
+
+class MeanReversionThresholdBaseline(ReturnThresholdBaseline):
+    """Transparent price mean-reversion control with no promotion authority."""
+
+
+class BreakoutThresholdBaseline(ReturnThresholdBaseline):
+    """Transparent causal close-price breakout control with no promotion authority."""
+
+
+def _threshold_family_for_type(strategy_type: type) -> str:
+    if strategy_type is ReturnThresholdBaseline:
+        return "DETERMINISTIC_RETURN_THRESHOLD"
+    if strategy_type is MeanReversionThresholdBaseline:
+        return "DETERMINISTIC_MEAN_REVERSION_THRESHOLD"
+    if strategy_type is BreakoutThresholdBaseline:
+        return "DETERMINISTIC_BREAKOUT_THRESHOLD"
+    raise TypeError("unsupported deterministic threshold strategy type")
+
+
+def _threshold_signal(
+    strategy_type: type,
+    window: list[CausalObservation],
+    threshold: Decimal,
+) -> tuple[str, str]:
+    """Return a transparent gross signal; never an economic qualification."""
+
+    if type(window) is not list or len(window) < 2:
+        raise ValueError("threshold strategy window must contain at least two observations")
+    first = window[0].price
+    last = window[-1].price
+
+    if strategy_type is ReturnThresholdBaseline:
+        change = (last / first) - Decimal("1")
+        if change > threshold:
+            return "BUY", "registered deterministic return threshold exceeded"
+        if change < -threshold:
+            return "SELL", "registered deterministic negative return threshold exceeded"
+        return "HOLD", "registered deterministic threshold not exceeded"
+
+    if strategy_type is MeanReversionThresholdBaseline:
+        change = (last / first) - Decimal("1")
+        if change > threshold:
+            return "SELL", "registered deterministic mean-reversion upper threshold exceeded"
+        if change < -threshold:
+            return "BUY", "registered deterministic mean-reversion lower threshold exceeded"
+        return "HOLD", "registered deterministic mean-reversion threshold not exceeded"
+
+    if strategy_type is BreakoutThresholdBaseline:
+        prior = [item.price for item in window[:-1]]
+        prior_high = max(prior)
+        prior_low = min(prior)
+        upper = prior_high * (Decimal("1") + threshold)
+        lower = prior_low * (Decimal("1") - threshold)
+        if last > upper:
+            return "BUY", "registered deterministic upside breakout threshold exceeded"
+        if last < lower:
+            return "SELL", "registered deterministic downside breakout threshold exceeded"
+        return "HOLD", "registered deterministic breakout threshold not exceeded"
+
+    raise TypeError("unsupported deterministic threshold strategy type")
+
+
 def run_baseline(
     strategy: ReturnThresholdBaseline,
     observations: Iterable[CausalObservation],
@@ -1165,12 +1246,236 @@ def run_baseline(
     decision_time: datetime,
     symbol: str,
 ) -> DeterministicProposal:
-    if type(strategy) is not ReturnThresholdBaseline:
-        raise TypeError("strategy must be ReturnThresholdBaseline")
+    if type(strategy) not in (
+        ReturnThresholdBaseline,
+        MeanReversionThresholdBaseline,
+        BreakoutThresholdBaseline,
+    ):
+        raise TypeError(
+            "strategy must be ReturnThresholdBaseline, "
+            "MeanReversionThresholdBaseline or BreakoutThresholdBaseline"
+        )
+    if type(observations) not in (list, tuple):
+        raise TypeError("observations must be an exact built-in list or tuple")
     cutoff = _time(decision_time, name="decision_time")
-    for observation in observations:
+    detached_observations = tuple(
+        _readmit_causal_observation(observation)
+        for observation in observations
+    )
+    for observation in detached_observations:
         strategy.ingest(observation, simulation_time=cutoff)
     return strategy.propose(symbol=symbol, decision_time=cutoff)
+
+
+def _proposal_comparison_document(
+    value: DeterministicProposal,
+) -> dict[str, object]:
+    proposal = _readmit_deterministic_proposal(value)
+    if (
+        proposal.strategy_version is None
+        or proposal.strategy_fingerprint is None
+        or proposal.strategy_configuration_fingerprint is None
+        or proposal.information_cutoff is None
+        or proposal.horizon_seconds is None
+        or proposal.expiry is None
+    ):
+        raise ValueError("comparison proposal lacks registered strategy identity")
+    return {
+        "strategy_version": proposal.strategy_version,
+        "strategy_fingerprint": proposal.strategy_fingerprint,
+        "strategy_configuration_fingerprint": (
+            proposal.strategy_configuration_fingerprint
+        ),
+        "symbol": proposal.symbol,
+        "action": proposal.action,
+        "quantity": str(proposal.quantity),
+        "decision_time": _utc_text(proposal.decision_time),
+        "information_cutoff": _utc_text(proposal.information_cutoff),
+        "horizon_seconds": proposal.horizon_seconds,
+        "expiry": _utc_text(proposal.expiry),
+        "evidence_event_ids": list(proposal.evidence_event_ids),
+        "model_calls": proposal.model_calls,
+        "economic_edge_claim": proposal.economic_edge_claim,
+        "reason": proposal.reason,
+    }
+
+
+@dataclass(frozen=True)
+class StrategyComparisonSnapshot:
+    """Neutral multi-strategy evidence surface.
+
+    It deliberately has no winner, routing, promotion or execution field.
+    Scientific/economic evaluation must establish those separately.
+    """
+
+    symbol: str
+    decision_time: datetime
+    proposals: tuple[DeterministicProposal, ...]
+
+    def __post_init__(self) -> None:
+        symbol = _text(self.symbol, name="symbol")
+        decision_time = _time(self.decision_time, name="decision_time")
+        if type(self.proposals) is not tuple:
+            raise ValueError("proposals must be a tuple")
+        if len(self.proposals) < 2:
+            raise ValueError("strategy comparison requires at least two candidates")
+        proposals = tuple(
+            _readmit_deterministic_proposal(proposal)
+            for proposal in self.proposals
+        )
+        configuration_ids: set[str] = set()
+        for proposal in proposals:
+            if proposal.symbol != symbol or proposal.decision_time != decision_time:
+                raise ValueError("comparison proposals must share symbol and decision_time")
+            if (
+                proposal.strategy_version is None
+                or proposal.strategy_fingerprint is None
+                or proposal.strategy_configuration_fingerprint is None
+                or proposal.information_cutoff is None
+                or proposal.horizon_seconds is None
+                or proposal.expiry is None
+            ):
+                raise ValueError("comparison proposal lacks registered strategy identity")
+            if proposal.strategy_configuration_fingerprint in configuration_ids:
+                raise ValueError("strategy comparison contains duplicate candidate configuration")
+            configuration_ids.add(proposal.strategy_configuration_fingerprint)
+        proposals = tuple(
+            sorted(
+                proposals,
+                key=lambda proposal: (
+                    proposal.strategy_fingerprint,
+                    proposal.strategy_configuration_fingerprint,
+                    proposal.strategy_version,
+                ),
+            )
+        )
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "decision_time", decision_time)
+        object.__setattr__(self, "proposals", proposals)
+
+    @property
+    def selection_status(self) -> str:
+        return "NOT_ESTABLISHED"
+
+    @property
+    def economic_edge_status(self) -> str:
+        return "NOT_ESTABLISHED"
+
+    @property
+    def grants_trading_authority(self) -> bool:
+        return False
+
+    @property
+    def model_calls(self) -> int:
+        return 0
+
+    def canonical_document(self) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "symbol": self.symbol,
+            "decision_time": _utc_text(self.decision_time),
+            "selection_status": self.selection_status,
+            "economic_edge_status": self.economic_edge_status,
+            "grants_trading_authority": self.grants_trading_authority,
+            "model_calls": self.model_calls,
+            "candidates": [
+                _proposal_comparison_document(proposal)
+                for proposal in self.proposals
+            ],
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        return "sha256:" + sha256(
+            _canonical_json(self.canonical_document()).encode("utf-8")
+        ).hexdigest()
+
+
+def compare_deterministic_strategies(
+    strategies: tuple[object, ...],
+    observations: tuple[CausalObservation, ...],
+    *,
+    decision_time: datetime,
+    symbol: str,
+) -> StrategyComparisonSnapshot:
+    """Evaluate registered transparent controls on one identical causal cut.
+
+    This function never selects a winner. It clones threshold strategy state
+    before applying the supplied observations so a comparison cannot mutate the
+    caller's ongoing research state.
+    """
+
+    if type(strategies) is not tuple:
+        raise TypeError("strategies must be an exact built-in tuple")
+    if len(strategies) < 2:
+        raise ValueError("strategy comparison requires at least two candidates")
+    if type(observations) is not tuple:
+        raise TypeError("observations must be an exact built-in tuple")
+    cutoff = _time(decision_time, name="decision_time")
+    name = _text(symbol, name="symbol")
+    detached_observations = tuple(
+        _readmit_causal_observation(observation)
+        for observation in observations
+    )
+    if any(observation.available_at > cutoff for observation in detached_observations):
+        raise ValueError("comparison observation is not causally available at decision_time")
+
+    candidate_ids: set[str] = set()
+    preflight: list[tuple[object, str]] = []
+    for strategy in strategies:
+        if type(strategy) is NoTradeBaseline:
+            descriptor = _readmit_strategy_descriptor(strategy.descriptor)
+            candidate_id = descriptor.fingerprint
+        elif type(strategy) in (
+            ReturnThresholdBaseline,
+            MeanReversionThresholdBaseline,
+            BreakoutThresholdBaseline,
+        ):
+            if strategy.descriptor is None:
+                raise ValueError("comparison threshold strategy must be registered")
+            _readmit_strategy_descriptor(strategy.descriptor)
+            candidate_id = strategy.configuration_fingerprint
+            if candidate_id is None:
+                raise ValueError("comparison strategy configuration is unavailable")
+        else:
+            raise TypeError("unsupported strategy type in deterministic comparison")
+        if candidate_id in candidate_ids:
+            raise ValueError("strategy comparison contains duplicate candidate configuration")
+        candidate_ids.add(candidate_id)
+        preflight.append((strategy, candidate_id))
+
+    proposals: list[DeterministicProposal] = []
+    evidence_ids = tuple(
+        observation.event_id
+        for observation in detached_observations
+        if observation.symbol == name
+    )
+    for strategy, _candidate_id in preflight:
+        if type(strategy) is NoTradeBaseline:
+            proposals.append(
+                strategy.propose(
+                    symbol=name,
+                    decision_time=cutoff,
+                    evidence_event_ids=evidence_ids,
+                )
+            )
+            continue
+        snapshot = ReturnThresholdBaseline.snapshot(strategy)
+        working = type(strategy).restore(snapshot)
+        proposals.append(
+            run_baseline(
+                working,
+                detached_observations,
+                decision_time=cutoff,
+                symbol=name,
+            )
+        )
+
+    return StrategyComparisonSnapshot(
+        symbol=name,
+        decision_time=cutoff,
+        proposals=tuple(proposals),
+    )
 
 
 

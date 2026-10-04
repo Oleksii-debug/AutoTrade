@@ -8,13 +8,17 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from research.autotrade_research.strategies.deterministic import (
+    BreakoutThresholdBaseline,
     CausalObservation,
     DeterministicProposal,
+    MeanReversionThresholdBaseline,
     NoTradeBaseline,
     ReturnThresholdBaseline,
+    StrategyComparisonSnapshot,
     StrategyDescriptor,
     StrategyEconomicsBinding,
     bind_strategy_economics,
+    compare_deterministic_strategies,
     run_baseline,
     to_decision_proposal,
 )
@@ -1380,6 +1384,357 @@ class DeterministicStrategyTests(unittest.TestCase):
         )
         self.assertEqual(strategy.threshold, Decimal("0.0100"))
         self.assertEqual(strategy.proposal_quantity, Decimal("2.0"))
+
+
+    def threshold_descriptor(self, *, family, strategy_id, minimum_history=3):
+        return self.descriptor(
+            strategy_id=strategy_id,
+            family=family,
+            minimum_history=minimum_history,
+            parameter_bounds=(
+                ("threshold", "0", "0.10"),
+                ("proposal_quantity", "0.0001", "100"),
+            ),
+        )
+
+    def test_threshold_implementation_rejects_mislabeled_strategy_family(self):
+        wrong = self.threshold_descriptor(
+            family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+            strategy_id="mislabeled",
+            minimum_history=2,
+        )
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=wrong,
+            )
+
+        trend = self.descriptor()
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            MeanReversionThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=trend,
+            )
+
+    def test_trend_and_mean_reversion_are_distinct_transparent_controls(self):
+        trend_descriptor = self.threshold_descriptor(
+            family="DETERMINISTIC_RETURN_THRESHOLD",
+            strategy_id="trend-control",
+            minimum_history=2,
+        )
+        mean_descriptor = self.threshold_descriptor(
+            family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+            strategy_id="mean-reversion-control",
+            minimum_history=2,
+        )
+        rising = [obs(0, "100"), obs(1, "102")]
+        trend = run_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=trend_descriptor,
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        mean = run_baseline(
+            MeanReversionThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=mean_descriptor,
+            ),
+            rising,
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        self.assertEqual(trend.action, "BUY")
+        self.assertEqual(mean.action, "SELL")
+        for proposal in (trend, mean):
+            self.assertEqual(proposal.model_calls, 0)
+            self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
+
+    def test_breakout_control_uses_only_prior_causal_window(self):
+        descriptor = self.threshold_descriptor(
+            family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+            strategy_id="breakout-control",
+        )
+        proposal = run_baseline(
+            BreakoutThresholdBaseline(
+                lookback=3,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "101"), obs(2, "103")],
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        self.assertEqual(proposal.action, "BUY")
+        self.assertEqual(proposal.quantity, Decimal("2"))
+        self.assertEqual(
+            proposal.evidence_event_ids,
+            ("event-0", "event-1", "event-2"),
+        )
+        self.assertIn("breakout", proposal.reason)
+
+    def test_family_specific_snapshot_restart_preserves_exact_semantics(self):
+        descriptor = self.threshold_descriptor(
+            family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+            strategy_id="mean-reversion-control",
+            minimum_history=2,
+        )
+        strategy = MeanReversionThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        for item in (obs(0, "100"), obs(1, "102")):
+            strategy.ingest(item, simulation_time=item.available_at)
+        restored = MeanReversionThresholdBaseline.restore(strategy.snapshot())
+        self.assertEqual(
+            restored.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "family does not match"):
+            ReturnThresholdBaseline.restore(strategy.snapshot())
+
+    def test_legacy_snapshot_cannot_be_reinterpreted_as_new_strategy_family(self):
+        trend = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        payload = json.loads(trend.snapshot())
+        payload["schema_version"] = 5
+        del payload["strategy_family"]
+        legacy = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        ReturnThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            MeanReversionThresholdBaseline.restore(legacy)
+        with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
+            BreakoutThresholdBaseline.restore(legacy)
+
+    def make_comparison_strategies(self):
+        no_trade_descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        return (
+            ReturnThresholdBaseline(
+                lookback=3,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=self.threshold_descriptor(
+                    family="DETERMINISTIC_RETURN_THRESHOLD",
+                    strategy_id="trend-control",
+                ),
+            ),
+            MeanReversionThresholdBaseline(
+                lookback=3,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=self.threshold_descriptor(
+                    family="DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+                    strategy_id="mean-reversion-control",
+                ),
+            ),
+            BreakoutThresholdBaseline(
+                lookback=3,
+                threshold="0.01",
+                proposal_quantity="1",
+                descriptor=self.threshold_descriptor(
+                    family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+                    strategy_id="breakout-control",
+                ),
+            ),
+            NoTradeBaseline(descriptor=no_trade_descriptor),
+        )
+
+    def test_comparison_exposes_candidates_without_declaring_a_winner(self):
+        comparison = compare_deterministic_strategies(
+            self.make_comparison_strategies(),
+            (obs(0, "100"), obs(1, "101"), obs(2, "103")),
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        self.assertIsInstance(comparison, StrategyComparisonSnapshot)
+        self.assertEqual(len(comparison.proposals), 4)
+        self.assertEqual(comparison.selection_status, "NOT_ESTABLISHED")
+        self.assertEqual(comparison.economic_edge_status, "NOT_ESTABLISHED")
+        self.assertFalse(comparison.grants_trading_authority)
+        self.assertEqual(comparison.model_calls, 0)
+        self.assertEqual(
+            {proposal.action for proposal in comparison.proposals},
+            {"BUY", "SELL", "HOLD"},
+        )
+        self.assertTrue(
+            all(
+                proposal.economic_edge_claim == "UNPROVEN"
+                for proposal in comparison.proposals
+            )
+        )
+        document = comparison.canonical_document()
+        self.assertNotIn("winner", document)
+        self.assertNotIn("selected_strategy", document)
+        self.assertEqual(
+            document["selection_status"],
+            "NOT_ESTABLISHED",
+        )
+
+    def test_comparison_fingerprint_is_invariant_to_candidate_input_order(self):
+        observations = (obs(0, "100"), obs(1, "101"), obs(2, "103"))
+        first = compare_deterministic_strategies(
+            self.make_comparison_strategies(),
+            observations,
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        second_strategies = tuple(reversed(self.make_comparison_strategies()))
+        second = compare_deterministic_strategies(
+            second_strategies,
+            observations,
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        self.assertEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual(first.canonical_document(), second.canonical_document())
+
+    def test_comparison_does_not_mutate_caller_strategy_state(self):
+        strategies = self.make_comparison_strategies()
+        threshold_strategies = strategies[:3]
+        compare_deterministic_strategies(
+            strategies,
+            (obs(0, "100"), obs(1, "101"), obs(2, "103")),
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        for strategy in threshold_strategies:
+            self.assertEqual(strategy._history, {})
+            self.assertEqual(strategy._observations_by_id, {})
+
+    def test_comparison_rejects_future_evidence_before_strategy_mutation(self):
+        strategies = self.make_comparison_strategies()
+        with self.assertRaisesRegex(ValueError, "not causally available"):
+            compare_deterministic_strategies(
+                strategies,
+                (
+                    obs(0, "100"),
+                    obs(
+                        1,
+                        "101",
+                        available=BASE + timedelta(minutes=5),
+                    ),
+                ),
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+            )
+        for strategy in strategies[:3]:
+            self.assertEqual(strategy._history, {})
+
+    def test_comparison_rejects_duplicate_candidate_configuration_before_run(self):
+        descriptor = self.threshold_descriptor(
+            family="DETERMINISTIC_RETURN_THRESHOLD",
+            strategy_id="trend-control",
+            minimum_history=2,
+        )
+        first = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        duplicate = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate candidate"):
+            compare_deterministic_strategies(
+                (first, duplicate),
+                (obs(0, "100"), obs(1, "102")),
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+            )
+        self.assertEqual(first._history, {})
+        self.assertEqual(duplicate._history, {})
+
+    def test_comparison_requires_multiple_registered_candidates(self):
+        strategy = self.make_comparison_strategies()[0]
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            compare_deterministic_strategies(
+                (strategy,),
+                (obs(0, "100"),),
+                decision_time=BASE,
+                symbol="AAA",
+            )
+        unregistered = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(ValueError, "must be registered"):
+            compare_deterministic_strategies(
+                (strategy, unregistered),
+                (obs(0, "100"), obs(1, "102")),
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA",
+            )
+
+    def test_comparison_rejects_hostile_tuple_subclasses_before_iteration(self):
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+        strategies = HostileTuple(self.make_comparison_strategies())
+        with self.assertRaisesRegex(TypeError, "strategies must"):
+            compare_deterministic_strategies(
+                strategies,
+                (),
+                decision_time=BASE,
+                symbol="AAA",
+            )
+        self.assertEqual(calls, [])
+
+        observations = HostileTuple((obs(0, "100"),))
+        with self.assertRaisesRegex(TypeError, "observations must"):
+            compare_deterministic_strategies(
+                self.make_comparison_strategies()[:2],
+                observations,
+                decision_time=BASE,
+                symbol="AAA",
+            )
+        self.assertEqual(calls, [])
+
+    def test_comparison_fingerprint_revalidates_nested_proposals(self):
+        comparison = compare_deterministic_strategies(
+            self.make_comparison_strategies()[:2],
+            (obs(0, "100"), obs(1, "102"), obs(2, "103")),
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        object.__setattr__(comparison.proposals[0], "economic_edge_claim", "PROVEN")
+        with self.assertRaisesRegex(ValueError, "economic edge"):
+            _ = comparison.fingerprint
 
 
 if __name__ == "__main__":

@@ -79,8 +79,19 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
-        if (_hostRefreshInProgress || _lifetime.IsCancellationRequested)
+        if (_lifetime.IsCancellationRequested)
         {
+            return;
+        }
+
+        if (_hostRefreshInProgress)
+        {
+            if (announce)
+            {
+                SetLiveRegionText(
+                    HostStatusAnnouncement,
+                    "Host status refresh is already in progress. The current request will update this status when it finishes.");
+            }
             return;
         }
 

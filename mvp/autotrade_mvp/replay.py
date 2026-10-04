@@ -232,7 +232,14 @@ def _runtime_authority_state_operations():
             RuntimeStateSignatureVerifier,
         ],
     ] = {}
-    product_verifier_states: dict[str, weakref.ReferenceType] = {}
+    # Keep the selected verifier binding sticky for the process lifetime even
+    # when the short-lived verifier wrapper is garbage-collected.  The strong
+    # reference to the exact verification callable prevents a later caller from
+    # replacing product trust merely by waiting for or forcing wrapper GC.
+    product_verifier_states: dict[
+        str,
+        tuple[str, RuntimeStateSignatureVerifier, weakref.ReferenceType],
+    ] = {}
     state_lock = threading.RLock()
 
     def authority_state(
@@ -340,26 +347,54 @@ def _runtime_authority_state_operations():
     def select_product_verifier(
         verifier: "RuntimeStateVerifier",
     ) -> "RuntimeStateVerifier":
-        authority_id_value = verifier_authority_id(verifier)
+        authority_id_value, verifier_id_value, verify_signature = verifier_state(
+            verifier
+        )
         with state_lock:
-            current_ref = product_verifier_states.get(authority_id_value)
-            current = current_ref() if current_ref is not None else None
-            if current is not None and current is not verifier:
-                raise ReplayError(
-                    "runtime authority already has a live product-selected verifier"
+            selected_state = product_verifier_states.get(authority_id_value)
+            if selected_state is not None:
+                selected_verifier_id, selected_verify_signature, selected_ref = (
+                    selected_state
                 )
-            if current_ref is not None and current is None:
-                product_verifier_states.pop(authority_id_value, None)
-            product_verifier_states[authority_id_value] = weakref.ref(verifier)
+                selected = selected_ref()
+                if selected is not None and selected is not verifier:
+                    raise ReplayError(
+                        "runtime authority already has a live product-selected verifier"
+                    )
+                if (
+                    verifier_id_value != selected_verifier_id
+                    or verify_signature is not selected_verify_signature
+                ):
+                    raise ReplayError(
+                        "runtime authority product-selected verifier binding is immutable"
+                    )
+            product_verifier_states[authority_id_value] = (
+                verifier_id_value,
+                verify_signature,
+                weakref.ref(verifier),
+            )
         return verifier
 
     def require_product_verifier(verifier: "RuntimeStateVerifier") -> None:
-        authority_id_value = verifier_authority_id(verifier)
+        authority_id_value, verifier_id_value, verify_signature = verifier_state(
+            verifier
+        )
         with state_lock:
-            selected_ref = product_verifier_states.get(authority_id_value)
-            selected = selected_ref() if selected_ref is not None else None
-            if selected_ref is not None and selected is None:
-                product_verifier_states.pop(authority_id_value, None)
+            selected_state = product_verifier_states.get(authority_id_value)
+            if selected_state is None:
+                selected = None
+            else:
+                selected_verifier_id, selected_verify_signature, selected_ref = (
+                    selected_state
+                )
+                if (
+                    verifier_id_value != selected_verifier_id
+                    or verify_signature is not selected_verify_signature
+                ):
+                    raise ReplayError(
+                        "runtime_state_verifier does not match the immutable product trust binding"
+                    )
+                selected = selected_ref()
         if selected is None:
             raise ReplayError("product-selected runtime verifier is unavailable")
         if selected is not verifier:

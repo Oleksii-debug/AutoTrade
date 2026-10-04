@@ -879,8 +879,8 @@ def parse_execution_frame(
 def _provider_fills_from_execution_frame(
     frame: object,
     *,
-    instrument_versions: Mapping[str, str],
-    fee_currency_by_symbol: Mapping[str, str],
+    instrument_versions: dict[str, str],
+    fee_currency_by_symbol: dict[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
     """Translate exact Kraken trade reports into canonical reconciliation fills.
 
@@ -891,10 +891,10 @@ def _provider_fills_from_execution_frame(
 
     if type(frame) is not KrakenSpotExecutionFrame:
         raise TypeError("frame must be exact KrakenSpotExecutionFrame")
-    if not isinstance(instrument_versions, Mapping):
-        raise TypeError("instrument_versions must be a mapping")
-    if not isinstance(fee_currency_by_symbol, Mapping):
-        raise TypeError("fee_currency_by_symbol must be a mapping")
+    if type(instrument_versions) is not dict:
+        raise TypeError("instrument_versions must be an exact dict")
+    if type(fee_currency_by_symbol) is not dict:
+        raise TypeError("fee_currency_by_symbol must be an exact dict")
 
     instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument in instrument_versions.items():
@@ -1360,8 +1360,8 @@ class KrakenSpotExecutionStreamRecovery:
     def buffered_provider_fills(
         self,
         *,
-        instrument_versions: Mapping[str, str],
-        fee_currency_by_symbol: Mapping[str, str],
+        instrument_versions: dict[str, str],
+        fee_currency_by_symbol: dict[str, str],
     ) -> tuple[ProviderFillEvidence, ...]:
         """Return fills only from updates admitted by this recovery sequence.
 

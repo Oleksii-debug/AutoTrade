@@ -193,6 +193,52 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
 
+    def test_fill_bridge_rejects_polymorphic_mapping_before_callbacks(self):
+        touched: list[str] = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping iteration")
+
+            def get(self, *args, **kwargs):
+                touched.append("get")
+                raise AssertionError("hostile mapping lookup")
+
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=43,
+                reports=[
+                    {
+                        "order_id": "O-MAP-GUARD",
+                        "cl_ord_id": "client-map-guard",
+                        "exec_id": "E-MAP-GUARD",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        with self.assertRaisesRegex(TypeError, "instrument_versions must be an exact dict"):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions=HostileDict(
+                    {"BTC/USD": "CRYPTO:BTC-USD:v1"}
+                ),
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+        with self.assertRaisesRegex(TypeError, "fee_currency_by_symbol must be an exact dict"):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol=HostileDict({"BTC/USD": "USD"}),
+            )
+        self.assertEqual(touched, [])
+
     def test_subscription_profile_requires_open_order_snapshot_without_trade_snapshot(self):
         self.assertEqual(
             dict(KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION),

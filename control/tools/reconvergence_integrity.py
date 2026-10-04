@@ -191,7 +191,7 @@ def reconvergence_evidence(
     max_deletions: int,
     max_deleted_fraction: float,
     scope_enforced: bool,
-    trusted_root_approvals: Sequence[str] | None,
+    trusted_root_approvals: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Build secret-free exact-revision evidence from one trusted-base decision."""
 

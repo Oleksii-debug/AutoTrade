@@ -593,8 +593,22 @@ class DurableProviderQualificationRegistry:
         for qualification_id, record in history.accepted.items():
             if _current_scope(record) != scope:
                 continue
-            if qualification_id in history.superseded:
-                continue
+            superseding_id = history.superseded.get(qualification_id)
+            if superseding_id is not None:
+                superseding = history.accepted.get(superseding_id)
+                if superseding is None:
+                    raise ProviderQualificationError(
+                        "provider qualification supersession target disappeared"
+                    )
+                superseding_signed_at = datetime.strptime(
+                    superseding.signed_at,
+                    "%Y-%m-%dT%H:%M:%SZ",
+                ).replace(tzinfo=timezone.utc)
+                # A later journal cut may know that Q2 supersedes Q1, but that
+                # knowledge must not retroactively erase Q1 from an evaluation
+                # time before Q2's signed authority existed.
+                if superseding_signed_at <= point:
+                    continue
             signed_at = datetime.strptime(
                 record.signed_at,
                 "%Y-%m-%dT%H:%M:%SZ",

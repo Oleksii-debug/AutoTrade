@@ -57,16 +57,18 @@ def _canonical_source_revision(value, *, source):
 
 
 def source_revision():
+    marker_revision = None
     marker = ROOT / 'SOURCE_REVISION'
     if marker.is_file():
-        return _canonical_source_revision(
+        marker_revision = _canonical_source_revision(
             marker.read_text(encoding='utf-8').strip(),
             source='SOURCE_REVISION',
         )
 
-    # Deterministic Windows bundles already carry their exact source SHA in the
-    # bundle manifest. This is reproducibility identity only; release
-    # authenticity remains owned by the separate qualification/signing gates.
+    # Deterministic Windows bundles carry their exact source SHA in the bundle
+    # manifest. If two installed identity authorities are present, require them
+    # to agree instead of silently preferring a stale marker.
+    bundle_revision = None
     bundle_manifest = ROOT / 'bundle-manifest.json'
     if bundle_manifest.is_file():
         try:
@@ -75,10 +77,21 @@ def source_revision():
             raise RuntimeError('bundle source revision manifest is unreadable') from error
         if type(manifest) is not dict:
             raise RuntimeError('bundle source revision manifest must be an object')
-        return _canonical_source_revision(
+        bundle_revision = _canonical_source_revision(
             manifest.get('source_sha'),
             source='bundle manifest',
         )
+
+    if (
+        marker_revision is not None
+        and bundle_revision is not None
+        and marker_revision != bundle_revision
+    ):
+        raise RuntimeError('installed source revision authorities disagree')
+    if marker_revision is not None:
+        return marker_revision
+    if bundle_revision is not None:
+        return bundle_revision
 
     try:
         revision = subprocess.check_output(

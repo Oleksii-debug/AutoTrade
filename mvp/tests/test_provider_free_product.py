@@ -744,6 +744,45 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             ):
                 self.assertEqual(source_revision(), 'a' * 40)
 
+    def test_matching_installed_source_revision_authorities_are_accepted(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = 'a' * 40
+            (root / 'SOURCE_REVISION').write_text(revision + '\n', encoding='utf-8')
+            (root / 'bundle-manifest.json').write_text(
+                json.dumps({'source_sha': revision}),
+                encoding='utf-8',
+            )
+            with patch(
+                'mvp.autotrade_mvp.product_runtime.ROOT',
+                root,
+            ), patch(
+                'mvp.autotrade_mvp.product_runtime.subprocess.check_output',
+                side_effect=AssertionError('Git must not be consulted'),
+            ):
+                self.assertEqual(source_revision(), revision)
+
+    def test_installed_source_revision_authorities_must_agree(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'SOURCE_REVISION').write_text('a' * 40, encoding='utf-8')
+            (root / 'bundle-manifest.json').write_text(
+                json.dumps({'source_sha': 'b' * 40}),
+                encoding='utf-8',
+            )
+            with patch(
+                'mvp.autotrade_mvp.product_runtime.ROOT',
+                root,
+            ), patch(
+                'mvp.autotrade_mvp.product_runtime.subprocess.check_output',
+                side_effect=AssertionError('Git must not mask installed identity conflict'),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    'source revision authorities disagree',
+                ):
+                    source_revision()
+
     def test_invalid_installed_bundle_source_revision_fails_closed_before_git(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

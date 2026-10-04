@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.financial_request_binding import FinancialRequestBindingM
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthority,
     FinancialSendAuthorityError,
+    FinancialSendAuthorityIssuer,
     FinanciallyBoundBybitOrderSender,
     require_exact_bybit_financial_request,
 )
@@ -174,6 +175,18 @@ class _HostileText(str):
         raise AssertionError("hostile text callback executed")
 
 
+class _HostileDescriptor:
+    callbacks = 0
+
+    @classmethod
+    def reset(cls):
+        cls.callbacks = 0
+
+    def __get__(self, _instance, _owner):
+        type(self).callbacks += 1
+        raise AssertionError("hostile capability descriptor executed")
+
+
 class _AuthorityStub:
     def __init__(self, material):
         self.binding = material
@@ -181,15 +194,34 @@ class _AuthorityStub:
         self.intent_hash = "intent-hash-1"
 
 
+class _OpaqueAuthority:
+    @property
+    def binding(self):
+        raise AssertionError("bound sender dynamically read authority.binding")
+
+    @property
+    def intent_id(self):
+        raise AssertionError("bound sender dynamically read authority.intent_id")
+
+    @property
+    def intent_hash(self):
+        raise AssertionError("bound sender dynamically read authority.intent_hash")
+
+
 class _IssuerStub:
     def __init__(self, runtime, *, before_guard=None):
         self.runtime = runtime
         self.before_guard = before_guard
 
-    def _dispatch_guard_for(self, _authority):
+    def _dispatch_material_for(self, _authority):
         if self.before_guard is not None:
             self.before_guard()
-        return lambda _intent_hash, _now: (True, "allowed")
+        return (
+            lambda _intent_hash, _now: (True, "allowed"),
+            binding(),
+            "intent-1",
+            "intent-hash-1",
+        )
 
 
 class _SenderStub:
@@ -275,8 +307,42 @@ def _executable_authority_shell():
     return bound
 
 
+def _capability_executable_authority_shell():
+    issuer = object.__new__(FinancialSendAuthorityIssuer)
+    issuer_function = FinancialSendAuthority.__dict__["_require_issuer"]
+    property_authorities = []
+    for name in ("binding", "admission_id", "intent_id", "intent_hash", "action"):
+        descriptor = FinancialSendAuthority.__dict__[name]
+        getter = descriptor.fget
+        property_authorities.append((name, descriptor, getter, getter.__code__))
+    object.__setattr__(
+        issuer,
+        "_FinancialSendAuthorityIssuer__capability_issuer_function",
+        issuer_function,
+    )
+    object.__setattr__(
+        issuer,
+        "_FinancialSendAuthorityIssuer__capability_issuer_code",
+        issuer_function.__code__,
+    )
+    object.__setattr__(
+        issuer,
+        "_FinancialSendAuthorityIssuer__capability_property_authorities",
+        tuple(property_authorities),
+    )
+    return issuer
+
+
 def _forged_sender_dispatch(*_args, **_kwargs):
     raise AssertionError("forged sender dispatch executed")
+
+
+def _forged_capability_issuer(_self, _issuer_identity):
+    raise AssertionError("forged capability issuer executable ran")
+
+
+def _forged_capability_getter(_self):
+    raise AssertionError("forged capability getter executable ran")
 
 
 class ExactBybitFinancialRequestTests(unittest.TestCase):
@@ -471,6 +537,21 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
         self.assertEqual(scope["provider_environment"], "DEMO")
         self.assertEqual(lower.submission_scope["provider_environment"], "TESTNET")
 
+    def test_bound_sender_never_dereferences_caller_capability(self):
+        bound, lower = _bound_sender_harness()
+        with patch.object(ProductionBybitOrderSender, "dispatch", _SenderStub.dispatch):
+            result = bound.dispatch(
+                authority=_OpaqueAuthority(),
+                attempt_id="attempt-3",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                request=exact_request()[0],
+                now="2026-10-04T04:30:00Z",
+                submission_scope=exact_scope(),
+            )
+        self.assertEqual(result, "sent")
+        self.assertEqual(lower.request["account_id"], "account-1")
+
     def test_direct_capability_construction_is_rejected(self):
         with self.assertRaisesRegex(
             FinancialSendAuthorityError,
@@ -499,6 +580,56 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 _factory_token=module._CAPABILITY_FACTORY_TOKEN,
             )
+
+
+class CapabilityExecutableAuthorityTests(unittest.TestCase):
+    def test_issuer_method_rebinding_fails_before_forged_executable(self):
+        issuer = _capability_executable_authority_shell()
+        original = FinancialSendAuthority.__dict__["_require_issuer"]
+        try:
+            setattr(
+                FinancialSendAuthority,
+                "_require_issuer",
+                _forged_capability_issuer,
+            )
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "issuer executable authority changed",
+            ):
+                issuer._require_capability_executable_authority()
+        finally:
+            setattr(FinancialSendAuthority, "_require_issuer", original)
+
+    def test_property_descriptor_rebinding_does_not_execute_descriptor(self):
+        issuer = _capability_executable_authority_shell()
+        original = FinancialSendAuthority.__dict__["binding"]
+        hostile = _HostileDescriptor()
+        _HostileDescriptor.reset()
+        try:
+            setattr(FinancialSendAuthority, "binding", hostile)
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "binding property authority changed",
+            ):
+                issuer._require_capability_executable_authority()
+        finally:
+            setattr(FinancialSendAuthority, "binding", original)
+        self.assertEqual(_HostileDescriptor.callbacks, 0)
+
+    def test_property_getter_same_function_code_mutation_fails_closed(self):
+        issuer = _capability_executable_authority_shell()
+        descriptor = FinancialSendAuthority.__dict__["intent_hash"]
+        getter = descriptor.fget
+        original_code = getter.__code__
+        try:
+            getter.__code__ = _forged_capability_getter.__code__
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "intent_hash getter authority code changed",
+            ):
+                issuer._require_capability_executable_authority()
+        finally:
+            getter.__code__ = original_code
 
 
 class BoundBybitExecutableAuthorityTests(unittest.TestCase):

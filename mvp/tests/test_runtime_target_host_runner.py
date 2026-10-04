@@ -192,6 +192,46 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(journal.current_journal_sequence(), before)
 
+    def test_operation_mapping_rejects_polymorphic_key_without_equality_callback(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            equality_called = False
+
+            class HostileKey(str):
+                __hash__ = str.__hash__
+
+                def __eq__(self, other):
+                    nonlocal equality_called
+                    equality_called = True
+                    raise AssertionError("operation-key equality callback executed")
+
+            operations = {
+                HostileKey("fin-1"): lambda: append_expected(journal, "fin-1")
+            }
+            before = journal.current_journal_sequence()
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_runner._require_shared_clock_contract",
+                return_value=None,
+            ), self.assertRaisesRegex(
+                RuntimeTargetHostRunnerError,
+                "operation keys must be exact strings",
+            ):
+                run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="runner-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations=operations,
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertFalse(equality_called)
+            self.assertEqual(journal.current_journal_sequence(), before)
+
     def test_above_budget_latency_fails_without_losing_financial_event(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

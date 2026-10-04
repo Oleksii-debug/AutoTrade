@@ -991,6 +991,27 @@ def _mutable_source_inventory_identity(
     return tuple((relative.as_posix(), kind) for _, relative, kind in sources)
 
 
+def _assert_mutable_sources_unchanged(
+    state: Path,
+    artifacts: Path,
+    source_inventory: Sequence[tuple[str, str]],
+    source_rechecks: Sequence[tuple[Path, str]],
+) -> None:
+    """Fail closed if the frozen mutable source cut no longer matches."""
+
+    for source, expected_digest in source_rechecks:
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or _sha256_file(source) != expected_digest
+        ):
+            raise BackupError("Source changed before backup commit")
+
+    current_sources = _mutable_backup_sources(state, artifacts)
+    if _mutable_source_inventory_identity(current_sources) != tuple(source_inventory):
+        raise BackupError("Source inventory changed before backup commit")
+
+
 def _validate_artifact_source(root: Path) -> None:
     manifests_root = root / "manifests" / "sha256"
     objects_root = root / "objects" / "sha256"
@@ -1125,17 +1146,12 @@ def create_backup(
             entries.append(_entry(relative.as_posix(), digest, size, kind))
             source_rechecks.append((source, digest))
 
-        for source, expected_digest in source_rechecks:
-            if (
-                source.is_symlink()
-                or not source.is_file()
-                or _sha256_file(source) != expected_digest
-            ):
-                raise BackupError("Source changed before backup commit")
-
-        current_sources = _mutable_backup_sources(state, artifacts)
-        if _mutable_source_inventory_identity(current_sources) != source_inventory:
-            raise BackupError("Source inventory changed before backup commit")
+        _assert_mutable_sources_unchanged(
+            state,
+            artifacts,
+            source_inventory,
+            source_rechecks,
+        )
 
         checkpoint_present = (stage / "state" / "checkpoint.json").is_file()
         learning_evidence_present = (
@@ -1165,6 +1181,18 @@ def create_backup(
         )
         verify_backup(stage)
         _fsync_directory_tree(stage)
+
+        # All staged validation and durability work is complete. Re-read both
+        # byte digests and the full mutable path/kind inventory at the final
+        # source cut immediately before atomic publication. A writer racing
+        # any earlier phase must abort this attempt rather than publish an
+        # already-stale bundle.
+        _assert_mutable_sources_unchanged(
+            state,
+            artifacts,
+            source_inventory,
+            source_rechecks,
+        )
         os.replace(stage, target)
         _fsync_directory(target.parent)
         return target

@@ -658,6 +658,51 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-10-04T05:00:00.123456Z")
         self.assertEqual(fill.evidence_refs, (frame.evidence_ref,))
 
+    def test_provider_fill_bridge_rejects_conflicting_normalized_authority_maps(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=45,
+                reports=[
+                    {
+                        "order_id": "O-MAP-CONFLICT",
+                        "cl_ord_id": "client-map-conflict",
+                        "exec_id": "E-MAP-CONFLICT",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "instrument_versions contains conflicting symbol mappings",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={
+                    "BTC/USD": "CRYPTO:BTC-USD:v1",
+                    " BTC/USD ": "CRYPTO:OTHER:v1",
+                },
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "fee_currency_by_symbol contains conflicting symbol mappings",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={
+                    "BTC/USD": "USD",
+                    " BTC/USD ": "EUR",
+                },
+            )
+
     def test_provider_fill_bridge_ignores_status_only_reports(self):
         frame = parse_execution_frame(
             frame_bytes(

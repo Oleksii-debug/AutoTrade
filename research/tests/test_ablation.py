@@ -1576,6 +1576,44 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(missing_value.required_lower_bound, Decimal("0"))
             self.assertEqual(missing_value.uncertainty_multiplier, Decimal("2"))
 
+            fx_required_payload = dict(base)
+            fx_required_payload["ablation_decision_policy"] = dict(
+                decision_only_payload["ablation_decision_policy"]
+            )
+            fx_required_payload["ablation_value_policy"] = {
+                "schema_version": "1.0.0",
+                "value_unit": "USD",
+                "utility_projection_ref": (
+                    "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                    + "1" * 64
+                ),
+                "cost_projection_ref": (
+                    "artifact:22222222-2222-4222-8222-222222222222@sha256:"
+                    + "2" * 64
+                ),
+                "fx_valuation_ref": (
+                    "artifact:55555555-5555-4555-8555-555555555555@sha256:"
+                    + "5" * 64
+                ),
+            }
+            fx_required = science.register_protocol(
+                fx_required_payload,
+                protocol_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            )
+            fx_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority_for(fx_required),
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+            )
+            self.assertEqual(
+                fx_result.reason,
+                "registered_ablation_fx_valuation_evidence_unavailable",
+            )
+            self.assertEqual(fx_result.required_lower_bound, Decimal("0"))
+            self.assertEqual(fx_result.uncertainty_multiplier, Decimal("2"))
+
             unsupported_payload = dict(base)
             unsupported_payload["ablation_decision_policy"] = {
                 **decision_only_payload["ablation_decision_policy"],

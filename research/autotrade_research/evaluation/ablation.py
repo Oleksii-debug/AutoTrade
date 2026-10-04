@@ -2268,6 +2268,18 @@ def evaluate_qualified_incremental_value(
                 uncertainty_multiplier=multiplier,
                 reason="registered_ablation_value_policy_unavailable",
             )
+        if registered_value.fx_valuation_ref is not None:
+            # The value policy has explicitly frozen an FX dependency.  Until
+            # the canonical FX owner (quote availability, freshness, side and
+            # rounding policy) is composed at the same causal cut, silently
+            # ignoring this preregistered dependency would make the value
+            # dimension post-hoc selectable.
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_fx_valuation_evidence_unavailable",
+            )
 
         # Population completeness is independently safe to resolve before the
         # utility/cost operand owners exist. This preflight reads only the frozen

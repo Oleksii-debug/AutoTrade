@@ -32,7 +32,7 @@ class ProviderRouteRecoveryProvenanceTests(unittest.TestCase):
             q2_box = []
 
             def transport(_client_id, _request, final_guard):
-                # Q1 is re-resolved by the irreversible final guard first.  Once
+                # Q1 is re-resolved by the irreversible final guard first. Once
                 # that barrier has passed, a later Q2 cannot make this attempt
                 # retry-safe or rewrite which qualification governed the send.
                 final_guard()
@@ -107,22 +107,23 @@ class ProviderRouteRecoveryProvenanceTests(unittest.TestCase):
                 route.candidate.protocol_version,
             )
 
-            # Simulate process restart by reopening the same journal through a
-            # fresh store/controller. Recovery must restore the sticky UNKNOWN
-            # attempt without rewriting the authoritative Prepared provenance.
+            # Simulate process restart through the real startup path. start()
+            # creates the new durable owner fence and immediately reconstructs
+            # sticky UNKNOWN sends from this PAPER:account journal scope.
             reopened = JournalStore(journal.path)
             recovery = RecoveryController(
                 owner_store=reopened,
                 owner_scope="PAPER:paper-account",
             )
-            recovered = recovery.recover_durable_submission_uncertainty(
-                environment="PAPER",
-                account_id="paper-account",
-            )
-            self.assertEqual(recovered, ("attempt-route-1",))
+            owner = recovery.start("host-restarted")
+            self.assertEqual(owner.owner_id, "host-restarted")
+            self.assertEqual(owner.epoch, 1)
             self.assertIn("attempt-route-1", recovery.unresolved_attempts)
             self.assertIn("provider_uncertainty", recovery.reason_codes)
 
+            # Startup may append recovery-owner evidence, but it must not rewrite
+            # the original submission aggregate or silently substitute current Q2
+            # for the exact Q1 that governed the possible send.
             after_restart = reopened.load_events(
                 "submission_attempt",
                 aggregate_id,

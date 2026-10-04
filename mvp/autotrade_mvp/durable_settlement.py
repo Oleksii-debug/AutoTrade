@@ -503,7 +503,7 @@ def _install_durable_settlement_store_binding():
             return None
         raise SettlementConflict("durable settlement binding identity collision")
 
-    def bind(
+    def initialize(
         book: object,
         store: JournalStore,
         identity: object,
@@ -513,7 +513,8 @@ def _install_durable_settlement_store_binding():
         with lock:
             if registered(book) is not None:
                 raise RuntimeError("durable settlement authority is already bound")
-            bindings[id(book)] = (
+            object_id = id(book)
+            bindings[object_id] = (
                 weakref.ref(book),
                 (
                     weakref.ref(store),
@@ -525,6 +526,21 @@ def _install_durable_settlement_store_binding():
                     scope_id,
                 ),
             )
+            # Keep the financial authority unpublished to competing threads
+            # until durable replay has reconstructed the in-memory book. The
+            # re-entrant lock still permits this initializer's _reload() path
+            # to resolve its own closure-owned binding.
+            try:
+                object.__setattr__(book, "store", store)
+                object.__setattr__(book, "scope", scope)
+                object.__setattr__(book, "scope_id", scope_id)
+                object.__setattr__(book, "_book", SettlementBook())
+                DurableSettlementBook._reload(book)
+            except Exception:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is book:
+                    bindings.pop(object_id, None)
+                raise
 
     def bound(
         book: object,
@@ -565,11 +581,11 @@ def _install_durable_settlement_store_binding():
         )
         return store, current_identity, scope, scope_id
 
-    return bind, bound
+    return initialize, bound
 
 
 (
-    _bind_durable_settlement_store,
+    _initialize_durable_settlement_store,
     _bound_durable_settlement_store,
 ) = _install_durable_settlement_store_binding()
 del _install_durable_settlement_store_binding
@@ -723,18 +739,13 @@ class DurableSettlementBook:
                         "provider_environment; migration/reconciliation is required"
                     )
 
-        _bind_durable_settlement_store(
+        _initialize_durable_settlement_store(
             self,
             store,
             store_identity,
             scope,
             scope_id,
         )
-        self.store = store
-        self.scope = scope
-        self.scope_id = scope_id
-        self._book = SettlementBook()
-        self._reload()
 
     def _selected_authority(
         self,

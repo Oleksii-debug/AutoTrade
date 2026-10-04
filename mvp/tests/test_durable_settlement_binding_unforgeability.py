@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import gc
+import threading
 import unittest
 import weakref
 
@@ -140,6 +141,92 @@ class DurableSettlementBindingUnforgeabilityTests(unittest.TestCase):
             del selected
             gc.collect()
             self.assertIsNone(store_ref())
+
+    def test_store_binding_is_not_observable_until_initial_reload_completes(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = JournalStore(root / "selected.sqlite")
+            artifacts = ArtifactStore(root / "evidence")
+            book = object.__new__(DurableSettlementBook)
+
+            original_reload = DurableSettlementBook._reload
+            reload_started = threading.Event()
+            release_reload = threading.Event()
+            initializer_done = threading.Event()
+            observer_entered = threading.Event()
+            observer_done = threading.Event()
+            outcomes: dict[str, object] = {}
+            outcomes_lock = threading.Lock()
+
+            def fenced_reload(value) -> None:
+                reload_started.set()
+                if not release_reload.wait(5):
+                    raise AssertionError("initial settlement reload rendezvous timed out")
+                original_reload(value)
+
+            def initialize() -> None:
+                try:
+                    book.__init__(
+                        selected,
+                        provider_id="PROVIDER-A",
+                        account_id="acct-1",
+                        environment="PAPER",
+                        evidence_artifact_root=root / "evidence",
+                        evidence_artifact_store=artifacts,
+                    )
+                except BaseException as error:  # captured for cross-thread assertion
+                    with outcomes_lock:
+                        outcomes["initialize_error"] = error
+                finally:
+                    initializer_done.set()
+
+            def observe() -> None:
+                observer_entered.set()
+                try:
+                    observed = settlement_authority._bound_durable_settlement_store(
+                        book
+                    )
+                    with outcomes_lock:
+                        outcomes["observed_store"] = observed[0]
+                except BaseException as error:  # captured for cross-thread assertion
+                    with outcomes_lock:
+                        outcomes["observe_error"] = error
+                finally:
+                    observer_done.set()
+
+            DurableSettlementBook._reload = fenced_reload
+            initializer_thread = threading.Thread(target=initialize)
+            observer_thread = threading.Thread(target=observe)
+            try:
+                initializer_thread.start()
+                self.assertTrue(reload_started.wait(5))
+                self.assertFalse(initializer_done.is_set())
+
+                observer_thread.start()
+                self.assertTrue(observer_entered.wait(5))
+
+                # The store row exists for the initializer's re-entrant replay,
+                # but no competing thread may acquire it while _book still
+                # represents the pre-replay empty state.
+                self.assertFalse(observer_done.wait(0.25))
+
+                release_reload.set()
+                initializer_thread.join(5)
+                observer_thread.join(5)
+            finally:
+                release_reload.set()
+                DurableSettlementBook._reload = original_reload
+                initializer_thread.join(5)
+                observer_thread.join(5)
+
+            self.assertFalse(initializer_thread.is_alive())
+            self.assertFalse(observer_thread.is_alive())
+            self.assertTrue(initializer_done.is_set())
+            self.assertTrue(observer_done.is_set())
+            self.assertNotIn("initialize_error", outcomes)
+            self.assertNotIn("observe_error", outcomes)
+            self.assertIs(outcomes.get("observed_store"), selected)
+            book.refresh()
 
     def test_original_store_binding_registry_is_not_module_mutable_state(self):
         self.assertFalse(

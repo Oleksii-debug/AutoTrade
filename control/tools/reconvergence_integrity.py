@@ -201,9 +201,12 @@ def assess_reconvergence(
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:
         normalized_scopes = _normalized_scopes(allowed_scopes)
-    exact_scope_authority = frozenset(
-        scope.casefold() for scope in (normalized_scopes or ())
-    )
+    # Trust-root mutation authority is stricter than ordinary mutation-scope
+    # coverage. Git paths are case-sensitive identities even though path_covers()
+    # intentionally case-folds ordinary scopes for conservative Windows overlap.
+    # Therefore only the literal canonical repository path grants this special
+    # self-modification capability.
+    exact_scope_authority = frozenset(normalized_scopes or ())
 
     protected_by_casefold: dict[str, str] = {}
     for sentinel in protected_sentinels:
@@ -268,7 +271,7 @@ def assess_reconvergence(
             kind == "R"
             and destination_trust_root is not None
             and source_sentinel != destination_trust_root
-            and destination_trust_root.casefold() not in exact_scope_authority
+            and destination_trust_root not in exact_scope_authority
         ):
             protected_damage.add(
                 f"{change.previous_path} -> {destination_trust_root} "
@@ -279,7 +282,7 @@ def assess_reconvergence(
         if (
             kind in {"A", "M", "C"}
             and destination_trust_root is not None
-            and destination_trust_root.casefold() not in exact_scope_authority
+            and destination_trust_root not in exact_scope_authority
         ):
             protected_damage.add(
                 f"{destination_trust_root} "

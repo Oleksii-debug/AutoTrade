@@ -369,18 +369,15 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
 
     def test_trust_root_approval_is_exact_path_not_directory_authority(self):
         guard_path = "control/tools/reconvergence_integrity.py"
-        result = assess_reconvergence(
-            base_paths=[guard_path, "owned/change.py"],
-            changes=[Change(status="M", path=guard_path)],
-            trusted_root_approvals=("control/tools",),
-        )
-
-        self.assertFalse(result.allowed)
-        self.assertIn(
-            f"{guard_path} (unauthorized trust-root modification)",
-            result.protected_violations,
-        )
-        self.assertEqual(result.scope_violations, ())
+        with self.assertRaisesRegex(
+            ValueError,
+            "trusted root approval must name one exact executable trust root",
+        ):
+            assess_reconvergence(
+                base_paths=[guard_path, "owned/change.py"],
+                changes=[Change(status="M", path=guard_path)],
+                trusted_root_approvals=("control/tools",),
+            )
 
     def test_change_and_path_authority_inputs_require_exact_builtin_types(self):
         class HostileStr(str):

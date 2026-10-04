@@ -186,18 +186,17 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "await refreshSnapshot({announceRefresh: true})",
             catch_index,
         )
-        nested_catch = js.index("} catch {", recovery_index)
-        blocked = js.index("setCommandAvailability(false)", nested_catch)
-        snapshot_unready = js.index("state.snapshotReady = false", nested_catch)
-        identity_cleared = js.index("state.sessionIdentity = null", nested_catch)
-        self.assertGreater(nested_catch, recovery_index)
-        self.assertGreater(blocked, nested_catch)
-        self.assertGreater(snapshot_unready, nested_catch)
-        self.assertGreater(identity_cleared, nested_catch)
-        self.assertIn(
+        nested_catch = js.index("} catch (recoveryError) {", recovery_index)
+        fail_closed = js.index("invalidateSnapshotAuthority();", nested_catch)
+        failure_message = js.index(
             "Host synchronization gap recovery failed. Commands remain blocked",
-            js[nested_catch:blocked + 500],
+            nested_catch,
         )
+        next_branch = js.index("} else {", failure_message)
+        self.assertGreater(nested_catch, recovery_index)
+        self.assertGreater(fail_closed, nested_catch)
+        self.assertGreater(failure_message, fail_closed)
+        self.assertLess(failure_message, next_branch)
 
     def test_successful_http_response_still_rejects_internal_cursor_gap(self):
         js = APP.read_text(encoding="utf-8")

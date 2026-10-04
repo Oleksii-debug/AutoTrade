@@ -668,6 +668,7 @@ def load_account_resource_availability_evidence(
     evidence_artifact_store: ArtifactStore | None = None,
     require_latest_scope: bool = False,
     journal_sequence_cut: int | None = None,
+    _historical_risk_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -681,13 +682,49 @@ def load_account_resource_availability_evidence(
         raise TypeError("store must be JournalStore")
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
-    if journal_sequence_cut is not None:
-        if (type(journal_sequence_cut) is not int or journal_sequence_cut < 0
-                or journal_sequence_cut > store.current_journal_sequence()):
+    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    historical_cut = journal_sequence_cut
+    if _historical_risk_event_id is not None:
+        if require_latest_scope:
+            raise ValueError("historical verification cannot authorize current availability")
+        risk_event = store.get_event(_historical_risk_event_id)
+        if (
+            risk_event is None
+            or risk_event.get("event_type") != "RiskDecisionRecorded"
+            or risk_event.get("aggregate_type") != "risk_decision"
+            or type(risk_event.get("journal_sequence")) is not int
+            or not isinstance(risk_event.get("payload"), Mapping)
+        ):
+            raise ValueError("historical availability requires a durable risk event")
+        risk_payload = risk_event["payload"]
+        historical_evidence = risk_payload.get("reservation_availability_evidence")
+        risk_cut = risk_payload.get("journal_sequence_cut")
+        if (
+            type(historical_evidence) is not dict
+            or historical_evidence.get("checkpoint_event_id") != event_id
+            or historical_evidence.get("provider_id") != provider_id
+            or historical_evidence.get("account_id") != account_id
+            or historical_evidence.get("environment") != environment
+        ):
+            raise ValueError("historical risk availability scope differs")
+        if (
+            type(risk_cut) is not int
+            or risk_cut < 0
+            or risk_event["journal_sequence"] <= risk_cut
+        ):
+            raise ValueError("historical durable risk event journal cut is invalid")
+        if historical_cut is not None and historical_cut != risk_cut:
+            raise ValueError("historical risk event journal cut differs")
+        historical_cut = risk_cut
+    if historical_cut is not None:
+        if (
+            type(historical_cut) is not int
+            or historical_cut < 0
+            or historical_cut > store.current_journal_sequence()
+        ):
             raise ValueError("historical availability journal cut is invalid")
         if require_latest_scope:
             raise ValueError("current availability cannot use a historical journal cut")
-    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     current_scope_head = None
     if require_latest_scope:
         current_scope_head = require_current_reconciliation_checkpoint(
@@ -700,9 +737,10 @@ def load_account_resource_availability_evidence(
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
-    if (journal_sequence_cut is not None
-            and checkpoint.get("journal_sequence", journal_sequence_cut + 1)
-            > journal_sequence_cut):
+    if (
+        historical_cut is not None
+        and checkpoint.get("journal_sequence", historical_cut + 1) > historical_cut
+    ):
         raise ValueError("availability checkpoint is after the historical journal cut")
     if (
         checkpoint.get("event_type") != "AccountReconciled"
@@ -872,8 +910,11 @@ def load_account_resource_availability_evidence(
             "settlement_book"
         ):
             settlement_sequence = settlement_event.get("journal_sequence")
-            if (journal_sequence_cut is not None and type(settlement_sequence) is int
-                    and settlement_sequence > journal_sequence_cut):
+            if (
+                historical_cut is not None
+                and type(settlement_sequence) is int
+                and settlement_sequence > historical_cut
+            ):
                 continue
             settlement_payload = settlement_event.get("payload")
             if (
@@ -914,8 +955,11 @@ def load_account_resource_availability_evidence(
             "option_lifecycle"
         ):
             lifecycle_sequence = lifecycle_event.get("journal_sequence")
-            if (journal_sequence_cut is not None and type(lifecycle_sequence) is int
-                    and lifecycle_sequence > journal_sequence_cut):
+            if (
+                historical_cut is not None
+                and type(lifecycle_sequence) is int
+                and lifecycle_sequence > historical_cut
+            ):
                 continue
             lifecycle_payload = lifecycle_event.get("payload")
             if (

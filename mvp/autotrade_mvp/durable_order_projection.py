@@ -254,7 +254,20 @@ def _order_projection_binding_operations():
             store = state["store"]
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+            binding_key = id(value)
+
+            # The live owner retains its selected stores. The registry compares
+            # their exact identities without retaining abandoned compositions
+            # or exposing a callable weakref callback that can erase authority.
+            evidence = state["evidence_artifact_store"]
+            reference = weakref.ref(value)
+            bindings[binding_key] = (
+                reference,
+                weakref.ref(store),
+                identity,
+                scope,
+                weakref.ref(evidence) if evidence is not None else None,
+            )
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:
@@ -263,7 +276,11 @@ def _order_projection_binding_operations():
             entry = bindings.get(id(value))
             if entry is None or entry[0]() is not value:
                 raise OrderProjectionConflict("durable OMS selection authority is unavailable")
-            _, store, identity, scope, evidence = entry
+            _, store_reference, identity, scope, evidence_reference = entry
+            store = store_reference()
+            evidence = evidence_reference() if evidence_reference is not None else None
+            if store is None or (evidence_reference is not None and evidence is None):
+                raise OrderProjectionConflict("durable OMS selected store is unavailable")
             state = object.__getattribute__(value, "__dict__")
             if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
                 raise OrderProjectionConflict("durable OMS instance state is shadowed")

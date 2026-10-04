@@ -17,6 +17,12 @@ from research.autotrade_research.artifacts.durable_publish import (
     atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,
 )
+from autotrade_foundation.windows_namespace import (
+    retain_windows_directory_namespace,
+    retain_windows_relative_directory_namespace,
+    retain_windows_regular_file,
+    windows_handle_information,
+)
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
@@ -60,6 +66,7 @@ WINDOWS_RESERVED_STEMS = frozenset(
     | {f"com{index}" for index in range(1, 10)}
     | {f"lpt{index}" for index in range(1, 10)}
 )
+WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class BundleError(ValueError):
@@ -67,7 +74,7 @@ class BundleError(ValueError):
 
 
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise BundleError(f"{name} is required")
     return value.strip()
 
@@ -83,6 +90,16 @@ def _safe_relative(path: Path, root: Path) -> str:
 def _windows_path_key(relative: str) -> str:
     normalized: list[str] = []
     for part in PurePosixPath(relative).parts:
+        if "\\" in part:
+            raise BundleError(
+                f"bundle contains Windows separator in path segment: {relative}"
+            )
+        if any(char in part for char in '*?"<>|') or any(
+            ord(char) < 32 for char in part
+        ):
+            raise BundleError(
+                f"bundle contains Windows-forbidden path character: {relative}"
+            )
         if part.endswith((" ", ".")):
             raise BundleError(
                 f"bundle contains Windows-unsafe trailing space/dot segment: {relative}"
@@ -98,6 +115,96 @@ def _windows_path_key(relative: str) -> str:
             )
         normalized.append(part.casefold())
     return "/".join(normalized)
+
+
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Return whether a no-follow Windows stat identifies a reparse point."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise BundleError("Windows file attributes are invalid")
+    return bool(attributes & WINDOWS_REPARSE_POINT)
+
+
+def _reject_windows_reparse(path: Path, observed: os.stat_result) -> None:
+    if _has_windows_reparse_point(observed):
+        raise BundleError(f"Windows reparse points are forbidden in bundles: {path}")
+
+
+def _assert_windows_path_chain_is_not_reparse(path: Path) -> None:
+    """Reject every existing component in one absolute staging path chain."""
+
+    absolute = path.absolute()
+    anchor = Path(absolute.anchor)
+    current = anchor
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _assert_staging_components_are_not_reparse(
+    path: Path,
+    *,
+    staging: Path,
+) -> None:
+    """Reject root/ancestor/final reparse aliases for one staged path."""
+
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        relative = path.relative_to(staging)
+    except ValueError as error:
+        raise BundleError(f"staged path escaped staging directory: {path}") from error
+    current = staging
+    for part in relative.parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _walk_staging(staging: Path) -> list[Path]:
+    """Enumerate staging without descending through symlink/reparse directories."""
+
+    files: list[Path] = []
+    pending = [staging]
+    while pending:
+        directory = pending.pop()
+        _assert_windows_path_chain_is_not_reparse(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, observed)
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            if stat.S_ISDIR(observed.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            files.append(path)
+    return sorted(files, key=lambda item: item.as_posix())
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -164,6 +271,7 @@ def _assert_staged_file_identity(
         raise BundleError(f"staged file identity cannot be verified: {path}") from error
 
     for observed in (opened, current, resolved_current):
+        _reject_windows_reparse(path, observed)
         if not stat.S_ISREG(observed.st_mode):
             raise BundleError(f"staged entry must remain a regular file: {path}")
 
@@ -221,19 +329,247 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
+def _windows_descriptor_identity(
+    descriptor: int,
+    *,
+    subject: str,
+) -> tuple[int, int, int]:
+    """Return one canonical Windows file identity for an already-open descriptor.
+
+    CPython/CRT stat device and inode fields are not a cross-descriptor
+    authority on Windows. Convert each descriptor back to its native HANDLE
+    and reuse the foundation GetFileInformationByHandle authority instead.
+    """
+
+    if sys.platform != "win32":
+        raise BundleError("Windows descriptor identity is Windows-only")
+    try:
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(descriptor)
+        information = windows_handle_information(handle, subject=subject)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(f"{subject} identity cannot be verified") from error
+
+    if information.number_of_links > 1:
+        raise BundleError("hardlinked staged files are forbidden")
+    if information.number_of_links != 1:
+        raise BundleError("staged file changed during collection")
+    return (
+        information.volume_serial,
+        information.file_index_high,
+        information.file_index_low,
+    )
+
+
+def _read_retained_windows_regular_file(
+    authority,
+    *,
+    target_name: str,
+    path: Path,
+) -> bytes:
+    """Read one staged Windows file through one retained native identity.
+
+    A pathname descriptor establishes the admitted generation. The canonical
+    retained relative NT open is then acquired while the admission descriptor
+    is still held. Cross-descriptor identity is compared through the shared
+    GetFileInformationByHandle authority; CRT fstat metadata is used only for
+    bounded mutation checks. Once the retained descriptor exists its
+    no-WRITE/no-DELETE sharing fence keeps that exact generation stable through
+    the byte read.
+    """
+
+    try:
+        try:
+            admission_stream = path.open("rb")
+        except OSError as error:
+            raise BundleError(
+                f"staged Windows file authority cannot be admitted: {path}"
+            ) from error
+        with admission_stream:
+            admitted = os.fstat(admission_stream.fileno())
+            if not stat.S_ISREG(admitted.st_mode):
+                raise BundleError(f"staged entry must remain a regular file: {path}")
+            admitted_identity = _windows_descriptor_identity(
+                admission_stream.fileno(),
+                subject="Windows bundle admitted staged file",
+            )
+
+            with retain_windows_regular_file(
+                authority,
+                target_name=target_name,
+                subject="Windows bundle staged file",
+            ) as descriptor:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise BundleError(
+                        f"staged entry must remain a regular file: {path}"
+                    )
+                retained_identity = _windows_descriptor_identity(
+                    descriptor,
+                    subject="Windows bundle retained staged file",
+                )
+                if admitted_identity != retained_identity:
+                    raise BundleError(f"staged file changed during collection: {path}")
+                if (
+                    admitted.st_size != before.st_size
+                    or admitted.st_mtime_ns != before.st_mtime_ns
+                    or admitted.st_ctime_ns != before.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
+
+                chunks = bytearray()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                after = os.fstat(descriptor)
+
+                admitted_after = os.fstat(admission_stream.fileno())
+                if (
+                    admitted_after.st_size != admitted.st_size
+                    or admitted_after.st_mtime_ns != admitted.st_mtime_ns
+                    or admitted_after.st_ctime_ns != admitted.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
+    except BundleError:
+        raise
+    except RuntimeError as error:
+        if "must not have hard-link aliases" in str(error):
+            raise BundleError(
+                f"hardlinked staged files are forbidden: {path}"
+            ) from error
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+    except (OSError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+        or len(chunks) != after.st_size
+    ):
+        raise BundleError(f"staged file changed while being read: {path}")
+    return bytes(chunks)
+
+
+def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
+    """Snapshot staging while retaining each traversed Windows namespace generation."""
+
+    snapshots: list[tuple[Path, bytes]] = []
+
+    def visit(authority, directory: Path) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            _reject_windows_reparse(path, observed)
+
+            if stat.S_ISDIR(observed.st_mode):
+                try:
+                    with retain_windows_relative_directory_namespace(
+                        authority,
+                        (entry.name,),
+                        create=False,
+                    ) as child_authority:
+                        visit(child_authority, path)
+                except BundleError:
+                    raise
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    raise BundleError(
+                        f"staged Windows directory authority cannot be retained: {path}"
+                    ) from error
+                continue
+
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            if observed.st_nlink > 1:
+                raise BundleError(f"hardlinked staged files are forbidden: {path}")
+            if observed.st_nlink != 1:
+                raise BundleError(f"staged file changed during collection: {path}")
+
+            # Entry metadata admits only type/reparse/link shape. Exact
+            # generation identity is established by two descriptors in the
+            # same CRT/fstat domain, with the second descriptor held by the
+            # canonical retained no-WRITE/no-DELETE Windows authority.
+            snapshots.append(
+                (
+                    path,
+                    _read_retained_windows_regular_file(
+                        authority,
+                        target_name=entry.name,
+                        path=path,
+                    ),
+                )
+            )
+
+    try:
+        with retain_windows_directory_namespace(
+            staging,
+            create=False,
+        ) as staging_authority:
+            visit(staging_authority, staging)
+    except BundleError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"Windows staging namespace authority cannot be retained: {staging}"
+        ) from error
+
+    return sorted(snapshots, key=lambda item: item[0].as_posix())
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
-    if not staging.is_dir():
+    staging = staging.absolute()
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        staging_stat = os.stat(staging, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError("staging must be an existing directory") from error
+    _reject_windows_reparse(staging, staging_stat)
+    if not stat.S_ISDIR(staging_stat.st_mode):
         raise BundleError("staging must be an existing directory")
     staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
-    for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise BundleError(f"symlinks are forbidden in bundles: {path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise BundleError(f"unsupported filesystem entry: {path}")
+    if sys.platform == "win32":
+        snapshots = _walk_staging_windows_retained(staging)
+    else:
+        snapshots = []
+        for path in _walk_staging(staging):
+            _assert_staging_components_are_not_reparse(
+                path,
+                staging=staging,
+            )
+            snapshots.append(
+                (
+                    path,
+                    _read_staged_regular_file(
+                        path,
+                        staging_resolved=staging_resolved,
+                    ),
+                )
+            )
+
+    for path, data in snapshots:
         relative = _safe_relative(path, staging)
         windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
@@ -245,10 +581,6 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        data = _read_staged_regular_file(
-            path,
-            staging_resolved=staging_resolved,
-        )
         _reject_sensitive_content(relative, data)
         collected.append((relative, path, data))
     if not collected:
@@ -368,9 +700,11 @@ def _load_composition(
         raise BundleError("unsupported Windows composition schema_version")
     if value["product"] != "AutoTrade":
         raise BundleError("Windows composition product must be AutoTrade")
-    composition_sha = _required_text(value["source_sha"], name="composition source_sha").lower()
+    composition_sha = _required_text(value["source_sha"], name="composition source_sha")
     if SOURCE_SHA.fullmatch(composition_sha) is None:
-        raise BundleError("composition source_sha must be an exact 40-character Git SHA")
+        raise BundleError(
+            "composition source_sha must be an exact 40-character lowercase Git SHA"
+        )
     if composition_sha != source_sha:
         raise BundleError("composition source_sha does not match bundle source_sha")
 
@@ -565,10 +899,10 @@ def build_bundle(
     composition_path: Path | None = None,
 ) -> dict[str, object]:
     normalized_version = _required_text(version, name="version")
-    normalized_sha = _required_text(source_sha, name="source_sha").lower()
+    normalized_sha = _required_text(source_sha, name="source_sha")
     if SOURCE_SHA.fullmatch(normalized_sha) is None:
         raise BundleError("source_sha must be an exact 40-character lowercase Git SHA")
-    if mode not in {"diagnostics", "release"}:
+    if type(mode) is not str or mode not in {"diagnostics", "release"}:
         raise BundleError("mode must be diagnostics or release")
 
     try:
@@ -619,13 +953,13 @@ def build_bundle(
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
-            not isinstance(provenance_source_sha, str)
-            or SOURCE_SHA.fullmatch(provenance_source_sha.lower()) is None
+            type(provenance_source_sha) is not str
+            or SOURCE_SHA.fullmatch(provenance_source_sha) is None
         ):
             raise BundleError(
-                "release provenance must bind an exact 40-character source_sha"
+                "release provenance must bind an exact 40-character lowercase source_sha"
             )
-        if provenance_source_sha.lower() != normalized_sha:
+        if provenance_source_sha != normalized_sha:
             raise BundleError(
                 "release provenance source_sha does not match bundle source_sha"
             )

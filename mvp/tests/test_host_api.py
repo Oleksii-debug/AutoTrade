@@ -271,5 +271,43 @@ class HostCommandStateTests(unittest.TestCase):
             self.store.events_after("1")
 
 
+    def test_expected_state_version_requires_canonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                ValueError,
+                "canonical Sequence",
+            ):
+                self.store.submit(self.command(version=version))
+            self.assertEqual(self.store.state_version, 0)
+            self.assertEqual(self.store.cursor, 0)
+
+    def test_event_cursor_rejects_noncanonical_sequence_text(self):
+        self.store.submit(self.command())
+        for after in ("01", "+1", "-0", " 0", "0 ", "\t0", "", True, 1.0, None):
+            with self.subTest(after=after), self.assertRaisesRegex(
+                ValueError,
+                "canonical Sequence",
+            ):
+                self.store.events_after(after)
+        self.assertEqual(
+            [event.cursor for event in self.store.events_after("0")],
+            [1],
+        )
+        self.assertEqual(
+            [event.cursor for event in self.store.events_after(0)],
+            [1],
+        )
+
+
+    def test_canonical_long_sequence_avoids_python_int_digit_limit(self):
+        long_sequence = "9" * 5000
+        result = self.store.submit(self.command(version=long_sequence))
+        self.assertEqual(result.status, "CONFLICT")
+        self.assertEqual(result.reason_codes, ("stale_state_version",))
+        self.assertEqual(self.store.state_version, 0)
+        with self.assertRaisesRegex(ValueError, "ahead of host state"):
+            self.store.events_after(long_sequence)
+
+
 if __name__ == "__main__":
     unittest.main()

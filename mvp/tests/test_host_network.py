@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.host_network import (
     header_principal_resolver,
     public_session_reference,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
@@ -194,6 +194,90 @@ class HostNetworkTests(unittest.TestCase):
             public_session_reference(self.owner.token),
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
+
+    def test_snapshot_retries_on_one_global_journal_advance_and_returns_one_coherent_cut(self):
+        writer = JournalStore(self.path)
+        inserted = {"done": False}
+        calls = {"count": 0}
+
+        def advancing_snapshot(durable, principal):
+            calls["count"] += 1
+            value = self._snapshot(durable, principal)
+            if not inserted["done"]:
+                inserted["done"] = True
+                payload = {"reason": "snapshot-cut-race-regression"}
+                writer.append_event(
+                    {
+                        "event_id": "snapshot-cut-race-event",
+                        "event_type": "SnapshotCutRaceInjected",
+                        "aggregate_type": "snapshot_cut_test",
+                        "aggregate_id": "singleton",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-25T09:30:00Z",
+                    }
+                )
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=advancing_snapshot,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["state_version"], "0")
+        self.assertEqual(calls["count"], 2)
+
+    def test_snapshot_persistent_journal_churn_remains_bounded_and_fails_closed(self):
+        writer = JournalStore(self.path)
+        calls = {"count": 0}
+
+        def always_advancing_snapshot(durable, principal):
+            calls["count"] += 1
+            value = self._snapshot(durable, principal)
+            sequence = calls["count"]
+            payload = {"reason": "snapshot-cut-persistent-churn", "attempt": sequence}
+            writer.append_event(
+                {
+                    "event_id": f"snapshot-cut-persistent-{sequence}",
+                    "event_type": "SnapshotCutRaceInjected",
+                    "aggregate_type": "snapshot_cut_persistent_test",
+                    "aggregate_id": str(sequence),
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-25T09:30:00Z",
+                }
+            )
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=always_advancing_snapshot,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 503)
+        self.assertEqual(
+            self.body(response),
+            {"error": "SNAPSHOT_BUSY", "retryable": True},
+        )
+        self.assertEqual(dict(response.headers)["Retry-After"], "1")
+        self.assertEqual(calls["count"], 4)
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):
         observer = self.boundary.create_session(
@@ -1056,6 +1140,94 @@ class HostNetworkTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(payload["component"], "HOST_NETWORK")
             self.assertNotIn("paper-account-1", json.dumps(payload))
+
+
+    def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
+        for field in ("state_version", "event_cursor"):
+            with self.subTest(field=field):
+                def malformed_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = int(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-{field}.sqlite3"
+                    ),
+                    snapshot_provider=malformed_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+
+    def test_command_expected_state_version_rejects_noncanonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version):
+                command = self.command(expected_state_version=version)
+                response = self.app.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers=self.headers(json_body=True),
+                    body=json.dumps(command).encode("utf-8"),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_event_cursor_rejects_noncanonical_query_aliases(self):
+        targets = (
+            "/api/v1/events?after=01",
+            "/api/v1/events?after=%2B1",
+            "/api/v1/events?after=-0",
+            "/api/v1/events?after=%200",
+            "/api/v1/events?after=0%20",
+            "/api/v1/events?after=",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                response = self.app.dispatch(
+                    method="GET",
+                    target=target,
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_EVENT_CURSOR"},
+                )
+
+        canonical = self.app.dispatch(
+            method="GET",
+            target="/api/v1/events?after=0",
+            headers=self.headers(),
+        )
+        self.assertEqual(canonical.status, 200)
+
+
+    def test_canonical_long_state_version_returns_conflict_not_parse_error(self):
+        command = self.command(expected_state_version="9" * 5000)
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=self.headers(json_body=True),
+            body=json.dumps(command).encode("utf-8"),
+        )
+        self.assertEqual(response.status, 409)
+        payload = self.body(response)
+        self.assertEqual(payload["status"], "CONFLICT")
+        self.assertEqual(payload["reason_codes"], ["stale_state_version"])
+        self.assertEqual(self.app.store.state_version, 0)
 
 
 if __name__ == "__main__":

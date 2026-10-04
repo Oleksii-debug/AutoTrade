@@ -19,6 +19,30 @@ SOURCE_SHA = subprocess.check_output(
 ).strip()
 
 
+class FoundationSourcePinContractTests(unittest.TestCase):
+    def test_invalid_expected_source_sha_fails_before_path_access(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging = root / "missing-staging"
+            composition = root / "missing-composition.json"
+            source_root = root / "missing-source"
+
+            with self.assertRaisesRegex(
+                FoundationStagingError,
+                "expected_source_sha must be an exact lowercase Git object id",
+            ):
+                stage_windows_foundation(
+                    staging=staging,
+                    composition_path=composition,
+                    source_root=source_root,
+                    expected_source_sha="main",
+                )
+
+            self.assertFalse(staging.exists())
+            self.assertFalse(composition.exists())
+            self.assertFalse(source_root.exists())
+
+
 @unittest.skipIf(os.name == "nt", "POSIX retained-directory publication regression")
 class PosixStagingNamespaceAuthorityTests(unittest.TestCase):
     def test_parent_generation_swap_cannot_mutate_external_tree(self):
@@ -118,6 +142,39 @@ class PosixStagingNamespaceAuthorityTests(unittest.TestCase):
 
             self.assertTrue(raced)
             self.assertEqual(target.read_bytes(), b"raced-component")
+
+    def test_expected_source_sha_mismatch_fails_before_component_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging = root / "staging"
+            staging.mkdir()
+            composition = root / "composition.json"
+            composition.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0.0",
+                        "product": "AutoTrade",
+                        "source_sha": SOURCE_SHA,
+                        "components": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = composition.read_bytes()
+            replacement = ("0" if SOURCE_SHA[0] != "0" else "1") + SOURCE_SHA[1:]
+
+            with self.assertRaisesRegex(
+                FoundationStagingError,
+                "composition source_sha does not match expected_source_sha",
+            ):
+                stage_windows_foundation(
+                    staging=staging,
+                    composition_path=composition,
+                    expected_source_sha=replacement,
+                )
+
+            self.assertEqual(composition.read_bytes(), before)
+            self.assertEqual(list(staging.iterdir()), [])
 
     def test_required_openat2_failure_precedes_parent_and_component_mutation(self):
         with TemporaryDirectory() as directory:

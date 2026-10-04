@@ -9,6 +9,31 @@ security:
   - AutoTradeSession: []
     AutoTradeActor: []
 paths:
+  /api/v1/session:
+    post:
+      operationId: pairLocalSession
+      security: []
+      description: Exchange one process-issued single-use local pairing code for an HttpOnly SameSite session. Available only in the provider-free launcher.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pairing_code]
+              properties:
+                pairing_code:
+                  type: string
+                  minLength: 32
+                  maxLength: 128
+      responses:
+        "200":
+          description: Local owner paired; browser receives an HttpOnly SameSite cookie. Standalone ZERO launch may hand the same short-lived session to the native safety shell through current-user Credential Manager; an owned WPF desktop child receives the bearer directly in its pairing response and does not persist it
+        "403":
+          description: Pairing rejected
+        "503":
+          description: Configured persistent Windows current-user session handoff failed; the minted bearer session is revoked and the pairing code remains retryable
   /api/v1/state:
     get:
       operationId: getState
@@ -19,6 +44,25 @@ paths:
             application/json:
               schema:
                 $ref: ../jsonschema/ui.schema.json#/$defs/UiSnapshot
+        "503":
+          description: A coherent snapshot could not be projected within the bounded retry window because durable state kept advancing. No mixed-cut snapshot is returned; clients may retry.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              description: Minimum retry delay in seconds.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [error, retryable]
+                properties:
+                  error:
+                    const: SNAPSHOT_BUSY
+                  retryable:
+                    const: true
   /api/v1/commands:
     post:
       operationId: submitCommand
@@ -66,7 +110,7 @@ paths:
           name: after
           required: false
           schema:
-            type: string
+            $ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence
       responses:
         "200":
           description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot

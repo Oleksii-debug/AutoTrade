@@ -11,6 +11,11 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+if __package__:
+    from .dotnet_lock import dotnet_locked_dependency_graph
+else:
+    from dotnet_lock import dotnet_locked_dependency_graph
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
@@ -419,7 +424,17 @@ def build_manifest() -> dict[str, object]:
         )
 
     python_dependencies = python_dev_dependencies()
-    dotnet_packages = dotnet_package_dependencies()
+    dotnet_projects = dotnet_package_projects()
+    try:
+        dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
+    except ValueError as error:
+        blockers.append(
+            {
+                "code": "DOTNET_LOCK_CONTENT_INVALID",
+                "detail": str(error),
+            }
+        )
+        dotnet_packages = []
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
@@ -448,7 +463,6 @@ def build_manifest() -> dict[str, object]:
             }
         )
 
-    dotnet_projects = dotnet_package_projects()
     missing_dotnet_locks = [
         project.relative_to(ROOT).as_posix()
         for project in dotnet_projects

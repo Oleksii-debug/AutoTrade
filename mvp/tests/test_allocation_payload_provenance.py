@@ -435,6 +435,61 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
+    def test_evidence_type_global_rebinding_cannot_admit_foreign_object(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        original_type = allocation_module.ImmutableAllocationEvidence
+
+        class ForgedEvidence:
+            pass
+
+        forged = ForgedEvidence()
+        for name in (
+            "evidence_id",
+            "kind",
+            "environment",
+            "schema_version",
+            "observed_at",
+            "valid_until",
+            "payload",
+            "digest",
+            "_payload_owners",
+        ):
+            setattr(forged, name, object.__getattribute__(evidence, name))
+
+        allocation_module.ImmutableAllocationEvidence = ForgedEvidence
+        try:
+            with self.assertRaisesRegex(TypeError, "canonical evidence type"):
+                allocation_module._verified_allocation_payload_owner(forged)
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            allocation_module.ImmutableAllocationEvidence = original_type
+
+    def test_resolver_verifier_global_rebinding_cannot_bypass_digest(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        original_verify = allocation_module._verified_allocation_payload_owner
+        original_digest = evidence.digest
+        object.__setattr__(evidence, "digest", "0" * 64)
+        allocation_module._verified_allocation_payload_owner = lambda _value: None
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "payload provenance digest mismatch",
+            ):
+                allocation_module._resolve_allocation_evidence(
+                    evidence,
+                    {evidence.evidence_id: evidence},
+                    expected_kind="VALUATION",
+                    expected_environment="SIMULATION",
+                    at="2026-09-25T18:30:00Z",
+                )
+        finally:
+            allocation_module._verified_allocation_payload_owner = original_verify
+            object.__setattr__(evidence, "digest", original_digest)
+
+
     def test_sealer_ignores_post_import_mappingproxy_and_weakref_rebinding(self):
         original_mapping_proxy = allocation_module.MappingProxyType
         original_weakref = allocation_module.weakref

@@ -2186,6 +2186,7 @@ class ImmutableAllocationEvidence:
 def _verified_allocation_payload_owner(
     evidence: ImmutableAllocationEvidence,
     _sealed_lookup=_registered_allocation_payload,
+    _evidence_type=ImmutableAllocationEvidence,
     _canonicalize=_canonical_evidence_value,
     _digest=_allocation_evidence_digest,
     _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
@@ -2193,7 +2194,7 @@ def _verified_allocation_payload_owner(
 ):
     """Verify canonical issuer provenance before any payload mapping method."""
 
-    if type(evidence) is not ImmutableAllocationEvidence:
+    if type(evidence) is not _evidence_type:
         raise TypeError("allocation evidence must use the canonical evidence type")
     payload = object.__getattribute__(evidence, "payload")
     sealed = _sealed_lookup(payload)
@@ -2289,10 +2290,17 @@ def _resolve_allocation_evidence(
     expected_kind: str,
     expected_environment: str,
     at: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _verify=_verified_allocation_payload_owner,
+    _verify_code=getattr(_verified_allocation_payload_owner, "__code__", None),
 ) -> ImmutableAllocationEvidence:
-    if type(evidence) is not ImmutableAllocationEvidence:
+    if type(evidence) is not _evidence_type:
         raise TypeError("allocation evidence values must use the canonical evidence type")
-    _verified_allocation_payload_owner(evidence)
+    if getattr(_verify, "__code__", None) is not _verify_code:
+        raise ValueError(
+            "allocation evidence resolver verifier executable changed after binding"
+        )
+    _verify(evidence)
     if evidence.kind != expected_kind:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} has kind {evidence.kind}, "
@@ -2307,11 +2315,11 @@ def _resolve_allocation_evidence(
             f"allocation evidence {evidence.evidence_id} is stale or not yet observable"
         )
     resolved = resolved_evidence.get(evidence.evidence_id)
-    if type(resolved) is not ImmutableAllocationEvidence:
+    if type(resolved) is not _evidence_type:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} cannot be resolved authoritatively"
         )
-    _verified_allocation_payload_owner(resolved)
+    _verify(resolved)
     if resolved.digest != evidence.digest:
         raise ValueError(
             f"allocation evidence {evidence.evidence_id} digest does not match authoritative content"

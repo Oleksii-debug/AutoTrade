@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import timedelta
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -922,6 +923,50 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 origin.load_response_binding(attempt_id, binding).response_sha256,
                 first.response_sha256,
             )
+
+    def test_imported_module_token_cannot_mint_direct_provider_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, _journal, *_rest, binding = self._route_fixture(directory)
+            raw = b'{"retCode":0,"result":{"list":[]}}'
+            base = binding.query_binding
+            forged = AuthenticatedReadResponseBinding(
+                attempt_id="provider-read:" + "f" * 32,
+                provider_id=base.provider_id,
+                account_id=base.account_id,
+                environment=base.environment,
+                provider_environment=binding.provider_environment,
+                capability_snapshot_id=base.capability_snapshot_id,
+                qualification_id=binding.qualification_id,
+                endpoint=base.endpoint,
+                qualified_query_digest=binding.query_digest,
+                endpoint_rule_digest=binding.endpoint_rule_digest,
+                qualified_route_rule_digest=binding.qualified_route_rule_digest,
+                data_entitlement=binding.data_entitlement,
+                parser_identity=binding.parser_identity,
+                transport_identity=provider_origin_module.direct_authenticated_read_transport_identity(),
+                network_policy_identity=provider_origin_module.direct_authenticated_read_network_policy_identity(),
+                http_status=200,
+                observed_at=NOW.isoformat().replace("+00:00", "Z"),
+                response_sha256="sha256:" + sha256(raw).hexdigest(),
+                response_artifact_id="00000000-0000-0000-0000-000000000000",
+                response_bytes=raw,
+                origin_ref="provider-origin:sha256:" + "0" * 64,
+                journal_sequence=3,
+                execution_class="DIRECT_PROVIDER_WIRE",
+                wire_request_sha256="sha256:" + "1" * 64,
+                wire_request_semantics_sha256="sha256:" + "2" * 64,
+                terminal_authority_journal_sequence_cut=1,
+                terminal_authority_verified_at=NOW.isoformat().replace("+00:00", "Z"),
+                _binding_token=provider_origin_module._BINDING_TOKEN,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "construction authority is unavailable",
+            ):
+                observe_provider_origin_json_response(
+                    response_binding=forged,
+                    query_binding=binding,
+                )
 
     def test_response_binding_constructor_is_sealed(self):
         with self.assertRaisesRegex(

@@ -73,10 +73,15 @@ def candidate(*, provider_environment="TESTNET", package_digest=PACKAGE_DIGEST):
     )
 
 
-def accepted_spot_q(*, ordinal=40, unsupported=()):
+def accepted_spot_q(
+    *,
+    ordinal=40,
+    unsupported=(),
+    valid_until="2026-10-05T05:00:00Z",
+):
     protocol = _protocol()
     raw_ref = _raw_ref(100 + ordinal)
-    payload = _campaign_payload(raw_ref=raw_ref)
+    payload = _campaign_payload(raw_ref=raw_ref, valid_until=valid_until)
     payload["product_family"] = "SPOT"
     payload["unsupported_features"] = sorted(unsupported)
     campaign_raw = canonical_json(payload).encode("utf-8")

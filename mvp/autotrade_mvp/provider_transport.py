@@ -1430,6 +1430,23 @@ def _install_direct_authenticated_read_execution_authority():
         prune()
         clients[id(client)] = (weakref.ref(client), client._opener)
 
+    def require_client(client: object) -> UrllibJsonWireClient:
+        if type(client) is not UrllibJsonWireClient:
+            raise ProviderTransportError(
+                "canonical direct authenticated-read wire client is required"
+            )
+        prune()
+        client_state = clients.get(id(client))
+        if (
+            client_state is None
+            or client_state[0]() is not client
+            or client_state[1] is not client._opener
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read wire client network authority changed"
+            )
+        return client
+
     def mint(
         client: object,
         request: object,
@@ -1441,13 +1458,9 @@ def _install_direct_authenticated_read_execution_authority():
             or type(response) is not AuthenticatedReadWireResponse
         ):
             return None
-        prune()
-        client_state = clients.get(id(client))
-        if (
-            client_state is None
-            or client_state[0]() is not client
-            or client_state[1] is not client._opener
-        ):
+        try:
+            require_client(client)
+        except ProviderTransportError:
             # A replaced/injected opener may still be useful for neutral transport
             # tests, but it is categorically ineligible for PROVIDER_ORIGIN.
             return None
@@ -1534,11 +1547,12 @@ def _install_direct_authenticated_read_execution_authority():
             )
         return values
 
-    return register_client, mint, snapshot
+    return register_client, require_client, mint, snapshot
 
 
 (
     _register_direct_authenticated_read_client,
+    require_direct_authenticated_read_client,
     _mint_direct_authenticated_read_execution_receipt,
     _direct_authenticated_read_execution_receipt_state,
 ) = _install_direct_authenticated_read_execution_authority()

@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.recovery import RecoveryController
+from mvp.autotrade_mvp.recovery import OwnerFence, RecoveryController
 from mvp.autotrade_mvp.recovery_dispatch import build_recovery_issued_dispatcher
 
 
@@ -19,6 +19,16 @@ def _forged_durable_owner_chain():
 
 def _forged_require_current_durable_owner():
     _FORGED_CALLS.append("_require_current_durable_owner")
+
+
+def _forged_store_append_event(*_args, **_kwargs):
+    _FORGED_CALLS.append("JournalStore.append_event")
+    return None
+
+
+def _forged_store_load_events(*_args, **_kwargs):
+    _FORGED_CALLS.append("JournalStore.load_events")
+    return []
 
 
 class _HostileScope(str):
@@ -115,6 +125,44 @@ class RecoveryDispatchInstanceShadowAuthorityTests(unittest.TestCase):
                 dispatcher._require_issued_authority()
 
             self.assertEqual(_FORGED_CALLS, [])
+
+    def test_owner_append_rejects_journal_write_shadow_before_execution(self):
+        with TemporaryDirectory() as directory:
+            journal, recovery = self._recovery(directory)
+            _FORGED_CALLS.clear()
+            journal.append_event = _forged_store_append_event
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical JournalStore instance state is shadowed",
+            ):
+                recovery._append_durable_owner(OwnerFence("host-b", 2))
+
+            self.assertEqual(_FORGED_CALLS, [])
+            del journal.append_event
+            self.assertEqual(
+                recovery.durable_owner_chain(),
+                (OwnerFence("host-a", 1),),
+            )
+
+    def test_owner_read_rejects_journal_reader_shadow_before_execution(self):
+        with TemporaryDirectory() as directory:
+            journal, recovery = self._recovery(directory)
+            _FORGED_CALLS.clear()
+            journal.load_events = _forged_store_load_events
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical JournalStore instance state is shadowed",
+            ):
+                recovery.durable_owner_chain()
+
+            self.assertEqual(_FORGED_CALLS, [])
+            del journal.load_events
+            self.assertEqual(
+                recovery.durable_owner_chain(),
+                (OwnerFence("host-a", 1),),
+            )
 
 
 if __name__ == "__main__":

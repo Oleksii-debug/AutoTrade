@@ -435,6 +435,17 @@ def measure_declared_financial_operation(
         raise error_type("payload digest authority is not canonical")
     canonical_json_namespace = canonical_json_for.__globals__
     json_module = canonical_json_namespace.get("json")
+    if type(json_module) is not ModuleType:
+        raise error_type("canonical JSON authority is not a module")
+    json_encoder_type = json_module.__dict__.get("JSONEncoder")
+    if type(json_encoder_type) is not type:
+        raise error_type("canonical JSON encoder authority is not an exact class")
+    json_encoder_methods = tuple(
+        (name, json_encoder_type.__dict__.get(name))
+        for name in ("__init__", "default", "encode", "iterencode")
+    )
+    if any(type(function) is not FunctionType for _name, function in json_encoder_methods):
+        raise error_type("canonical JSON encoder executable authority is unavailable")
 
     plan_digest_namespace = plan_digest_getter.__globals__
     plan_payload_digest = plan_digest_namespace.get("payload_digest")
@@ -478,6 +489,12 @@ def measure_declared_financial_operation(
             "canonical_json.json",
         ),
         (
+            json_module.__dict__,
+            "JSONEncoder",
+            json_encoder_type,
+            "canonical_json.json.JSONEncoder",
+        ),
+        (
             plan_digest_namespace,
             "payload_digest",
             plan_payload_digest,
@@ -512,6 +529,10 @@ def measure_declared_financial_operation(
             ("_non_negative_int", non_negative_int),
             ("payload_digest", payload_digest_for),
             ("payload_digest.canonical_json", canonical_json_for),
+            *(
+                (f"json.JSONEncoder.{name}", function)
+                for name, function in json_encoder_methods
+            ),
             ("DurableFinancialLatencySample.__init__", sample_init),
             ("ExpectedJournalEvent.payload", expected_payload_getter),
             ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),

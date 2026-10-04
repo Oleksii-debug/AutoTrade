@@ -29,9 +29,11 @@ from mvp.autotrade_mvp.production_financial_host import compose_financial_author
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_transport import ProviderTransportScopeError
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
@@ -123,6 +125,37 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             clock_utc=lambda: _NOW,
             wire_client=wire_client,
         )
+
+    def _mark_ready(
+        self,
+        runtime,
+        *,
+        provider_id: str = "BYBIT",
+        reconciliation_id: str = "production-bybit-ready",
+    ) -> None:
+        recovery = runtime.recovery_controller
+        owner = recovery.owner
+        self.assertIsNotNone(owner)
+        result = reconciliation(
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        record_reconciliation_checkpoint(
+            runtime.journal,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-10-04T01:59:59Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        self.assertIs(recovery.state, HostState.READY)
 
     def test_raw_sender_direct_construction_is_not_a_product_surface(self) -> None:
         with self.assertRaisesRegex(
@@ -412,10 +445,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 capability_snapshot_id=capability.snapshot_id,
                 wire_client=wire,
             )
-            recovery = runtime.recovery_controller
-            recovery.provider_reconciled = True
-            recovery.reason_codes.clear()
-            recovery.state = HostState.READY
+            self._mark_ready(runtime)
             lease_calls = []
 
             @contextmanager

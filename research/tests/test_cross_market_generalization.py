@@ -561,5 +561,48 @@ class CrossMarketGeneralizationTests(unittest.TestCase):
         self.assertNotEqual(first.digest, second.digest)
 
 
+    def test_coverage_pass_never_establishes_regime_routing_strategy_or_trading_authority(self):
+        result = assess_cross_market_generalization(
+            protocol(),
+            complete_evidence(),
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
+        self.assertEqual(result.regime_routing_status, "NOT_ESTABLISHED")
+        self.assertEqual(result.strategy_comparison_status, "NOT_ESTABLISHED")
+        self.assertFalse(result.grants_trading_authority)
+
+    def test_hostile_profile_sequence_is_rejected_before_iteration(self):
+        touched = {"count": 0}
+
+        class HostileSequence:
+            def __iter__(self):
+                touched["count"] += 1
+                raise AssertionError("hostile iterator executed")
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            AssetClassProfile.create(
+                asset_class="crypto",
+                instrument_families=HostileSequence(),
+                specialized_feature_namespaces=("crypto_orderbook",),
+            )
+        self.assertEqual(touched["count"], 0)
+
+    def test_hostile_evidence_sequence_is_rejected_before_iteration(self):
+        touched = {"count": 0}
+
+        class HostileSequence:
+            def __iter__(self):
+                touched["count"] += 1
+                raise AssertionError("hostile iterator executed")
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            assess_cross_market_generalization(
+                protocol(),
+                HostileSequence(),
+            )
+        self.assertEqual(touched["count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

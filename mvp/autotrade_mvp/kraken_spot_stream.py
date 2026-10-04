@@ -921,10 +921,6 @@ def _provider_fills_from_execution_frame(
             raw_currency,
             name=f"fee_currency_by_symbol[{symbol}]",
         ).upper()
-        if symbol in fee_currencies and fee_currencies[symbol] != currency:
-            raise KrakenSpotStreamError(
-                "fee_currency_by_symbol contains conflicting symbol mappings"
-            )
         fee_currencies[symbol] = currency
 
     fills: list[ProviderFillEvidence] = []

@@ -42,6 +42,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
+    DirectAuthenticatedReadExecutionReceipt,
     AlpacaTradingHttpTransport,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
@@ -53,6 +54,8 @@ from mvp.autotrade_mvp.provider_transport import (
     TradingWireResponse,
     SignedHttpRequest,
     UrllibJsonWireClient,
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
     _exact_trading_response,
     _binance_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
@@ -3330,6 +3333,45 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
         self.assertNotIn("SECRET", observation.evidence_ref)
 
+    def test_terminal_read_request_on_injected_wire_cannot_mint_direct_receipt(self):
+        events = []
+        wire = RecordingWire(events, response=b'{"balances":[]}')
+        transport, _resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+        )
+        proof = object()
+
+        def terminal_factory(binding):
+            events.append("terminal-cq")
+            self.assertIs(binding, authenticated_read_binding())
+            return proof
+
+        # Use the exact prepared binding object so identity is deterministic.
+        binding = authenticated_read_binding()
+        def exact_terminal_factory(received):
+            events.append("terminal-cq")
+            self.assertIs(received, binding)
+            return proof
+
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt is required",
+        ):
+            transport(
+                binding,
+                terminal_authority_factory=exact_terminal_factory,
+            )
+        self.assertEqual(
+            events,
+            ["capability", "resolve", "capability", "terminal-cq", "wire"],
+        )
+        self.assertEqual(len(wire.requests), 1)
+        self.assertIs(
+            getattr(wire.requests[0], "_terminal_qualified_read_authority"),
+            proof,
+        )
+
     def test_read_credential_generation_lease_covers_final_currentness_and_wire(self):
         events = []
         resolver = FakeSecretResolver(events)
@@ -4449,6 +4491,88 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             self.assertEqual(len(selected), 1)
             self.assertEqual(selected[0].proxies, {})
         self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_direct_authenticated_read_receipt_is_closure_authorized_and_exact(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        canonical_opener = client._opener
+        stream = Stream(b'{"ok":true}')
+        captured = []
+
+        def fake_open(request, *, timeout):
+            captured.append((request, timeout))
+            return stream
+
+        # Preserve the exact opener object registered by UrllibJsonWireClient;
+        # only deterministic network I/O is replaced for this unit test.
+        canonical_opener.open = fake_open
+        proof = object()
+        request = AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?signature=SYNTHETIC",
+            headers={"X-API-KEY": "SYNTHETIC"},
+            timeout_seconds=2,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_qualified_read_authority",
+            proof,
+        )
+
+        response = client.send(request)
+        self.assertIs(type(response), AuthenticatedReadWireResponse)
+        receipt = direct_authenticated_read_execution_receipt(response)
+        self.assertIs(type(receipt), DirectAuthenticatedReadExecutionReceipt)
+        snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
+        self.assertIs(snapshot["terminal_authority"], proof)
+        self.assertEqual(snapshot["http_status"], 200)
+        self.assertTrue(snapshot["request_sha256"].startswith("sha256:"))
+        self.assertTrue(snapshot["response_sha256"].startswith("sha256:"))
+        self.assertNotIn("SYNTHETIC", repr(snapshot))
+        self.assertEqual(len(captured), 1)
+
+        object.__setattr__(receipt, "http_status", 201)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "receipt changed after wire execution",
+        ):
+            direct_authenticated_read_execution_receipt_snapshot(receipt)
+
+    def test_replaced_urllib_opener_cannot_mint_direct_authenticated_read_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                return Stream(b'{"ok":true}')
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        request = AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?signature=SYNTHETIC",
+            headers={"X-API-KEY": "SYNTHETIC"},
+            timeout_seconds=2,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_qualified_read_authority",
+            object(),
+        )
+        response = client.send(request)
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt is required",
+        ):
+            direct_authenticated_read_execution_receipt(response)
 
     def test_signed_write_requires_exactly_one_payload_channel(self):
         body_request = SignedHttpRequest(

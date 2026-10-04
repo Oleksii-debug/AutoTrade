@@ -481,6 +481,105 @@ class DurableFinancingTests(unittest.TestCase):
             0,
         )
 
+    def test_authenticated_snapshot_rejects_polymorphic_manifest_rights_and_bytes(self):
+        artifact = "00000000-0000-0000-0000-000000000053"
+        self.artifacts.put(artifact, revision=1)
+        raw = self.artifacts.items[artifact]
+        digest = "sha256:" + sha256(raw).hexdigest()
+
+        class HostileManifest(dict):
+            calls = 0
+
+            def get(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile manifest get")
+
+        class HostileManifestStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    HostileManifest(
+                        {
+                            "artifact_id": artifact_id,
+                            "sha256": digest,
+                            "media_type": "application/json",
+                            "rights": {"storage": True, "export": False},
+                        }
+                    ),
+                    raw,
+                )
+
+        with self.assertRaisesRegex(FinancingError, "manifest is invalid"):
+            self.financing.record_authenticated_artifact(
+                HostileManifestStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(HostileManifest.calls, 0)
+
+        class HostileRights(dict):
+            calls = 0
+
+            def get(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile rights get")
+
+        class HostileRightsStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "sha256": digest,
+                        "media_type": "application/json",
+                        "rights": HostileRights(
+                            {"storage": True, "export": False}
+                        ),
+                    },
+                    raw,
+                )
+
+        with self.assertRaisesRegex(FinancingError, "storage rights"):
+            self.financing.record_authenticated_artifact(
+                HostileRightsStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(HostileRights.calls, 0)
+
+        class HostileBytes(bytes):
+            calls = 0
+
+            def decode(self, *args, **kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile bytes decode")
+
+        hostile_raw = HostileBytes(raw)
+
+        class HostileBytesStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "sha256": digest,
+                        "media_type": "application/json",
+                        "rights": {"storage": True, "export": False},
+                    },
+                    hostile_raw,
+                )
+
+        with self.assertRaisesRegex(FinancingError, "evidence bytes are required"):
+            self.financing.record_authenticated_artifact(
+                HostileBytesStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(HostileBytes.calls, 0)
+
+        self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
+        )
+
     def test_forged_or_unreadable_artifact_cannot_grant_economics(self):
         with self.assertRaises(FinancingError):
             self.financing.record_authenticated_artifact(

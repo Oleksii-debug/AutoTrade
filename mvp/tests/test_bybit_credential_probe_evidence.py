@@ -211,9 +211,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.recv_window_ms, 5000)
         self.assertEqual(evidence.http_status, 200)
         self.assertFalse(evidence.api_key_echo_confirmed)
+        self.assertFalse(evidence.provider_transport_confirmed)
         self.assertIs(
             evidence.classification,
-            BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+            BybitCredentialNonAcceptance.INCONCLUSIVE,
         )
         self.assertFalse(evidence.send_authority)
         self.assertFalse(evidence.retirement_authority)
@@ -452,7 +453,8 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 "response_sha256": evidence.response_sha256,
                 "observed_at": "2026-10-03T22:01:02Z",
                 "api_key_echo_confirmed": False,
-                "classification": "REJECTED_EXACT_DOMAIN",
+                "provider_transport_confirmed": False,
+                "classification": "INCONCLUSIVE",
                 "send_authority": False,
                 "retirement_authority": False,
                 "takeover_authority": False,
@@ -506,9 +508,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             evidence = _probe(vault=vault, handle=handle, wire_query=wire_query)
             self.assertEqual(len(calls), 1)
             self.assertEqual(evidence.credential_handle, handle)
+            self.assertFalse(evidence.provider_transport_confirmed)
             self.assertIs(
                 evidence.classification,
-                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+                BybitCredentialNonAcceptance.INCONCLUSIVE,
             )
             self.assertNotIn("probe-secret", repr(evidence))
 
@@ -692,9 +695,10 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
             self.assertEqual(request.headers["X-BAPI-SIGN"], expected_signature)
             self.assertNotIn("probe-key", repr(request))
             self.assertNotIn("probe-secret", repr(request))
+            self.assertFalse(evidence.provider_transport_confirmed)
             self.assertIs(
                 evidence.classification,
-                BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+                BybitCredentialNonAcceptance.INCONCLUSIVE,
             )
 
     def test_injected_shared_wire_success_cannot_mint_provider_attestation(self):

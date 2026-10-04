@@ -59,7 +59,8 @@ class BybitCredentialProbeReceiptSnapshotAuthorityTests(unittest.TestCase):
         self.assertEqual(metadata["credential_generation"], 7)
         self.assertEqual(metadata["provider_environment"], "MAINNET")
         self.assertEqual(metadata["ret_code"], 10003)
-        self.assertEqual(metadata["classification"], "REJECTED_EXACT_DOMAIN")
+        self.assertFalse(metadata["provider_transport_confirmed"])
+        self.assertEqual(metadata["classification"], "INCONCLUSIVE")
         self.assertFalse(metadata["send_authority"])
         self.assertFalse(metadata["retirement_authority"])
         self.assertFalse(metadata["takeover_authority"])
@@ -107,6 +108,18 @@ class BybitCredentialProbeReceiptSnapshotAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "mutated after receipt issuance"):
             bybit_credential_probe_receipt_metadata(evidence)
 
+    def test_transport_provenance_mutation_cannot_reclassify_issued_receipt(self):
+        evidence = _capture()
+        object.__setattr__(evidence, "provider_transport_confirmed", True)
+        object.__setattr__(
+            evidence,
+            "classification",
+            BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
+        )
+
+        with self.assertRaisesRegex(ProviderCoreError, "mutated after receipt issuance"):
+            bybit_credential_probe_receipt_metadata(evidence)
+
     def test_copy_without_issuance_identity_cannot_emit_receipt(self):
         evidence = _capture()
         copied = copy.copy(evidence)
@@ -132,6 +145,7 @@ class BybitCredentialProbeReceiptSnapshotAuthorityTests(unittest.TestCase):
             "response_sha256",
             "observed_at",
             "api_key_echo_confirmed",
+            "provider_transport_confirmed",
             "classification",
         ):
             object.__setattr__(first, name, getattr(second, name))

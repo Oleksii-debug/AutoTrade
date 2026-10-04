@@ -3613,6 +3613,27 @@ def commit_provider_fill_correction_with_settlement_replacement(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(original_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("original_projected_fill must be exact ProjectedFillEvidence")
+    if type(original_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("original_provider_fill must be exact ProviderFillEvidence")
+    if type(corrected_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("corrected_projected_fill must be exact ProjectedFillEvidence")
+    if type(corrected_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("corrected_provider_fill must be exact ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_family = _text(asset_family, name="asset_family").upper()
+    normalized_correction_observed_at = _instant_text(
+        correction_observed_at,
+        name="correction_observed_at",
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -3639,9 +3660,9 @@ def commit_provider_fill_correction_with_settlement_replacement(
         original_provider_fill=original_provider_fill,
         corrected_projected_fill=corrected_projected_fill,
         corrected_provider_fill=corrected_provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
-        correction_observed_at=correction_observed_at,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
+        correction_observed_at=normalized_correction_observed_at,
     )
     binding = _prepare_provider_fill_correction_binding(
         economic_book,
@@ -3652,7 +3673,7 @@ def commit_provider_fill_correction_with_settlement_replacement(
         corrected_projected_fill=corrected_projected_fill,
         corrected_provider_fill=corrected_provider_fill,
         replacement=replacement,
-        asset_family=asset_family,
+        asset_family=normalized_family,
         committed_at=when,
     )
     return commit_economic_correction_with_settlement_replacement(
@@ -3804,6 +3825,18 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise TypeError("projected_fill must be ProjectedFillEvidence")
     if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_bust_observed_at = _instant_text(
+        bust_observed_at,
+        name="bust_observed_at",
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -4068,10 +4101,10 @@ def commit_provider_fill_bust_with_economic_reversal(
         provider_id=economic_book.provider_id,
         projected_fill=projected_fill,
         provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
         bust_provider_revision=revision,
-        bust_observed_at=bust_observed_at,
+        bust_observed_at=normalized_bust_observed_at,
     )
     if reversal.reverses_transaction_id is None:
         raise AccountingConflict(
@@ -4513,6 +4546,24 @@ def commit_provider_fill_with_reservation_consumption(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("projected_fill must be exact ProjectedFillEvidence")
+    if type(provider_fill) is not ProviderFillEvidence:
+        raise TypeError("provider_fill must be exact ProviderFillEvidence")
+    normalized_instrument = _text(
+        expected_instrument,
+        name="expected_instrument",
+    )
+    normalized_settlement = _text(
+        settlement_currency,
+        name="settlement_currency",
+    ).upper()
+    normalized_family = _text(asset_family, name="asset_family").upper()
+    normalized_observed_at = (
+        None
+        if observed_at is None
+        else _instant_text(observed_at, name="observed_at")
+    )
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -4527,11 +4578,11 @@ def commit_provider_fill_with_reservation_consumption(
         provider_id=economic_book.provider_id,
         projected_fill=projected_fill,
         provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        expected_instrument=normalized_instrument,
+        settlement_currency=normalized_settlement,
         reservation_snapshot=snapshot,
-        asset_family=asset_family,
-        observed_at=observed_at,
+        asset_family=normalized_family,
+        observed_at=normalized_observed_at,
     )
     if plan.reservation_id != rid:
         raise AccountingConflict(

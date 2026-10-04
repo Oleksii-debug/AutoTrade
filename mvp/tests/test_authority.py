@@ -511,6 +511,36 @@ class AuthorityTests(unittest.TestCase):
                 Decimal("0"),
             )
 
+    def test_durable_financial_binding_rejects_legacy_confirmation(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="legacy-durable-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="legacy-durable-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+
+        confirmation = service._confirmations["legacy-durable-confirmation"]
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "lacks financial binding",
+        ):
+            authority_module._validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                authority_policy_version=item.version,
+                durable_risk_intent={},
+                authoritative_risk_snapshot={},
+                reservation_requirements={},
+            )
+
     def test_financial_confirmation_invalidates_material_envelope_changes(self):
         variants = (
             (

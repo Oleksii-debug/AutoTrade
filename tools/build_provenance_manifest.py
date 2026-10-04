@@ -647,6 +647,37 @@ def git_blob_sha(path: Path) -> str:
         ) from exc
 
     try:
+        attribute_raw = _trusted_git(
+            "check-attr",
+            "-z",
+            "text",
+            "eol",
+            "--",
+            relative.as_posix(),
+            source_root=repository_root,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"trusted git check-attr failed for {relative.as_posix()}"
+        ) from exc
+    if not isinstance(attribute_raw, bytes):
+        raise RuntimeError("trusted git check-attr returned non-bytes output")
+    relative_bytes = relative.as_posix().encode("utf-8")
+    if attribute_raw.split(b"\0") != [
+        relative_bytes,
+        b"text",
+        b"set",
+        relative_bytes,
+        b"eol",
+        b"lf",
+        b"",
+    ]:
+        raise ValueError(
+            "provenance text path must enforce repository-controlled text eol=lf: "
+            f"{relative.as_posix()}"
+        )
+
+    try:
         object_id_raw = _trusted_git(
             "hash-object",
             f"--path={relative.as_posix()}",

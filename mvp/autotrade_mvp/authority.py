@@ -3692,7 +3692,41 @@ class AuthorityService:
         action: str,
         notional,
         expires_at: str,
-        financial_binding_hash: str | None = None,
+    ) -> bool:
+        """Add a legacy/non-financial confirmation.
+
+        Durable financial admission intentionally rejects this weaker shape.
+        Use add_financial_confirmation() for an executable financial approval.
+        """
+
+        return self._add_confirmation(
+            confirmation_id=confirmation_id,
+            policy_id=policy_id,
+            intent_hash=intent_hash,
+            account_id=account_id,
+            environment=environment,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            action=action,
+            notional=notional,
+            expires_at=expires_at,
+            financial_binding_hash=None,
+        )
+
+    def _add_confirmation(
+        self,
+        *,
+        confirmation_id: str,
+        policy_id: str,
+        intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
+        expires_at: str,
+        financial_binding_hash: str | None,
     ) -> bool:
         cid = _text(confirmation_id, name="confirmation_id")
         pid = _text(policy_id, name="policy_id")
@@ -3761,7 +3795,7 @@ class AuthorityService:
             ),
             reservation_requirements=reservation_requirements,
         )
-        return self.add_confirmation(
+        return self._add_confirmation(
             confirmation_id=confirmation_id,
             policy_id=pid,
             intent_hash=intent_hash,
@@ -6019,7 +6053,7 @@ class AuthorityService:
             if cid in seen_confirmation_ids:
                 raise AuthorityConflict("duplicate confirmation in authority snapshot")
             seen_confirmation_ids.add(cid)
-            service.add_confirmation(
+            service._add_confirmation(
                 confirmation_id=cid,
                 policy_id=item.get("policy_id"),
                 intent_hash=item.get("intent_hash"),

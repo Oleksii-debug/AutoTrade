@@ -169,6 +169,46 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             Decimal("120"),
         )
 
+    def test_reservation_bound_bust_cannot_omit_reservation_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "reservation-bound fill bust requires reservation authority",
+            ):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id="provider-bust-without-reservation",
+                    idempotency_key="provider-bust-without-reservation",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-without-reservation",
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            reservation = reservations.get("reservation-1")
+            self.assertEqual(
+                reservation.consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservation.remaining["CASH:USD"],
+                Decimal("20"),
+            )
+
     def test_fresh_bust_is_atomic_restart_safe_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

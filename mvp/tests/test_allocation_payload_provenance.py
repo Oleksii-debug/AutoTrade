@@ -555,6 +555,30 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_json_decoder_attribute_dispatch_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        decoder_type = allocation_module.json.JSONDecoder
+        decoder_type_dict = type.__getattribute__(decoder_type, "__dict__")
+        self.assertNotIn("__getattribute__", decoder_type_dict)
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged JSON decoder attribute dispatch executed")
+
+        decoder_type.__getattribute__ = forged_getattribute
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decoder authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            del decoder_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
     def test_json_decoder_scanner_retarget_fails_before_callback(self):
         evidence = self.evidence({"symbol": "AAA"})
         decoder = allocation_module.json.loads.__globals__["_default_decoder"]

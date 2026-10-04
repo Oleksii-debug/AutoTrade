@@ -1824,6 +1824,7 @@ def _canonical_evidence_value(
     _mapping_proxy_type=MappingProxyType,
     _decimal_type=Decimal,
     _json_decoder=json.JSONDecoder,
+    _json_decoder_bases=json.JSONDecoder.__bases__,
     _json_default_decoder=json.loads.__globals__.get("_default_decoder"),
     _json_decoder_decode=json.JSONDecoder.decode,
     _json_decoder_decode_code=getattr(json.JSONDecoder.decode, "__code__", None),
@@ -1890,6 +1891,11 @@ def _canonical_evidence_value(
             )
             if (
                 type(_json_default_decoder) is not _json_decoder
+                or type(_json_decoder) is not type
+                or type.__getattribute__(_json_decoder, "__bases__") is not _json_decoder_bases
+                or "__getattribute__" in decoder_type_dict
+                or "__getattr__" in decoder_type_dict
+                or type(object.__getattribute__(_json_default_decoder, "scan_once")).__name__ != "Scanner"
                 or "decode" in default_decoder_dict
                 or "raw_decode" in default_decoder_dict
                 or dict.get(default_decoder_dict, "scan_once")

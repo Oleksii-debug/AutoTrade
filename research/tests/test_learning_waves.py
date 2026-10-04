@@ -5,8 +5,8 @@ from decimal import Decimal
 from hashlib import sha256
 import unittest
 
+from research.autotrade_research.learning.champion import CandidateApproval
 from research.autotrade_research.learning.waves import (
-    CandidateEvaluation,
     CandidateWave,
     EvidencePopulation,
     LearningWavePolicy,
@@ -108,23 +108,41 @@ def candidate_wave(*, promotion_mode="CONFIRMATION") -> CandidateWave:
     )
 
 
-def evaluation(
+def approval(
     *,
     status="PASS",
-    science=True,
     retention=True,
     risk=True,
-    candidate_hash=None,
-) -> CandidateEvaluation:
-    return CandidateEvaluation(
-        candidate_artifact_hash=candidate_hash or digest("candidate"),
+    candidate_id="candidate-0001",
+    artifact_hash=None,
+    valid_until=None,
+) -> CandidateApproval:
+    return CandidateApproval.create(
+        candidate_id=candidate_id,
+        artifact_hash=artifact_hash or digest("candidate"),
+        evidence_id="evidence:candidate-0001",
+        evidence_valid_until=valid_until or (BASE + timedelta(days=1)),
         evaluation_status=status,
-        evaluation_hash=digest(
-            f"evaluation:{status}:{science}:{retention}:{risk}"
+        retention_passed=retention,
+        risk_passed=risk,
+        authority_scope_id="paper-scope",
+        protocol_id="protocol-v1",
+        protocol_hash=digest("protocol"),
+        evaluation_id="evaluation-v1",
+        evaluation_result_hash=digest(
+            f"evaluation:{status}:{retention}:{risk}:{candidate_id}"
         ),
-        science_gate_passed=science,
-        retention_gate_passed=retention,
-        risk_gate_passed=risk,
+    )
+
+
+RESOLUTION_TIME = BASE + timedelta(minutes=30)
+
+
+def resolve(wave, approval_value=None, *, at=RESOLUTION_TIME):
+    return resolve_candidate(
+        wave,
+        approval_value or approval(),
+        resolved_at=at,
     )
 
 
@@ -629,53 +647,43 @@ class CandidateWaveIsolationTests(unittest.TestCase):
 
 
 class CandidateResolutionTests(unittest.TestCase):
-    def test_pass_under_auto_policy_is_only_eligible_for_external_promotion(self):
-        result = resolve_candidate(
-            candidate_wave(promotion_mode="AUTO"),
-            evaluation(),
-        )
-        self.assertEqual(result.action, "ELIGIBLE_AUTO_PROMOTION")
+    def test_pass_under_auto_policy_hands_off_to_canonical_promotion_authority(self):
+        result = resolve(candidate_wave(promotion_mode="AUTO"))
+        self.assertEqual(result.action, "HANDOFF_AUTO_PROMOTION_AUTHORITY")
         self.assertFalse(result.grants_trading_authority)
 
     def test_pass_under_confirmation_policy_waits_for_confirmation(self):
-        result = resolve_candidate(candidate_wave(), evaluation())
+        result = resolve(candidate_wave())
         self.assertEqual(result.action, "AWAITING_CONFIRMATION")
         self.assertFalse(result.grants_trading_authority)
 
-    def test_failed_evaluation_rejects_candidate(self):
-        result = resolve_candidate(
+    def test_failed_canonical_approval_rejects_candidate(self):
+        result = resolve(
             candidate_wave(),
-            evaluation(status="FAIL"),
+            approval(status="FAIL"),
         )
         self.assertEqual(result.action, "REJECTED")
+        self.assertIn("LEARNING_WAVE.EVALUATION_FAILED", result.reasons)
 
-    def test_inconclusive_evaluation_preserves_champion_and_continues_validation(self):
-        result = resolve_candidate(
+    def test_inconclusive_approval_preserves_champion_and_continues_validation(self):
+        result = resolve(
             candidate_wave(),
-            evaluation(status="INCONCLUSIVE"),
+            approval(status="INCONCLUSIVE"),
         )
         self.assertEqual(result.action, "CONTINUE_VALIDATION")
 
-    def test_pass_claim_cannot_bypass_science_gate(self):
-        result = resolve_candidate(
-            candidate_wave(promotion_mode="AUTO"),
-            evaluation(science=False),
-        )
-        self.assertEqual(result.action, "REJECTED")
-        self.assertIn("LEARNING_WAVE.SCIENCE_GATE_FAILED", result.reasons)
-
     def test_pass_claim_cannot_bypass_retention_gate(self):
-        result = resolve_candidate(
+        result = resolve(
             candidate_wave(promotion_mode="AUTO"),
-            evaluation(retention=False),
+            approval(retention=False),
         )
         self.assertEqual(result.action, "REJECTED")
         self.assertIn("LEARNING_WAVE.RETENTION_GATE_FAILED", result.reasons)
 
     def test_pass_claim_cannot_bypass_risk_gate(self):
-        result = resolve_candidate(
+        result = resolve(
             candidate_wave(promotion_mode="AUTO"),
-            evaluation(risk=False),
+            approval(risk=False),
         )
         self.assertEqual(result.action, "REJECTED")
         self.assertIn("LEARNING_WAVE.RISK_GATE_FAILED", result.reasons)
@@ -684,28 +692,43 @@ class CandidateResolutionTests(unittest.TestCase):
         wave = candidate_wave(promotion_mode="CONFIRMATION")
         object.__setattr__(wave.policy, "promotion_mode", "AUTO")
         with self.assertRaisesRegex(ValueError, "policy changed"):
-            resolve_candidate(wave, evaluation())
+            resolve(wave)
 
     def test_inconclusive_status_cannot_hide_failed_hard_gate(self):
-        result = resolve_candidate(
+        result = resolve(
             candidate_wave(promotion_mode="AUTO"),
-            evaluation(status="INCONCLUSIVE", risk=False),
+            approval(status="INCONCLUSIVE", risk=False),
         )
         self.assertEqual(result.action, "REJECTED")
         self.assertIn("LEARNING_WAVE.RISK_GATE_FAILED", result.reasons)
         self.assertNotIn("LEARNING_WAVE.EVALUATION_INCONCLUSIVE", result.reasons)
 
-    def test_evaluation_must_bind_exact_candidate_artifact(self):
-        with self.assertRaisesRegex(ValueError, "does not bind"):
-            resolve_candidate(
+    def test_approval_must_bind_exact_candidate_identity(self):
+        with self.assertRaisesRegex(ValueError, "candidate identity"):
+            resolve(
                 candidate_wave(),
-                evaluation(candidate_hash=digest("different-candidate")),
+                approval(candidate_id="candidate-different"),
             )
+
+    def test_approval_must_bind_exact_candidate_artifact(self):
+        with self.assertRaisesRegex(ValueError, "candidate artifact"):
+            resolve(
+                candidate_wave(),
+                approval(artifact_hash=digest("different-candidate")),
+            )
+
+    def test_expired_approval_is_rejected_before_handoff(self):
+        result = resolve(
+            candidate_wave(promotion_mode="AUTO"),
+            approval(valid_until=RESOLUTION_TIME),
+        )
+        self.assertEqual(result.action, "REJECTED")
+        self.assertIn("LEARNING_WAVE.APPROVAL_EVIDENCE_EXPIRED", result.reasons)
 
     def test_resolution_hash_is_deterministic(self):
         wave = candidate_wave(promotion_mode="AUTO")
-        first = resolve_candidate(wave, evaluation())
-        second = resolve_candidate(wave, evaluation())
+        first = resolve(wave)
+        second = resolve(wave)
         self.assertEqual(first.resolution_hash, second.resolution_hash)
 
 

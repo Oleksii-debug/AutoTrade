@@ -52,27 +52,6 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                     (f"{path} (unauthorized trust-root modification)",),
                 )
 
-    def test_existing_unlisted_workflow_still_requires_exact_modification_authority(self):
-        path = ".github/workflows/future-qualified-check.yaml"
-        result = assess_reconvergence(
-            base_paths=[path, "owned/change.py"],
-            changes=[Change(status="M", path=path)],
-        )
-
-        self.assertFalse(result.allowed)
-        self.assertEqual(
-            result.protected_violations,
-            (f"{path} (unauthorized trust-root modification)",),
-        )
-
-        authorized = assess_reconvergence(
-            base_paths=[path, "owned/change.py"],
-            changes=[Change(status="M", path=path)],
-            allowed_scopes=(path,),
-        )
-        self.assertTrue(authorized.allowed)
-        self.assertEqual(authorized.protected_violations, ())
-
     def test_untrusted_modification_of_integration_harness_roots_fails_closed(self):
         expected = {
             "Directory.Build.props",
@@ -136,18 +115,15 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertFalse(created.allowed)
         self.assertEqual(
             created.protected_violations,
-            (
-                "control/__init__.py (unauthorized bootstrap trust-root creation)",
-                "control/__init__.py (unauthorized trust-root creation)",
-            ),
+            ("control/__init__.py (unauthorized trust-root creation)",),
         )
 
-    def test_exact_scope_can_authorize_bootstrap_trust_root_evolution(self):
+    def test_exact_trust_root_approval_can_authorize_bootstrap_evolution(self):
         path = "control/__init__.py"
         result = assess_reconvergence(
             base_paths=["control/tools/registry_state.py", "owned/change.py"],
             changes=[Change(status="A", path=path)],
-            allowed_scopes=(path,),
+            trusted_root_approvals=(path,),
         )
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
@@ -293,7 +269,7 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             (f"{path} (unauthorized trust-root modification)",),
         )
 
-    def test_exact_trusted_scope_can_authorize_workflow_authority_modification(self):
+    def test_exact_mutation_scope_cannot_authorize_workflow_authority_modification(self):
         path = ".github/workflows/verify.yml"
         result = assess_reconvergence(
             base_paths=[path, "owned/change.py"],
@@ -301,11 +277,26 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             allowed_scopes=(path,),
         )
 
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
+        )
+        self.assertEqual(result.scope_violations, ())
+
+    def test_exact_trust_root_approval_can_authorize_workflow_authority_modification(self):
+        path = ".github/workflows/verify.yml"
+        result = assess_reconvergence(
+            base_paths=[path, "owned/change.py"],
+            changes=[Change(status="M", path=path)],
+            trusted_root_approvals=(path,),
+        )
+
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, ())
 
-    def test_exact_trusted_scope_can_authorize_integration_harness_modification(self):
+    def test_exact_mutation_scope_cannot_authorize_integration_harness_modification(self):
         path = "tools/verify.py"
         result = assess_reconvergence(
             base_paths=[path, "owned/change.py"],
@@ -313,16 +304,46 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             allowed_scopes=(path,),
         )
 
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
+        )
+        self.assertEqual(result.scope_violations, ())
+
+    def test_exact_trust_root_approval_can_authorize_integration_harness_modification(self):
+        path = "tools/verify.py"
+        result = assess_reconvergence(
+            base_paths=[path, "owned/change.py"],
+            changes=[Change(status="M", path=path)],
+            trusted_root_approvals=(path,),
+        )
+
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, ())
 
-    def test_exact_trusted_scope_can_authorize_new_workflow_authority(self):
+    def test_exact_mutation_scope_cannot_authorize_new_workflow_authority(self):
         path = ".github/workflows/new-authorized.yml"
         result = assess_reconvergence(
             base_paths=[".github/workflows/verify.yml", "owned/change.py"],
             changes=[Change(status="A", path=path)],
             allowed_scopes=(path,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized workflow-authority creation)",),
+        )
+        self.assertEqual(result.scope_violations, ())
+
+    def test_exact_trust_root_approval_can_authorize_new_workflow_authority(self):
+        path = ".github/workflows/new-authorized.yml"
+        result = assess_reconvergence(
+            base_paths=[".github/workflows/verify.yml", "owned/change.py"],
+            changes=[Change(status="A", path=path)],
+            trusted_root_approvals=(path,),
         )
 
         self.assertTrue(result.allowed)
@@ -391,11 +412,28 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                 Change(status="M", path=unlisted),
             ],
             allowed_scopes=(protected,),
+            trusted_root_approvals=(protected,),
         )
 
         self.assertFalse(result.allowed)
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, (unlisted,))
+
+    def test_trust_root_approval_is_not_full_candidate_mutation_scope(self):
+        protected = ".github/workflows/verify.yml"
+        ordinary = "owned/change.py"
+        result = assess_reconvergence(
+            base_paths=[protected, ordinary],
+            changes=[
+                Change(status="M", path=protected),
+                Change(status="M", path=ordinary),
+            ],
+            trusted_root_approvals=(protected,),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, ())
 
     def test_trusted_workflow_resolves_only_owner_exact_head_comment_scopes(self):
         workflow = (
@@ -415,7 +453,32 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertIn("parse_trusted_scope_approval", resolver)
         self.assertIn("expected_head_sha=head_sha", resolver)
         self.assertIn("/issues/{pr_number}/comments", resolver)
-        self.assertIn('args+=(--allowed-scope "${scope}")', guard)
+        self.assertIn('args+=(--trusted-root-approval "${scope}")', guard)
+        self.assertNotIn('args+=(--allowed-scope "${scope}")', guard)
+        approval_recheck = workflow.split(
+            "- name: Reverify trusted exact-path scope approval is unchanged",
+            1,
+        )[1].split("- name: Reverify event base is still live target tip", 1)[0]
+        regression_tests_offset = workflow.index("- name: Run trusted guard regression tests")
+        approval_recheck_offset = workflow.index(
+            "- name: Reverify trusted exact-path scope approval is unchanged"
+        )
+        final_base_recheck_offset = workflow.index(
+            "- name: Reverify event base is still live target tip"
+        )
+        self.assertLess(regression_tests_offset, approval_recheck_offset)
+        self.assertLess(approval_recheck_offset, final_base_recheck_offset)
+        self.assertIn('comment.get("author_association") != "OWNER"', approval_recheck)
+        self.assertIn("parse_trusted_scope_approval", approval_recheck)
+        self.assertIn("expected_head_sha=head_sha", approval_recheck)
+        self.assertIn("/issues/{pr_number}/comments", approval_recheck)
+        self.assertIn("APPROVED_SCOPE_FILE", approval_recheck)
+        self.assertIn("RECHECK_SCOPE_FILE", approval_recheck)
+        self.assertIn("target.read_bytes() != original.read_bytes()", approval_recheck)
+        self.assertIn(
+            "trusted exact-path scope approval changed during reconvergence run",
+            approval_recheck,
+        )
         self.assertNotIn("pull_request.body", resolver)
         self.assertNotIn("pull_request.title", resolver)
 
@@ -658,7 +721,6 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
         self.assertIn("unauthorized trust-root modification", completed.stdout)
         self.assertIn("tests/Contracts.DotNet/Program.cs", completed.stdout)
-
 
 
 if __name__ == "__main__":

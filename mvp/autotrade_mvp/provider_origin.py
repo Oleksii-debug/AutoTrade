@@ -821,7 +821,31 @@ class ProviderOriginJournal:
         )
 
 
-def observe_provider_origin_json_response(
+    def observe_json_response(
+        self,
+        attempt_id: str,
+        query_binding: QualifiedProviderReadQueryBinding,
+    ) -> ProviderOriginObservation:
+        """Parse only a freshly reverified durable response cut.
+
+        Caller-held response DTOs are deliberately not accepted here: frozen
+        dataclasses can still be rewritten with object.__setattr__, so provider
+        origin must be reconstructed from JournalStore + authenticated artifact
+        state immediately before normalized parsing.
+        """
+
+        response_binding = ProviderOriginJournal.load_response_binding(
+            self,
+            attempt_id,
+            query_binding,
+        )
+        return _observe_loaded_provider_origin_json_response(
+            response_binding=response_binding,
+            query_binding=query_binding,
+        )
+
+
+def _observe_loaded_provider_origin_json_response(
     *,
     response_binding: AuthenticatedReadResponseBinding,
     query_binding: QualifiedProviderReadQueryBinding,
@@ -855,4 +879,21 @@ def observe_provider_origin_json_response(
         response_binding=response_binding,
         qualified_observation=qualified,
         _observation_token=_OBSERVATION_TOKEN,
+    )
+
+
+def observe_provider_origin_json_response(
+    *,
+    origin_journal: ProviderOriginJournal,
+    attempt_id: str,
+    query_binding: QualifiedProviderReadQueryBinding,
+) -> ProviderOriginObservation:
+    """Reverify durable provider origin before exposing normalized content."""
+
+    if type(origin_journal) is not ProviderOriginJournal:
+        raise TypeError("origin_journal must be exact ProviderOriginJournal")
+    return ProviderOriginJournal.observe_json_response(
+        origin_journal,
+        attempt_id,
+        query_binding,
     )

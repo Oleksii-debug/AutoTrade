@@ -1610,6 +1610,130 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_registered_projection_rule_authentication_is_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+
+            def publish(
+                artifact_id: str,
+                payload: dict,
+                *,
+                media_type: str = (
+                    "application/vnd.autotrade.ablation-value-projection+json"
+                ),
+                canonical: bool = True,
+            ) -> str:
+                raw_text = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":") if canonical else None,
+                    ensure_ascii=False,
+                )
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=raw_text.encode("utf-8"),
+                    media_type=media_type,
+                    rights={"storage": True, "export": False},
+                    source_refs=["wp63:test-projection-rule"],
+                )
+                return f"artifact:{artifact_id}@{manifest['sha256']}"
+
+            base = {
+                "schema_version": 1,
+                "projection_kind": "UTILITY",
+                "value_unit": "USD",
+                "owner_authority": "CANONICAL_RECONCILED_OUTCOME",
+                "rule_id": "reconciled-outcome-net-value-v1",
+            }
+            reference = publish(
+                "77777777-7777-4777-8777-777777777771",
+                base,
+            )
+            descriptor = ablation_module._load_registered_projection_descriptor(
+                store,
+                reference,
+                projection_kind="UTILITY",
+                value_unit="USD",
+            )
+            self.assertEqual(descriptor.projection_kind, "UTILITY")
+            self.assertEqual(descriptor.value_unit, "USD")
+            self.assertEqual(
+                descriptor.owner_authority,
+                "CANONICAL_RECONCILED_OUTCOME",
+            )
+
+            wrong_owner = publish(
+                "77777777-7777-4777-8777-777777777772",
+                {**base, "owner_authority": "CALLER_ASSERTED"},
+            )
+            with self.assertRaisesRegex(ValueError, "owner authority mismatch"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    wrong_owner,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
+            wrong_kind = publish(
+                "77777777-7777-4777-8777-777777777773",
+                {**base, "projection_kind": "COST"},
+            )
+            with self.assertRaisesRegex(ValueError, "kind mismatch"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    wrong_kind,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
+            wrong_unit = publish(
+                "77777777-7777-4777-8777-777777777774",
+                {**base, "value_unit": "EUR"},
+            )
+            with self.assertRaisesRegex(ValueError, "value unit mismatch"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    wrong_unit,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
+            noncanonical = publish(
+                "77777777-7777-4777-8777-777777777775",
+                base,
+                canonical=False,
+            )
+            with self.assertRaisesRegex(ValueError, "JSON must be canonical"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    noncanonical,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
+            wrong_media = publish(
+                "77777777-7777-4777-8777-777777777776",
+                base,
+                media_type="application/json",
+            )
+            with self.assertRaisesRegex(ValueError, "media type"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    wrong_media,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
+            artifact_id = reference.split(":", 1)[1].split("@", 1)[0]
+            forged_ref = f"artifact:{artifact_id}@sha256:{'0' * 64}"
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    forged_ref,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
     def test_terminal_qualification_requires_persistent_protocol_population_and_artifacts(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

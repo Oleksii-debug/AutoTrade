@@ -96,6 +96,7 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             "Directory.Build.targets",
             "global.json",
             "requirements-dev.txt",
+            "provenance/components.json",
             "tools/baseline.py",
             "tools/build_provenance_manifest.py",
             "tools/check_nvda_qualification.py",
@@ -152,6 +153,18 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertIn(
             "tests/Integration/LeanAdoption/Program.cs",
             INTEGRATION_HARNESS_ROOTS,
+        )
+
+    def test_candidate_cannot_retarget_lean_source_selection_without_exact_approval(self):
+        path = "provenance/components.json"
+        result = assess_reconvergence(
+            base_paths=[path, ".github/workflows/lean-adoption.yml"],
+            changes=[Change(status="M", path=path)],
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
         )
 
     def test_integration_harness_deletion_is_also_protected(self):

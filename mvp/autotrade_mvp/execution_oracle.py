@@ -185,6 +185,17 @@ def assert_conservative_execution(
             "filled quantity exceeds independently qualified participation capacity"
         )
 
+    if result.filled_quantity > zero:
+        expected_fill_status = (
+            "FILLED" if result.filled_quantity == order.quantity else "PARTIAL"
+        )
+        if result.status != expected_fill_status:
+            raise ExecutionOracleError(
+                "positive fill status must match exact execution completeness"
+            )
+    elif result.status in {"FILLED", "PARTIAL"}:
+        raise ExecutionOracleError("zero fill cannot claim FILLED or PARTIAL status")
+
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)
     market_time = _instant(observation.market_time, name="market_time")

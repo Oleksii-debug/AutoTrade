@@ -437,10 +437,10 @@ class BybitCredentialProbeWireResponse:
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
         ret_code, response_sha256 = _response_digest(response)
-        if _provider_transport_attestation not in {
-            None,
-            _PROVIDER_TRANSPORT_ATTESTATION,
-        }:
+        if (
+            _provider_transport_attestation is not None
+            and _provider_transport_attestation is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
             raise ProviderCoreError(
                 "Bybit credential probe provider transport attestation is invalid"
             )
@@ -567,10 +567,10 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
-        if _provider_transport_attestation not in {
-            None,
-            _PROVIDER_TRANSPORT_ATTESTATION,
-        }:
+        if (
+            _provider_transport_attestation is not None
+            and _provider_transport_attestation is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
             raise ProviderCoreError(
                 "Bybit credential evidence provider transport attestation is invalid"
             )

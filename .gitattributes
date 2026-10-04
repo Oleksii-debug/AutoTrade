@@ -1,4 +1,0 @@
-# Release-provenance inputs and generated evidence must have one checkout-independent text identity.
-provenance/** text eol=lf
-requirements-dev.txt text eol=lf
-global.json text eol=lf

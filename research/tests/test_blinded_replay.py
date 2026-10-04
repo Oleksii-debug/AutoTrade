@@ -1015,6 +1015,60 @@ class Section17BlindedReplayTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_tampered_source_graph_is_rejected_before_callbacks(self):
+        callbacks = []
+        source = dataset(event("one"))
+
+        class HostilePayload(dict):
+            def items(self):
+                callbacks.append("payload-items")
+                return super().items()
+
+            def __iter__(self):
+                callbacks.append("payload-iter")
+                return super().__iter__()
+
+        object.__setattr__(
+            source.events[0],
+            "payload",
+            HostilePayload(dict(source.events[0].payload)),
+        )
+        with self.assertRaisesRegex(TypeError, "payload must remain an exact frozen mapping"):
+            self.blind(source)
+        self.assertEqual(callbacks, [])
+
+    def test_tampered_dataset_events_are_rejected_before_iteration(self):
+        callbacks = []
+        source = dataset(event("one"))
+
+        class HostileEvents(tuple):
+            def __iter__(self):
+                callbacks.append("events-iter")
+                return super().__iter__()
+
+        object.__setattr__(source, "events", HostileEvents(source.events))
+        with self.assertRaisesRegex(TypeError, "events must remain an exact tuple"):
+            self.blind(source)
+        self.assertEqual(callbacks, [])
+
+    def test_tampered_profile_collections_are_rejected_before_iteration(self):
+        callbacks = []
+        selected = profile()
+
+        class HostileFields(tuple):
+            def __iter__(self):
+                callbacks.append("profile-iter")
+                return super().__iter__()
+
+        object.__setattr__(
+            selected,
+            "identity_fields",
+            HostileFields(selected.identity_fields),
+        )
+        with self.assertRaisesRegex(TypeError, "identity_fields must remain an exact tuple"):
+            self.blind(dataset(event("one")), profile=selected)
+        self.assertEqual(callbacks, [])
+
     def test_hostile_dataset_and_profile_subclasses_are_rejected(self):
         class HostileDataset(CausalDataset):
             pass

@@ -43,7 +43,7 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
         fee="0.00000000",
         cash_flow="0",
         change="-0.003676",
-        include_trade=True,
+        include_trade=False,
     ):
         settlement = {
             "transSubType": "",
@@ -104,7 +104,7 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             observed_at,
         )
 
-    def test_parser_projects_one_funding_row_and_skips_trade(self):
+    def test_parser_projects_one_funding_row(self):
         rows = self._parse()
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -116,6 +116,13 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
         self.assertEqual(row.funding_amount, Decimal("-0.003676"))
         self.assertEqual(row.transaction_time_ms, "1672128000000")
         self.assertNotIsInstance(row, ProviderFundingIncomeObservation)
+
+    def test_nonsettlement_row_escaped_qualified_type_fails_closed(self):
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "qualified transaction type",
+        ):
+            self._parse(payload=self._payload(include_trade=True))
 
     def test_parser_accepts_canonical_frozen_provider_payload_shape(self):
         payload = _decode_exact_json(
@@ -322,6 +329,32 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             "qualified query startTime.*canonical",
         ):
             self._parse(query=self._query(startTime="01672128000000"))
+
+    def test_start_only_window_enforces_bybit_24_hour_implicit_end(self):
+        start = 1672128000000
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "qualified endTime",
+        ):
+            self._parse(
+                payload=self._payload(
+                    transaction_time=str(start + 24 * 60 * 60 * 1000 + 1)
+                ),
+                query=self._query(startTime=str(start)),
+            )
+
+    def test_end_only_window_enforces_bybit_24_hour_implicit_start(self):
+        end = 1672214400000
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "qualified startTime",
+        ):
+            self._parse(
+                payload=self._payload(
+                    transaction_time=str(end - 24 * 60 * 60 * 1000 - 1)
+                ),
+                query=self._query(endTime=str(end)),
+            )
 
     def test_qualified_time_window_over_seven_days_is_rejected(self):
         start = 1672128000000

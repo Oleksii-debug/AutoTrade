@@ -13,8 +13,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from weakref import WeakKeyDictionary
 from typing import Iterable, Mapping
+import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts import (
@@ -478,11 +478,30 @@ class PreparedSettlementMutation:
 def _install_durable_settlement_store_binding():
     """Keep original settlement composition outside mutable instance/module state."""
 
-    bindings: WeakKeyDictionary[
-        object,
-        tuple[JournalStore, object, str, str, str, str, str],
-    ] = WeakKeyDictionary()
+    bindings: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[weakref.ReferenceType, object, str, str, str, str, str],
+        ],
+    ] = {}
     lock = RLock()
+
+    def registered(
+        book: object,
+    ) -> tuple[weakref.ReferenceType, object, str, str, str, str, str] | None:
+        object_id = id(book)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        book_ref, binding = entry
+        current = book_ref()
+        if current is book:
+            return binding
+        if current is None:
+            bindings.pop(object_id, None)
+            return None
+        raise SettlementConflict("durable settlement binding identity collision")
 
     def bind(
         book: object,
@@ -492,29 +511,32 @@ def _install_durable_settlement_store_binding():
         scope_id: str,
     ) -> None:
         with lock:
-            if book in bindings:
+            if registered(book) is not None:
                 raise RuntimeError("durable settlement authority is already bound")
-            bindings[book] = (
-                store,
-                identity,
-                scope.provider_id,
-                scope.account_id,
-                scope.environment,
-                scope.provider_environment,
-                scope_id,
+            bindings[id(book)] = (
+                weakref.ref(book),
+                (
+                    weakref.ref(store),
+                    identity,
+                    scope.provider_id,
+                    scope.account_id,
+                    scope.environment,
+                    scope.provider_environment,
+                    scope_id,
+                ),
             )
 
     def bound(
         book: object,
     ) -> tuple[JournalStore, object, SettlementAccountScope, str]:
         with lock:
-            binding = bindings.get(book)
+            binding = registered(book)
         if binding is None:
             raise SettlementConflict(
                 "durable settlement authority binding is unavailable"
             )
         (
-            store,
+            store_ref,
             retained_identity,
             provider_id,
             account_id,
@@ -522,6 +544,11 @@ def _install_durable_settlement_store_binding():
             provider_environment,
             scope_id,
         ) = binding
+        store = store_ref()
+        if store is None:
+            raise SettlementConflict(
+                "durable settlement JournalStore was released while book is live"
+            )
         current_identity = require_exact_journal_store_authority(
             store,
             subject="durable settlement JournalStore",
@@ -551,8 +578,27 @@ del _install_durable_settlement_store_binding
 def _install_durable_settlement_evidence_reader():
     """Retain one product-selected artifact generation outside mutable book state."""
 
-    readers: WeakKeyDictionary[object, object] = WeakKeyDictionary()
+    readers: dict[
+        int,
+        tuple[weakref.ReferenceType, weakref.ReferenceType],
+    ] = {}
     lock = RLock()
+
+    def registered(book: object):
+        object_id = id(book)
+        entry = readers.get(object_id)
+        if entry is None:
+            return None
+        book_ref, reader_ref = entry
+        current = book_ref()
+        if current is book:
+            return reader_ref
+        if current is None:
+            readers.pop(object_id, None)
+            return None
+        raise SettlementConflict(
+            "durable settlement evidence binding identity collision"
+        )
 
     def bind(
         book: object,
@@ -560,7 +606,7 @@ def _install_durable_settlement_evidence_reader():
         publication_store: ArtifactStore,
     ) -> None:
         with lock:
-            if book in readers:
+            if registered(book) is not None:
                 raise SettlementConflict(
                     "durable settlement evidence authority is already bound"
                 )
@@ -583,14 +629,37 @@ def _install_durable_settlement_evidence_reader():
                 raise SettlementConflict(
                     "trusted settlement evidence authority is unavailable"
                 ) from error
-            readers[book] = reader
+            # The book owns the live reader strongly; the closure-owned registry
+            # retains only callback-free weakrefs. This prevents both a
+            # caller-invokable WeakKeyDictionary removal callback and a stale
+            # registry row retaining namespace capabilities after book death.
+            object.__setattr__(book, "_settlement_evidence_reader", reader)
+            readers[id(book)] = (weakref.ref(book), weakref.ref(reader))
 
     def bound(book: object):
         with lock:
-            reader = readers.get(book)
-        if reader is None:
+            reader_ref = registered(book)
+        if reader_ref is None:
             raise SettlementConflict(
                 "durable settlement evidence authority is unavailable"
+            )
+        reader = reader_ref()
+        if reader is None:
+            raise SettlementConflict(
+                "durable settlement evidence authority was released while book is live"
+            )
+        try:
+            visible_reader = object.__getattribute__(
+                book,
+                "_settlement_evidence_reader",
+            )
+        except AttributeError as error:
+            raise SettlementConflict(
+                "durable settlement evidence authority changed"
+            ) from error
+        if visible_reader is not reader:
+            raise SettlementConflict(
+                "durable settlement evidence authority changed"
             )
         return reader
 

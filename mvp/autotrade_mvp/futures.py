@@ -27,7 +27,7 @@ from .exact_decimal import (
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
-from .instruments import InstrumentVersion
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
 
 
 class FuturesError(ValueError):
@@ -952,6 +952,8 @@ def book_variation_margin(
 def lifecycle_gate(
     contract: FuturesContract,
     at: datetime,
+    *,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> str:
     """Return the conservative lifecycle state for holding/trading the contract.
 
@@ -1019,6 +1021,28 @@ def lifecycle_gate(
             "futures lifecycle contract no longer matches construction authority"
         )
 
+    # Exact object shape and a construction snapshot establish integrity only.
+    # Lifecycle authorization must be re-selected from the composition-owned
+    # canonical registry on every gate invocation; a caller-authored exact
+    # InstrumentVersion cannot grant itself trading/lifecycle authority.
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentRegistry"
+        )
+    try:
+        selected_version = InstrumentRegistry.exact(
+            instrument_registry,
+            contract.instrument,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle instrument is not selected by canonical InstrumentRegistry"
+        ) from error
+    if type(selected_version) is not InstrumentVersion or selected_version != version:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion differs from canonical registry selection"
+        )
+
     point = _utc(at, "at")
     if point >= contract.expiry:
         return "EXPIRED"
@@ -1035,7 +1059,13 @@ def lifecycle_gate(
 def require_open_for_new_exposure(
     contract: FuturesContract,
     at: datetime,
+    *,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> None:
-    state = lifecycle_gate(contract, at)
+    state = lifecycle_gate(
+        contract,
+        at,
+        instrument_registry=instrument_registry,
+    )
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")

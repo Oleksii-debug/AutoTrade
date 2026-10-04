@@ -349,7 +349,7 @@ def _make_normalized_event_build_identity_guard():
         reference = weakref.ref(event, release)
         bindings[identity] = (reference, event_id, adapter_version)
 
-    def require(event: object) -> None:
+    def require(event: object) -> tuple[str, str]:
         current = bindings.get(id(event))
         if current is None or current[0]() is not event:
             raise MarketDataError(
@@ -365,6 +365,7 @@ def _make_normalized_event_build_identity_guard():
             raise MarketDataError(
                 "normalized market event build identity changed after construction"
             )
+        return current[1], current[2]
 
     return bind, require
 
@@ -444,11 +445,11 @@ class NormalizedMarketEvent:
         self,
         _require=_require_normalized_event_build_identity,
     ) -> dict[str, Any]:
-        _require(self)
+        bound_event_id, bound_adapter_version = _require(self)
         result = {
-            "event_id": self.event_id,
+            "event_id": bound_event_id,
             "instrument_version": self.instrument_version,
-            "adapter_version": self.adapter_version,
+            "adapter_version": bound_adapter_version,
             "kind": self.kind,
             "source_event_at": _utc_text(self.source_event_at),
             "available_at": _utc_text(self.available_at),

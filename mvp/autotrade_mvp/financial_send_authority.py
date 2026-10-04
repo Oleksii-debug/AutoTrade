@@ -15,13 +15,12 @@ or manufacture qualification evidence.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, Mapping
 
 from .authority import AuthorityService
 from .dispatch import DispatchOutcome
 from .financial_request_binding import FinancialRequestBindingMaterial
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import JournalStore, payload_digest
 from .production_bybit import ProductionBybitOrderSender
 from .production_financial_host import FinancialProductionHostRuntime
 
@@ -35,26 +34,42 @@ _CAPABILITY_FACTORY_TOKEN = object()
 _BOUND_BYBIT_FACTORY_TOKEN = object()
 
 
-def _mapping_digest(value: Mapping[str, Any], *, name: str) -> str:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    # payload_digest uses the same canonical-json contract as GuardedDispatcher.
-    return payload_digest(dict(value))
+def _exact_json_value(value: object, *, name: str) -> object:
+    """Detach one JSON-domain value without caller-polymorphic dispatch."""
+
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    if type(value) is list:
+        return [
+            _exact_json_value(item, name=f"{name}[{index}]")
+            for index, item in enumerate(list.copy(value))
+        ]
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise TypeError(f"{name} keys must be exact strings")
+        detached = dict.copy(value)
+        return {
+            key: _exact_json_value(item, name=f"{name}.{key}")
+            for key, item in detached.items()
+        }
+    raise TypeError(f"{name} must contain exact JSON-domain values")
 
 
-def _detached_mapping_snapshot(
-    value: Mapping[str, Any],
-    *,
-    name: str,
-) -> dict[str, Any]:
-    """Materialize caller-owned mapping state exactly once and detach nested JSON."""
+def _detached_mapping_snapshot(value: object, *, name: str) -> dict[str, Any]:
+    """Snapshot an exact built-in JSON object once before authority callbacks."""
 
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    detached = json.loads(canonical_json(dict(value)))
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
+    detached = _exact_json_value(value, name=name)
     if type(detached) is not dict:
-        raise TypeError(f"{name} must canonicalize to a JSON object")
+        raise TypeError(f"{name} must be an exact dict")
     return detached
+
+
+def _mapping_digest(value: object, *, name: str) -> str:
+    # payload_digest uses the same canonical-json contract as GuardedDispatcher,
+    # but only after the caller-owned input is detached into exact built-ins.
+    return payload_digest(_detached_mapping_snapshot(value, name=name))
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -178,20 +193,20 @@ def require_exact_bybit_financial_request(
         raise FinancialSendAuthorityError(
             "Bybit provider environment differs from financial binding"
         )
-    if not isinstance(request, Mapping):
-        raise TypeError("request must be a mapping")
-    if _mapping_digest(request, name="request") != binding.request_sha256:
+
+    canonical_request = _detached_mapping_snapshot(request, name="request")
+    if payload_digest(canonical_request) != binding.request_sha256:
         raise FinancialSendAuthorityError(
             "dispatcher request digest differs from financial binding"
         )
 
     exact_projection = (
-        request.get("endpoint"),
-        request.get("account_id"),
-        request.get("environment"),
-        request.get("provider_environment"),
-        request.get("capability_snapshot_id"),
-        request.get("body_sha256"),
+        canonical_request.get("endpoint"),
+        canonical_request.get("account_id"),
+        canonical_request.get("environment"),
+        canonical_request.get("provider_environment"),
+        canonical_request.get("capability_snapshot_id"),
+        canonical_request.get("body_sha256"),
     )
     expected_projection = (
         binding.endpoint,
@@ -206,10 +221,10 @@ def require_exact_bybit_financial_request(
             "dispatcher provider projection differs from financial binding"
         )
 
-    body = request.get("body")
-    if not isinstance(body, Mapping):
+    body = canonical_request.get("body")
+    if type(body) is not dict:
         raise FinancialSendAuthorityError("Bybit dispatcher request body is missing")
-    if _mapping_digest(body, name="request.body") != binding.body_sha256:
+    if payload_digest(body) != binding.body_sha256:
         raise FinancialSendAuthorityError("Bybit body digest differs from financial binding")
 
     expected_side = "Buy" if binding.side == "BUY" else "Sell"
@@ -233,8 +248,11 @@ def require_exact_bybit_financial_request(
     if type(body_reduce_only) is not bool or body_reduce_only != binding.reduce_only:
         raise FinancialSendAuthorityError("Bybit reduce-only differs from financial binding")
 
-    scope = {} if submission_scope is None else submission_scope
-    if _mapping_digest(scope, name="submission_scope") != binding.submission_scope_digest:
+    scope = {} if submission_scope is None else _detached_mapping_snapshot(
+        submission_scope,
+        name="submission_scope",
+    )
+    if payload_digest(scope) != binding.submission_scope_digest:
         raise FinancialSendAuthorityError(
             "dispatcher submission scope differs from financial binding"
         )
@@ -308,6 +326,7 @@ class FinancialSendAuthority:
             raise FinancialSendAuthorityError(
                 "financial send capability belongs to another authority issuer"
             )
+
 
 class FinancialSendAuthorityIssuer:
     """Product-owned bridge from AuthorityService to exact send capabilities."""
@@ -483,7 +502,15 @@ def build_financial_send_authority_issuer(
 class FinanciallyBoundBybitOrderSender:
     """Canonical Bybit product sender requiring one sealed financial capability."""
 
-    __slots__ = ("__sender", "__issuer", "__runtime", "__provider_environment")
+    __slots__ = (
+        "__sender",
+        "__sender_dispatch",
+        "__sender_dispatch_function",
+        "__sender_dispatch_code",
+        "__issuer",
+        "__runtime",
+        "__provider_environment",
+    )
 
     def __init_subclass__(cls, **_kwargs) -> None:
         raise TypeError("FinanciallyBoundBybitOrderSender is sealed")
@@ -509,7 +536,21 @@ class FinanciallyBoundBybitOrderSender:
             raise FinancialSendAuthorityError(
                 "Bybit sender and financial issuer belong to different production hosts"
             )
+        sender_dispatch_function = ProductionBybitOrderSender.dispatch
+        sender_dispatch = sender.dispatch
+        if (
+            not callable(sender_dispatch_function)
+            or not hasattr(sender_dispatch_function, "__code__")
+            or getattr(sender_dispatch, "__self__", None) is not sender
+            or getattr(sender_dispatch, "__func__", None) is not sender_dispatch_function
+        ):
+            raise FinancialSendAuthorityError(
+                "Bybit sender dispatch executable authority is unavailable"
+            )
         self.__sender = sender
+        self.__sender_dispatch = sender_dispatch
+        self.__sender_dispatch_function = sender_dispatch_function
+        self.__sender_dispatch_code = sender_dispatch_function.__code__
         self.__issuer = issuer
         self.__runtime = runtime
         self.__provider_environment = sender.provider_environment
@@ -517,6 +558,25 @@ class FinanciallyBoundBybitOrderSender:
     @property
     def provider_environment(self) -> str:
         return self.__provider_environment
+
+    def _require_sender_dispatch_authority(self) -> None:
+        sender_dispatch_function = self.__sender_dispatch_function
+        if ProductionBybitOrderSender.dispatch is not sender_dispatch_function:
+            raise FinancialSendAuthorityError(
+                "Bybit sender dispatch executable authority changed"
+            )
+        if sender_dispatch_function.__code__ is not self.__sender_dispatch_code:
+            raise FinancialSendAuthorityError(
+                "Bybit sender dispatch executable authority code changed"
+            )
+        sender_dispatch = self.__sender_dispatch
+        if (
+            getattr(sender_dispatch, "__self__", None) is not self.__sender
+            or getattr(sender_dispatch, "__func__", None) is not sender_dispatch_function
+        ):
+            raise FinancialSendAuthorityError(
+                "Bybit sender dispatch binding authority changed"
+            )
 
     def dispatch(
         self,
@@ -532,6 +592,7 @@ class FinanciallyBoundBybitOrderSender:
         final_barrier_clock: Callable[[], str] | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        self._require_sender_dispatch_authority()
         request_snapshot = _detached_mapping_snapshot(request, name="request")
         submission_scope_snapshot = (
             {}
@@ -556,7 +617,9 @@ class FinanciallyBoundBybitOrderSender:
             submission_scope_snapshot,
             provider_environment=self.__provider_environment,
         )
-        return self.__sender.dispatch(
+        self._require_sender_dispatch_authority()
+        sender_dispatch = self.__sender_dispatch
+        return sender_dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash=intent_hash,

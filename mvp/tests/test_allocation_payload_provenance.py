@@ -457,6 +457,30 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_json_encoder_constructor_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder = allocation_module.json.JSONEncoder
+        encoder_dict = type.__getattribute__(encoder, "__dict__")
+        self.assertNotIn("__new__", encoder_dict)
+        touched = []
+
+        def forged_new(cls, *args, **kwargs):
+            touched.append("new")
+            raise AssertionError("forged JSON encoder constructor executed")
+
+        encoder.__new__ = staticmethod(forged_new)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            del encoder.__new__
+
+        self.assertEqual(touched, [])
+
+
     def test_json_encoder_helper_retarget_fails_before_callback(self):
         evidence = self.evidence({"symbol": "AAA"})
         encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__

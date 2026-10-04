@@ -1670,6 +1670,7 @@ def _make_allocation_payload_sealer(
     _json_dumps=json.dumps,
     _json_dumps_code=getattr(json.dumps, "__code__", None),
     _json_encoder=json.JSONEncoder,
+    _json_encoder_bases=json.JSONEncoder.__bases__,
     _json_encoder_init=json.JSONEncoder.__init__,
     _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
     _json_encoder_default=json.JSONEncoder.default,
@@ -1734,6 +1735,12 @@ def _make_allocation_payload_sealer(
             encoder_type_dict = type.__getattribute__(_json_encoder, "__dict__")
             if (
                 getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+                or type(_json_encoder) is not type
+                or type.__getattribute__(_json_encoder, "__bases__") is not _json_encoder_bases
+                or "__new__" in encoder_type_dict
+                or "__getattribute__" in encoder_type_dict
+                or "__getattr__" in encoder_type_dict
+                or "__setattr__" in encoder_type_dict
                 or encoder_type_dict.get("__init__") is not _json_encoder_init
                 or getattr(_json_encoder_init, "__code__", None)
                 is not _json_encoder_init_code
@@ -1916,6 +1923,7 @@ def _canonical_evidence_json(
     _json_dumps_code=getattr(json.dumps, "__code__", None),
     _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
     _json_encoder=json.JSONEncoder,
+    _json_encoder_bases=json.JSONEncoder.__bases__,
     _json_encoder_init=json.JSONEncoder.__init__,
     _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
     _json_encoder_default=json.JSONEncoder.default,
@@ -1949,7 +1957,13 @@ def _canonical_evidence_json(
             "allocation evidence canonicalizer executable changed after binding"
         )
     if (
-        encoder_type_dict.get("__init__") is not _json_encoder_init
+        type(_json_encoder) is not type
+        or type.__getattribute__(_json_encoder, "__bases__") is not _json_encoder_bases
+        or "__new__" in encoder_type_dict
+        or "__getattribute__" in encoder_type_dict
+        or "__getattr__" in encoder_type_dict
+        or "__setattr__" in encoder_type_dict
+        or encoder_type_dict.get("__init__") is not _json_encoder_init
         or getattr(_json_encoder_init, "__code__", None)
         is not _json_encoder_init_code
         or encoder_type_dict.get("default") is not _json_encoder_default
@@ -2159,9 +2173,9 @@ class ImmutableAllocationEvidence:
 def _verified_allocation_payload_owner(
     evidence: ImmutableAllocationEvidence,
     _sealed_lookup=_registered_allocation_payload,
-    _json_loads=json.loads,
+    _canonicalize=_canonical_evidence_value,
     _digest=_allocation_evidence_digest,
-    _json_loads_code=getattr(json.loads, "__code__", None),
+    _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
     _digest_code=getattr(_allocation_evidence_digest, "__code__", None),
 ):
     """Verify canonical issuer provenance before any payload mapping method."""
@@ -2175,17 +2189,17 @@ def _verified_allocation_payload_owner(
         raise ValueError("allocation evidence payload provenance is not sealed")
     if type(owners) is not tuple:
         raise ValueError("allocation evidence payload provenance is not sealed")
-    owner, canonical_json = sealed
+    owner, _canonical_json = sealed
     if not any(candidate is owner for candidate in owners):
         raise ValueError("allocation evidence payload provenance is not sealed")
     if (
-        getattr(_json_loads, "__code__", None) is not _json_loads_code
+        getattr(_canonicalize, "__code__", None) is not _canonicalize_code
         or getattr(_digest, "__code__", None) is not _digest_code
     ):
         raise ValueError(
             "allocation evidence trust helper executable changed after binding"
         )
-    decoded = _json_loads(canonical_json)
+    decoded = _canonicalize(payload)
     if type(decoded) is not dict:
         raise RuntimeError("sealed allocation payload provenance is invalid")
     expected_digest = _digest(

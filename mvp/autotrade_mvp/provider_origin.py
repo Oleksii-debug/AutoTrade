@@ -1680,6 +1680,16 @@ class ProviderOriginJournal:
         )
         if execution_class == _DIRECT_EXECUTION_CLASS:
             _require_direct_prepared_network_authority(prepared_payload)
+            expected_wire_semantics_sha256 = (
+                qualified_authenticated_read_expected_wire_semantics_digest(
+                    query_binding.query_binding,
+                    provider_environment=query_binding.provider_environment,
+                )
+            )
+            if wire_request_semantics_sha256 != expected_wire_semantics_sha256:
+                raise ProviderOriginError(
+                    "durable direct wire semantics differ from exact qualified read"
+                )
             _require_direct_terminal_after_prepared_sequence(
                 prepared_event=prepared,
                 terminal_cut=terminal_cut,

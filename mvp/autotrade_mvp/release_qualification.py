@@ -173,6 +173,73 @@ class ReleaseCandidate:
         )
 
 
+_RELEASE_CHECK_FIELDS = frozenset(
+    {"name", "status", "source_sha", "evidence_ref", "evidence_sha256"}
+)
+_RELEASE_CANDIDATE_FIELDS = frozenset(
+    {
+        "version",
+        "source_sha",
+        "installer_sha256",
+        "diagnostics_sha256",
+        "sbom_sha256",
+        "compatibility_manifest_sha256",
+        "signatures_verified",
+    }
+)
+
+
+def _exact_state(
+    value: object,
+    *,
+    expected_type: type,
+    expected_fields: frozenset[str],
+    subject: str,
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise ReleaseQualificationError(
+            f"{subject} must be exact {expected_type.__name__}"
+        )
+    raw = vars(value)
+    if type(raw) is not dict:
+        raise ReleaseQualificationError(f"{subject} state must be canonical")
+    state = dict.copy(raw)
+    if any(type(key) is not str for key in state) or set(state) != expected_fields:
+        raise ReleaseQualificationError(
+            f"{subject} state is incomplete or has unexpected fields"
+        )
+    return state
+
+
+def _reseal_release_check(value: object) -> ReleaseCheck:
+    state = _exact_state(
+        value,
+        expected_type=ReleaseCheck,
+        expected_fields=_RELEASE_CHECK_FIELDS,
+        subject="release check",
+    )
+    if any(type(state[field]) is not str for field in _RELEASE_CHECK_FIELDS):
+        raise ReleaseQualificationError("release check fields must be canonical text")
+    return ReleaseCheck(**state)
+
+
+def _reseal_release_candidate(value: object) -> ReleaseCandidate:
+    state = _exact_state(
+        value,
+        expected_type=ReleaseCandidate,
+        expected_fields=_RELEASE_CANDIDATE_FIELDS,
+        subject="release candidate",
+    )
+    for field in _RELEASE_CANDIDATE_FIELDS - {"signatures_verified"}:
+        if type(state[field]) is not str:
+            raise ReleaseQualificationError(
+                f"release candidate {field} must be canonical text"
+            )
+    if type(state["signatures_verified"]) is not bool:
+        raise ReleaseQualificationError("signatures_verified must be boolean")
+    return ReleaseCandidate(**state)
+
+
 @dataclass(frozen=True)
 class ReleaseDecision:
     status: str
@@ -188,11 +255,10 @@ def evaluate_release(
 ) -> ReleaseDecision:
     """Evaluate one immutable release candidate without inheriting stale evidence."""
 
-    rows = tuple(checks)
+    candidate = _reseal_release_candidate(candidate)
+    rows = tuple(_reseal_release_check(row) for row in checks)
     by_name: dict[str, ReleaseCheck] = {}
     for row in rows:
-        if not isinstance(row, ReleaseCheck):
-            raise ReleaseQualificationError("checks must contain ReleaseCheck values")
         if row.name in by_name:
             raise ReleaseQualificationError(f"duplicate release check: {row.name}")
         by_name[row.name] = row

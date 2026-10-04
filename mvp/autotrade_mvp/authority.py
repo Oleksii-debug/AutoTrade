@@ -618,13 +618,11 @@ def _authority_service_capital_operations():
                     "settlement and economic capital scopes do not match"
                 )
             # DurableProviderEconomicBook does not yet retain provider_environment.
-            # Never collapse BYBIT TESTNET/DEMO into generic PAPER authority.
-            if (
-                scope.provider_id == "BYBIT"
-                and scope.provider_environment != scope.environment
-            ):
+            # Until it does, never collapse a provider-specific domain into the
+            # broader runtime environment for any provider.
+            if scope.provider_environment != scope.environment:
                 raise AuthorityConflict(
-                    "BYBIT capital authority requires provider_environment "
+                    "capital authority requires provider_environment "
                     "in the durable economic book"
                 )
 
@@ -697,6 +695,11 @@ def _authority_service_capital_operations():
             or scope.environment != economic_book.environment
         ):
             raise AuthorityConflict("capital authority scope changed")
+        if scope.provider_environment != scope.environment:
+            raise AuthorityConflict(
+                "capital authority requires provider_environment "
+                "in the durable economic book"
+            )
         return settlement_book, economic_book
 
     def resolve(

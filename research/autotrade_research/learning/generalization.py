@@ -360,10 +360,20 @@ class CrossMarketTrainingProtocol:
             raise TypeError("asset_profiles must be a sequence")
         if isinstance(required_cells, (str, bytes)):
             raise TypeError("required_cells must be a sequence")
+        profiles_raw = tuple(asset_profiles)
+        if any(type(item) is not AssetClassProfile for item in profiles_raw):
+            raise TypeError(
+                "asset_profiles must contain exact AssetClassProfile"
+            )
+        cells_raw = tuple(required_cells)
+        if any(type(item) is not MarketRegimeCell for item in cells_raw):
+            raise TypeError(
+                "required_cells must contain exact MarketRegimeCell"
+            )
         profiles = tuple(
-            sorted(tuple(asset_profiles), key=lambda item: item.asset_class)
+            sorted(profiles_raw, key=lambda item: item.asset_class)
         )
-        cells = tuple(sorted(tuple(required_cells)))
+        cells = tuple(sorted(cells_raw))
         return cls(
             protocol_id=protocol_id,
             candidate_hash=candidate_hash,

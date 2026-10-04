@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
+import weakref
 from types import MappingProxyType
 from typing import Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -781,6 +782,7 @@ class ProviderOriginObservation:
             raise ProviderOriginError(
                 "provider-origin observation must come from durable response binding"
             )
+        require_provider_origin_response_binding_authority(self.response_binding)
         if type(self.response_binding) is not AuthenticatedReadResponseBinding:
             raise ProviderOriginError("response_binding is not exact durable binding")
         if self.response_binding.execution_class != _DIRECT_EXECUTION_CLASS:
@@ -1702,6 +1704,103 @@ class ProviderOriginJournal:
 
 
 
+def _install_provider_origin_response_binding_authority():
+    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    field_names = (
+        "attempt_id",
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_environment",
+        "capability_snapshot_id",
+        "qualification_id",
+        "endpoint",
+        "qualified_query_digest",
+        "endpoint_rule_digest",
+        "qualified_route_rule_digest",
+        "data_entitlement",
+        "parser_identity",
+        "transport_identity",
+        "network_policy_identity",
+        "http_status",
+        "observed_at",
+        "response_sha256",
+        "response_artifact_id",
+        "response_bytes",
+        "origin_ref",
+        "journal_sequence",
+        "execution_class",
+        "wire_request_sha256",
+        "wire_request_semantics_sha256",
+        "terminal_authority_journal_sequence_cut",
+        "terminal_authority_verified_at",
+    )
+
+    def prune() -> None:
+        for object_id, state in tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def material(value: AuthenticatedReadResponseBinding) -> tuple[object, ...]:
+        if type(value) is not AuthenticatedReadResponseBinding:
+            raise ProviderOriginError(
+                "exact provider-origin response binding is required"
+            )
+        return tuple(getattr(value, name) for name in field_names)
+
+    def register(value: AuthenticatedReadResponseBinding) -> None:
+        snapshot = material(value)
+        prune()
+        object_id = id(value)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            if current[0]() is value and current[1] == snapshot:
+                return
+            raise ProviderOriginError(
+                "provider-origin response binding authority identity collision"
+            )
+        states[object_id] = (weakref.ref(value), snapshot)
+
+    def require(value: AuthenticatedReadResponseBinding) -> AuthenticatedReadResponseBinding:
+        snapshot = material(value)
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderOriginError(
+                "provider-origin response binding construction authority is unavailable"
+            )
+        if state[1] != snapshot:
+            raise ProviderOriginError(
+                "provider-origin response binding changed after durable journal load"
+            )
+        return value
+
+    return register, require
+
+
+(
+    _register_provider_origin_response_binding_authority,
+    require_provider_origin_response_binding_authority,
+) = _install_provider_origin_response_binding_authority()
+del _install_provider_origin_response_binding_authority
+
+
+def _bind_provider_origin_response_load(load_impl, register_authority):
+    def load_response_binding(self, attempt_id, query_binding):
+        value = load_impl(self, attempt_id, query_binding)
+        register_authority(value)
+        return value
+
+    return load_response_binding
+
+
+ProviderOriginJournal.load_response_binding = _bind_provider_origin_response_load(
+    ProviderOriginJournal.load_response_binding,
+    _register_provider_origin_response_binding_authority,
+)
+del _bind_provider_origin_response_load
+del _register_provider_origin_response_binding_authority
+
 def execute_direct_provider_origin_read(
     *,
     origin: ProviderOriginJournal,
@@ -1830,6 +1929,7 @@ def observe_provider_origin_json_response(
     response_binding: AuthenticatedReadResponseBinding,
     query_binding: QualifiedProviderReadQueryBinding,
 ) -> ProviderOriginObservation:
+    require_provider_origin_response_binding_authority(response_binding)
     if type(response_binding) is not AuthenticatedReadResponseBinding:
         raise TypeError("response_binding must be exact AuthenticatedReadResponseBinding")
     if response_binding.execution_class != _DIRECT_EXECUTION_CLASS:

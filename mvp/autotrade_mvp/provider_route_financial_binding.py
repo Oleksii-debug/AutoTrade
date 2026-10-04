@@ -5,12 +5,13 @@ select a provider, resolve current capability/qualification state, dispatch a
 request, or add another final guard.  It proves that the immutable #987
 financial request binding names the same provider financial scope, capability C
 and accepted provider qualification Q already sealed by the canonical route
-result, and exposes the one canonical durable submission scope used while that
-binding is prepared.
+result, and exposes canonical construction inputs used while that binding and
+the existing provider transport are prepared.
 """
 
 from __future__ import annotations
 
+from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .financial_request_binding import FinancialRequestBindingMaterial
 from .provider_route_dispatch import bind_selected_provider_route_submission_scope
 from .provider_selection import SelectedProviderRoute
@@ -69,6 +70,51 @@ def build_selected_provider_route_financial_submission_scope(
             "capability_snapshot_id": route.capability_snapshot_id,
         },
     )
+
+
+def build_selected_provider_route_transport_capability_registry(
+    route: SelectedProviderRoute,
+) -> CapabilityRegistry:
+    """Project the sealed route C1 into the existing Bybit transport registry.
+
+    No new capability is minted here.  ``SelectedProviderRoute.capability`` is
+    the exact fresh ``CapabilitySnapshot`` returned by durable selection; the
+    legacy provider transport consumes the same snapshot type.  A one-element
+    registry therefore preserves C1 identity instead of asking product
+    composition to choose another snapshot id or reconstruct capability facts.
+    The durable C/Q final guard remains authoritative for supersession/currentness.
+    """
+
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
+    capability = route.capability
+    if type(capability) is not CapabilitySnapshot:
+        raise ProviderRouteFinancialBindingError(
+            "selected provider route capability is not canonical"
+        )
+    candidate = route.candidate
+    provider_scope = route.qualification.scope.provider_scope
+    capability_identity = (
+        capability.provider_id,
+        capability.account_id,
+        capability.entity_id,
+        capability.environment,
+        capability.provider_environment,
+    )
+    selected_identity = (
+        candidate.provider_id,
+        candidate.account_id,
+        candidate.entity_id,
+        provider_scope.runtime_environment,
+        candidate.provider_environment,
+    )
+    if capability_identity != selected_identity:
+        raise ProviderRouteFinancialBindingError(
+            "selected provider route capability differs from transport scope"
+        )
+    registry = CapabilityRegistry()
+    registry.add(capability)
+    return registry
 
 
 def require_financial_binding_matches_selected_route(

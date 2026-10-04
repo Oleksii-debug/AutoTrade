@@ -437,7 +437,11 @@ def _runtime_leaf(root: str | Path, name: str) -> Path:
         return candidate
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
-    return candidate.resolve(strict=False)
+    # Canonicalize the containing namespace, not the authority-bearing leaf.
+    # Resolving the final component here would dereference an existing symlink
+    # before _read_runtime_regular_file() can enforce lstat/O_NOFOLLOW.
+    parent = candidate.parent.resolve(strict=False)
+    return parent / candidate.name
 
 
 def _authority_key_path(root: str | Path) -> Path:

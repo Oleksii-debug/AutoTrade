@@ -1667,6 +1667,8 @@ _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
 def _make_allocation_payload_sealer(
+    _mapping_proxy_type=MappingProxyType,
+    _weakref_ref=weakref.ref,
     _json_dumps=json.dumps,
     _json_dumps_code=getattr(json.dumps, "__code__", None),
     _json_encoder=json.JSONEncoder,
@@ -1713,7 +1715,7 @@ def _make_allocation_payload_sealer(
             )
 
     def lookup(value):
-        if type(value) is not _MAPPING_PROXY_TYPE:
+        if type(value) is not _mapping_proxy_type:
             return None
         entry = registry.get(id(value))
         if entry is None:
@@ -1732,7 +1734,7 @@ def _make_allocation_payload_sealer(
                 frozen_item, nested_owners = freeze(item)
                 frozen_items[key] = frozen_item
                 owners.extend(nested_owners)
-            proxy = MappingProxyType(frozen_items)
+            proxy = _mapping_proxy_type(frozen_items)
             encoder_type_dict = type.__getattribute__(_json_encoder, "__dict__")
             if (
                 getattr(_json_dumps, "__code__", None) is not _json_dumps_code
@@ -1794,7 +1796,7 @@ def _make_allocation_payload_sealer(
             # the weak owner is alive.  This makes the identity check a plain
             # built-in `is` comparison and prevents reachable owner-class
             # descriptors from participating in trust use.
-            registry[key] = (weakref.ref(owner, cleanup), proxy, canonical_json)
+            registry[key] = (_weakref_ref(owner, cleanup), proxy, canonical_json)
             owners.append(owner)
             return proxy, tuple(owners)
         if type(value) is list:
@@ -1819,6 +1821,8 @@ del _make_allocation_payload_sealer
 def _canonical_evidence_value(
     value,
     _sealed_lookup=_registered_allocation_payload,
+    _mapping_proxy_type=MappingProxyType,
+    _decimal_type=Decimal,
     _json_decoder=json.JSONDecoder,
     _json_default_decoder=json.loads.__globals__.get("_default_decoder"),
     _json_decoder_decode=json.JSONDecoder.decode,
@@ -1844,7 +1848,7 @@ def _canonical_evidence_value(
     """
 
     def canonicalize(item):
-        if type(item) is Decimal:
+        if type(item) is _decimal_type:
             return str(item)
         if item is None or type(item) is bool:
             return item
@@ -1872,7 +1876,7 @@ def _canonical_evidence_value(
                     )
                 normalized[key] = canonicalize(raw_value)
             return normalized
-        if type(item) is _MAPPING_PROXY_TYPE:
+        if type(item) is _mapping_proxy_type:
             sealed = _sealed_lookup(item)
             if sealed is None:
                 raise TypeError(

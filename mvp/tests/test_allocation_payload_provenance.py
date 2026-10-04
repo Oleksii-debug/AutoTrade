@@ -435,6 +435,36 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
+    def test_sealer_ignores_post_import_mappingproxy_and_weakref_rebinding(self):
+        original_mapping_proxy = allocation_module.MappingProxyType
+        original_weakref = allocation_module.weakref
+        touched = []
+
+        class ForgedWeakref:
+            @staticmethod
+            def ref(*args, **kwargs):
+                touched.append("weakref")
+                raise AssertionError("forged weakref authority executed")
+
+        def forged_mapping_proxy(*args, **kwargs):
+            touched.append("mappingproxy")
+            raise AssertionError("forged mappingproxy authority executed")
+
+        allocation_module.MappingProxyType = forged_mapping_proxy
+        allocation_module.weakref = ForgedWeakref
+        try:
+            evidence = self.evidence({"symbol": "AAA"})
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            allocation_module.MappingProxyType = original_mapping_proxy
+            allocation_module.weakref = original_weakref
+
+        self.assertEqual(touched, [])
+
+
     def test_json_encoder_global_rebind_is_not_serialization_authority(self):
         evidence = self.evidence({"symbol": "AAA"})
         dumps_globals = allocation_module.json.dumps.__globals__

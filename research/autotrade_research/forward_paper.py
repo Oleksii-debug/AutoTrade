@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Mapping, Sequence
 from hashlib import sha256
@@ -69,6 +70,11 @@ def forward_paper_protocol_hash(
     maximum_decision_latency_ms: int,
     required_provider_capabilities: Sequence[str],
     required_operational_cases: Sequence[str],
+    required_regimes: Sequence[str] = (),
+    minimum_independent_decisions_per_regime: int = 1,
+    required_simulation_limitations: Sequence[str] = (),
+    reporting_currency: str = "USD",
+    maximum_drawdown: object | None = None,
 ) -> str:
     """Canonical semantic identity of a frozen forward-paper protocol."""
 
@@ -102,8 +108,38 @@ def forward_paper_protocol_hash(
         raise ForwardPaperError(
             "required_operational_cases contains case-insensitive duplicates"
         )
+    raw_regimes = _unique_text(required_regimes, name="required_regimes")
+    regimes = tuple(sorted(value.upper() for value in raw_regimes))
+    if len(set(regimes)) != len(regimes):
+        raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+    independent_minimum = _positive_int(
+        minimum_independent_decisions_per_regime,
+        name="minimum_independent_decisions_per_regime",
+    )
+    raw_limitations = _unique_text(
+        required_simulation_limitations,
+        name="required_simulation_limitations",
+    )
+    limitations = tuple(sorted(value.upper() for value in raw_limitations))
+    if len(set(limitations)) != len(limitations):
+        raise ForwardPaperError(
+            "required_simulation_limitations contains case-insensitive duplicates"
+        )
+    currency = _text(reporting_currency, name="reporting_currency").upper()
+    drawdown = (
+        None
+        if maximum_drawdown is None
+        else _decimal(maximum_drawdown, name="maximum_drawdown", nonnegative=True)
+    )
+    extended = bool(
+        regimes
+        or limitations
+        or drawdown is not None
+        or independent_minimum != 1
+        or currency != "USD"
+    )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2 if extended else 1,
         "campaign_id": campaign,
         "exact_build_sha": build,
         "registered_at": registered.isoformat(),
@@ -114,6 +150,16 @@ def forward_paper_protocol_hash(
         "required_provider_capabilities": list(capabilities),
         "required_operational_cases": list(cases),
     }
+    if extended:
+        payload.update(
+            {
+                "required_regimes": list(regimes),
+                "minimum_independent_decisions_per_regime": independent_minimum,
+                "required_simulation_limitations": list(limitations),
+                "reporting_currency": currency,
+                "maximum_drawdown": None if drawdown is None else str(drawdown),
+            }
+        )
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -168,6 +214,11 @@ class ForwardPaperProtocol:
     maximum_decision_latency_ms: int
     required_provider_capabilities: tuple[str, ...]
     required_operational_cases: tuple[str, ...]
+    required_regimes: tuple[str, ...] = ()
+    minimum_independent_decisions_per_regime: int = 1
+    required_simulation_limitations: tuple[str, ...] = ()
+    reporting_currency: str = "USD"
+    maximum_drawdown: Decimal | None = None
 
     def __post_init__(self) -> None:
         build = _git_sha(self.exact_build_sha, name="exact_build_sha")
@@ -197,6 +248,33 @@ class ForwardPaperProtocol:
             raise ForwardPaperError(
                 "required_operational_cases contains case-insensitive duplicates"
             )
+        raw_regimes = _unique_text(self.required_regimes, name="required_regimes")
+        regimes = tuple(value.upper() for value in raw_regimes)
+        if len(set(regimes)) != len(regimes):
+            raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+        independent_minimum = _positive_int(
+            self.minimum_independent_decisions_per_regime,
+            name="minimum_independent_decisions_per_regime",
+        )
+        raw_limitations = _unique_text(
+            self.required_simulation_limitations,
+            name="required_simulation_limitations",
+        )
+        limitations = tuple(value.upper() for value in raw_limitations)
+        if len(set(limitations)) != len(limitations):
+            raise ForwardPaperError(
+                "required_simulation_limitations contains case-insensitive duplicates"
+            )
+        currency = _text(self.reporting_currency, name="reporting_currency").upper()
+        drawdown = (
+            None
+            if self.maximum_drawdown is None
+            else _decimal(
+                self.maximum_drawdown,
+                name="maximum_drawdown",
+                nonnegative=True,
+            )
+        )
         object.__setattr__(
             self,
             "campaign_id",
@@ -214,6 +292,11 @@ class ForwardPaperProtocol:
             maximum_decision_latency_ms=self.maximum_decision_latency_ms,
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
+            required_regimes=regimes,
+            minimum_independent_decisions_per_regime=independent_minimum,
+            required_simulation_limitations=limitations,
+            reporting_currency=currency,
+            maximum_drawdown=drawdown,
         )
         if provided_hash != expected_hash:
             raise ForwardPaperError(
@@ -243,6 +326,19 @@ class ForwardPaperProtocol:
             capabilities,
         )
         object.__setattr__(self, "required_operational_cases", cases)
+        object.__setattr__(self, "required_regimes", regimes)
+        object.__setattr__(
+            self,
+            "minimum_independent_decisions_per_regime",
+            independent_minimum,
+        )
+        object.__setattr__(
+            self,
+            "required_simulation_limitations",
+            limitations,
+        )
+        object.__setattr__(self, "reporting_currency", currency)
+        object.__setattr__(self, "maximum_drawdown", drawdown)
 
     @classmethod
     def create(
@@ -258,6 +354,11 @@ class ForwardPaperProtocol:
         maximum_decision_latency_ms: int,
         required_provider_capabilities: Sequence[str],
         required_operational_cases: Sequence[str],
+        required_regimes: Sequence[str] = (),
+        minimum_independent_decisions_per_regime: int = 1,
+        required_simulation_limitations: Sequence[str] = (),
+        reporting_currency: str = "USD",
+        maximum_drawdown: object | None = None,
     ) -> "ForwardPaperProtocol":
         build = _git_sha(exact_build_sha, name="exact_build_sha")
         registered = _instant(registered_at, name="registered_at")
@@ -284,6 +385,29 @@ class ForwardPaperProtocol:
             raise ForwardPaperError(
                 "required_operational_cases contains case-insensitive duplicates"
             )
+        raw_regimes = _unique_text(required_regimes, name="required_regimes")
+        regimes = tuple(value.upper() for value in raw_regimes)
+        if len(set(regimes)) != len(regimes):
+            raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+        independent_minimum = _positive_int(
+            minimum_independent_decisions_per_regime,
+            name="minimum_independent_decisions_per_regime",
+        )
+        raw_limitations = _unique_text(
+            required_simulation_limitations,
+            name="required_simulation_limitations",
+        )
+        limitations = tuple(value.upper() for value in raw_limitations)
+        if len(set(limitations)) != len(limitations):
+            raise ForwardPaperError(
+                "required_simulation_limitations contains case-insensitive duplicates"
+            )
+        currency = _text(reporting_currency, name="reporting_currency").upper()
+        drawdown = (
+            None
+            if maximum_drawdown is None
+            else _decimal(maximum_drawdown, name="maximum_drawdown", nonnegative=True)
+        )
         return cls(
             campaign_id=_text(campaign_id, name="campaign_id"),
             exact_build_sha=build,
@@ -302,6 +426,11 @@ class ForwardPaperProtocol:
             ),
             required_provider_capabilities=capabilities,
             required_operational_cases=cases,
+            required_regimes=regimes,
+            minimum_independent_decisions_per_regime=independent_minimum,
+            required_simulation_limitations=limitations,
+            reporting_currency=currency,
+            maximum_drawdown=drawdown,
         )
 
 
@@ -316,6 +445,8 @@ class SealedPrediction:
     decision_deadline_at: str
     outcome_horizon_end_at: str
     decision_latency_ms: int
+    regime: str = "UNSPECIFIED"
+    independence_key: str = "UNSPECIFIED"
 
     def __post_init__(self) -> None:
         cutoff = _instant(
@@ -363,6 +494,16 @@ class SealedPrediction:
                 allow_zero=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "regime",
+            _text(self.regime, name="regime").upper(),
+        )
+        object.__setattr__(
+            self,
+            "independence_key",
+            _text(self.independence_key, name="independence_key"),
+        )
 
     @classmethod
     def create(
@@ -377,6 +518,8 @@ class SealedPrediction:
         decision_deadline_at: str,
         outcome_horizon_end_at: str,
         decision_latency_ms: int,
+        regime: str = "UNSPECIFIED",
+        independence_key: str = "UNSPECIFIED",
     ) -> "SealedPrediction":
         cutoff = _instant(information_cutoff_at, name="information_cutoff_at")
         sealed = _instant(sealed_at, name="sealed_at")
@@ -403,6 +546,8 @@ class SealedPrediction:
                 name="decision_latency_ms",
                 allow_zero=True,
             ),
+            regime=_text(regime, name="regime").upper(),
+            independence_key=_text(independence_key, name="independence_key"),
         )
 
     @property
@@ -508,6 +653,94 @@ class OperationalObservation:
 
 
 @dataclass(frozen=True)
+class PaperDecisionEconomics:
+    prediction_id: str
+    currency: str
+    gross_pnl: Decimal
+    fees: Decimal
+    spread_cost: Decimal
+    slippage_cost: Decimal
+    net_pnl: Decimal
+    equity_before: Decimal
+    equity_after: Decimal
+    peak_equity_before: Decimal
+
+    def __post_init__(self) -> None:
+        prediction_id = _text(self.prediction_id, name="prediction_id")
+        currency = _text(self.currency, name="currency").upper()
+        gross = _decimal(self.gross_pnl, name="gross_pnl")
+        fees = _decimal(self.fees, name="fees", nonnegative=True)
+        spread = _decimal(self.spread_cost, name="spread_cost", nonnegative=True)
+        slippage = _decimal(
+            self.slippage_cost,
+            name="slippage_cost",
+            nonnegative=True,
+        )
+        net = _decimal(self.net_pnl, name="net_pnl")
+        equity_before = _decimal(self.equity_before, name="equity_before")
+        equity_after = _decimal(self.equity_after, name="equity_after")
+        peak = _decimal(self.peak_equity_before, name="peak_equity_before")
+        if (
+            Fraction(net)
+            != Fraction(gross) - Fraction(fees) - Fraction(spread) - Fraction(slippage)
+        ):
+            raise ForwardPaperError(
+                "net_pnl must equal gross_pnl minus fees, spread_cost and slippage_cost"
+            )
+        if Fraction(equity_after) != Fraction(equity_before) + Fraction(net):
+            raise ForwardPaperError("equity_after must equal equity_before plus net_pnl")
+        if Fraction(peak) < Fraction(equity_before):
+            raise ForwardPaperError(
+                "peak_equity_before cannot be below equity_before"
+            )
+        object.__setattr__(self, "prediction_id", prediction_id)
+        object.__setattr__(self, "currency", currency)
+        object.__setattr__(self, "gross_pnl", gross)
+        object.__setattr__(self, "fees", fees)
+        object.__setattr__(self, "spread_cost", spread)
+        object.__setattr__(self, "slippage_cost", slippage)
+        object.__setattr__(self, "net_pnl", net)
+        object.__setattr__(self, "equity_before", equity_before)
+        object.__setattr__(self, "equity_after", equity_after)
+        object.__setattr__(self, "peak_equity_before", peak)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        prediction_id: str,
+        currency: str,
+        gross_pnl: object,
+        fees: object,
+        spread_cost: object,
+        slippage_cost: object,
+        net_pnl: object,
+        equity_before: object,
+        equity_after: object,
+        peak_equity_before: object,
+    ) -> "PaperDecisionEconomics":
+        return cls(
+            prediction_id=prediction_id,
+            currency=currency,
+            gross_pnl=_decimal(gross_pnl, name="gross_pnl"),
+            fees=_decimal(fees, name="fees", nonnegative=True),
+            spread_cost=_decimal(spread_cost, name="spread_cost", nonnegative=True),
+            slippage_cost=_decimal(
+                slippage_cost,
+                name="slippage_cost",
+                nonnegative=True,
+            ),
+            net_pnl=_decimal(net_pnl, name="net_pnl"),
+            equity_before=_decimal(equity_before, name="equity_before"),
+            equity_after=_decimal(equity_after, name="equity_after"),
+            peak_equity_before=_decimal(
+                peak_equity_before,
+                name="peak_equity_before",
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ForwardPaperEvidence:
     exact_build_sha: str
     protocol_hash: str
@@ -518,6 +751,8 @@ class ForwardPaperEvidence:
     costs_by_currency: Mapping[str, Decimal]
     costs_complete: bool
     account_reconciliation_complete: bool
+    paper_economics: tuple[PaperDecisionEconomics, ...] = ()
+    simulation_limitations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         build = _git_sha(self.exact_build_sha, name="exact_build_sha")
@@ -556,6 +791,17 @@ class ForwardPaperEvidence:
             "costs_by_currency",
             MappingProxyType(costs),
         )
+        object.__setattr__(self, "paper_economics", tuple(self.paper_economics))
+        raw_limitations = _unique_text(
+            self.simulation_limitations,
+            name="simulation_limitations",
+        )
+        limitations = tuple(value.upper() for value in raw_limitations)
+        if len(set(limitations)) != len(limitations):
+            raise ForwardPaperError(
+                "simulation_limitations contains case-insensitive duplicates"
+            )
+        object.__setattr__(self, "simulation_limitations", limitations)
 
     @classmethod
     def create(
@@ -570,6 +816,8 @@ class ForwardPaperEvidence:
         costs_by_currency: Mapping[str, object],
         costs_complete: bool,
         account_reconciliation_complete: bool,
+        paper_economics: Sequence[PaperDecisionEconomics] = (),
+        simulation_limitations: Sequence[str] = (),
     ) -> "ForwardPaperEvidence":
         build = _git_sha(exact_build_sha, name="exact_build_sha")
         _instant(observed_until, name="observed_until")
@@ -595,6 +843,8 @@ class ForwardPaperEvidence:
             costs_by_currency=MappingProxyType(costs),
             costs_complete=costs_complete,
             account_reconciliation_complete=account_reconciliation_complete,
+            paper_economics=tuple(paper_economics),
+            simulation_limitations=tuple(simulation_limitations),
         )
 
 
@@ -642,10 +892,21 @@ def assess_forward_paper(
     campaign_end = _instant(protocol.ends_at, name="ends_at")
     observed_until = _instant(evidence.observed_until, name="observed_until")
 
+    if not protocol.required_regimes:
+        incomplete.append("regime_coverage_not_registered")
+    if not protocol.required_simulation_limitations:
+        incomplete.append("simulation_limitations_not_registered")
+    if protocol.maximum_drawdown is None:
+        incomplete.append("maximum_drawdown_not_registered")
+
     prediction_by_id: dict[str, SealedPrediction] = {}
     capability_counts = {
         capability: 0 for capability in protocol.required_provider_capabilities
     }
+    regime_independence: dict[str, set[str]] = {
+        regime: set() for regime in protocol.required_regimes
+    }
+    independence_regime: dict[str, str] = {}
     for prediction in evidence.predictions:
         if not isinstance(prediction, SealedPrediction):
             invalid.append("invalid_prediction_record")
@@ -663,6 +924,18 @@ def assess_forward_paper(
             invalid.append("undeclared_provider_capability")
         else:
             capability_counts[prediction.provider_capability] += 1
+        if protocol.required_regimes:
+            if prediction.regime not in regime_independence:
+                invalid.append("undeclared_regime")
+            else:
+                prior_regime = independence_regime.get(prediction.independence_key)
+                if prior_regime is not None and prior_regime != prediction.regime:
+                    invalid.append("independence_key_regime_conflict")
+                else:
+                    independence_regime[prediction.independence_key] = prediction.regime
+                    regime_independence[prediction.regime].add(
+                        prediction.independence_key
+                    )
         if not prediction.met_deadline:
             operational_failures.append("decision_deadline_missed")
         if prediction.decision_latency_ms > protocol.maximum_decision_latency_ms:
@@ -673,6 +946,11 @@ def assess_forward_paper(
     for capability, count in capability_counts.items():
         if count == 0:
             incomplete.append(f"missing_provider_capability:{capability}")
+    for regime, keys in regime_independence.items():
+        if len(keys) < protocol.minimum_independent_decisions_per_regime:
+            incomplete.append(
+                f"minimum_independent_decisions_not_reached:{regime}"
+            )
 
     outcomes_by_prediction: dict[str, ForwardOutcome] = {}
     for outcome in evidence.outcomes:
@@ -729,6 +1007,39 @@ def assess_forward_paper(
             invalid.append("operational_case_after_observed_until")
         if not item.reconciled:
             operational_failures.append("unreconciled_operational_case")
+
+    economics_by_prediction: dict[str, PaperDecisionEconomics] = {}
+    for item in evidence.paper_economics:
+        if not isinstance(item, PaperDecisionEconomics):
+            invalid.append("invalid_paper_economics_record")
+            continue
+        if item.prediction_id in economics_by_prediction:
+            invalid.append("duplicate_paper_economics_for_prediction")
+            continue
+        if item.prediction_id not in prediction_by_id:
+            invalid.append("paper_economics_without_sealed_prediction")
+            continue
+        economics_by_prediction[item.prediction_id] = item
+        if item.currency != protocol.reporting_currency:
+            invalid.append("paper_economics_currency_mismatch")
+        if (
+            protocol.maximum_drawdown is not None
+            and max(
+                Fraction(0),
+                Fraction(item.peak_equity_before) - Fraction(item.equity_after),
+            )
+            > Fraction(protocol.maximum_drawdown)
+        ):
+            operational_failures.append("maximum_drawdown_exceeded")
+
+    for prediction_id in prediction_by_id:
+        if prediction_id not in economics_by_prediction:
+            incomplete.append("missing_paper_economics")
+
+    observed_limitations = set(evidence.simulation_limitations)
+    for limitation in protocol.required_simulation_limitations:
+        if limitation not in observed_limitations:
+            incomplete.append(f"missing_simulation_limitation:{limitation}")
 
     if not evidence.costs_complete:
         incomplete.append("actual_costs_incomplete")

@@ -1527,7 +1527,7 @@ def execute_direct_provider_origin_read(
         raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
     if type(qualification_registry) is not DurableProviderQualificationRegistry:
         raise TypeError(
-            "qualification_registry must be exact DurableCapabilityRegistry"
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
         )
     authority_store = capability_registry.store
     if qualification_registry.store is not authority_store:

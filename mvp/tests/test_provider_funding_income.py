@@ -89,10 +89,17 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             "time": 1672132481405,
         }
 
-    def _parse(self, *, payload=None, query=None):
+    def _parse(
+        self,
+        *,
+        payload=None,
+        query=None,
+        observed_at="2026-10-04T11:00:00Z",
+    ):
         return _parse_bybit_funding_income_rows(
             self._payload() if payload is None else payload,
             self._query() if query is None else query,
+            observed_at,
         )
 
     def test_parser_projects_one_funding_row_and_skips_trade(self):
@@ -116,6 +123,24 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             rows[0].provider_transaction_at.isoformat(),
             "2022-12-27T08:00:00.001000+00:00",
         )
+
+    def test_transaction_after_response_observation_fails_closed(self):
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "after provider response observation",
+        ):
+            self._parse(
+                payload=self._payload(transaction_time="1672128000001"),
+                observed_at="2022-12-27T08:00:00Z",
+            )
+
+    def test_response_observation_time_must_be_canonical_utc(self):
+        for observed_at in ("2026-10-04T11:00:00+00:00", "not-a-time"):
+            with self.subTest(observed_at=observed_at), self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "observed_at must be canonical UTC",
+            ):
+                self._parse(observed_at=observed_at)
 
     def test_noncanonical_leading_zero_transaction_time_fails_closed(self):
         with self.assertRaisesRegex(

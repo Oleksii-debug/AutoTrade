@@ -353,9 +353,25 @@ class AuthenticatedHostApplication:
         payload = dict(projected)
         if set(payload) != _SNAPSHOT_FIELDS:
             raise ValueError("UiSnapshot fields do not match the canonical contract")
-        for field in ("state_version", "event_cursor", "account_id", "environment"):
-            if str(payload[field]) != str(durable[field]):
-                raise ValueError(f"UiSnapshot {field} does not match durable host truth")
+        for field in ("state_version", "event_cursor"):
+            value = payload[field]
+            if (
+                not is_valid_common_scalar("Sequence", value)
+                or value != durable[field]
+            ):
+                raise ValueError(
+                    f"UiSnapshot {field} does not match canonical durable host truth"
+                )
+        if payload["account_id"] != durable["account_id"]:
+            raise ValueError("UiSnapshot account_id does not match durable host truth")
+        environment = payload["environment"]
+        if (
+            not is_valid_common_scalar("Environment", environment)
+            or environment != durable["environment"]
+        ):
+            raise ValueError(
+                "UiSnapshot environment does not match canonical durable host truth"
+            )
         if payload["host_id"] != self.host_id:
             raise ValueError("UiSnapshot host_id does not match the configured host")
         for field in (

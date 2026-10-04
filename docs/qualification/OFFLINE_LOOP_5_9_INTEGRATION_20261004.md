@@ -75,6 +75,13 @@
     і paused/resumed запусків для обох execution profiles.
     Це draft continuation: фінальний результат прогону не підтверджено після
     втрати відповіді execution service; новий PASS не заявлено.
+15. UNKNOWN reservation transition у canonical autonomous loop більше не
+    бере фізичний час із `DurableReservationBook._now()`. Reservation authority
+    приймає explicit `committed_at` для MARK_UNKNOWN, а simulation передає той
+    самий frozen episode timestamp. Unit regression забороняє fallback на wall
+    clock; whole-loop lost-response regression вимагає exact
+    `2026-10-03T00:00:02.000001Z` і зберігає no-blind-retry після restart.
+    Це source/test hardening; terminal exact-head CI ще є окремою вимогою.
 
 Приклад того самого продуктового CLI, без іншого engine:
 

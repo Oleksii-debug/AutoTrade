@@ -43,6 +43,10 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             )
             stage.assert_called_once()
             self.assertIn('mvp/autotrade_mvp/product_runtime.py', selected)
+            self.assertIn(
+                'contracts/bindings/python/common_scalars.py',
+                selected,
+            )
             self.assertEqual(
                 (destination / 'SOURCE_REVISION').read_text(encoding='utf-8'),
                 source_sha + '\n',

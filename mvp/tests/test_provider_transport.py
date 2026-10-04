@@ -4555,6 +4555,59 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         ):
             direct_authenticated_read_execution_receipt_snapshot(receipt)
 
+    def test_direct_receipt_cannot_be_relabelled_to_same_bytes_local_response(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        canonical_opener = client._opener
+        canonical_opener.open = lambda *_args, **_kwargs: Stream(b'{"ok":true}')
+        proof = object()
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_qualified_read_authority",
+            proof,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            binding,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
+        )
+
+        direct_response = client.send(request)
+        receipt = direct_authenticated_read_execution_receipt(direct_response)
+        forged_response = AuthenticatedReadWireResponse(
+            http_status=direct_response.http_status,
+            body=direct_response.body,
+        )
+        object.__setattr__(
+            forged_response,
+            "_direct_authenticated_read_execution_receipt",
+            receipt,
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "not bound to exact response",
+        ):
+            direct_authenticated_read_execution_receipt(forged_response)
+
     def test_direct_receipt_rejects_terminal_proof_relabelled_to_other_wire_endpoint(self):
         class Stream(BytesIO):
             status = 200

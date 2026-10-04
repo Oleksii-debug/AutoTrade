@@ -27,6 +27,7 @@ class ThesisInstrumentBridgeTests(unittest.TestCase):
             as_of=AS_OF,
             horizon_end=HORIZON,
             required_notional="10000",
+            notional_currency="USD",
         )
 
     def instrument(self, **overrides):
@@ -71,6 +72,7 @@ class ThesisInstrumentBridgeTests(unittest.TestCase):
             leverage_ratio="1",
             liquidation_risk="0",
             liquidity_capacity="50000",
+            liquidity_currency="USD",
         )
         values.update(overrides)
         return candidate_from_instrument_version(**values)

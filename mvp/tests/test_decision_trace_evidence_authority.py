@@ -98,7 +98,7 @@ class DecisionTraceEvidenceAuthorityTests(unittest.TestCase):
             )
             self.assertIn("Evidence:\n- evidence-1", exported)
 
-    def test_accessible_export_marks_verified_only_with_complete_linked_evidence(self):
+    def test_complete_caller_availability_remains_explicitly_unverified(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
             store.append(trace())
@@ -109,9 +109,10 @@ class DecisionTraceEvidenceAuthorityTests(unittest.TestCase):
                 available_evidence_ids=["evidence-1"],
             )
 
-            self.assertIn("Evidence status: VERIFIED", exported)
+            self.assertIn("Evidence status: UNVERIFIED", exported)
+            self.assertNotIn("Evidence status: VERIFIED", exported)
             self.assertIn(
-                "All linked durable events and evidence were available at export time.",
+                "Caller-declared linked evidence is complete, but no product-selected durable evidence authority verified those identifiers.",
                 exported,
             )
 

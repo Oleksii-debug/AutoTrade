@@ -38,14 +38,14 @@ def assert_conservative_execution(
 ) -> None:
     """Reject a simulated result that exceeds independent conservative bounds."""
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
-    if not isinstance(result, SimulatedExecution):
-        raise TypeError("result must be SimulatedExecution")
+    if type(order) is not SimulatedOrder:
+        raise TypeError("order must be exact SimulatedOrder")
+    if type(observation) is not LiquidityObservation:
+        raise TypeError("observation must be exact LiquidityObservation")
+    if type(model) is not ExecutionModel:
+        raise TypeError("model must be exact ExecutionModel")
+    if type(result) is not SimulatedExecution:
+        raise TypeError("result must be exact SimulatedExecution")
     if observation.instrument_version != order.instrument_version:
         raise ExecutionOracleError("instrument identity mismatch")
     if result.model_fingerprint != model.fingerprint:

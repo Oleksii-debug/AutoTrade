@@ -1023,6 +1023,87 @@ class DurableFinancingTests(unittest.TestCase):
         self.assertIn(observation.evidence_ref, restarted.evidence_ref)
 
 
+    def test_bybit_instrument_versions_reject_mapping_subclass_before_lookup(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-hostile-map",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.003676",
+                        "currency": "USDT",
+                        "fee": "0",
+                        "cashFlow": "0",
+                        "change": "-0.003676",
+                    }
+                ],
+            },
+            "time": transaction_time + 1000,
+        }
+        raw = json.dumps(
+            response,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        observed_at = BASE + timedelta(seconds=2)
+        observation = bybit_activity_observation(raw, observed_at=observed_at)
+        artifact = "00000000-0000-0000-0000-000000000084"
+        raw_store = ArtifactStore(
+            Path(self.temp.name) / "bybit-hostile-map-artifacts"
+        )
+        raw_store.publish_bytes(
+            artifact_id=artifact,
+            data=raw,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[observation.evidence_ref],
+            metadata={"evidence_class": "provider_response"},
+        )
+
+        class HostileVersions(dict):
+            calls = 0
+
+            def __getitem__(self, key):
+                type(self).calls += 1
+                raise AssertionError("hostile instrument version lookup")
+
+            def items(self):
+                type(self).calls += 1
+                raise AssertionError("hostile instrument version iteration")
+
+        hostile = HostileVersions(
+            {"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"}
+        )
+        HostileVersions.calls = 0
+        with self.assertRaisesRegex(
+            FinancingError,
+            "instrument_versions must be a mapping.*exact dict",
+        ):
+            self.financing.record_bybit_funding_observation(
+                observation,
+                raw_store,
+                artifact_id=artifact,
+                row_id="funding-hostile-map",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions=hostile,
+                committed_at=observed_at.isoformat(),
+            )
+        self.assertEqual(HostileVersions.calls, 0)
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+            0,
+        )
+
     def test_bybit_funding_requires_provider_origin_before_paper_or_live_mutation(self):
         transaction_time = int(BASE.timestamp() * 1000)
         response = {

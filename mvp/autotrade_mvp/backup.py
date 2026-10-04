@@ -1162,6 +1162,7 @@ def create_backup(
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
+    published = False
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
@@ -1232,10 +1233,19 @@ def create_backup(
             source_rechecks,
         )
         os.replace(stage, target)
+        published = True
         _fsync_directory(target.parent)
         return target
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = target if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(target.parent)
+            except Exception:
+                # Preserve the original durability failure. The best-effort
+                # cleanup sync can fail for the same underlying reason.
+                pass
         raise
 
 
@@ -1395,6 +1405,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         raise BackupError("Restore destination must be outside the backup bundle")
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-restore-", dir=destination.parent))
+    published = False
     try:
         for item in manifest["files"]:
             relative = _safe_relative_path(item["path"])
@@ -1436,10 +1447,17 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)
+        published = True
         _fsync_directory(destination.parent)
         return destination
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = destination if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(destination.parent)
+            except Exception:
+                pass
         raise
 
 

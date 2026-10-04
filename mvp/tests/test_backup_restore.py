@@ -317,6 +317,71 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_backup_publication_fsync_failure_removes_uncommitted_target(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_fsync_directory = backup_module._fsync_directory
+            failed = False
+
+            def fail_after_publication(path):
+                nonlocal failed
+                if Path(path) == target.parent and target.exists() and not failed:
+                    failed = True
+                    raise OSError("simulated backup publication directory fsync failure")
+                return original_fsync_directory(path)
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory",
+                side_effect=fail_after_publication,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "backup publication directory fsync failure",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(failed)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_restore_publication_fsync_failure_removes_uncommitted_destination(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            destination = root / "restored"
+            original_fsync_directory = backup_module._fsync_directory
+            failed = False
+
+            def fail_after_publication(path):
+                nonlocal failed
+                if (
+                    Path(path) == destination.parent
+                    and destination.exists()
+                    and not failed
+                ):
+                    failed = True
+                    raise OSError("simulated restore publication directory fsync failure")
+                return original_fsync_directory(path)
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory",
+                side_effect=fail_after_publication,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "restore publication directory fsync failure",
+                ):
+                    restore_backup(backup, destination)
+
+            self.assertTrue(failed)
+            self.assertFalse(destination.exists())
+            self.assertFalse(any(root.glob(".autotrade-restore-*")))
+
     def test_journal_only_backup_declares_journal_only_consistency(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

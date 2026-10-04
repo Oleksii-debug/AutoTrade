@@ -13,22 +13,38 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
     private readonly Process _process;
     private readonly HttpClient _http;
     private readonly EmergencyHostSession _session;
+    private readonly Task _stdoutDrain;
+    private readonly Task _stderrDrain;
     public Uri Origin => _session.Origin;
     public string DataDirectory { get; }
     public string CookieToken => _session.Token;
     public IEmergencyHostClient Client { get; }
 
-    private OwnedProviderFreeRuntime(Process process, HttpClient http, EmergencyHostSession session, string data)
+    private OwnedProviderFreeRuntime(Process process, HttpClient http, EmergencyHostSession session, string data,
+        Task stdoutDrain, Task stderrDrain)
     {
         _process = process;
         _http = http;
         _session = session.Validated();
+        _stdoutDrain = stdoutDrain;
+        _stderrDrain = stderrDrain;
         DataDirectory = data;
         Client = new AuthenticatedEmergencyHostClient(http, Origin, this,
             new WindowsCredentialManagerPendingCommandStore("AutoTrade.ZERO:pending-emergency-command-v1"));
     }
 
     public EmergencyHostSession GetSession() => _session;
+
+    private static async Task DrainRedirectedPipeAsync(StreamReader reader)
+    {
+        char[] buffer = new char[4096];
+        try
+        {
+            while (await reader.ReadAsync(buffer, 0, buffer.Length) != 0) { }
+        }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+    }
 
     public static async Task<OwnedProviderFreeRuntime> StartAsync()
     {
@@ -53,14 +69,16 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
             "--port", "0", "--no-browser", "--desktop-child", "--parent-pid", Environment.ProcessId.ToString()})
             start.ArgumentList.Add(arg);
         Process process = Process.Start(start) ?? throw new InvalidOperationException("The installed host could not start.");
-        // Drain errors without presenting local session material or untrusted stderr as authority.
-        Task<string> errors = process.StandardError.ReadToEndAsync();
+        // Drain redirected pipes without retaining unbounded untrusted child output in memory.
+        Task stderrDrain = DrainRedirectedPipeAsync(process.StandardError);
+        Task stdoutDrain = Task.CompletedTask;
         HttpClient http = new(new HttpClientHandler {AllowAutoRedirect = false, UseCookies = false})
         { Timeout = TimeSpan.FromSeconds(10) };
         try
         {
             using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(30));
             string? line = await process.StandardOutput.ReadLineAsync(deadline.Token);
+            stdoutDrain = DrainRedirectedPipeAsync(process.StandardOutput);
             const string prefix = "AutoTrade ZERO: ";
             if (line is null || !line.StartsWith(prefix, StringComparison.Ordinal))
                 throw new InvalidOperationException("The installed host did not become ready. Check package files, data-directory permissions and another running AutoTrade instance.");
@@ -84,13 +102,14 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
                 throw new InvalidOperationException("Host pairing did not return the expected session cookie.");
             string token = cookie[cookieName.Length..cookie.IndexOf(';')];
             // The reusable token stays in process memory and WebView's HttpOnly cookie.
-            return new(process, http, new EmergencyHostSession("local-owner", token, origin), data);
+            return new(process, http, new EmergencyHostSession("local-owner", token, origin), data,
+                stdoutDrain, stderrDrain);
         }
         catch
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
-            await errors;
+            await Task.WhenAll(stdoutDrain, stderrDrain);
             process.Dispose(); http.Dispose();
             throw;
         }
@@ -112,6 +131,7 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
                 await _process.WaitForExitAsync();
             }
         }
+        await Task.WhenAll(_stdoutDrain, _stderrDrain);
         _process.Dispose(); _http.Dispose();
     }
 }

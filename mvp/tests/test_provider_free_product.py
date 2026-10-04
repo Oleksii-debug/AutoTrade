@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.product_runtime import (
     _launch_message,
+    _owned_desktop_session_sink,
     build_product,
     restore_product_backup,
     source_revision,
@@ -28,6 +29,8 @@ from mvp.autotrade_mvp.windows_host_session import (
     persist_desktop_owner_session,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.authority import AuthorityService
+from mvp.autotrade_mvp.product_worker import _host_emergency_pause_required
 from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_action
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
@@ -101,6 +104,40 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_owned_desktop_child_uses_direct_ephemeral_session_handoff(self):
+        from mvp.autotrade_mvp import product_runtime
+
+        class Runtime:
+            def __init__(self):
+                self.closed = 0
+            def serve_forever(self):
+                return
+            def close(self):
+                self.closed += 1
+
+        runtime = Runtime()
+        with patch.object(product_runtime, 'build_product',
+                return_value=(runtime, 'http://127.0.0.1:8765/#pair=test-secret')) as builder, \
+             patch.object(product_runtime.signal, 'signal'), \
+             patch.object(product_runtime, 'Thread'):
+            self.assertEqual(product_runtime.main([
+                '--data-dir', 'unused-owned-child-state',
+                '--port', '8765',
+                '--no-browser',
+                '--desktop-child',
+            ]), 0)
+        self.assertIs(builder.call_args.kwargs['desktop_session_sink'], _owned_desktop_session_sink)
+        self.assertGreaterEqual(runtime.closed, 1)
+
+    def test_owned_desktop_session_sink_does_not_write_credential_manager(self):
+        with patch('mvp.autotrade_mvp.product_runtime.persist_desktop_owner_session') as persist:
+            self.assertIsNone(_owned_desktop_session_sink(
+                origin='http://127.0.0.1:8765',
+                actor='local-owner',
+                token='ephemeral-owned-session',
+            ))
+        persist.assert_not_called()
+
     def test_host_backpressure_rejects_before_admission_and_keeps_retry_identity(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)
@@ -311,6 +348,70 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             self.assertTrue((restored / 'state' / 'artifacts').is_dir())
             self.assertFalse((restored / 'artifacts').exists())
             self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_worker_pause_allows_exact_durable_block_restore(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / 'journal.sqlite3')
+            authority = AuthorityService(store)
+            blocked_at = '2026-10-04T00:00:00Z'
+            block_reason = 'host_operator_command:BLOCK_NEW_EXPOSURE:EMERGENCY_STOP'
+            authority.block_new_exposure(
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                reason=block_reason,
+                blocked_at=blocked_at,
+                command_id='block-command-1',
+            )
+            host_events = [
+                {'event_type': 'COMMAND_ACCEPTED',
+                 'payload': {'action': 'BLOCK_NEW_EXPOSURE',
+                             'operation_id': 'block-operation-1'}},
+                {'event_type': 'OPERATION_UPDATED',
+                 'payload': {'operation_id': 'block-operation-1',
+                             'phase': 'RUNNING'}},
+                {'event_type': 'OPERATION_UPDATED',
+                 'payload': {'operation_id': 'block-operation-1',
+                             'phase': 'SUCCEEDED'}},
+            ]
+            original_load = store.load_events_by_aggregate_type
+
+            def load_events(aggregate_type):
+                if aggregate_type == 'HOST_CONTROL':
+                    return list(host_events)
+                return original_load(aggregate_type)
+
+            with patch.object(store, 'load_events_by_aggregate_type', side_effect=load_events):
+                self.assertTrue(_host_emergency_pause_required(store))
+                authority.restore_new_exposure(
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    reason='host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:POLICY_REVIEW',
+                    restored_at='2026-10-04T00:00:01Z',
+                    command_id='restore-command-1',
+                    expected_block_command_id='block-command-1',
+                    expected_block_reason=block_reason,
+                    expected_blocked_at=blocked_at,
+                )
+                self.assertFalse(_host_emergency_pause_required(store))
+
+                host_events.append({
+                    'event_type': 'COMMAND_ACCEPTED',
+                    'payload': {'action': 'BLOCK_NEW_EXPOSURE',
+                                'operation_id': 'block-operation-2'},
+                })
+                self.assertTrue(_host_emergency_pause_required(store))
+                host_events.append({
+                    'event_type': 'OPERATION_UPDATED',
+                    'payload': {'operation_id': 'block-operation-2', 'phase': 'FAILED'},
+                })
+                self.assertFalse(_host_emergency_pause_required(store))
+
+                host_events.append({
+                    'event_type': 'COMMAND_ACCEPTED',
+                    'payload': {'action': 'REVOKE_AUTHORITY',
+                                'operation_id': 'revoke-operation-1'},
+                })
+                self.assertTrue(_host_emergency_pause_required(store))
 
     def test_worker_rejects_unaccepted_lifecycle_invocation(self):
         with TemporaryDirectory() as directory:

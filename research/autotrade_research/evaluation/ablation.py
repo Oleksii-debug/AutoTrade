@@ -1769,6 +1769,10 @@ class AblationQualificationAuthority:
     ) -> RegisteredAblationPopulation:
         """Resolve only canonical frozen population evidence, never outcome economics."""
 
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
         (
             scientific_registry,
             experience_memory,
@@ -1781,10 +1785,6 @@ class AblationQualificationAuthority:
             task,
             instrument_family,
         ) = _registered_policy_context(self)
-        if type(pairs) not in {list, tuple}:
-            raise TypeError(
-                "pairs must be an exact list or tuple for authority-backed qualification"
-            )
         selected = tuple(pairs)
         if not selected:
             raise ValueError("qualified ablation requires a non-empty matched population")
@@ -1867,6 +1867,14 @@ class AblationQualificationAuthority:
         *,
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
         (
             _science,
             experience_memory,
@@ -1879,14 +1887,6 @@ class AblationQualificationAuthority:
             task,
             instrument_family,
         ) = _registered_policy_context(self)
-        if type(pairs) not in {list, tuple}:
-            raise TypeError(
-                "pairs must be an exact list or tuple for authority-backed qualification"
-            )
-        if type(outcome_refs) not in {list, tuple}:
-            raise TypeError(
-                "outcome_refs must be an exact list or tuple for authority-backed qualification"
-            )
         selected = tuple(pairs)
         refs = tuple(outcome_refs)
         population = self.resolve_population(selected)

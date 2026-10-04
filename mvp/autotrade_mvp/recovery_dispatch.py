@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from threading import Condition, Lock, current_thread
 from typing import Any, Callable, Mapping
+from weakref import WeakKeyDictionary
 
 from .dispatch import (
     AuthorityCheck,
@@ -45,7 +46,9 @@ class _RecoveryDispatchLifecycle:
 
 
 _LIFECYCLE_BIND_LOCK = Lock()
-_LIFECYCLE_STATE_KEY = "_recovery_dispatch_lifecycle"
+_LIFECYCLE_REGISTRY: WeakKeyDictionary[RecoveryController, _RecoveryDispatchLifecycle] = (
+    WeakKeyDictionary()
+)
 
 
 class RecoveryBoundDispatcher:
@@ -57,13 +60,13 @@ class RecoveryBoundDispatcher:
     caller cannot replace sender authority with a permissive callback.
 
     All dispatcher instances constructed for the same exact controller share one
-    process-local lifecycle. Product shutdown can therefore call
-    :meth:`stop_and_drain` on the canonical dispatcher and still drain accidental
-    duplicate retained dispatchers before recovery revocation and process-fence
-    release. New dispatch entry is held until that stop commits, after which all
-    bound dispatchers are permanently revoked without touching the journal or
-    provider transport. Calling shutdown from inside an active dispatch is
-    rejected rather than self-deadlocking.
+    process-local lifecycle held outside mutable controller state. Product
+    shutdown can therefore call :meth:`stop_and_drain` on the canonical
+    dispatcher and still drain accidental duplicate retained dispatchers before
+    recovery revocation and process-fence release. New dispatch entry is held
+    until that stop commits, after which all bound dispatchers are permanently
+    revoked without touching the journal or provider transport. Calling shutdown
+    from inside an active dispatch is rejected rather than self-deadlocking.
 
     A durable takeover intentionally invalidates an existing instance. Product
     composition must construct a new dispatcher from the successor controller;
@@ -122,14 +125,10 @@ class RecoveryBoundDispatcher:
             )
 
         with _LIFECYCLE_BIND_LOCK:
-            lifecycle = controller_state.get(_LIFECYCLE_STATE_KEY)
+            lifecycle = _LIFECYCLE_REGISTRY.get(controller)
             if lifecycle is None:
                 lifecycle = _RecoveryDispatchLifecycle()
-                controller_state[_LIFECYCLE_STATE_KEY] = lifecycle
-            elif type(lifecycle) is not _RecoveryDispatchLifecycle:
-                raise RecoveryDispatchBindingError(
-                    "recovery dispatcher lifecycle binding is invalid"
-                )
+                _LIFECYCLE_REGISTRY[controller] = lifecycle
 
         self._controller = controller
         self._store = store
@@ -169,10 +168,11 @@ class RecoveryBoundDispatcher:
             raise RecoveryDispatchBindingError(
                 "recovery JournalStore changed after dispatcher construction"
             )
-        if state.get(_LIFECYCLE_STATE_KEY) is not self._lifecycle:
-            raise RecoveryDispatchBindingError(
-                "recovery dispatcher lifecycle changed after construction"
-            )
+        with _LIFECYCLE_BIND_LOCK:
+            if _LIFECYCLE_REGISTRY.get(controller) is not self._lifecycle:
+                raise RecoveryDispatchBindingError(
+                    "recovery dispatcher lifecycle changed after construction"
+                )
         if controller.owner_scope != self._owner_scope:
             raise RecoveryDispatchBindingError(
                 "recovery owner scope changed after dispatcher construction"

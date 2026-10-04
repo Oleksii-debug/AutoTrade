@@ -1759,7 +1759,9 @@ def _make_allocation_payload_sealer(
                 is not _json_make_iterencode_code
             ):
                 raise ValueError(
-                         canonical_json = _json_dumps(
+                    "allocation evidence serializer authority changed after binding"
+                )
+            canonical_json = _json_dumps(
                 value,
                 skipkeys=False,
                 ensure_ascii=False,
@@ -1972,7 +1974,9 @@ def _canonical_evidence_json(
         is not _json_make_iterencode_code
     ):
         raise ValueError(
-            "    return _json_dumps(
+            "allocation evidence serializer authority changed after binding"
+        )
+    return _json_dumps(
         _canonicalize(value),
         skipkeys=False,
         ensure_ascii=False,

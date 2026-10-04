@@ -11,7 +11,7 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
     schemas = ["a.schema.json"] if schemas is None else schemas
     defs = {"A": {"type": "string"}} if defs is None else defs
     base_uri = f"https://schemas.autotrade.local/{version}/"
-    (root / "contracts" / "jsonschema").mkdir(parents=True)
+    (root / "contracts" / "jsonschema").mkdir(parents=True, exist_ok=True)
     (root / "contracts" / "manifest.json").write_text(
         json.dumps({
             "contract_version": version,
@@ -117,6 +117,34 @@ class ContractVersionGuardTests(unittest.TestCase):
             write_tree(Path(right), defs={"A": {"type": "number"}})
             errors = evaluate(Path(left), Path(right))
             self.assertTrue(any("without increasing" in item for item in errors))
+
+    def test_tightening_existing_array_cardinality_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "DatasetManifest": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["source_evidence"],
+                    "properties": {
+                        "source_evidence": {"type": "array", "items": {"type": "object"}},
+                    },
+                }
+            }
+            current_defs = json.loads(json.dumps(base_defs))
+            current_defs["DatasetManifest"]["properties"]["source_evidence"]["minItems"] = 1
+            write_tree(Path(left), version="5.0.0", defs=base_defs)
+            write_tree(Path(right), version="5.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "DatasetManifest" in item
+                    for item in errors
+                )
+            )
+
+            write_tree(Path(right), version="6.0.0", defs=current_defs)
+            self.assertEqual(evaluate(Path(left), Path(right)), [])
 
     def test_decimal_envelope_member_change_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:

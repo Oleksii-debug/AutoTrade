@@ -161,6 +161,19 @@ class ContractSchemaTests(unittest.TestCase):
     def test_dataset_manifest_fixture(self):
         self.validate("data.schema.json", "DatasetManifest", json.loads((FIXTURES / "dataset-manifest.valid.json").read_text()))
 
+    def test_dataset_manifest_requires_non_empty_source_evidence(self):
+        fixture = json.loads((FIXTURES / "dataset-manifest.valid.json").read_text())
+        schema = self.schemas["data.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/DatasetManifest"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        self.assertTrue(validator.is_valid(fixture))
+        candidate = json.loads(json.dumps(fixture))
+        candidate["source_evidence"] = []
+        self.assertFalse(validator.is_valid(candidate))
+
     def test_ui_command_fixture(self):
         self.validate("ui.schema.json", "UiCommand", json.loads((FIXTURES / "ui-command.valid.json").read_text()))
 

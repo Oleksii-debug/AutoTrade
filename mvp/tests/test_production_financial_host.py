@@ -105,7 +105,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
 
             # Even if source-owner reconciliation were to make the controller
             # otherwise READY, the takeover-only marker is an independent sender
-            # and admission fence.  Reissuing the canonical recovery dispatcher
+            # and admission fence. Reissuing the canonical recovery dispatcher
             # directly cannot bypass explicit durable N -> N+1 takeover.
             recovery = runtime.recovery_controller
             recovery.provider_reconciled = True
@@ -270,6 +270,96 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 "fence must be active",
             ):
                 compose_financial_authority(host)
+
+    def test_host_identity_mutation_invalidates_retained_dispatcher_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            dispatcher = runtime.financial_dispatcher
+            authority_calls = []
+            wire_calls = []
+
+            object.__setattr__(host.config, "host_id", "host-retargeted")
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "identity changed after composition",
+            ):
+                dispatcher.dispatch(
+                    attempt_id="attempt-retarget-config",
+                    intent_id="intent-retarget-config",
+                    intent_hash="hash-retarget-config",
+                    provider="BYBIT",
+                    request={"symbol": "BTCUSDT"},
+                    now="2026-10-04T02:00:03Z",
+                    authority_check=lambda *_args: authority_calls.append("authority"),
+                    transport_send=lambda *_args: wire_calls.append("wire"),
+                )
+
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(wire_calls, [])
+
+    def test_host_journal_retarget_invalidates_retained_dispatcher_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            dispatcher = runtime.financial_dispatcher
+            authority_calls = []
+            wire_calls = []
+
+            host.journal = JournalStore(Path(directory) / "retargeted.sqlite3")
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "journal changed after composition",
+            ):
+                dispatcher.dispatch(
+                    attempt_id="attempt-retarget-journal",
+                    intent_id="intent-retarget-journal",
+                    intent_hash="hash-retarget-journal",
+                    provider="BYBIT",
+                    request={"symbol": "BTCUSDT"},
+                    now="2026-10-04T02:00:04Z",
+                    authority_check=lambda *_args: authority_calls.append("authority"),
+                    transport_send=lambda *_args: wire_calls.append("wire"),
+                )
+
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(wire_calls, [])
+
+    def test_financial_runtime_recovery_controller_reference_is_read_only(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            replacement = RecoveryController(
+                owner_store=host.journal,
+                owner_scope="PAPER:acct",
+            )
+
+            with self.assertRaises(AttributeError):
+                runtime.recovery_controller = replacement
+            self.assertIsNot(runtime.recovery_controller, replacement)
+
+    def test_equivalent_config_object_replacement_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            original = host.config
+            host.config = ProductionHostConfig(
+                journal_path=original.journal_path,
+                account_id=original.account_id,
+                environment=original.environment,
+                host_id=original.host_id,
+                bind_host=original.bind_host,
+                bind_port=original.bind_port,
+                public_origin=original.public_origin,
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "config authority changed",
+            ):
+                _ = runtime.takeover_required
 
 
 if __name__ == "__main__":

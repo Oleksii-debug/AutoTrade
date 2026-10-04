@@ -215,6 +215,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            preregister_holdout(store, registered.protocol_id)
             before = store.completeness(registered.protocol_id)
             store.record_trial(
                 registered.protocol_id,
@@ -249,6 +250,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            preregister_holdout(store, registered.protocol_id)
 
             with self.assertRaisesRegex(
                 ProtocolViolation,
@@ -273,14 +275,13 @@ class ScientificRegistryTests(unittest.TestCase):
                 0,
             )
 
-            # The rejected attempt must roll back the holdout identity/alias too.
-            # Otherwise a pre-budget probe could poison the future legitimate
-            # locked evaluation even though no holdout access was recorded.
+            # The rejected attempt must not consume or contaminate the exact
+            # physical holdout that was frozen before trial 1.
             exhaust_trials(store, registered.protocol_id)
             admitted = store.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-premature",
-                holdout_identity=holdout_identity(dataset_digit="b"),
+                holdout_identity=holdout_identity(),
                 result={"score": "0.1"},
             )
             self.assertEqual(admitted["prior_access_count"], 0)
@@ -290,6 +291,7 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            preregister_holdout(store, registered.protocol_id)
             rules_hash = store.completeness(
                 registered.protocol_id
             )["stopping_rules_hash"]
@@ -409,6 +411,7 @@ class ScientificRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 1
             registered = store.register_protocol(value)
+            preregister_holdout(store, registered.protocol_id)
             store.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -418,6 +421,7 @@ class ScientificRegistryTests(unittest.TestCase):
 
             import sqlite3
             with sqlite3.connect(path) as connection:
+                connection.execute("DROP TRIGGER trials_no_update")
                 connection.execute(
                     "UPDATE trials SET payload_json=? WHERE trial_id=?",
                     (

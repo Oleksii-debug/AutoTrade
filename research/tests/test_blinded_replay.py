@@ -3,7 +3,8 @@ import json
 import unittest
 
 from autotrade_research.evaluation.replay.blinding import (
-    BlindedEvent,
+    BlindedCausalFeeder,
+    BlindedFeederCheckpoint,
     BlindingError,
     BlindingProfile,
     CalendarField,
@@ -383,6 +384,242 @@ class Section17BlindedReplayTests(unittest.TestCase):
                 profile=profile(),
                 training_cutoff_uncertainty="unknown",
             )
+
+    def test_causal_blinded_view_starts_empty_before_first_availability(self):
+        source = dataset(
+            event(
+                "one",
+                event_time="2024-03-12T09:59:00Z",
+                available_at="2024-03-12T10:00:00Z",
+            )
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T09:58:00Z",
+            experiment_id="causal-prefix",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        self.assertEqual(feeder.published_count, 0)
+        self.assertEqual(feeder.view().events, ())
+        self.assertLess(feeder.view().simulation_time_us, 0)
+
+    def test_causal_blinded_feeder_never_publishes_future_event(self):
+        source = dataset(
+            event("one", available_at="2024-03-12T10:00:00Z", sequence=1),
+            event(
+                "two",
+                instrument="ETH-USD",
+                provider="Coinbase",
+                available_at="2024-03-12T10:02:00Z",
+                sequence=2,
+            ),
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T09:59:00Z",
+            experiment_id="causal-prefix",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        self.assertEqual(feeder.advance_to("2024-03-12T09:59:59Z"), ())
+        first = feeder.advance_to("2024-03-12T10:00:00Z")
+        self.assertEqual([item.event_id for item in first], ["Event 000001"])
+        self.assertEqual([item.event_id for item in feeder.view().events], ["Event 000001"])
+        self.assertEqual(feeder.advance_to("2024-03-12T10:01:59Z"), ())
+        self.assertEqual(feeder.published_count, 1)
+        second = feeder.advance_to("2024-03-12T10:02:00Z")
+        self.assertEqual([item.event_id for item in second], ["Event 000002"])
+
+    def test_causal_blinded_advance_next_time_preserves_same_time_batch(self):
+        source = dataset(
+            event("a", instrument="AAA", provider="P1", sequence=1),
+            event("b", instrument="BBB", provider="P2", sequence=2),
+            event(
+                "c",
+                instrument="CCC",
+                provider="P3",
+                available_at="2024-03-12T10:03:00Z",
+                sequence=3,
+            ),
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T09:00:00Z",
+            experiment_id="same-time",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        first = feeder.advance_next_time()
+        self.assertEqual(len(first), 2)
+        self.assertEqual([item.moment_index for item in first], [1, 1])
+        self.assertEqual(feeder.published_count, 2)
+        self.assertEqual(len(feeder.advance_next_time()), 1)
+        self.assertEqual(feeder.published_count, 3)
+        self.assertEqual(feeder.advance_next_time(), ())
+
+    def test_blinded_input_evidence_binds_exact_causal_prefix(self):
+        source = dataset(
+            event("one"),
+            event(
+                "two",
+                instrument="ETH-USD",
+                provider="Coinbase",
+                available_at="2024-03-12T10:01:00Z",
+                sequence=2,
+            ),
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T09:00:00Z",
+            experiment_id="evidence",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        before = feeder.input_evidence()
+        feeder.advance_next_time()
+        after = feeder.input_evidence()
+        self.assertNotEqual(before.published_prefix_sha256, after.published_prefix_sha256)
+        self.assertNotEqual(before.digest, after.digest)
+        self.assertEqual(after.blinded_dataset_sha256, feeder.blinded_dataset_sha256)
+
+    def test_blinded_checkpoint_contains_no_absolute_calendar_or_raw_identity(self):
+        source = dataset(
+            event(
+                "btc-2024-03-12-kraken",
+                event_time="2024-03-12T09:59:00Z",
+                available_at="2024-03-12T10:00:00Z",
+            )
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T10:00:00Z",
+            experiment_id="checkpoint",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        record = feeder.checkpoint().to_record()
+        serialized = json.dumps(record, sort_keys=True)
+        self.assertNotIn("2024-03-12", serialized)
+        self.assertNotIn("BTC", serialized)
+        self.assertNotIn("Kraken", serialized)
+        self.assertEqual(record["cursor"], 1)
+
+    def test_blinded_checkpoint_resume_matches_uninterrupted_prefix_and_tail(self):
+        source = dataset(
+            event("one", sequence=1),
+            event(
+                "two",
+                instrument="ETH-USD",
+                provider="Coinbase",
+                available_at="2024-03-12T10:01:00Z",
+                sequence=2,
+            ),
+            event(
+                "three",
+                instrument="SOL-USD",
+                provider="ProviderX",
+                available_at="2024-03-12T10:02:00Z",
+                sequence=3,
+            ),
+        )
+        kwargs = dict(
+            dataset=source,
+            experiment_id="resume",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        live = BlindedCausalFeeder(start_time="2024-03-12T09:00:00Z", **kwargs)
+        live.advance_to("2024-03-12T10:01:00Z")
+        checkpoint = live.checkpoint()
+        prefix = live.view()
+        uninterrupted_tail = live.advance_to("2024-03-12T10:03:00Z")
+        uninterrupted_final = live.view()
+
+        resumed = BlindedCausalFeeder.restore(checkpoint=checkpoint, **kwargs)
+        self.assertEqual(resumed.view(), prefix)
+        resumed_tail = resumed.advance_to("2024-03-12T10:03:00Z")
+        self.assertEqual(resumed_tail, uninterrupted_tail)
+        self.assertEqual(resumed.view(), uninterrupted_final)
+        self.assertEqual(resumed.checkpoint(), live.checkpoint())
+
+    def test_blinded_restore_rejects_wrong_dataset_experiment_profile_and_prefix(self):
+        source = dataset(event("one"))
+        kwargs = dict(
+            dataset=source,
+            experiment_id="resume",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        live = BlindedCausalFeeder(start_time="2024-03-12T10:00:00Z", **kwargs)
+        checkpoint = live.checkpoint()
+
+        wrong_experiment = BlindedFeederCheckpoint.from_record(
+            {**checkpoint.to_record(), "experiment_id": "other"}
+        )
+        with self.assertRaisesRegex(BlindingError, "experiment"):
+            BlindedCausalFeeder.restore(checkpoint=wrong_experiment, **kwargs)
+
+        wrong_prefix = BlindedFeederCheckpoint.from_record(
+            {
+                **checkpoint.to_record(),
+                "published_prefix_sha256": "sha256:" + ("f" * 64),
+            }
+        )
+        with self.assertRaisesRegex(BlindingError, "prefix digest"):
+            BlindedCausalFeeder.restore(checkpoint=wrong_prefix, **kwargs)
+
+        wrong_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(("instrument_id",), "ASSET", required=True),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "blinded dataset|profile"):
+            BlindedCausalFeeder.restore(
+                dataset=source,
+                checkpoint=checkpoint,
+                experiment_id="resume",
+                shuffle_key_sha256=SHUFFLE,
+                profile=wrong_profile,
+                training_cutoff_uncertainty="unknown",
+            )
+
+        other_source = dataset(event("other", instrument="ETH-USD", provider="Coinbase"))
+        with self.assertRaisesRegex(BlindingError, "source dataset|blinded dataset"):
+            BlindedCausalFeeder.restore(
+                dataset=other_source,
+                checkpoint=checkpoint,
+                experiment_id="resume",
+                shuffle_key_sha256=SHUFFLE,
+                profile=profile(),
+                training_cutoff_uncertainty="unknown",
+            )
+
+    def test_blinded_checkpoint_record_rejects_missing_or_extra_keys(self):
+        source = dataset(event("one"))
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T10:00:00Z",
+            experiment_id="record",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+        record = feeder.checkpoint().to_record()
+        missing = dict(record)
+        missing.pop("cursor")
+        with self.assertRaisesRegex(BlindingError, "keys mismatch"):
+            BlindedFeederCheckpoint.from_record(missing)
+        with self.assertRaisesRegex(BlindingError, "keys mismatch"):
+            BlindedFeederCheckpoint.from_record({**record, "extra": 1})
 
     def test_hostile_dataset_and_profile_subclasses_are_rejected(self):
         class HostileDataset(CausalDataset):

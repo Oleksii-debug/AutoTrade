@@ -55,6 +55,7 @@ _TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
 _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 _RUNTIME_CONFIG_BINDINGS = WeakKeyDictionary()
 _RUNTIME_CONFIG_BINDINGS_LOCK = RLock()
+_RUNTIME_ISSUANCE_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -405,7 +406,12 @@ class ProductionHostRuntime:
         server: AuthenticatedHostServer,
         instance_fence: _InstanceFence,
         admission_gate: _CommandAdmissionGate,
+        issuance_token: object | None = None,
     ) -> None:
+        if issuance_token is not _RUNTIME_ISSUANCE_TOKEN:
+            raise PermissionError(
+                "ProductionHostRuntime must be issued by canonical host composition"
+            )
         canonical_config = _readmit_production_host_config(config)
         with _RUNTIME_CONFIG_BINDINGS_LOCK:
             if self in _RUNTIME_CONFIG_BINDINGS:
@@ -670,6 +676,7 @@ def build_production_host(
             server=server,
             instance_fence=instance_fence,
             admission_gate=admission_gate,
+            issuance_token=_RUNTIME_ISSUANCE_TOKEN,
         )
     except BaseException as error:
         cleanup_errors: list[tuple[str, BaseException]] = []

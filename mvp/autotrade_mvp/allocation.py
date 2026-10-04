@@ -1663,7 +1663,7 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
-def _make_allocation_payload_sealer():
+def _make_allocation_payload_sealer(_json_dumps=json.dumps):
     """Create closure-private provenance for canonical frozen mapping nodes."""
 
     registry: dict[int, tuple[weakref.ReferenceType, object, str]] = {}
@@ -1701,7 +1701,7 @@ def _make_allocation_payload_sealer():
                 frozen_items[key] = frozen_item
                 owners.extend(nested_owners)
             proxy = MappingProxyType(frozen_items)
-            canonical_json = json.dumps(
+            canonical_json = _json_dumps(
                 value,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1745,6 +1745,7 @@ del _make_allocation_payload_sealer
 def _canonical_evidence_value(
     value,
     _sealed_lookup=_registered_allocation_payload,
+    _json_loads=json.loads,
 ):
     """Reduce untrusted evidence to exact built-in JSON-domain values.
 
@@ -1778,7 +1779,7 @@ def _canonical_evidence_value(
                 "allocation evidence mappingproxy lacks sealed canonical provenance"
             )
         _, canonical_json = sealed
-        decoded = json.loads(canonical_json)
+        decoded = _json_loads(canonical_json)
         if type(decoded) is not dict:
             raise RuntimeError("sealed allocation payload provenance is invalid")
         return decoded
@@ -1787,9 +1788,13 @@ def _canonical_evidence_value(
     raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
 
 
-def _canonical_evidence_json(value) -> str:
-    return json.dumps(
-        _canonical_evidence_value(value),
+def _canonical_evidence_json(
+    value,
+    _json_dumps=json.dumps,
+    _canonicalize=_canonical_evidence_value,
+) -> str:
+    return _json_dumps(
+        _canonicalize(value),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -1806,6 +1811,7 @@ def _allocation_evidence_digest(
     observed_at: str,
     valid_until: str,
     payload: Mapping[str, object],
+    _canonical_json=_canonical_evidence_json,
 ) -> str:
     body = {
         "evidence_id": evidence_id,
@@ -1816,7 +1822,7 @@ def _allocation_evidence_digest(
         "valid_until": valid_until,
         "payload": payload,
     }
-    return sha256(_canonical_evidence_json(body).encode("utf-8")).hexdigest()
+    return sha256(_canonical_json(body).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1958,6 +1964,8 @@ class ImmutableAllocationEvidence:
 def _verified_allocation_payload_owner(
     evidence: ImmutableAllocationEvidence,
     _sealed_lookup=_registered_allocation_payload,
+    _json_loads=json.loads,
+    _digest=_allocation_evidence_digest,
 ):
     """Verify canonical issuer provenance before any payload mapping method."""
 
@@ -1973,10 +1981,10 @@ def _verified_allocation_payload_owner(
     owner, canonical_json = sealed
     if not any(candidate is owner for candidate in owners):
         raise ValueError("allocation evidence payload provenance is not sealed")
-    decoded = json.loads(canonical_json)
+    decoded = _json_loads(canonical_json)
     if type(decoded) is not dict:
         raise RuntimeError("sealed allocation payload provenance is invalid")
-    expected_digest = _allocation_evidence_digest(
+    expected_digest = _digest(
         evidence_id=object.__getattribute__(evidence, "evidence_id"),
         kind=object.__getattribute__(evidence, "kind"),
         environment=object.__getattribute__(evidence, "environment"),

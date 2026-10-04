@@ -390,5 +390,43 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         self.assertEqual(hostile.calls, [])
 
 
+    def test_post_issuance_helper_rebinding_cannot_retarget_sealed_snapshot(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        original_json = allocation_module.json
+        original_canonicalize = allocation_module._canonical_evidence_value
+        original_canonical_json = allocation_module._canonical_evidence_json
+        original_digest = allocation_module._allocation_evidence_digest
+
+        class ForgedJson:
+            @staticmethod
+            def loads(_value):
+                return {"symbol": "FORGED"}
+
+        allocation_module.json = ForgedJson
+        allocation_module._canonical_evidence_value = (
+            lambda _value: {"symbol": "FORGED"}
+        )
+        allocation_module._canonical_evidence_json = (
+            lambda _value: '{"symbol":"FORGED"}'
+        )
+        allocation_module._allocation_evidence_digest = (
+            lambda **_kwargs: evidence.digest
+        )
+        try:
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+            self.assertEqual(
+                original_canonicalize(evidence.payload),
+                {"symbol": "AAA"},
+            )
+        finally:
+            allocation_module.json = original_json
+            allocation_module._canonical_evidence_value = original_canonicalize
+            allocation_module._canonical_evidence_json = original_canonical_json
+            allocation_module._allocation_evidence_digest = original_digest
+
+
 if __name__ == "__main__":
     unittest.main()

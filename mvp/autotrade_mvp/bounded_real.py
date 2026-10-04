@@ -296,10 +296,12 @@ class ArtifactStoreEvidenceVerifier:
             raise TypeError(
                 "bounded-real integrity verification requires canonical ArtifactStore"
             )
-        if not isinstance(evidence_root, (str, Path)):
-            raise TypeError("evidence_root must be a string or Path")
-        if isinstance(evidence_root, str) and not evidence_root.strip():
-            raise ValueError("evidence_root must be non-empty")
+        canonical_path_type = type(Path())
+        if type(evidence_root) is str:
+            if not evidence_root.strip():
+                raise ValueError("evidence_root must be non-empty")
+        elif type(evidence_root) is not canonical_path_type:
+            raise TypeError("evidence_root must be an exact string or Path")
         root = Path(evidence_root).absolute()
         self._store = store
         self._evidence_root = root

@@ -1435,9 +1435,9 @@ internal static class Program
                 var refresh =
                     typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
                 var host =
-                    (System.Windows.Controls.TextBlock)window.FindName("HostValue");
+                    (System.Windows.Controls.TextBox)window.FindName("HostValue");
                 var stateVersion =
-                    (System.Windows.Controls.TextBlock)window.FindName("StateVersionValue");
+                    (System.Windows.Controls.TextBox)window.FindName("StateVersionValue");
                 var connection =
                     (System.Windows.Controls.TextBlock)window.FindName("ConnectionStatus");
                 var announcement =

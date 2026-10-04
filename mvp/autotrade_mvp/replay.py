@@ -516,6 +516,7 @@ class RuntimeStateVerifier:
             raise ReplayError(
                 "runtime state verifier requires canonical RuntimeStateSnapshot"
             )
+        snapshot = _canonical_runtime_snapshot(snapshot)
         if snapshot.authority_id != self.authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
         if snapshot.verifier_id != self.verifier_id:
@@ -546,6 +547,7 @@ class RuntimeStateVerifier:
             raise ReplayError(
                 "runtime state verifier requires canonical CompositeReplayCheckpoint"
             )
+        checkpoint = _canonical_composite_checkpoint(checkpoint)
         if checkpoint.runtime_authority_id != self.authority_id:
             raise ReplayError("runtime state checkpoint authority identity mismatch")
         if checkpoint.runtime_verifier_id != self.verifier_id:
@@ -719,6 +721,7 @@ class RuntimeStateAuthority:
             raise ReplayError(
                 "runtime state authority requires canonical RuntimeStateSnapshot"
             )
+        snapshot = _canonical_runtime_snapshot(snapshot)
         if snapshot.authority_id != self.authority_id:
             raise ReplayError("runtime state snapshot authority identity mismatch")
         return _sign_runtime_authority_material(
@@ -1001,6 +1004,62 @@ class ReplayCheckpoint:
         _instant(self.clock, field="clock")
 
 
+def _stored_component_dict(values: Mapping[str, str]) -> dict[str, str]:
+    if type(values) is not MappingProxyType:
+        raise TypeError(
+            "stored runtime component bindings must be canonical frozen mapping"
+        )
+    try:
+        held = tuple(values.items())
+    except RuntimeError as error:
+        raise ReplayError(
+            "stored runtime component bindings changed during validation"
+        ) from error
+    copied: dict[str, str] = {}
+    for raw_name, raw_digest in held:
+        if type(raw_name) is not str or type(raw_digest) is not str:
+            raise ReplayError(
+                "stored runtime component bindings must contain exact text"
+            )
+        copied[raw_name] = raw_digest
+    return copied
+
+
+def _canonical_runtime_snapshot(
+    snapshot: RuntimeStateSnapshot,
+) -> RuntimeStateSnapshot:
+    if type(snapshot) is not RuntimeStateSnapshot:
+        raise TypeError("runtime snapshot must be canonical RuntimeStateSnapshot")
+    return RuntimeStateSnapshot(
+        cut_id=snapshot.cut_id,
+        replay=snapshot.replay,
+        runtime_components=_stored_component_dict(snapshot.runtime_components),
+        authority_id=snapshot.authority_id,
+        verifier_id=snapshot.verifier_id,
+        authority_seal=snapshot.authority_seal,
+    )
+
+
+def _canonical_composite_checkpoint(
+    checkpoint: CompositeReplayCheckpoint,
+) -> CompositeReplayCheckpoint:
+    if type(checkpoint) is not CompositeReplayCheckpoint:
+        raise TypeError(
+            "checkpoint must be canonical CompositeReplayCheckpoint"
+        )
+    return CompositeReplayCheckpoint(
+        replay=checkpoint.replay,
+        runtime_components=_stored_component_dict(checkpoint.runtime_components),
+        runtime_cut_id=checkpoint.runtime_cut_id,
+        runtime_authority_id=checkpoint.runtime_authority_id,
+        runtime_verifier_id=checkpoint.runtime_verifier_id,
+        runtime_authority_seal=checkpoint.runtime_authority_seal,
+        build_sha=checkpoint.build_sha,
+        protocol_ref=checkpoint.protocol_ref,
+        schema_version=checkpoint.schema_version,
+    )
+
+
 def _detached_replay_event(event: ReplayEvent) -> ReplayEvent:
     if type(event) is not ReplayEvent:
         raise TypeError("events must contain exact ReplayEvent values")
@@ -1194,6 +1253,7 @@ def resume_from_composite_checkpoint(
 
     if type(checkpoint) is not CompositeReplayCheckpoint:
         raise TypeError("checkpoint must be the canonical CompositeReplayCheckpoint")
+    checkpoint = _canonical_composite_checkpoint(checkpoint)
     if type(runtime_state_authority) is not RuntimeStateAuthority:
         raise TypeError(
             "runtime_state_authority must be the canonical RuntimeStateAuthority"

@@ -115,6 +115,19 @@ class _HostileComponents(dict):
         raise AssertionError("hostile component iteration executed")
 
 
+class _HostileComparable:
+    def __init__(self):
+        self.touched = False
+
+    def __eq__(self, other):
+        self.touched = True
+        raise AssertionError("hostile equality callback executed")
+
+    def __ne__(self, other):
+        self.touched = True
+        raise AssertionError("hostile inequality callback executed")
+
+
 class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
     def _checkpoint_value(self):
         return ReplayCheckpoint(
@@ -262,6 +275,72 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
         self.assertEqual(checkpoint.replay.cursor, 0)
         self.assertEqual(checkpoint.replay.clock, "2026-09-24T09:59:00Z")
         self.assertEqual(checkpoint.fingerprint, fingerprint)
+
+    def test_verifier_revalidates_mutated_snapshot_before_identity_comparison(self):
+        verifier = _trusted_verifier()
+        snapshot = RuntimeStateSnapshot(
+            cut_id="cut:mutated-snapshot",
+            replay=self._checkpoint_value(),
+            runtime_components=_components(),
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            authority_seal="a" * 64,
+        )
+        hostile = _HostileComparable()
+        object.__setattr__(snapshot, "authority_id", hostile)
+
+        with self.assertRaisesRegex(ReplayError, "authority_id must be non-empty"):
+            RuntimeStateVerifier.verify_snapshot(verifier, snapshot)
+        self.assertFalse(hostile.touched)
+
+    def test_verifier_revalidates_mutated_checkpoint_before_identity_comparison(self):
+        verifier = _trusted_verifier()
+        checkpoint = CompositeReplayCheckpoint(
+            replay=self._checkpoint_value(),
+            runtime_components=_components(),
+            runtime_cut_id="cut:mutated-checkpoint",
+            runtime_authority_id="runtime:production",
+            runtime_verifier_id="host-trust:runtime-production-v1",
+            runtime_authority_seal="a" * 64,
+            build_sha="b" * 40,
+            protocol_ref="protocol:mutated-checkpoint",
+        )
+        hostile = _HostileComparable()
+        object.__setattr__(checkpoint, "runtime_authority_id", hostile)
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "runtime_authority_id must be non-empty",
+        ):
+            RuntimeStateVerifier.verify_checkpoint_binding(verifier, checkpoint)
+        self.assertFalse(hostile.touched)
+
+    def test_authority_revalidates_mutated_snapshot_before_identity_comparison(self):
+        replay = self._checkpoint_value()
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=lambda: ("cut:unused", replay, _components()),
+        )
+        snapshot = RuntimeStateSnapshot(
+            cut_id="cut:mutated-seal",
+            replay=replay,
+            runtime_components=_components(),
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            authority_seal="a" * 64,
+        )
+        hostile = _HostileComparable()
+        object.__setattr__(snapshot, "authority_id", hostile)
+
+        with self.assertRaisesRegex(ReplayError, "authority_id must be non-empty"):
+            RuntimeStateAuthority.seal_checkpoint(
+                authority,
+                snapshot,
+                build_sha="b" * 40,
+                protocol_ref="protocol:mutated-seal",
+            )
+        self.assertFalse(hostile.touched)
 
     def test_composite_schema_version_rejects_text_subclass(self):
         hostile = _HostileText("4.0.0")

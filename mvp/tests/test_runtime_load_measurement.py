@@ -158,6 +158,7 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                     plan_id=plan.plan_id,
                     financial_staleness_us=(100, 200),
                     research_interference_us=(50,),
+                    financial_staleness_event_ids=(first.event_id, second.event_id),
                     reconnect_backlog_remaining=0,
                     declared_duration_us=1_000_000,
                     observed_duration_us=1_000_000,
@@ -169,6 +170,7 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                 ("unverified_runtime_measurement_provenance",),
             )
             self.assertEqual(tuple(item.latency_us for item in samples), (100, 200))
+            self.assertEqual(tuple(item.event_id for item in samples), (first.event_id, second.event_id))
             self.assertEqual(evidence.missing_event_ids, ())
             self.assertEqual(loaded_plan.digest, plan.digest)
 

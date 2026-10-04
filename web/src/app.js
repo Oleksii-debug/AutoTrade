@@ -529,6 +529,7 @@
     }
     return Object.freeze({
       rowKey: row.dataset.selectionKey,
+      rowText: row.dataset.selectionExact === "true" ? row.textContent : null,
       cellIndex,
       textOffset: prefix.toString().length
     });
@@ -564,7 +565,8 @@
     if (bookmark === null) return;
     const findPoint = (endpoint) => {
       const row = [...body.rows].find(
-        (candidate) => candidate.dataset.selectionKey === endpoint.rowKey);
+        (candidate) => candidate.dataset.selectionKey === endpoint.rowKey &&
+          (endpoint.rowText === null || candidate.textContent === endpoint.rowText));
       if (!row || row.hidden) return null;
       const cell = row.cells[endpoint.cellIndex];
       return cell ? textPointAtOffset(cell, endpoint.textOffset) : null;
@@ -615,6 +617,7 @@
     cell.textContent = value;
     row.append(header, cell);
     body.appendChild(row);
+    return row;
   }
 
   function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {}) {
@@ -654,8 +657,12 @@
         return;
       }
       permissionSummary.capabilities.forEach((capability, index) => {
-        appendProjectionRow(
+        const row = appendProjectionRow(
           body, "Capability " + String(index + 1), capability);
+        // The contract exposes no independent capability-row identity. Never
+        // retarget an old selection merely because a different capability
+        // occupies the same list position on a later snapshot.
+        row.dataset.selectionExact = "true";
       });
     });
   }
@@ -678,6 +685,10 @@
           const row = document.createElement("tr");
           row.dataset.filterableRow = "true";
           row.dataset.selectionKey = "job:" + String(index + 1);
+          // UiSnapshot.jobs has no required durable job identifier. Position
+          // alone is not identity, so preserve a selected row only while its
+          // complete rendered evidence remains unchanged.
+          row.dataset.selectionExact = "true";
           const header = document.createElement("th");
           header.scope = "row";
           header.textContent = "Job " + String(index + 1);

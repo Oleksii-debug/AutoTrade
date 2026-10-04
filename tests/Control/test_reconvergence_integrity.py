@@ -1,20 +1,94 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control.tools.reconvergence_integrity import (
     Change,
+    IntegrityAssessment,
     PROTECTED_SENTINELS,
     assess_git_revisions,
     assess_reconvergence,
+    main,
     parse_name_status,
+    reconvergence_evidence,
 )
 
 
 class ReconvergenceIntegrityTests(unittest.TestCase):
+    def test_exact_revision_evidence_is_canonical_and_secret_free(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+        )
+        self.assertEqual(evidence["base_sha"], "a" * 40)
+        self.assertEqual(evidence["head_sha"], "b" * 40)
+        self.assertEqual(evidence["result"], "PASS")
+        self.assertFalse(evidence["contains_secrets"])
+
+        with self.assertRaisesRegex(ValueError, "exact lowercase Git object id"):
+            reconvergence_evidence(
+                base_sha="A" * 40,
+                head_sha="b" * 40,
+                assessment=assessment,
+            )
+
+    def test_cli_writes_fail_evidence_before_returning_blocked(self):
+        blocked = IntegrityAssessment(
+            allowed=False,
+            base_is_ancestor=False,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=("head is not descended from exact base revision",),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "reconvergence.json"
+            with patch(
+                "control.tools.reconvergence_integrity._git_commit_id",
+                side_effect=["a" * 40, "b" * 40],
+            ), patch(
+                "control.tools.reconvergence_integrity.assess_git_revisions",
+                return_value=blocked,
+            ):
+                status = main(
+                    [
+                        "--base",
+                        "trusted-base",
+                        "--head",
+                        "candidate-head",
+                        "--evidence-output",
+                        str(output),
+                    ]
+                )
+            self.assertEqual(status, 2)
+            evidence = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["base_sha"], "a" * 40)
+            self.assertEqual(evidence["head_sha"], "b" * 40)
+            self.assertEqual(evidence["result"], "FAIL")
+            self.assertEqual(
+                evidence["reasons"],
+                ["head is not descended from exact base revision"],
+            )
     def test_mass_base_tree_deletion_fails_closed(self):
         base = [f"path-{index}.txt" for index in range(100)]
         changes = [Change(status="D", path=path) for path in base[:60]]
@@ -303,6 +377,22 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 allowed_scopes=("web/*",),
             )
 
+    def test_canonical_workflow_persists_exact_base_head_guard_evidence(self):
+        workflow = Path(
+            ".github/workflows/reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '--evidence-output "artifacts/reconvergence-integrity.json"',
+            workflow,
+        )
+        self.assertIn("Upload exact-head reconvergence evidence", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn(
+            "reconvergence-integrity-${{ github.event.pull_request.number }}-"
+            "${{ github.event.pull_request.head.sha }}",
+            workflow,
+        )
+        self.assertIn("if: always() && github.event_name == 'pull_request_target'", workflow)
     def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"

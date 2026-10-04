@@ -13,6 +13,15 @@ from .blinding import (
     IdentityField,
     blind_dataset,
 )
+from .news import (
+    NewsClaim,
+    NewsIdentity,
+    NewsReplayBundle,
+    NewsReplayError,
+    NewsRevision,
+    build_news_replay_bundle,
+    render_blinded_news,
+)
 from .feeder import (
     CausalDataView,
     CausalDataset,
@@ -36,6 +45,13 @@ __all__ = [
     "CalendarField",
     "IdentityField",
     "blind_dataset",
+    "NewsClaim",
+    "NewsIdentity",
+    "NewsReplayBundle",
+    "NewsReplayError",
+    "NewsRevision",
+    "build_news_replay_bundle",
+    "render_blinded_news",
     "CausalDataView",
     "CausalDataset",
     "CausalEvent",

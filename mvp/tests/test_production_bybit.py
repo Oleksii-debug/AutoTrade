@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.dispatch import stable_client_order_id
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.financial_send_authority import (
+    FinancialSendAuthorityError,
     FinanciallyBoundBybitOrderSender,
     build_financial_send_authority_issuer,
 )
@@ -130,26 +131,26 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         ):
             ProductionBybitOrderSender(runtime=object(), transport=object())
 
-    def test_public_builder_returns_only_financially_bound_sender(self) -> None:
+    def test_public_builder_rejects_financial_issuer_without_selected_route(self) -> None:
         with TemporaryDirectory() as root:
             runtime, _host, _boundary = self._runtime(root)
             service = AuthorityService(runtime.journal)
             issuer = build_financial_send_authority_issuer(service, runtime)
-            sender = build_production_bybit_order_sender(
-                runtime,
-                financial_issuer=issuer,
-                provider_environment="TESTNET",
-                capability_snapshot_id="capability-1",
-                capability_registry=CapabilityRegistry(),
-                credential_handle=self._handle(),
-                session_token="session-1",
-                clock_millis=lambda: 1_700_000_000_000,
-                clock_utc=lambda: _NOW,
-            )
-
-            self.assertIs(type(sender), FinanciallyBoundBybitOrderSender)
-            lower = sender._FinanciallyBoundBybitOrderSender__sender
-            self.assertIs(type(lower), ProductionBybitOrderSender)
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "requires selected provider route authority",
+            ):
+                build_production_bybit_order_sender(
+                    runtime,
+                    financial_issuer=issuer,
+                    provider_environment="TESTNET",
+                    capability_snapshot_id="capability-1",
+                    capability_registry=CapabilityRegistry(),
+                    credential_handle=self._handle(),
+                    session_token="session-1",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: _NOW,
+                )
 
     def test_public_builder_rejects_noncanonical_financial_issuer_before_raw_build(self) -> None:
         with TemporaryDirectory() as root:

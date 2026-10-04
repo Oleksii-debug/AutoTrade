@@ -282,18 +282,38 @@ def build_product(data_dir, *, port=8765, desktop_session_sink=None):
 
 
 def restore_product_backup(backup_dir, data_dir):
-    from .backup import restore_backup
-    root = restore_backup(backup_dir, data_dir)
-    # The shared backup format keeps artifacts alongside state. ZERO's existing
-    # session expects state/artifacts. Move the verified directory atomically;
-    # leave the original reconciliation/fencing gate untouched.
-    source = root / 'artifacts'
-    destination = root / 'state' / 'artifacts'
-    if source.exists():
-        if destination.exists():
-            raise ValueError('restored artifact layout conflicts')
-        source.rename(destination)
-    return root
+    from tempfile import TemporaryDirectory
+    from .backup import (
+        BackupError,
+        _fsync_directory,
+        _fsync_directory_tree,
+        restore_backup,
+    )
+
+    destination_root = Path(data_dir)
+    if destination_root.exists():
+        raise BackupError('Restore destination already exists')
+    destination_root.parent.mkdir(parents=True, exist_ok=True)
+
+    # The shared backup format restores artifacts alongside state, while ZERO
+    # consumes state/artifacts. Convert that product-only layout in an
+    # unpublished sibling tree. A crash/failure before final publication leaves
+    # the requested destination absent and the exact restore retryable.
+    with TemporaryDirectory(
+        prefix='.autotrade-zero-restore-',
+        dir=destination_root.parent,
+    ) as scratch:
+        root = restore_backup(backup_dir, Path(scratch) / 'product')
+        source = root / 'artifacts'
+        artifact_destination = root / 'state' / 'artifacts'
+        if source.exists():
+            if artifact_destination.exists():
+                raise BackupError('restored artifact layout conflicts')
+            source.rename(artifact_destination)
+        _fsync_directory_tree(root)
+        os.replace(root, destination_root)
+        _fsync_directory(destination_root.parent)
+    return destination_root
 
 
 def _launch_message(launch_url, *, no_browser):

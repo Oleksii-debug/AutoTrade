@@ -217,6 +217,39 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
 
+    def test_product_restore_layout_failure_leaves_final_destination_retryable(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            try:
+                backup_id, operation = client.command('BACKUP_SIMULATION')
+                self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
+            finally:
+                client.close()
+
+            backup = data / 'backups' / backup_id
+            restored = Path(directory) / 'retryable-restored'
+            original_rename = Path.rename
+
+            def fail_zero_layout(path, target):
+                if Path(path).name == 'artifacts' and Path(target).name == 'artifacts':
+                    raise OSError('simulated ZERO artifact layout failure')
+                return original_rename(path, target)
+
+            with patch.object(Path, 'rename', new=fail_zero_layout):
+                with self.assertRaisesRegex(
+                    OSError,
+                    'simulated ZERO artifact layout failure',
+                ):
+                    restore_product_backup(backup, restored)
+
+            self.assertFalse(restored.exists())
+            result = restore_product_backup(backup, restored)
+            self.assertEqual(result, restored)
+            self.assertTrue((restored / 'state' / 'artifacts').is_dir())
+            self.assertFalse((restored / 'artifacts').exists())
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_worker_rejects_unaccepted_lifecycle_invocation(self):
         with TemporaryDirectory() as directory:
             data = Path(directory) / 'product'

@@ -319,7 +319,11 @@ def assess_reconvergence(
         # C* intentionally does not remove its source path.
 
     disappeared = tuple(sorted(disappeared_paths))
-    protected = tuple(sorted(direct_deletions.intersection(protected_sentinels)))
+    base_workflow_authorities = frozenset(
+        path for path in base_path_set if _is_workflow_authority_path(path)
+    )
+    protected_paths = frozenset(protected_sentinels).union(base_workflow_authorities)
+    protected = tuple(sorted(direct_deletions.intersection(protected_paths)))
     fraction = len(disappeared) / base_count
 
     protected_damage: set[str] = set(protected)
@@ -337,7 +341,7 @@ def assess_reconvergence(
         if (
             kind == "R"
             and (
-                change.previous_path in protected_sentinels
+                change.previous_path in protected_paths
                 or previous_existing_workflow_path
             )
             and change.path != change.previous_path
@@ -346,14 +350,9 @@ def assess_reconvergence(
                 f"{change.previous_path} -> {change.path} (rename)"
             )
         if (
-            kind == "D"
-            and existing_workflow_path
-        ):
-            protected_damage.add(change.path)
-        if (
             kind == "T"
             and (
-                change.path in protected_sentinels
+                change.path in protected_paths
                 or existing_workflow_path
             )
         ):

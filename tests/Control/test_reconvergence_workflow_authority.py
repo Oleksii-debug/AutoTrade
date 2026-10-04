@@ -57,19 +57,29 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         path = ".github/workflows/future-authority.yaml"
         self.assertNotIn(path, WORKFLOW_AUTHORITY_ROOTS)
 
-        for change in (
-            Change(status="M", path=path),
+        destructive = (
             Change(status="D", path=path),
             Change(status="T", path=path),
             Change(status="R100", previous_path=path, path="archive/future-authority.yaml"),
-        ):
+        )
+        modified = assess_reconvergence(
+            base_paths=[path, "owned/change.py"],
+            changes=[Change(status="M", path=path)],
+        )
+        self.assertFalse(modified.allowed)
+        self.assertTrue(modified.protected_violations)
+
+        for change in destructive:
             with self.subTest(status=change.status):
                 result = assess_reconvergence(
                     base_paths=[path, "owned/change.py"],
                     changes=[change],
+                    allowed_scopes=(path,),
                 )
                 self.assertFalse(result.allowed)
                 self.assertTrue(result.protected_violations)
+                if change.status == "D":
+                    self.assertEqual(result.protected_deletions, (path,))
 
     def test_untrusted_modification_of_integration_workflow_authorities_fails_closed(self):
         for path in (

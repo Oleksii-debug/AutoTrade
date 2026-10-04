@@ -26,9 +26,10 @@ from threading import RLock
 import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 from .dispatch import (
@@ -295,8 +296,7 @@ def _order_projection_binding_operations():
     bindings = {}
     lock = RLock()
     artifact_store_type = ArtifactStore
-    authenticated_snapshot_read = ArtifactStore.read_authenticated_snapshot
-    authenticated_snapshot_read_code = authenticated_snapshot_read.__code__
+    trusted_reader_factory = trusted_authenticated_reader
 
     def evidence_namespace(evidence):
         if evidence is None:
@@ -333,13 +333,27 @@ def _order_projection_binding_operations():
             )
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
             evidence = state["evidence_artifact_store"]
+            frozen_evidence_namespace = evidence_namespace(evidence)
+            trusted_reader = None
+            if evidence is not None:
+                evidence_state = object.__getattribute__(evidence, "__dict__")
+                try:
+                    trusted_reader = trusted_reader_factory(
+                        evidence_state["root"],
+                        publication_store=evidence,
+                    )
+                except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+                    raise OrderProjectionConflict(
+                        "provider evidence trusted reader authority is unavailable"
+                    ) from error
             bindings[id(value)] = (
                 weakref.ref(value),
                 store,
                 identity,
                 scope,
                 evidence,
-                evidence_namespace(evidence),
+                frozen_evidence_namespace,
+                trusted_reader,
             )
 
     def require(value):
@@ -351,7 +365,15 @@ def _order_projection_binding_operations():
                 raise OrderProjectionConflict(
                     "durable OMS selection authority is unavailable"
                 )
-            _, store, identity, scope, evidence, frozen_evidence_namespace = entry
+            (
+                _,
+                store,
+                identity,
+                scope,
+                evidence,
+                frozen_evidence_namespace,
+                trusted_reader,
+            ) = entry
             state = object.__getattribute__(value, "__dict__")
             if (
                 type(state) is not dict
@@ -391,10 +413,14 @@ def _order_projection_binding_operations():
                     raise OrderProjectionConflict(
                         "provider evidence ArtifactStore namespace authority changed"
                     )
-                if authenticated_snapshot_read.__code__ is not authenticated_snapshot_read_code:
+                if trusted_reader is None:
                     raise OrderProjectionConflict(
-                        "provider evidence authenticated snapshot reader authority changed"
+                        "provider evidence trusted reader authority is unavailable"
                     )
+            elif trusted_reader is not None:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority is inconsistent"
+                )
             return store, identity
 
     def read_provider_evidence(value, artifact_id: str):
@@ -405,16 +431,12 @@ def _order_projection_binding_operations():
                 raise OrderProjectionConflict(
                     "durable OMS selection authority is unavailable"
                 )
-            evidence = entry[4]
-            if evidence is None:
+            trusted_reader = entry[6]
+            if trusted_reader is None:
                 raise OrderProjectionConflict(
-                    "provider evidence ArtifactStore authority is unavailable"
+                    "provider evidence trusted reader authority is unavailable"
                 )
-            if authenticated_snapshot_read.__code__ is not authenticated_snapshot_read_code:
-                raise OrderProjectionConflict(
-                    "provider evidence authenticated snapshot reader authority changed"
-                )
-        return authenticated_snapshot_read(evidence, artifact_id)
+        return trusted_reader(artifact_id)
 
     return registered, bind, require, read_provider_evidence
 
@@ -425,9 +447,6 @@ def _order_projection_binding_operations():
     require_exact_order_projection_authority,
     _read_authenticated_provider_evidence,
 ) = _order_projection_binding_operations()
-_READ_AUTHENTICATED_PROVIDER_EVIDENCE_CODE = (
-    _read_authenticated_provider_evidence.__code__
-)
 
 
 class DurableOrderBookProjection:
@@ -518,7 +537,6 @@ class DurableOrderBookProjection:
         evidence_refs: Sequence[Mapping[str, object]] | None,
         committed_at: str,
         _read_authenticated_snapshot=_read_authenticated_provider_evidence,
-        _expected_reader_code=_READ_AUTHENTICATED_PROVIDER_EVIDENCE_CODE,
     ) -> tuple[dict[str, str], ...]:
         refs = _canonical_evidence_refs(evidence_refs)
         requires = self._requires_provider_evidence(operation, request)
@@ -538,11 +556,6 @@ class DurableOrderBookProjection:
                     "provider evidence requires the trusted ArtifactStore boundary"
                 )
             return refs
-
-        if _read_authenticated_snapshot.__code__ is not _expected_reader_code:
-            raise OrderProjectionConflict(
-                "provider evidence authenticated snapshot reader authority changed"
-            )
 
         committed = _instant(committed_at, name="committed_at")
         committed_dt = datetime.fromisoformat(

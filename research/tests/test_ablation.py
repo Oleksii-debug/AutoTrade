@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from hashlib import sha256
 import gc
 import json
@@ -2407,6 +2407,35 @@ class AblationTests(unittest.TestCase):
         ):
             authority.resolve(cases, outcome_refs=HostileList())
         self.assertEqual(calls, [])
+
+
+    def test_descriptive_summary_reporting_is_all_or_none_on_late_failure(self):
+        cases = [
+            pair("report-atomic-a", "2", population_unit="report-atomic-unit-a"),
+            pair("report-atomic-b", "3", population_unit="report-atomic-unit-b"),
+        ]
+        original = ablation_module._report_fraction
+        calls = 0
+
+        def fail_third_projection(value):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise InvalidOperation
+            return original(value)
+
+        with patch.object(
+            ablation_module,
+            "_report_fraction",
+            side_effect=fail_third_projection,
+        ):
+            summary = summarize_ablation("agent", cases)
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(summary.reporting_status, "UNAVAILABLE")
+        self.assertIsNone(summary.mean_utility_delta)
+        self.assertIsNone(summary.mean_cost_delta)
+        self.assertIsNone(summary.mean_latency_delta_ms)
 
 
 if __name__ == "__main__":

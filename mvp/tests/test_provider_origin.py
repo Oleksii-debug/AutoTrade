@@ -15,6 +15,8 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    _require_same_terminal_qualified_authority,
+    execute_qualified_provider_origin_read,
     observe_provider_origin_json_response,
 )
 from mvp.autotrade_mvp.provider_route_reads import prepare_qualified_provider_read
@@ -155,6 +157,69 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 "independently authenticated wire evidence",
             ):
                 origin.observe_json_response(attempt_id, binding)
+
+
+    def test_terminal_revalidation_accepts_fresh_same_q_c_and_detects_tampering(self):
+        with TemporaryDirectory() as directory:
+            (
+                fixture,
+                _journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            terminal = fixture.prepare(
+                route,
+                capabilities,
+                qualifications,
+                at=NOW,
+            )
+            _require_same_terminal_qualified_authority(binding, terminal)
+
+            object.__setattr__(
+                terminal,
+                "qualification_id",
+                "provider-qualification:sha256:" + "0" * 64,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "authority is unavailable|differs from prepared authority",
+            ):
+                _require_same_terminal_qualified_authority(binding, terminal)
+
+    def test_product_bridge_rejects_noncanonical_transport_before_durable_prepare(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            before = journal.whole_store_state_cut()
+
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "requires exact canonical authenticated-read transport",
+            ):
+                execute_qualified_provider_origin_read(
+                    origin=origin,
+                    route=route,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                    query_binding=binding,
+                    transport=object(),
+                    clock_utc=lambda: NOW,
+                )
+
+            self.assertEqual(journal.whole_store_state_cut(), before)
 
     def test_journal_never_embeds_provider_response_bytes(self):
         with TemporaryDirectory() as directory:

@@ -248,6 +248,30 @@ def _qualified_query_snapshot(
     return material
 
 
+def _require_provider_origin_causal_chronology(
+    *,
+    prepared_at: object,
+    terminal_verified_at: object,
+    observed_at: object,
+) -> None:
+    prepared = _parse_utc_text(
+        _exact_text(prepared_at, name="prepared_at"),
+        name="prepared_at",
+    )
+    terminal = _parse_utc_text(
+        _exact_text(terminal_verified_at, name="terminal_authority_verified_at"),
+        name="terminal_authority_verified_at",
+    )
+    observed = _parse_utc_text(
+        _exact_text(observed_at, name="observed_at"),
+        name="observed_at",
+    )
+    if not prepared <= terminal <= observed:
+        raise ProviderOriginError(
+            "provider-origin causal chronology requires Prepared <= terminal C/Q verification <= response observation"
+        )
+
+
 def _response_artifact_id(
     *,
     attempt_id: str,
@@ -996,10 +1020,11 @@ class ProviderOriginJournal:
                 raise ProviderOriginError(
                     "durable Prepared network authority differs from direct wire receipt"
                 )
-        if _parse_utc_text(observed_text, name="observed_at") < _parse_utc_text(
-            prepared.get("committed_at"), name="prepared committed_at"
-        ):
-            raise ProviderOriginError("provider response cannot precede durable prepare")
+        _require_provider_origin_causal_chronology(
+            prepared_at=prepared.get("committed_at"),
+            terminal_verified_at=terminal_verified_at,
+            observed_at=observed_text,
+        )
 
         response_digest = "sha256:" + sha256(raw).hexdigest()
         if execution_class == _DIRECT_EXECUTION_CLASS:
@@ -1145,6 +1170,13 @@ class ProviderOriginJournal:
         )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event is not bound to exact Prepared event")
+        _require_provider_origin_causal_chronology(
+            prepared_at=prepared.get("committed_at"),
+            terminal_verified_at=retained_payload.get(
+                "terminal_authority_verified_at"
+            ),
+            observed_at=retained_payload.get("observed_at"),
+        )
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
             _require_direct_wire_execution_claim(
                 self._require_store(),
@@ -1308,6 +1340,15 @@ class ProviderOriginJournal:
             terminal_verified_at,
             name="terminal_authority_verified_at",
         )
+        observed_text = _exact_text(
+            retained_payload.get("observed_at"),
+            name="observed_at",
+        )
+        _require_provider_origin_causal_chronology(
+            prepared_at=prepared.get("committed_at"),
+            terminal_verified_at=terminal_verified_at,
+            observed_at=observed_text,
+        )
         if execution_class == _DIRECT_EXECUTION_CLASS:
             _require_direct_wire_execution_claim(
                 self._require_store(),
@@ -1345,7 +1386,6 @@ class ProviderOriginJournal:
             raise ProviderOriginError(
                 "durable provider response artifact metadata differs from journal authority"
             )
-        observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
         _parse_utc_text(observed_text, name="observed_at")
         journal_sequence = observed.get("journal_sequence")
         if type(journal_sequence) is not int or journal_sequence < 1:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import timedelta
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -176,6 +177,85 @@ class ProviderOriginJournalTests(unittest.TestCase):
                         transport=transport,
                     )
                 prepare_direct.assert_not_called()
+
+    def test_direct_origin_rejects_terminal_cq_time_before_durable_prepared(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[]}}'
+
+            class Stream(BytesIO):
+                status = 200
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener.open = lambda *_args, **_kwargs: Stream(body)
+            base = binding.query_binding
+            points = iter(
+                (
+                    NOW,
+                    NOW,
+                    NOW,
+                    NOW - timedelta(seconds=1),
+                    NOW,
+                )
+            )
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-causal-clock",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-causal-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-causal-host",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: next(points),
+                wire_client=client,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "causal chronology",
+            ):
+                execute_direct_provider_origin_read(
+                    origin=origin,
+                    route=route,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                    query_binding=binding,
+                    transport=transport,
+                )
+            events = JournalStore.load_events_by_aggregate_type(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+            )
+            self.assertEqual(events, [])
 
     def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
         class Resolver:

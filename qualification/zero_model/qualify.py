@@ -330,6 +330,7 @@ def qualify(source_sha: str) -> dict[str, object]:
                 run_id="section16-partial-fill-qualification",
                 now=AUTONOMOUS_NOW,
                 execution_profile="TWO_EQUAL_PARTIALS",
+                target_quantity="2",
             )
             partial_fill_replay = run_autonomous_simulation(
                 list(AUTONOMOUS_PRICES[:8]),
@@ -337,6 +338,7 @@ def qualify(source_sha: str) -> dict[str, object]:
                 run_id="section16-partial-fill-qualification",
                 now=AUTONOMOUS_NOW,
                 execution_profile="TWO_EQUAL_PARTIALS",
+                target_quantity="2",
             )
             if partial_fill["status"] != "COMPLETED":
                 raise RuntimeError("canonical partial-fill ZERO loop did not complete")

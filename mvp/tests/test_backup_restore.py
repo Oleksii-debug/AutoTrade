@@ -500,6 +500,46 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_source_aba_during_copy_cannot_publish_transient_generation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_bytes = checkpoint.read_bytes()
+            original_copy = backup_module._copy_stable_file
+            injected = False
+
+            def copy_transient_then_restore(source, destination):
+                nonlocal injected
+                if Path(source) == checkpoint and not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"transient_generation":true}\n',
+                        encoding="utf-8",
+                    )
+                    try:
+                        return original_copy(source, destination)
+                    finally:
+                        checkpoint.write_bytes(original_bytes)
+                return original_copy(source, destination)
+
+            with patch.object(
+                backup_module,
+                "_copy_stable_file",
+                side_effect=copy_transient_then_restore,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed across journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertEqual(checkpoint.read_bytes(), original_bytes)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_existing_source_change_during_sqlite_snapshot_aborts_publication(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

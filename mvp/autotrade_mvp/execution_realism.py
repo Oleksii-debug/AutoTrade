@@ -674,6 +674,19 @@ def _market_projected_price(
         raise ExecutionRealismError(
             "price projection instrument_version must match order instrument_version"
         )
+    try:
+        reference_is_on_grid = is_exact_decimal_multiple(
+            base_price,
+            projection.price_quantum,
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "market reference price grid check exceeds exact arithmetic resource envelope"
+        ) from error
+    if not reference_is_on_grid:
+        raise ExecutionRealismError(
+            "market reference price is not aligned to authoritative price quantum"
+        )
 
     available = as_fraction(observation.available_volume)
     participation = (

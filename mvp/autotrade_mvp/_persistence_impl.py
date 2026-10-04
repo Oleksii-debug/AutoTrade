@@ -1482,17 +1482,20 @@ class JournalStore:
             or aggregate_version < 0
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
+        # Freeze caller-owned state exactly once. Hash the parsed canonical bytes,
+        # not a second traversal of a potentially mutable/callback-bearing object.
         state_json = canonical_json(state)
+        frozen_state = json.loads(state_json)
         state_hash = (
             _projection_checkpoint_digest(
                 projection_name=projection_name,
                 aggregate_type=aggregate_type,
                 aggregate_id=aggregate_id,
                 aggregate_version=aggregate_version,
-                state=state,
+                state=frozen_state,
             )
             if self.SCHEMA_VERSION >= 8
-            else payload_digest(state)
+            else payload_digest(frozen_state)
         )
 
         with self._connect() as connection:
@@ -1685,12 +1688,15 @@ class JournalStore:
         projection_name = self._require_text(projection_name, "projection_name")
         if type(journal_sequence) is not int or journal_sequence < 0:
             raise ValueError("journal_sequence must be a non-negative integer")
+        # Freeze caller-owned state exactly once so persisted JSON and its digest
+        # cannot come from different mutations of the same object.
         state_json = canonical_json(state)
+        frozen_state = json.loads(state_json)
         state_hash = payload_digest(
             {
                 "projection_name": projection_name,
                 "journal_sequence": journal_sequence,
-                "state": state,
+                "state": frozen_state,
             }
         )
 

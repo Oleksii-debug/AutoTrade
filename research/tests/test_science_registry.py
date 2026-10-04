@@ -1,4 +1,5 @@
 import copy
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -66,6 +67,35 @@ def _hash_for_test(payload):
 
 
 class ScientificRegistryTests(unittest.TestCase):
+    def test_relative_backing_path_is_frozen_at_construction(self):
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "primary"
+            alternate = root / "alternate"
+            primary.mkdir()
+            alternate.mkdir()
+            try:
+                os.chdir(primary)
+                store = ScientificRegistry(Path("state") / "science.sqlite3")
+                registered = store.register_protocol(protocol())
+                frozen_path = store.path
+
+                self.assertTrue(frozen_path.is_absolute())
+                self.assertEqual(
+                    frozen_path,
+                    (primary / "state" / "science.sqlite3").resolve(strict=False),
+                )
+
+                os.chdir(alternate)
+                reloaded = store.protocol_registration(registered.protocol_id)
+
+                self.assertEqual(reloaded.protocol_hash, registered.protocol_hash)
+                self.assertEqual(store.path, frozen_path)
+                self.assertFalse((alternate / "state" / "science.sqlite3").exists())
+            finally:
+                os.chdir(original_cwd)
+
     def test_protocol_is_immutable_after_registration(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

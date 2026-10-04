@@ -314,7 +314,16 @@ class LockedEvaluationEvidence:
 
 class ScientificRegistry:
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        if type(path) is str:
+            candidate = Path(path)
+        elif type(path) is type(Path()):
+            candidate = path
+        else:
+            raise TypeError("path must be exact string or pathlib path")
+        # Freeze caller-relative/CWD-sensitive authority at construction.  Every
+        # later SQLite connection must target the same lexical backing path even
+        # if another component changes the process working directory.
+        self.path = candidate.resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 

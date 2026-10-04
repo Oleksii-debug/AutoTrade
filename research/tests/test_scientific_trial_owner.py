@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -37,6 +38,39 @@ def fill_trials(registry: ScientificRegistry, protocol_id: str, count: int) -> N
 
 
 class ScientificTrialOwnerTests(unittest.TestCase):
+    def test_relative_registry_path_cannot_retarget_owner_after_cwd_change(self):
+        gate_profile = profile()
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "primary"
+            alternate = root / "alternate"
+            primary.mkdir()
+            alternate.mkdir()
+            try:
+                os.chdir(primary)
+                registry = ScientificRegistry(Path("state") / "science.sqlite3")
+                registered = registry.register_protocol(
+                    bound_protocol(gate_profile, trial_budget=1)
+                )
+                fill_trials(registry, registered.protocol_id, 1)
+                frozen_path = registry.path
+
+                os.chdir(alternate)
+                owner = resolve_scientific_trial_owner(
+                    registry=registry,
+                    profile=gate_profile,
+                    evidence=evidence(trials_attempted=1, trial_log_complete=True),
+                )
+
+                self.assertEqual(registry.path, frozen_path)
+                self.assertEqual(owner.binding.protocol_id, registered.protocol_id)
+                self.assertEqual(owner.trial_evidence.recorded_trials, 1)
+                self.assertTrue(owner.authoritative)
+                self.assertFalse((alternate / "state" / "science.sqlite3").exists())
+            finally:
+                os.chdir(original_cwd)
+
     def test_unique_preregistered_profile_binding_resolves_without_protocol_id_input(self):
         gate_profile = profile()
         with TemporaryDirectory() as directory:

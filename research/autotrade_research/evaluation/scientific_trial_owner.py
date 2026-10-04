@@ -60,8 +60,10 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
 
     _assert_registry_dispatch_unshadowed(registry)
     path = object.__getattribute__(registry, "path")
-    if not isinstance(path, Path) or type(path).__module__ != "pathlib":
-        raise TypeError("ScientificRegistry path must be a pathlib-owned path")
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise TypeError(
+            "ScientificRegistry path must be a frozen absolute pathlib path"
+        )
     authority = object.__new__(ScientificRegistry)
     object.__setattr__(authority, "path", path)
     return authority

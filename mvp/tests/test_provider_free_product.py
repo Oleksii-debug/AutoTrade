@@ -284,6 +284,8 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             data = Path(directory) / 'product'
             client = ProductClient(data)
             try:
+                _, simulation = client.command('START_SIMULATION')
+                self.assertEqual(simulation['phase'], 'SUCCEEDED', simulation)
                 backup_id, operation = client.command('BACKUP_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
             finally:

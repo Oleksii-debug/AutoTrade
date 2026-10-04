@@ -877,6 +877,16 @@ def _prepare_provider_fill_correction_binding(
 
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
+    if type(original_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("original_projected_fill must be exact ProjectedFillEvidence")
+    if type(original_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("original_provider_fill must be exact ProviderFillEvidence")
+    if type(corrected_projected_fill) is not ProjectedFillEvidence:
+        raise TypeError("corrected_projected_fill must be exact ProjectedFillEvidence")
+    if type(corrected_provider_fill) is not ProviderFillEvidence:
+        raise TypeError("corrected_provider_fill must be exact ProviderFillEvidence")
+    if type(replacement) is not JournalTransaction:
+        raise TypeError("replacement must be an exact JournalTransaction")
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
         economic_book,
@@ -3323,10 +3333,10 @@ def commit_economic_correction_with_settlement_replacement(
                 "provider fill correction binding scope does not match correction"
             )
 
-    if not isinstance(reversal, JournalTransaction):
-        raise TypeError("reversal must be a JournalTransaction")
-    if not isinstance(replacement, JournalTransaction):
-        raise TypeError("replacement must be a JournalTransaction")
+    if type(reversal) is not JournalTransaction:
+        raise TypeError("reversal must be an exact JournalTransaction")
+    if type(replacement) is not JournalTransaction:
+        raise TypeError("replacement must be an exact JournalTransaction")
     if reversal.reverses_transaction_id is None:
         raise AccountingConflict(
             "settlement-aware correction requires an explicit reversal"

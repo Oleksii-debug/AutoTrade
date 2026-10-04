@@ -9,7 +9,10 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_core import Surface
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+)
 from mvp.autotrade_mvp.provider_origin import (
     AuthenticatedReadResponseBinding,
     ProviderOriginError,
@@ -158,6 +161,80 @@ class ProviderOriginJournalTests(unittest.TestCase):
             ):
                 origin.observe_json_response(attempt_id, binding)
 
+
+
+    def test_private_retention_core_cannot_self_mint_provider_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity=(
+                    "mvp.autotrade_mvp.provider_transport."
+                    "BybitV5AuthenticatedReadTransport:direct-receipt-v1"
+                ),
+                network_policy_identity="sha256:" + "c" * 64,
+                recorded_at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "requires canonical direct-wire observation",
+            ):
+                origin._record_response(
+                    attempt_id,
+                    binding,
+                    http_status=200,
+                    response_bytes=b'{"retCode":0,"result":{}}',
+                    observed_at=NOW,
+                    origin_kind="PROVIDER_ORIGIN",
+                )
+            events = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared"],
+            )
+
+    def test_canonical_parser_observation_without_wire_receipt_cannot_mint_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity=(
+                    "mvp.autotrade_mvp.provider_transport."
+                    "BybitV5AuthenticatedReadTransport:direct-receipt-v1"
+                ),
+                network_policy_identity="sha256:" + "d" * 64,
+                recorded_at=NOW,
+            )
+            observation = observe_authenticated_json_response(
+                query_binding=binding.query_binding,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{}}',
+                observed_at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "lacks canonical direct-wire execution receipt",
+            ):
+                origin._record_provider_origin_response(
+                    attempt_id,
+                    binding,
+                    observation,
+                )
+            events = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_read",
+                attempt_id,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["AuthenticatedReadPrepared"],
+            )
 
     def test_terminal_revalidation_accepts_fresh_same_q_c_and_detects_tampering(self):
         with TemporaryDirectory() as directory:

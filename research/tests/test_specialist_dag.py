@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, Inexact, Rounded, localcontext
 import unittest
 
@@ -75,6 +75,99 @@ def aggregate(
 
 
 class SpecialistDagTests(unittest.TestCase):
+
+    def test_time_ingress_rejects_custom_tzinfo_without_callbacks(self):
+        calls = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                calls.append("utcoffset")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def dst(self, dt):
+                calls.append("dst")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def fromutc(self, dt):
+                calls.append("fromutc")
+                raise AssertionError("caller timezone callback must not execute")
+
+        hostile_time = datetime(2026, 9, 24, 18, tzinfo=HostileTz())
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            SpecialistRun(
+                role_id="hostile-time",
+                input_snapshot_id="cut-1",
+                direction="LONG",
+                score="0.5",
+                confidence="1",
+                evidence_refs=("evidence:hostile-time",),
+                cost="0",
+                completed_at=hostile_time,
+            )
+        self.assertEqual(calls, [])
+
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=full_plan(specs),
+                decision_deadline=hostile_time,
+            )
+        self.assertEqual(calls, [])
+
+    def test_time_ingress_preserves_builtin_fixed_offset_normalization(self):
+        fixed = timezone(timedelta(hours=2))
+        local_time = datetime(2026, 9, 24, 20, tzinfo=fixed)
+        result = SpecialistRun(
+            role_id="fixed-offset",
+            input_snapshot_id="cut-1",
+            direction="LONG",
+            score="0.5",
+            confidence="1",
+            evidence_refs=("evidence:fixed-offset",),
+            cost="0",
+            completed_at=local_time,
+        )
+        self.assertEqual(result.completed_at, NOW)
+
+    def test_mutated_run_custom_timezone_is_rejected_on_aggregation_readmission(self):
+        calls = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                calls.append("utcoffset")
+                raise AssertionError("caller timezone callback must not execute")
+
+            def dst(self, dt):
+                calls.append("dst")
+                raise AssertionError("caller timezone callback must not execute")
+
+        value = run("a", "0.5")
+        object.__setattr__(
+            value,
+            "completed_at",
+            datetime(2026, 9, 24, 18, tzinfo=HostileTz()),
+        )
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "built-in timezone",
+        ):
+            aggregate(
+                specs,
+                [value],
+                plan=full_plan(specs),
+                decision_deadline=NOW,
+            )
+        self.assertEqual(calls, [])
+
     def test_string_collections_cannot_masquerade_as_specialist_evidence(self):
         with self.assertRaisesRegex(SpecialistDagError, "required_inputs must be a tuple"):
             SpecialistSpec(

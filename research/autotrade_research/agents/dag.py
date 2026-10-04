@@ -97,12 +97,16 @@ def _score_decimal(value: Fraction) -> Decimal:
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise SpecialistDagError(f"{name} must be an exact timezone-aware datetime")
+    # The outer datetime type alone is not enough: an exact datetime may embed
+    # caller-defined tzinfo whose utcoffset/dst/fromutc callbacks would execute
+    # while this authority-bearing deadline/evidence time is normalized.
+    # Admit only the non-polymorphic stdlib timezone implementation first.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise SpecialistDagError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    if value.utcoffset() is None:
+        raise SpecialistDagError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
 

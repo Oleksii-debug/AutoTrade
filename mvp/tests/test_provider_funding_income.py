@@ -279,6 +279,20 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
         ):
             self._parse(query=self._query(startTime="01672128000000"))
 
+    def test_qualified_time_window_over_seven_days_is_rejected(self):
+        start = 1672128000000
+        end = start + 7 * 24 * 60 * 60 * 1000 + 1
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "seven-day range",
+        ):
+            self._parse(
+                query=self._query(
+                    startTime=str(start),
+                    endTime=str(end),
+                )
+            )
+
     def test_inverted_qualified_time_window_is_rejected(self):
         with self.assertRaisesRegex(
             ProviderFundingIncomeError,
@@ -333,13 +347,17 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
                 self._parse(query=query)
 
     def test_malformed_response_shape_fails_closed(self):
-        payload = self._payload()
-        payload["result"]["list"] = {}
-        with self.assertRaisesRegex(
-            ProviderFundingIncomeError,
-            "result shape is invalid",
-        ):
-            self._parse(payload=payload)
+        for mutation in ("list", "cursor"):
+            payload = self._payload()
+            if mutation == "list":
+                payload["result"]["list"] = {}
+            else:
+                payload["result"]["nextPageCursor"] = None
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "result shape is invalid",
+            ):
+                self._parse(payload=payload)
 
     def test_authoritative_observation_constructor_remains_sealed(self):
         with self.assertRaisesRegex(

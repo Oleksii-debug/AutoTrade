@@ -82,7 +82,7 @@ def _canonical(value: object, *, path: str = "value") -> object:
         return value
     if type(value) is Decimal:
         return canonical_decimal_text(value)
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         normalized: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             key = _text(raw_key, name=f"{path} key")
@@ -95,7 +95,7 @@ def _canonical(value: object, *, path: str = "value") -> object:
                 path=f"{path}.{key}",
             )
         return {key: normalized[key] for key in sorted(normalized)}
-    if isinstance(value, (tuple, list)):
+    if type(value) in {tuple, list}:
         return [
             _canonical(item, path=f"{path}[]")
             for item in value
@@ -172,11 +172,11 @@ class AssetClassProfile:
         instrument_families: Sequence[str],
         specialized_feature_namespaces: Sequence[str],
     ) -> "AssetClassProfile":
-        if isinstance(instrument_families, (str, bytes)):
-            raise TypeError("instrument_families must be a sequence")
-        if isinstance(specialized_feature_namespaces, (str, bytes)):
+        if type(instrument_families) not in {tuple, list}:
+            raise TypeError("instrument_families must be an exact tuple or list")
+        if type(specialized_feature_namespaces) not in {tuple, list}:
             raise TypeError(
-                "specialized_feature_namespaces must be a sequence"
+                "specialized_feature_namespaces must be an exact tuple or list"
             )
         return cls(
             asset_class=_text(asset_class, name="asset_class"),
@@ -356,10 +356,10 @@ class CrossMarketTrainingProtocol:
         required_cells: Sequence[MarketRegimeCell],
         min_observations_per_cell: int,
     ) -> "CrossMarketTrainingProtocol":
-        if isinstance(asset_profiles, (str, bytes)):
-            raise TypeError("asset_profiles must be a sequence")
-        if isinstance(required_cells, (str, bytes)):
-            raise TypeError("required_cells must be a sequence")
+        if type(asset_profiles) not in {tuple, list}:
+            raise TypeError("asset_profiles must be an exact tuple or list")
+        if type(required_cells) not in {tuple, list}:
+            raise TypeError("required_cells must be an exact tuple or list")
         profiles_raw = tuple(asset_profiles)
         if any(type(item) is not AssetClassProfile for item in profiles_raw):
             raise TypeError(
@@ -488,9 +488,9 @@ class MarketRegimeEvidence:
         costs_complete: bool,
         observed_feature_namespaces: Sequence[str],
     ) -> "MarketRegimeEvidence":
-        if isinstance(observed_feature_namespaces, (str, bytes)):
+        if type(observed_feature_namespaces) not in {tuple, list}:
             raise TypeError(
-                "observed_feature_namespaces must be a sequence"
+                "observed_feature_namespaces must be an exact tuple or list"
             )
         return cls(
             asset_class=asset_class,
@@ -591,6 +591,9 @@ class CrossMarketGeneralizationAssessment:
     protocol_sha256: str
     evidence_sha256: str
     economic_edge_status: str = "NOT_ESTABLISHED"
+    regime_routing_status: str = "NOT_ESTABLISHED"
+    strategy_comparison_status: str = "NOT_ESTABLISHED"
+    grants_trading_authority: bool = False
 
     def __post_init__(self) -> None:
         status = _text(self.status, name="status")
@@ -608,8 +611,8 @@ class CrossMarketGeneralizationAssessment:
             raise CrossMarketGeneralizationError(
                 "assessment requires at least one reason"
             )
-        if not isinstance(self.cell_statuses, Mapping):
-            raise TypeError("cell_statuses must be a mapping")
+        if type(self.cell_statuses) not in {dict, MappingProxyType}:
+            raise TypeError("cell_statuses must be an exact dict or mapping proxy")
         statuses: dict[str, str] = {}
         for raw_key, raw_status in self.cell_statuses.items():
             key = _text(raw_key, name="cell_status key")
@@ -627,9 +630,20 @@ class CrossMarketGeneralizationAssessment:
             raise CrossMarketGeneralizationError(
                 "cell_statuses must not be empty"
             )
-        if self.economic_edge_status != "NOT_ESTABLISHED":
+        for name, value in (
+            ("economic_edge_status", self.economic_edge_status),
+            ("regime_routing_status", self.regime_routing_status),
+            ("strategy_comparison_status", self.strategy_comparison_status),
+        ):
+            if type(value) is not str or value != "NOT_ESTABLISHED":
+                raise CrossMarketGeneralizationError(
+                    f"{name} must remain NOT_ESTABLISHED for coverage evidence"
+                )
+        if type(self.grants_trading_authority) is not bool:
+            raise TypeError("grants_trading_authority must be boolean")
+        if self.grants_trading_authority:
             raise CrossMarketGeneralizationError(
-                "cross-market coverage cannot establish economic edge"
+                "cross-market coverage cannot grant trading authority"
             )
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "reasons", reasons)
@@ -653,6 +667,7 @@ class CrossMarketGeneralizationAssessment:
 
     @property
     def coverage_ready(self) -> bool:
+        """Coverage/comparability only; never routing, edge, or trading authority."""
         return self.status == "PASS"
 
 
@@ -675,8 +690,8 @@ def assess_cross_market_generalization(
         required_cells=protocol.required_cells,
         min_observations_per_cell=protocol.min_observations_per_cell,
     )
-    if isinstance(evidence, (str, bytes)):
-        raise TypeError("evidence must be a sequence")
+    if type(evidence) not in {tuple, list}:
+        raise TypeError("evidence must be an exact tuple or list")
     records = tuple(_detach_evidence(item) for item in evidence)
 
     profiles = {

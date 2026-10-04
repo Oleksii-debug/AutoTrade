@@ -14,7 +14,7 @@ import secrets
 import signal
 import subprocess
 import sys
-from threading import Thread
+from threading import Lock, Thread
 from urllib.parse import urlsplit
 import webbrowser
 
@@ -115,6 +115,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
     ):
         self.state_dir = state_dir
         self._pairing_code = pairing_code
+        self._pairing_lock = Lock()
         if not callable(desktop_session_sink):
             raise TypeError('desktop_session_sink must be callable')
         self._desktop_session_sink = desktop_session_sink
@@ -148,27 +149,42 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                 request = self._parse_body(body, normalized)
                 if set(request) != {'pairing_code'} or type(request['pairing_code']) is not str:
                     raise ValueError()
-                if not secrets.compare_digest(request['pairing_code'], self._pairing_code):
-                    raise ValueError()
-                session = self._boundary.create_session(subject='local-owner', role='OWNER',
-                    origin=self._origin, ttl_seconds=3600)
-                try:
-                    self._desktop_session_sink(
+                with self._pairing_lock:
+                    if (
+                        self._pairing_code is None
+                        or not secrets.compare_digest(
+                            request['pairing_code'],
+                            self._pairing_code,
+                        )
+                    ):
+                        raise ValueError()
+                    session = self._boundary.create_session(
+                        subject='local-owner',
+                        role='OWNER',
                         origin=self._origin,
-                        actor='local-owner',
-                        token=session.token,
+                        ttl_seconds=3600,
                     )
-                except Exception:
-                    # Do not leave an unreported bearer alive when the protected
-                    # current-user handoff to the native safety shell failed.
-                    self._boundary.revoke_session(session.token)
-                    return TransportResponse(
-                        503,
-                        'application/json',
-                        b'{"error":"DESKTOP_SESSION_STORE_FAILED"}',
-                        (('Cache-Control', 'no-store'),),
-                    )
-                self._pairing_code = None
+                    try:
+                        self._desktop_session_sink(
+                            origin=self._origin,
+                            actor='local-owner',
+                            token=session.token,
+                        )
+                    except Exception:
+                        # Do not leave an unreported bearer alive when the
+                        # protected current-user handoff to the native safety
+                        # shell failed. Keep the one-time code available only
+                        # because this claimant never received a usable session.
+                        self._boundary.revoke_session(session.token)
+                        return TransportResponse(
+                            503,
+                            'application/json',
+                            b'{"error":"DESKTOP_SESSION_STORE_FAILED"}',
+                            (('Cache-Control', 'no-store'),),
+                        )
+                    # Session issuance, native handoff and one-time code consume
+                    # are one serialized authority transition.
+                    self._pairing_code = None
                 return TransportResponse(200, 'application/json', b'{"status":"PAIRED"}',
                     (('Set-Cookie', 'AutoTradeSession=' + session.token + '; HttpOnly; SameSite=Strict; Path=/api/v1; Max-Age=3600'),
                      ('Cache-Control', 'no-store')))

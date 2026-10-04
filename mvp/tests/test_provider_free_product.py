@@ -2,6 +2,7 @@
 
 This is provider-free process/UI-API evidence, not Windows/NVDA qualification.
 """
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
 import os
@@ -564,6 +565,47 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     self.assertEqual(response.status, 403)
                 finally:
                     connection.close()
+            finally:
+                client.close()
+
+    def test_pairing_code_is_consumed_by_exactly_one_concurrent_claimant(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory, auto_pair=False)
+            boundary = client.runtime.application._boundary
+            create_session = boundary.create_session
+
+            def slow_create_session(*args, **kwargs):
+                # Widen the pre-fix check/create race. Without serialized
+                # consumption both request threads can mint an OWNER session
+                # from the same one-time code.
+                time.sleep(.15)
+                return create_session(*args, **kwargs)
+
+            def claim(_index):
+                return client.request(
+                    'POST',
+                    '/api/v1/session',
+                    {'pairing_code': client.pairing_code},
+                )
+
+            try:
+                with patch.object(
+                    boundary,
+                    'create_session',
+                    side_effect=slow_create_session,
+                ), ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(claim, range(2)))
+                self.assertEqual(
+                    sorted(status for status, _payload, _headers in results),
+                    [200, 403],
+                )
+                issued = [
+                    headers.get('Set-Cookie')
+                    for status, _payload, headers in results
+                    if status == 200
+                ]
+                self.assertEqual(len(issued), 1)
+                self.assertIn('AutoTradeSession=', issued[0])
             finally:
                 client.close()
 

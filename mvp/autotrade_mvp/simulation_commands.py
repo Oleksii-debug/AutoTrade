@@ -212,7 +212,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import os
         import sys
         from .simulation_status import inspect_canonical_simulation
-        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
+        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         try:

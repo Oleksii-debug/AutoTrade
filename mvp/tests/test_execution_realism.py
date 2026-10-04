@@ -60,6 +60,44 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_execution_scalar_ingress_rejects_hostile_subclasses_without_callbacks(self):
+        class HostileDecimal(Decimal):
+            finite_calls = 0
+
+            def is_finite(self):
+                type(self).finite_calls += 1
+                raise AssertionError("hostile decimal callback executed")
+
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile text callback executed")
+
+        class HostileInt(int):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile latency comparison executed")
+
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate=HostileDecimal("0.001"))
+        self.assertEqual(HostileDecimal.finite_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
+            order(order_id=HostileText("sim-1"))
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            model(latency_ms=HostileInt(100))
+        self.assertEqual(HostileInt.compare_calls, 0)
+
+    def test_execution_scalar_ingress_enforces_shared_decimal_resource_envelope(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate="9" * 257)
+
     def test_simulation_rejects_domain_subclasses_before_execution_logic(self):
         class DerivedOrder(SimulatedOrder):
             pass

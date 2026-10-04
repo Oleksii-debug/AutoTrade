@@ -255,8 +255,17 @@ def _order_projection_binding_operations():
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
             evidence = state["evidence_artifact_store"]
-            bindings[id(value)] = (
-                weakref.ref(value),
+            key = id(value)
+
+            def release(reference, *, key=key):
+                with lock:
+                    entry = bindings.get(key)
+                    if entry is not None and entry[0] is reference:
+                        bindings.pop(key, None)
+
+            projection_ref = weakref.ref(value, release)
+            bindings[key] = (
+                projection_ref,
                 weakref.ref(store),
                 identity,
                 scope,

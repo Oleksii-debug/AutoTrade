@@ -14,6 +14,50 @@ _store = _root._store
 _ORIGINAL_TRUSTED_AUTHENTICATED_READER = _root.trusted_authenticated_reader
 
 
+def _duplicate_exact_store_generation_pins(store: object) -> tuple[int, ...]:
+    """Duplicate retained namespace capabilities without caller coercion."""
+
+    if type(store) is not _store.ArtifactStore:
+        raise TypeError("trusted generation requires canonical ArtifactStore")
+    attributes = (
+        ("root", "_namespace_root_handle" if sys.platform == "win32" else "_namespace_root_fd"),
+        (
+            "manifests",
+            "_retained_manifests_handle"
+            if sys.platform == "win32"
+            else "_retained_manifests_fd",
+        ),
+        (
+            "objects",
+            "_retained_objects_handle"
+            if sys.platform == "win32"
+            else "_retained_objects_fd",
+        ),
+        (
+            "staging",
+            "_retained_staging_handle"
+            if sys.platform == "win32"
+            else "_retained_staging_fd",
+        ),
+    )
+    source: list[int] = []
+    for name, attribute in attributes:
+        try:
+            capability = object.__getattribute__(store, attribute)
+        except AttributeError:
+            capability = None
+        if (
+            type(capability) is not int
+            or capability < 0
+            or (sys.platform == "win32" and capability == 0)
+        ):
+            raise _store.ArtifactIntegrityError(
+                f"retained artifact {name} capability is unavailable"
+            )
+        source.append(capability)
+    return _root._duplicate_generation_pins(tuple(source))
+
+
 def _assert_same_namespace_generation(
     publication_store: object,
     private_store: object,
@@ -28,8 +72,8 @@ def _assert_same_namespace_generation(
     publication_pins: tuple[int, ...] = ()
     private_pins: tuple[int, ...] = ()
     try:
-        publication_pins = _root._duplicate_store_generation_pins(publication_store)
-        private_pins = _root._duplicate_store_generation_pins(private_store)
+        publication_pins = _duplicate_exact_store_generation_pins(publication_store)
+        private_pins = _duplicate_exact_store_generation_pins(private_store)
         publication_generation = _root._pinned_generation(publication_pins)
         private_generation = _root._pinned_generation(private_pins)
         if publication_generation != private_generation:
@@ -56,7 +100,7 @@ def _publication_bound_trusted_authenticated_reader(
     pins: tuple[int, ...] = ()
     registered_reader_id: int | None = None
     try:
-        pins = _root._duplicate_store_generation_pins(publication_store)
+        pins = _duplicate_exact_store_generation_pins(publication_store)
         expected_generation = _root._pinned_generation(pins)
         configured_generation = _root._immutable_configured_generation(root_key)
         _root._assert_expected_generation(

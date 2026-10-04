@@ -100,6 +100,8 @@ def _bool(value, *, name: str) -> bool:
 
 
 def _actions(values: Iterable[str]) -> FrozenSet[str]:
+    if type(values) not in {set, frozenset}:
+        raise TypeError("allowed_actions must be an exact set or frozenset")
     result = frozenset(_text(value, name="action").upper() for value in values)
     if not result:
         raise ValueError("allowed_actions must be non-empty")
@@ -272,6 +274,8 @@ class EvidenceVerification:
     def __post_init__(self) -> None:
         _bool(self.valid, name="valid")
         _bool(self.conflicted, name="conflicted")
+        if type(self.reason) is not str:
+            raise TypeError("reason must be a string")
         if self.valid and self.conflicted:
             raise ValueError("evidence cannot be both valid and conflicted")
 
@@ -444,6 +448,8 @@ class QualificationEvidence:
     unresolved_blockers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.unresolved_blockers) is not tuple:
+            raise TypeError("unresolved_blockers must be a tuple")
         blockers = tuple(
             _text(value, name="unresolved_blocker")
             for value in self.unresolved_blockers
@@ -516,7 +522,9 @@ class BoundedRealObservations:
             "protection_verified",
         ):
             _bool(getattr(self, field_name), name=field_name)
-        refs = tuple(self.evidence_refs)
+        if type(self.evidence_refs) is not tuple:
+            raise TypeError("evidence_refs must be a tuple")
+        refs = self.evidence_refs
         artifact_ids: set[str] = set()
         digests: set[str] = set()
         kinds: set[str] = set()
@@ -610,6 +618,8 @@ def assess_bounded_real_qualification(
         raise TypeError("envelope must be BoundedRealEnvelope")
     if type(observations) is not BoundedRealObservations:
         raise TypeError("observations must be BoundedRealObservations")
+    if type(prerequisite_evidence) not in {list, tuple}:
+        raise TypeError("prerequisite_evidence must be an exact list or tuple")
 
     reasons: list[str] = []
     scope_matches = (
@@ -734,6 +744,11 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_incomplete")
     elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
+    elif (
+        type(qualification_receipt) is not SignedQualificationAttestation
+        or type(qualification_policy) is not QualificationTrustPolicy
+    ):
+        reasons.append("independent_evidence_trust_invalid")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
         signed_requirements = frozenset(

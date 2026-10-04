@@ -78,7 +78,11 @@ async function command(page, action, index) {
     && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before);
   await tabTo(page, "refresh-state");
   await page.keyboard.press("Enter");
-  await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
+  await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled
+    && !document.querySelector("#submit-command").disabled
+    && document.querySelector("#freshness").textContent.includes("host=CURRENT"));
+  if (action === "RECOVER_SIMULATION" || action === "START_SIMULATION")
+    await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("895.696"));
 }
 
 (async () => {

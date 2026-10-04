@@ -10,6 +10,7 @@ from tools.dotnet_lock import (
     dotnet_imported_package_reference_blockers,
     dotnet_lock_content_blockers,
     dotnet_locked_dependency_graph,
+    dotnet_project_package_references,
 )
 
 
@@ -628,6 +629,10 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 '<ItemGroup><PackageReference Include="Microsoft.Web.WebView2" '
                 'Version="1.0.4191.47" /></ItemGroup></Project>',
                 encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_project_package_references(project),
+                [('Microsoft.Web.WebView2', '1.0.4191.47')],
             )
             blockers = dotnet_lock_content_blockers(root, project)
             self.assertEqual(

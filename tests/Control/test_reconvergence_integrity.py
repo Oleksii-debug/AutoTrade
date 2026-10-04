@@ -271,6 +271,16 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             ("control/qualification.json (type change)",),
         )
 
+    def test_non_executable_sentinel_content_change_preserves_existing_semantics(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
     def test_protected_sentinel_content_change_requires_exact_scope(self):
         sentinel = "control/tools/reconvergence_integrity.py"
         base = [sentinel, "README.md"]

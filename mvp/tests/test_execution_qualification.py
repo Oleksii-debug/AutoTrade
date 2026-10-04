@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
@@ -341,6 +341,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             evidence_artifact_id=ARTIFACT_ID,
             purpose="REPLAY",
         )
+        self.assertEqual(valid.status, "FILLED")
         forged = replace(valid, fill_price=Decimal("100"))
         with patch(
             "mvp.autotrade_mvp.execution_qualification.simulate_execution",
